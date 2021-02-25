@@ -1,0 +1,58 @@
+version: "3"
+
+services:
+  postgres:
+    container_name: postgres_mattermost
+    image: postgres:alpine
+    restart: unless-stopped
+    volumes:
+      - ${POSTGRES_DATA_PATH}:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB
+
+  nginx:
+    container_name: nginx_mattermost
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ${NGINX_MATTERMOST_CONFIG}:/etc/nginx/conf.d/mattermost.conf:ro
+      - ${LETSENCRYPT_FULLCHAIN_PATH}:/fullchain.pem:ro
+      - ${LETSENCRYPT_PRIVKEY_PATH}:/privkey.pem:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - ${HTTPS_PORT}:443
+      - ${HTTP_PORT}:80
+
+  mattermost:
+    depends_on:
+      - postgres
+      - nginx
+    container_name: mattermost
+    image: mattermost/mattermost-enterprise-edition:latest
+    restart: unless-stopped
+    volumes:
+      - ${MATTERMOST_CONFIG_PATH}/config:/mattermost/config:rw
+      - ${MATTERMOST_DATA_PATH}/data:/mattermost/data:rw
+      - ${MATTERMOST_LOGS_PATH}/logs:/mattermost/logs:rw
+      - ${MATTERMOST_PLUGINS_PATH}/plugins:/mattermost/plugins:rw
+      - ${MATTERMOST_CLIENT_PLUGINS_PATH}/client-plugins:/mattermost/client-plugins:rw
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - MM_SERVICESETTINGS_SITEURL
+      - MM_LOGSETTINGS_CONSOLELEVEL
+      - MM_LOGSETTINGS_FILELEVEL
+      - MM_SQLSETTINGS_DRIVERNAME
+      - MM_SQLSETTINGS_DATASOURCE
+      - MM_PASSWORDSETTINGS_MINIMUMLENGTH
+      - MM_PASSWORDSETTINGS_SYMBOL
+      - MM_PASSWORDSETTINGS_UPPERCASE
+
+#  watchtower:
+#    container_name: watchtower
+#    image: containrrr/watchtower:latest
+#    restart: unless-stopped
+#    volumes:
+#      - /var/run/docker.sock:/var/run/docker.sock
