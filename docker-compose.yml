@@ -44,11 +44,13 @@ services:
       - ${MATTERMOST_CLIENT_PLUGINS_PATH}:/mattermost/client-plugins:rw
       - /etc/localtime:/etc/localtime:ro
     environment:
+      # necessary options/variables (see env.example)
+      - MM_SQLSETTINGS_DRIVERNAME
+      - MM_SQLSETTINGS_DATASOURCE
+
       - MM_SERVICESETTINGS_SITEURL
       - MM_LOGSETTINGS_CONSOLELEVEL
       - MM_LOGSETTINGS_FILELEVEL
-      - MM_SQLSETTINGS_DRIVERNAME
-      - MM_SQLSETTINGS_DATASOURCE
       - MM_PASSWORDSETTINGS_MINIMUMLENGTH
       - MM_PASSWORDSETTINGS_SYMBOL
       - MM_PASSWORDSETTINGS_UPPERCASE
