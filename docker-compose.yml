@@ -3,7 +3,7 @@ version: "3"
 services:
   postgres:
     container_name: postgres_mattermost
-    image: postgres:alpine
+    image: postgres:${POSTGRES_IMAGE_TAG}
     restart: unless-stopped
     volumes:
       - ${POSTGRES_DATA_PATH}:/var/lib/postgresql/data
@@ -15,7 +15,7 @@ services:
 
   nginx:
     container_name: nginx_mattermost
-    image: nginx:alpine
+    image: nginx:${NGINX_IMAGE_TAG}
     restart: unless-stopped
     volumes:
       - ${NGINX_MATTERMOST_CONFIG}:/etc/nginx/conf.d/mattermost.conf:ro
@@ -32,7 +32,7 @@ services:
       - postgres
       - nginx
     container_name: mattermost
-    image: mattermost/mattermost-enterprise-edition:latest
+    image: mattermost/${MATTERMOST_IMAGE}:${MATTERMOST_IMAGE_TAG}
     restart: unless-stopped
     volumes:
       - ${MATTERMOST_CONFIG_PATH}:/mattermost/config:rw
