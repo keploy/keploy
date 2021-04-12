@@ -35,11 +35,11 @@ services:
     image: mattermost/mattermost-enterprise-edition:latest
     restart: unless-stopped
     volumes:
-      - ${MATTERMOST_CONFIG_PATH}/config:/mattermost/config:rw
-      - ${MATTERMOST_DATA_PATH}/data:/mattermost/data:rw
-      - ${MATTERMOST_LOGS_PATH}/logs:/mattermost/logs:rw
-      - ${MATTERMOST_PLUGINS_PATH}/plugins:/mattermost/plugins:rw
-      - ${MATTERMOST_CLIENT_PLUGINS_PATH}/client-plugins:/mattermost/client-plugins:rw
+      - ${MATTERMOST_CONFIG_PATH}:/mattermost/config:rw
+      - ${MATTERMOST_DATA_PATH}:/mattermost/data:rw
+      - ${MATTERMOST_LOGS_PATH}:/mattermost/logs:rw
+      - ${MATTERMOST_PLUGINS_PATH}:/mattermost/plugins:rw
+      - ${MATTERMOST_CLIENT_PLUGINS_PATH}:/mattermost/client-plugins:rw
       - /etc/localtime:/etc/localtime:ro
     environment:
       - MM_SERVICESETTINGS_SITEURL
