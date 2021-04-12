@@ -19,9 +19,9 @@ services:
     restart: unless-stopped
     volumes:
       - ${NGINX_MATTERMOST_CONFIG}:/etc/nginx/conf.d/mattermost.conf:ro
-      - ${LETSENCRYPT_FULLCHAIN_PATH}:/fullchain.pem:ro
-      - ${LETSENCRYPT_PRIVKEY_PATH}:/privkey.pem:ro
       - ${NGINX_DHPARAMS_FILE}:/dhparams4096.pem
+      - ${CERT_PATH}:/cert.pem:ro
+      - ${KEY_PATH}:/key.pem:ro
       - /etc/localtime:/etc/localtime:ro
     ports:
       - ${HTTPS_PORT}:443
