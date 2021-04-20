@@ -38,12 +38,8 @@ services:
       - MM_SQLSETTINGS_DRIVERNAME
       - MM_SQLSETTINGS_DATASOURCE
 
+      # additional settings
       - MM_SERVICESETTINGS_SITEURL
-      - MM_LOGSETTINGS_CONSOLELEVEL
-      - MM_LOGSETTINGS_FILELEVEL
-      - MM_PASSWORDSETTINGS_MINIMUMLENGTH
-      - MM_PASSWORDSETTINGS_SYMBOL
-      - MM_PASSWORDSETTINGS_UPPERCASE
 
 # If you use rolling image tags and feel lucky watchtower can automatically pull new images and
 # instantiate containers from it. https://containrrr.dev/watchtower/
