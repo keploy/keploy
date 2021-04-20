@@ -1,6 +1,10 @@
 version: "3"
 
 services:
+  mattermost:
+    depends_on:
+      - nginx
+
   nginx:
     container_name: nginx_mattermost
     image: nginx:${NGINX_IMAGE_TAG}
