@@ -8,20 +8,20 @@ executable while Mattermost is running.
 **NOTE:** Commands with a **$** prefix denote those are executed as user, **#** as root and commands without a prefix are database commands.
 We assume the database name is *mattermost* and the database user *mmuser*.
 
-1. Find out the name or id of the PostgreSQL container
+### 1. Find out the name or id of the PostgreSQL container
 To get either the name or the id of the running PostgeSQL container we can use `$ sudo docker ps`.
 
-2. Attaching to the database container
+### 2. Attaching to the database container
 `$ sudo docker exec -it POSTGRES_CONTAINER_NAME/ID /bin/sh`
 
-3. Connecting to the database
+### 3. Connecting to the database
 ```
 # psql DATABASE_NAME USERNAME
 e.g.
 # psql mattermost mmuser
 ```
 
-4. Checking if the Mattermost user is a superuser
+### 4. Checking if the Mattermost user is a superuser
 The following PostgreSQL command will print a list of the present users and its attributes.
 ```
 \du
@@ -35,7 +35,7 @@ A possible output can look like the following:
  mmuser    | Superuser, Create role, Create DB, Replication, Bypass RLS | {}
 ```
 
-5. Creating a new `superuser` and changing existing role attributes
+### 5. Creating a new `superuser` and changing existing role attributes
 **ATTENTION:** It's strongly recommended to create a database prior alteration. This can be done by stopping the database
 and backup the PostgreSQL data path at filesystem level and/or to use `pg_dumpall`. For this attach to the running PostgreSQL
 container described in step 2 and execute:

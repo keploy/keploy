@@ -8,7 +8,7 @@ This guide assumes you're inside the mattermost-docker directory but if using ab
 (e.g. /home/admin/mattermost-docker instead of `${PWD}`) it doesn't matter because the paths are unique. These commands
 requires that DNS records (A or CNAME) have been set and resolve to your server's external IP.
 
-1. Issuing the certificate using the standalone authenticator (because there is no nginx yet)
+### 1. Issuing the certificate using the standalone authenticator (because there is no nginx yet)
 ```
 $ sudo docker run -it --rm --name certbot -p 80:80 \
     -v "${PWD}/certs/etc/letsencrypt:/etc/letsencrypt" \
@@ -16,7 +16,7 @@ $ sudo docker run -it --rm --name certbot -p 80:80 \
     certbot/certbot certonly --standalone -d mm.example.com
 ```
 
-2. Changing the authenticator to webroot for later renewals
+### 2. Changing the authenticator to webroot for later renewals
 
 ```
 $ sudo docker run -it --rm --name certbot \
@@ -38,7 +38,7 @@ webroot_path = /usr/share/nginx/html,
 EOF
 ```
 
-3. Command for requesting renewal (Let's Encrypt certificates do have a 3 month lifetime)
+### 3. Command for requesting renewal (Let's Encrypt certificates do have a 3 month lifetime)
 
 ```
 sudo docker run --rm --name certbot \
