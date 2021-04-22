@@ -6,7 +6,7 @@ Usage: $0 [-h] <-d DOMAIN> <-o PATH>
 
 Options
   -h Print this help
-  -o Output path (e.g. ${PWD}/certs)
+  -o Output path (e.g. \${PWD}/certs)
   -d Domain certificate is issued for (e.g. mm.example.com)
 
 EOF
