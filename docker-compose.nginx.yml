@@ -10,7 +10,7 @@ services:
     image: nginx:${NGINX_IMAGE_TAG}
     restart: ${RESTART_POLICY}
     volumes:
-      - ${NGINX_MATTERMOST_CONFIG}:/etc/nginx/conf.d/mattermost.conf:ro
+      - ${NGINX_CONFIG_PATH}:/etc/nginx/conf.d:ro
       - ${NGINX_DHPARAMS_FILE}:/dhparams4096.pem
       - ${CERT_PATH}:/cert.pem:ro
       - ${KEY_PATH}:/key.pem:ro
