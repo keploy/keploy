@@ -1,11 +1,9 @@
 version: "3"
 
 services:
-  mattermost:
-    depends_on:
-      - nginx
-
   nginx:
+    depends_on:
+      - mattermost
     container_name: nginx_mattermost
     image: nginx:${NGINX_IMAGE_TAG}
     restart: ${RESTART_POLICY}
