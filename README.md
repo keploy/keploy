@@ -35,10 +35,13 @@ $ mkdir -p ./volumes/web/cert
 ```
 
 ### 4. Placing the certificate and key (if using provided nginx)
+Use either 4.1 or 4.2 for setting up SSL.
+
 #### 4.1 Pre-existing certificate and key
 ```
 $ cp PATH-TO-CERT.PEM ./volumes/web/cert/cert.pem
 $ cp PATH-TO-KEY.PEM ./volumes/web/cert/key-no-password.pem
+
 ```
 #### 4.2 Let's Encrypt
 **TODO: add link to Let's Encrypt certificate guide**
@@ -47,7 +50,7 @@ For using Let's Encrypt you can follow this guide LINK or use the this Bash scri
 methods requires you to change the path to the Let's Encrypt config folders inside the *.env*.
 ```
 $ sudo docker volume create shared-webroot
-$ bash scripts/issue-certificate.sh -d mm.example.com -o ./certs
+$ bash scripts/issue-certificate.sh -d mm.example.com -o ${PWD}/certs
 ```
 
 ### 5. Run `docker-compose`
