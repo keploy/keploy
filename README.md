@@ -30,7 +30,7 @@ $ cp env.example .env
 $ mkdir -p ./volumes/app/mattermost/{config,data,logs,plugins,client-plugins}
 $ sudo chown -R 2000:2000 ./volumes/app/mattermost
 
-## when using the provided nginx and if a certificate and key already exists
+## (optinally) when using the provided nginx and if a certificate and key already exists
 $ mkdir -p ./volumes/web/cert
 ```
 
