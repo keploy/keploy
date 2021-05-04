@@ -14,7 +14,7 @@ These steps are required for new Mattermost setups and don't include everything 
 
 ### 1. Cloning the repository (as an alternative please download it as archive)
 ```
-$ git pull https://github.com/mattermost/docker
+$ git clone https://github.com/mattermost/docker
 $ cd docker
 ```
 
