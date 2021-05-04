@@ -27,7 +27,7 @@ webroot_path = /usr/share/nginx/html,
 EOF
 }
 
-# become root by asking for sudo password
+# become root (keeping environment) and make script executable
 if [ $EUID != 0 ]; then
   chmod +x "$0"
   sudo -E ./"$0" "$@"

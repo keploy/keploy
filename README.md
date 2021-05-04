@@ -18,13 +18,13 @@ $ git pull https://github.com/mattermost/docker
 $ cd docker
 ```
 
-### 2. Create a *.env* file by copying and adjusting the example file
+### 2. Create a *.env* file by copying and adjusting the env.example file
+Docker will search for an *.env* file when no option specifies another environment file. Afterwards edit it with your preferred text editor.
 ```
 $ cp env.example .env
 ```
 
-### 3. Create the needed directores and set permissions (this orientates on the previous *mattermost-docker* structure and the
-   direcories can be changed in the *.env* file)
+### 3. Create the needed directores and set permissions (this orientates on the previous *mattermost-docker* structure and the direcories can be changed in the *.env* file)
 
 ```
 $ mkdir -p ./volumes/app/mattermost/{config,data,logs,plugins,client-plugins}
@@ -46,16 +46,22 @@ $ cp PATH-TO-KEY.PEM ./volumes/web/cert/key-no-password.pem
 For using Let's Encrypt you can follow this guide LINK or use the this Bash script scripts/issue-certificate.sh. Both
 methods requires you to change the path to the Let's Encrypt config folders inside the *.env*.
 ```
+$ sudo docker volume create shared-webroot
 $ bash scripts/issue-certificate.sh -d mm.example.com -o ./certs
 ```
 
 ### 5. Run `docker-compose`
+First ensure the docker daemon is enabled and running:
+```
+$ sudo systemctl enable --now docker
+```
+
 #### 5.1 Default (with nginx)
 ```
-$ sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+$ sudo /usr/local/bin/docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
 ```
 
 #### 5.2. Without nginx (for use behind an existing reverse proxy)
 ```
-$ sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d
+$ sudo /usr/local/bin/docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d
 ```
