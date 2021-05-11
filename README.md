@@ -114,3 +114,16 @@ If you want to have a different version of Mattermost installed you will need to
   - You can find a list of the Mattermost version tags here: [enterprise-edition](https://hub.docker.com/r/mattermost/mattermost-enterprise-edition/tags?page=1&ordering=last_updated) / [team-edition](https://hub.docker.com/r/mattermost/mattermost-team-edition/tags?page=1&ordering=last_updated).
 3. `sudo docker-compose down`
 4. `sudo docker-compose up -d`
+
+# Removing The Docker Containers
+
+Remove the containers
+
+```
+docker-compose stop && docker-compose rm
+```
+
+Remove the data and settings of your Mattermost instance
+```
+sudo rm -rf volumes
+```
