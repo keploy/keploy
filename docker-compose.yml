@@ -1,12 +1,17 @@
 # https://docs.docker.com/compose/environment-variables/
 
-version: "3"
+version: "2.4"
 
 services:
   postgres:
     container_name: postgres_mattermost
     image: postgres:${POSTGRES_IMAGE_TAG}
+    pids_limit: 10
     restart: ${RESTART_POLICY}
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
     volumes:
       - ${POSTGRES_DATA_PATH}:/var/lib/postgresql/data
     environment:
@@ -23,7 +28,11 @@ services:
       - postgres
     container_name: mattermost
     image: mattermost/${MATTERMOST_IMAGE}:${MATTERMOST_IMAGE_TAG}
+    pids_limit: 15
     restart: ${RESTART_POLICY}
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - ${MATTERMOST_CONFIG_PATH}:/mattermost/config:rw
       - ${MATTERMOST_DATA_PATH}:/mattermost/data:rw
@@ -49,5 +58,8 @@ services:
 #    container_name: watchtower
 #    image: containrrr/watchtower:latest
 #    restart: unless-stopped
+#    read_only: true
+#    tmpfs:
+#      - /tmp
 #    volumes:
 #      - /var/run/docker.sock:/var/run/docker.sock

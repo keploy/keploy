@@ -1,4 +1,4 @@
-version: "3"
+version: "2.4"
 
 services:
   nginx:
@@ -6,7 +6,13 @@ services:
       - mattermost
     container_name: nginx_mattermost
     image: nginx:${NGINX_IMAGE_TAG}
+    pids_limit: 10
     restart: ${RESTART_POLICY}
+    read_only: true
+    tmpfs:
+      - /var/run
+      - /var/cache
+      - /var/log/nginx
     volumes:
       - ${NGINX_CONFIG_PATH}:/etc/nginx/conf.d:ro
       - ${NGINX_DHPARAMS_FILE}:/dhparams4096.pem
