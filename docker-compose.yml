@@ -1,12 +1,19 @@
 # https://docs.docker.com/compose/environment-variables/
 
-version: "3"
+version: "2.4"
 
 services:
   postgres:
     container_name: postgres_mattermost
     image: postgres:${POSTGRES_IMAGE_TAG}
     restart: ${RESTART_POLICY}
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
     volumes:
       - ${POSTGRES_DATA_PATH}:/var/lib/postgresql/data
     environment:
@@ -24,6 +31,12 @@ services:
     container_name: mattermost
     image: mattermost/${MATTERMOST_IMAGE}:${MATTERMOST_IMAGE_TAG}
     restart: ${RESTART_POLICY}
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - ${MATTERMOST_CONFIG_PATH}:/mattermost/config:rw
       - ${MATTERMOST_DATA_PATH}:/mattermost/data:rw
