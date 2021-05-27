@@ -103,7 +103,11 @@ To update Mattermost to the latest version in this repo run the below commands. 
 ```
 sudo docker-compose down
 git pull
-docker-compose up -d
+
+## Based on what you followed in step 6
+docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+## OR
+docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d
 ```
 
 # Installing different versions of Mattermost
@@ -120,7 +124,7 @@ If you want to have a different version of Mattermost installed you will need to
 Remove the containers
 
 ```
-docker-compose stop && docker-compose rm
+docker-compose down
 ```
 
 Remove the data and settings of your Mattermost instance
