@@ -38,7 +38,7 @@ POSTGRES_NEW_DOCKERFILE=$POSTGRES_NEW_VERSION # i.e. 'FROM postgres:'$POSTGRES_D
 
 # This is found here - https://github.com/tianon/docker-postgres-upgrade
 # The string here needs to match a folder on that repo. It should read 'old-to-new'.
-UPGRADE_LINE=$UPGRADE_LINE # i.e. '9.4-to-13'
+POSTGRES_UPGRADE_LINE=$POSTGRES_UPGRADE_LINE # i.e. '9.4-to-13'
 
 # Mattermost Versions
 MM_OLD_VERSION=$MM_OLD_VERSION # i.e. "5.31.0"
@@ -80,8 +80,8 @@ if [[ $POSTGRES_NEW_DOCKERFILE == "" ]]; then
   echo "Please set environment variable POSTGRES_NEW_DOCKERFILE in the script. "
   exit 1
 fi
-if [[ $UPGRADE_LINE == "" ]]; then
-  echo "Please set environment variable UPGRADE_LINE in the script. "
+if [[ $POSTGRES_UPGRADE_LINE == "" ]]; then
+  echo "Please set environment variable POSTGRES_UPGRADE_LINE in the script. "
   exit 1
 fi
 if [[ $MM_OLD_VERSION == "" ]]; then
@@ -102,7 +102,7 @@ echo "Postgres new version: $POSTGRES_NEW_VERSION"
 echo "Postgres alpine docker tag including python3-dev: $POSTGRES_DOCKER_TAG"
 echo "Postgres old Dockerfile: $POSTGRES_OLD_DOCKERFILE"
 echo "Postgres new Dockerfile: $POSTGRES_NEW_DOCKERFILE"
-echo "Postgres upgrade-line: $UPGRADE_LINE"
+echo "Postgres upgrade-line: $POSTGRES_UPGRADE_LINE"
 echo "Mattermost old version: $MM_OLD_VERSION"
 echo "Mattermost new version: $MM_NEW_VERSION"
 df -h
@@ -143,7 +143,7 @@ docker run --rm \
     -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
     -e POSTGRES_DB="$POSTGRES_DB" \
     -v $PATH_TO_MATTERMOST_DOCKER/volumes/db:/var/lib/postgresql \
-    tianon/postgres-upgrade:$UPGRADE_LINE \
+    tianon/postgres-upgrade:$POSTGRES_UPGRADE_LINE \
     --link
 
 cp -p $PATH_TO_MATTERMOST_DOCKER/volumes/db/$POSTGRES_OLD_VERSION/data/pg_hba.conf $PATH_TO_MATTERMOST_DOCKER/volumes/db/$POSTGRES_NEW_VERSION/data/
