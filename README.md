@@ -69,7 +69,6 @@ cp PATH-TO-KEY.PEM ./volumes/web/cert/key-no-password.pem
 
 For using Let's Encrypt you can follow this guide LINK or use the this Bash script scripts/issue-certificate.sh. Make sure to adjust `mm.example.com` to match your domain configured in step 2.
 ```
-sudo docker volume create shared-webroot
 bash scripts/issue-certificate.sh -d mm.example.com -o ${PWD}/certs
 ```
 
