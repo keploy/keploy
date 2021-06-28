@@ -16,7 +16,7 @@
 ##
 PATH_TO_MATTERMOST_DOCKER=$PATH_TO_MATTERMOST_DOCKER # i.e. $PWD
 
-# Below is default values in the mattermost-docker container. If you've edited these you will need
+# Below are default values in the mattermost-docker container. If you've edited these you will need
 # to modify them before running the script or this will generate a new database.
 POSTGRES_USER=$POSTGRES_USER # i.e. mmuser
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD # i.e. mmuser_password
