@@ -36,11 +36,10 @@ DOMAIN=mm.example.com
 ## This will be 'mattermost-enterprise-edition' or 'mattermost-team-edition' based on the version of Mattermost you're installing.
 MATTERMOST_IMAGE=mattermost-enterprise-edition
 MATTERMOST_IMAGE_TAG=5.36
- ```
+```
 
 
 ### 3. Create the needed directores and set permissions (this orientates on the previous *mattermost-docker* structure and the direcories can be changed in the *.env* file)
-
 ```
 mkdir -p ./volumes/app/mattermost/{config,data,logs,plugins,client-plugins}
 sudo chown -R 2000:2000 ./volumes/app/mattermost
@@ -57,7 +56,6 @@ Use either 4.1 or 4.2 for setting up SSL. Both methods require you to change the
 
 
 #### 5.1 Pre-existing certificate and key
-
 ```
 ## When using the provided nginx and if a certificate and key already exists make the below directory
 mkdir -p ./volumes/web/cert
@@ -65,8 +63,8 @@ mkdir -p ./volumes/web/cert
 ## Then copy your existing certs into this directory.
 cp PATH-TO-CERT.PEM ./volumes/web/cert/cert.pem
 cp PATH-TO-KEY.PEM ./volumes/web/cert/key-no-password.pem
-
 ```
+
 #### 5.2 Let's Encrypt
 For using Let's Encrypt you can use this Bash script located in scripts/issue-certificate.sh (or follow the steps in docs/issuing-letsencrypt-certificate.md). Make sure to adjust `mm.example.com` to match your domain configured in step 2.
 ```
@@ -98,7 +96,6 @@ sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up
 ```
 
 # Update Mattermost to the latest version
-
 To update Mattermost to the latest version in this repo run the below commands. This will download a new image of the instance and update Mattermost.
 
 ```
@@ -107,7 +104,7 @@ sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml down
 # OR
 sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml down
 
-git pull  ## alternatively you can change the docker tag yourself as described below)
+git pull  ## alternatively you can change the docker tag yourself as described below
 
 sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
 ## OR
@@ -124,7 +121,6 @@ If you want to have a different version of Mattermost installed you will need to
 4. `sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d` or `sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d`
 
 # Removing The Docker Containers
-
 Remove the containers
 
 ```
