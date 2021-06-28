@@ -1,8 +1,11 @@
 # Mattermost Docker setup
 
 This repository is meant to replace the previous *mattermost-docker* repository and tries to stay as close as possible
-to the old one. Migrating will include some steps and while trying to keep it simple the structure changed. To keep it
-simple all the basic configuration can be done through the *.env* file.
+to the old one. Migrating will include some steps described below. To keep it
+simple all the basic configuration can be done through the *.env* file and you're free to change it to your likings.
+Additional guides can be found in the *docs* folder. Those are **optional**.
+It's advised to take a look at our [documenation](https://docs.mattermost.com/deployment/scaling.html) with regards to
+scalability.
 
 ## Prequisites
 1. A Docker installation is needed (https://docs.docker.com/engine/install/)
@@ -27,12 +30,12 @@ cp env.example .env
 Within the .env file make sure you edit at a minimum the below values. You can find a list of the Mattermost version tags here: [enterprise-edition](https://hub.docker.com/r/mattermost/mattermost-enterprise-edition/tags?page=1&ordering=last_updated) / [team-edition](https://hub.docker.com/r/mattermost/mattermost-team-edition/tags?page=1&ordering=last_updated). If you want to change the postgres user and pass, you will do so in this `.env` file as well.
 
 ```
-## This domain must be a live domain that points to the server where Mattermost is installed.
+## This domain must be a live domain (FQDN) that points to the server where Mattermost is installed.
 DOMAIN=mm.example.com
 
 ## This will be 'mattermost-enterprise-edition' or 'mattermost-team-edition' based on the version of Mattermost you're installing.
 MATTERMOST_IMAGE=mattermost-enterprise-edition
-MATTERMOST_IMAGE_TAG=5.34
+MATTERMOST_IMAGE_TAG=5.36
  ```
 
 
@@ -65,12 +68,11 @@ cp PATH-TO-KEY.PEM ./volumes/web/cert/key-no-password.pem
 
 ```
 #### 5.2 Let's Encrypt
-**TODO: add link to Let's Encrypt certificate guide**
-
-For using Let's Encrypt you can follow this guide LINK or use the this Bash script scripts/issue-certificate.sh. Make sure to adjust `mm.example.com` to match your domain configured in step 2.
+For using Let's Encrypt you can use this Bash script located in scripts/issue-certificate.sh (or follow the steps in docs/issuing-letsencrypt-certificate.md). Make sure to adjust `mm.example.com` to match your domain configured in step 2.
 ```
 bash scripts/issue-certificate.sh -d mm.example.com -o ${PWD}/certs
 ```
+Otherwise please consult the Certbot [documentation](https://certbot.eff.org/instructions) on how to issue a standalone certificate and ensure the paths to the certificate and key are correctly set in your *.env*.
 
 #### 5.3 Adjusting the `.env` file.
 Once you've completed 5.1 or 5.2 you'll need to adjust the `.env` file accordingly. With 5.1 verify the first two lines below are uncommented in the `.env` file, with 5.2 comment out the first two lines and uncomment the last two lines.
@@ -100,13 +102,16 @@ sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up
 To update Mattermost to the latest version in this repo run the below commands. This will download a new image of the instance and update Mattermost.
 
 ```
-sudo docker-compose down
-git pull
-
 ## Based on what you followed in step 6
-docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml down
+# OR
+sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml down
+
+git pull  ## alternatively you can change the docker tag yourself as described below)
+
+sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
 ## OR
-docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d
+sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d
 ```
 
 # Installing different versions of Mattermost
@@ -115,18 +120,20 @@ If you want to have a different version of Mattermost installed you will need to
 1. Open the `.env` file in your docker folder
 2. Edit the line `MATTERMOST_IMAGE_TAG=5.34` to be equal to the version you want. Ex: (`MATTERMOST_IMAGE_TAG=5.35`).
   - You can find a list of the Mattermost version tags here: [enterprise-edition](https://hub.docker.com/r/mattermost/mattermost-enterprise-edition/tags?page=1&ordering=last_updated) / [team-edition](https://hub.docker.com/r/mattermost/mattermost-team-edition/tags?page=1&ordering=last_updated).
-3. `sudo docker-compose down`
-4. `sudo docker-compose up -d`
+3. `sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml down` or `sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml down`
+4. `sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d` or `sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d`
 
 # Removing The Docker Containers
 
 Remove the containers
 
 ```
-docker-compose down
+sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.ymp down
+# OR
+sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml down
 ```
 
-Remove the data and settings of your Mattermost instance
+Remove all the data and settings of your Mattermost instance
 ```
 sudo rm -rf volumes
 ```
