@@ -31,6 +31,7 @@ services:
 # Shared volume for Let's Encrypt certificate renewal with a webroot
 volumes:
   shared-webroot:
+    name: shared-webroot
 
 # This network name is being used for Let's Encrypt certificate renewal
 networks:
