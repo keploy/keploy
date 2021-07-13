@@ -5,7 +5,7 @@ set -e
 ##
 ## Instructions
 ##
-# Dockerfile stolen from contributions in this issue:
+# Dockerfile stolen from contributions in this issue: https://github.com/mattermost/mattermost-docker/issues/489#issuecomment-790277661
 
 # 1. Edit the variables below to match your environment. This uses default variables and assumes you're on 5.31.0.
 #    If you're wanting to use another version of Postgres/Mattermost , update the variables as desired.
