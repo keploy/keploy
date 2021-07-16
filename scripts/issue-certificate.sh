@@ -16,12 +16,12 @@ issue_cert_standalone() {
   docker run -it --rm --name certbot -p 80:80 \
     -v "${1}/etc/letsencrypt:/etc/letsencrypt" \
     -v "${1}/lib/letsencrypt:/var/lib/letsencrypt" \
-    certbot/certbot certonly --standalone -d ${2}
+    certbot/certbot certonly --standalone -d "${2}"
 }
 
 authenticator_to_webroot() {
-  sed -i 's/standalone/webroot/' ${1}/etc/letsencrypt/renewal/${2}.conf
-  tee -a ${1}/etc/letsencrypt/renewal/${2}.conf >/dev/null <<EOF
+  sed -i 's/standalone/webroot/' "${1}"/etc/letsencrypt/renewal/"${2}".conf
+  tee -a "${1}"/etc/letsencrypt/renewal/"${2}".conf >/dev/null <<EOF
 webroot_path = /usr/share/nginx/html,
 [[webroot_map]]
 EOF
@@ -67,10 +67,10 @@ if [ -z "$output" ]; then
   exit 64
 fi
 
-if ! $(which docker 1>/dev/null); then
+if ! which docker 1>/dev/null; then
   echo "Can't find Docker command" >&2
   exit 64
 fi
 
-issue_cert_standalone ${output} ${domain}
-authenticator_to_webroot ${output} ${domain}
+issue_cert_standalone "${output}" "${domain}"
+authenticator_to_webroot "${output}" "${domain}"

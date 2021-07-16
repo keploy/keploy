@@ -14,9 +14,9 @@ set -o errexit
 #    This may take some time to complete as it's migrating the database to Postgres 13.6 from 9.4
 
 
-PATH_TO_MATTERMOST_DOCKER=$PATH_TO_MATTERMOST_DOCKER # i.e. $PWD
 if [[ $PATH_TO_MATTERMOST_DOCKER == "" ]]; then
-  echo "Please export environment variable PATH_TO_MATTERMOST_DOCKER with '$ export PATH_TO_MATTERMOST_DOCKER=/path/to/mattermost-docker' before running this script. "
+  # shellcheck disable=SC2016
+  echo 'Please export environment variable PATH_TO_MATTERMOST_DOCKER with "$ export PATH_TO_MATTERMOST_DOCKER=/path/to/mattermost-docker", i.e. $PWD before running this script. '
   exit 1
 fi
 
@@ -27,7 +27,7 @@ fi
 # The script is trying to fetch those variables first. Should fetching fail, please export the variables before running the script.
 if [[ $POSTGRES_USER == "" ]]; then
   echo "trying to fetch POSTGRES_USER from $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
-  POSTGRES_USER=$(echo "$(grep "^.*-.*POSTGRES_USER=.*$" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml)" | sed s~^.*-.*POSTGRES_USER=~~g)
+  POSTGRES_USER=$(grep "^.*-.*POSTGRES_USER=.*$" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml | sed s~^.*-.*POSTGRES_USER=~~g)
   if [[ $POSTGRES_USER == "" ]]; then
     echo "could not find POSTGRES_USER set in $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
     echo "please run 'export POSTGRES_USER=yourPostgresUser' before running this script"
@@ -38,7 +38,7 @@ fi
 
 if [[ $POSTGRES_PASSWORD == "" ]]; then
   echo "trying to fetch POSTGRES_PASSWORD from $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
-  POSTGRES_PASSWORD=$(echo "$(grep "^.*-.*POSTGRES_PASSWORD=.*$" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml)" | sed s~^.*-.*POSTGRES_PASSWORD=~~g)
+  POSTGRES_PASSWORD=$(grep "^.*-.*POSTGRES_PASSWORD=.*$" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml | sed s~^.*-.*POSTGRES_PASSWORD=~~g)
   if [[ $POSTGRES_PASSWORD == "" ]]; then
     echo "could not find POSTGRES_PASSWORD set in $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
     echo "please run 'export POSTGRES_PASSWORD=yourPostgresPassword' before running this script"
@@ -49,7 +49,7 @@ fi
 
 if [[ $POSTGRES_DB == "" ]]; then
   echo "trying to fetch POSTGRES_DB from $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
-  POSTGRES_DB=$(echo "$(grep "^.*-.*POSTGRES_DB=.*$" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml)" | sed s~^.*-.*POSTGRES_DB=~~g)
+  POSTGRES_DB=$(grep "^.*-.*POSTGRES_DB=.*$" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml | sed s~^.*-.*POSTGRES_DB=~~g)
   if [[ $POSTGRES_DB == "" ]]; then
     echo "could not find POSTGRES_DB set in $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
     echo "please run 'export POSTGRES_DB=yourPostgresDatabase' before running this script"
@@ -113,7 +113,7 @@ fi
 printf "\n"
 if [[ $MM_OLD_VERSION == "" ]]; then
   echo "trying to fetch MM_OLD_VERSION from $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
-  MM_OLD_VERSION=$(echo "$(grep ".*-.*MM_VERSION=.*" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml)" | sed s~.*-.*MM_VERSION=~~g)
+  MM_OLD_VERSION=$(grep ".*-.*MM_VERSION=.*" "$PATH_TO_MATTERMOST_DOCKER"/docker-compose.yml | sed s~.*-.*MM_VERSION=~~g)
   if [[ $MM_OLD_VERSION == "" ]]; then
     echo "could not find MM_OLD_VERSION set in $PATH_TO_MATTERMOST_DOCKER/docker-compose.yml"
     echo "please run 'export MM_OLD_VERSION=yourMMVersion' before running this script"
