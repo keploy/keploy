@@ -6,3 +6,4 @@ workflows:
     jobs:
       - shellcheck/check:
           dir: ./scripts
+          exclude: SC2001
