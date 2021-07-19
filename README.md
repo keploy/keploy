@@ -137,5 +137,7 @@ sudo rm -rf volumes
 # Upgrading from mattermost-docker
 
 For upgrading from deprecated [mattermost-docker](https://github.com/mattermost/mattermost-docker) please follow the instructions [here](https://github.com/mattermost/docker/blob/main/scripts/UPGRADE.md). 
-This will upgrade the mattermost-docker postgresql database and your installation can then be switched to this repository's setup which will be maintained for future releases. 
+This will upgrade the mattermost-docker postgres database and the mattermost application. The upgrade script aims to ease the migration to this repository's approach which does not use customized docker images. 
+This repository will be maintained for future releases.  
+
 For any comments, help needed and/or questions, please don't hesitate to write us in this issue: https://github.com/mattermost/mattermost-docker/issues/489
