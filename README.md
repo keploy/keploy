@@ -134,7 +134,7 @@ Remove all the data and settings of your Mattermost instance
 sudo rm -rf volumes
 ```
 
-## Upgrading from mattermost-docker
+# Upgrading from mattermost-docker
 
 For upgrading from deprecated [mattermost-docker](https://github.com/mattermost/mattermost-docker) please follow the instructions [here](https://github.com/mattermost/docker/blob/main/scripts/UPGRADE.md). 
 This will upgrade the mattermost-docker postgresql database and your installation can then be switched to this repository's setup which will be maintained for future releases. 
