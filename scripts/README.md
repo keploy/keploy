@@ -1,3 +1,7 @@
+# IMPORTANT: Please make sure you have enough disk space available for the backups! 
+Because it is more complicated to check the available disk space for various disk formatting options provided by different linux distributions, the script does currently not check for if there is enough disk space. 
+Please check manually before executing this script!
+
 ## Upgrading from mattermost-docker
 
 ```
