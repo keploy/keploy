@@ -52,7 +52,7 @@ sudo systemctl enable --now docker
 ```
 
 ### 5. Placing the certificate and key (if using provided nginx)
-Use either 4.1 or 4.2 for setting up SSL. Both methods require you to change the path to the Let's Encrypt config folders inside the *.env*. 
+Use either 5.1 or 5.2 for setting up SSL. Both methods require you to change the path to the Let's Encrypt config folders inside the *.env*. 
 
 
 #### 5.1 Pre-existing certificate and key
