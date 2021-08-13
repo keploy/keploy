@@ -4,7 +4,7 @@ This repository is meant to replace the previous *mattermost-docker* repository 
 to the old one. Migrating will include some steps described below. To keep it
 simple all the basic configuration can be done through the *.env* file and you're free to change it to your likings.
 Additional guides can be found in the *docs* folder. Those are **optional**.
-It's advised to take a look at our [documenation](https://docs.mattermost.com/deployment/scaling.html) with regards to
+It's advised to take a look at our [documentation](https://docs.mattermost.com/deployment/scaling.html) with regards to
 scalability.
 
 ## Prequisites
