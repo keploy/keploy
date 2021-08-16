@@ -124,7 +124,7 @@ If you want to have a different version of Mattermost installed you will need to
 Remove the containers
 
 ```
-sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.ymp down
+sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml down
 # OR
 sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml down
 ```
