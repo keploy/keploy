@@ -4,7 +4,7 @@ This repository is meant to replace the previous *mattermost-docker* repository 
 to the old one. Migrating will include some steps described below. To keep it
 simple all the basic configuration can be done through the *.env* file and you're free to change it to your likings.
 Additional guides can be found in the *docs* folder. Those are **optional**.
-It's advised to take a look at our [documenation](https://docs.mattermost.com/deployment/scaling.html) with regards to
+It's advised to take a look at our [documentation](https://docs.mattermost.com/deployment/scaling.html) with regards to
 scalability.
 
 ## Prequisites
@@ -41,7 +41,7 @@ MATTERMOST_IMAGE_TAG=5.36
 
 ### 3. Create the needed directores and set permissions (this orientates on the previous *mattermost-docker* structure and the direcories can be changed in the *.env* file)
 ```
-mkdir -p ./volumes/app/mattermost/{config,data,logs,plugins,client-plugins}
+mkdir -p ./volumes/app/mattermost/{config,data,logs,plugins,client/plugins}
 sudo chown -R 2000:2000 ./volumes/app/mattermost
 ```
 
@@ -52,7 +52,7 @@ sudo systemctl enable --now docker
 ```
 
 ### 5. Placing the certificate and key (if using provided nginx)
-Use either 4.1 or 4.2 for setting up SSL. Both methods require you to change the path to the Let's Encrypt config folders inside the *.env*. 
+Use either 5.1 or 5.2 for setting up SSL. Both methods require you to change the path to the Let's Encrypt config folders inside the *.env*. 
 
 
 #### 5.1 Pre-existing certificate and key
@@ -124,7 +124,7 @@ If you want to have a different version of Mattermost installed you will need to
 Remove the containers
 
 ```
-sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.ymp down
+sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml down
 # OR
 sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml down
 ```

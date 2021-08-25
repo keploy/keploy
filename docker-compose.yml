@@ -42,7 +42,7 @@ services:
       - ${MATTERMOST_DATA_PATH}:/mattermost/data:rw
       - ${MATTERMOST_LOGS_PATH}:/mattermost/logs:rw
       - ${MATTERMOST_PLUGINS_PATH}:/mattermost/plugins:rw
-      - ${MATTERMOST_CLIENT_PLUGINS_PATH}:/mattermost/client-plugins:rw
+      - ${MATTERMOST_CLIENT_PLUGINS_PATH}:/mattermost/client/plugins:rw
     environment:
       # timezone inside container
       - TZ
