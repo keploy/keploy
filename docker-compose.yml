@@ -34,7 +34,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 200
-    read_only: true
+    read_only: ${MATTERMOST_CONTAINER_READONLY}
     tmpfs:
       - /tmp
     volumes:
