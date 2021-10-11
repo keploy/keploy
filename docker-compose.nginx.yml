@@ -27,7 +27,7 @@ services:
       # - ${GITLAB_PKI_CHAIN_PATH}:/etc/ssl/certs/pki_chain.pem:ro
     environment:
       # timezone inside container
-      - TZ
+      - TZ: ${TZ}
     ports:
       - ${HTTPS_PORT}:443
       - ${HTTP_PORT}:80
