@@ -21,6 +21,10 @@ services:
       - ${CERT_PATH}:/cert.pem:ro
       - ${KEY_PATH}:/key.pem:ro
       - shared-webroot:/usr/share/nginx/html
+      # When you want to use SSO with GitLab, you have to add the cert pki chain of GitLab inside Alpine
+      # to avoid Token request failed: certificate signed by unknown authority 
+      # (link: https://github.com/mattermost/mattermost-server/issues/13059 and https://github.com/mattermost/docker/issues/34)
+      # - ${GITLAB_PKI_CHAIN_PATH}:/etc/ssl/certs/pki_chain.pem:ro
     environment:
       # timezone inside container
       - TZ: ${TZ}
