@@ -10,7 +10,7 @@ set -o errexit
 # 1. Edit the variables below to match your environment. This uses default variables and assumes you're on 5.31.0.
 #    If you're wanting to use another version of Postgres/Mattermost , update the variables as desired.
 
-# 2. run 'sudo bash upgrade-from-mattermost-docker.sh' replace upgrade.sh with what you've named the file.
+# 2. run 'sudo bash upgrade-postgres.sh' replace upgrade.sh with what you've named the file.
 #    This may take some time to complete as it's migrating the database to Postgres 13.6 from 9.4
 
 

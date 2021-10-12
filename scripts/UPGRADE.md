@@ -2,11 +2,11 @@
 Because it is more complicated to check the available disk space for various disk formatting options provided by different linux distributions, the script does currently not check for if there is enough disk space. 
 Please check manually before executing this script!
 
-## Upgrading from mattermost-docker
+## Upgrading Postgres
 
 ```
 $ export PATH_TO_MATTERMOST_DOCKER=path/to/mattermost-docker
-$ ./scripts/upgrade-from-mattermost-docker.sh
+$ ./scripts/upgrade-postgres.sh
 ```
 
 Environment variables for upgrading:
@@ -31,5 +31,5 @@ You can overwrite any of these variables before running this script with:
 ```
 $ export VAR_NAME_FROM_ABOVE=yourValue
 $ export PATH_TO_MATTERMOST_DOCKER=path/to/mattermost-docker
-$ ./scripts/upgrade-from-mattermost-docker.sh
+$ ./scripts/upgrade-postgres.sh
 ```
