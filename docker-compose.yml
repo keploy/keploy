@@ -20,7 +20,7 @@ services:
       # timezone inside container
       - TZ
 
-      # necessay Postgres options/variables
+      # necessary Postgres options/variables
       - POSTGRES_USER
       - POSTGRES_PASSWORD
       - POSTGRES_DB
