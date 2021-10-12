@@ -23,7 +23,7 @@ services:
       - shared-webroot:/usr/share/nginx/html
     environment:
       # timezone inside container
-      - TZ
+      - TZ: ${TZ}
     ports:
       - ${HTTPS_PORT}:443
       - ${HTTP_PORT}:80
