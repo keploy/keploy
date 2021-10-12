@@ -64,20 +64,28 @@ mkdir -p ./volumes/web/cert
 cp PATH-TO-CERT.PEM ./volumes/web/cert/cert.pem
 cp PATH-TO-KEY.PEM ./volumes/web/cert/key-no-password.pem
 ```
+#### 5.2 Configure SSO with GitLab
+If you are looking for SSO with GitLab and you use self signed certificate you have to add the PKI chain of your authority in app because Alpine doesn't know him. This is required to avoid **Token request failed: certificate signed by unknown authority**
 
-#### 5.2 Let's Encrypt
+For that uncomment this line :
+```
+# - ${GITLAB_PKI_CHAIN_PATH}:/etc/ssl/certs/pki_chain.pem:ro
+```
+
+#### 5.3 Let's Encrypt
 For using Let's Encrypt you can use this Bash script located in scripts/issue-certificate.sh (or follow the steps in docs/issuing-letsencrypt-certificate.md). Make sure to adjust `mm.example.com` to match your domain configured in step 2.
 ```
 bash scripts/issue-certificate.sh -d mm.example.com -o ${PWD}/certs
 ```
 Otherwise please consult the Certbot [documentation](https://certbot.eff.org/instructions) on how to issue a standalone certificate and ensure the paths to the certificate and key are correctly set in your *.env*.
 
-#### 5.3 Adjusting the `.env` file.
-Once you've completed 5.1 or 5.2 you'll need to adjust the `.env` file accordingly. With 5.1 verify the first two lines below are uncommented in the `.env` file, with 5.2 comment out the first two lines and uncomment the last two lines.
+#### 5.4 Adjusting the `.env` file.
+Once you've completed 5.1 or 5.2 or 5.3 you'll need to adjust the `.env` file accordingly. With 5.1 verify the first two lines below are uncommented in the `.env` file, with 5.2 uncomment the third line and put the correct path for your pki chain, with 5.3 comment out the first two lines and uncomment the last two lines.
 
 ```
 CERT_PATH=./volumes/web/cert/cert.pem
 KEY_PATH=./volumes/web/cert/key-no-password.pem
+#GITLAB_PKI_CHAIN_PATH=<path_to_your_gitlab_pki>/pki_chain.pem
 #CERT_PATH=./certs/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
 #KEY_PATH=./certs/etc/letsencrypt/live/${DOMAIN}/privkey.pem
 ```
