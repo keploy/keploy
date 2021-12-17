@@ -104,16 +104,20 @@ sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up
 ```
 
 # Update Mattermost to the latest version
-To update Mattermost to the latest version in this repo run the below commands. This will download a new image of the instance and update Mattermost.
+To update Mattermost to the latest version in this repo run the below commands.
 
-```
+1. Shutdown your Mattermost instance
+```bash
 ## Based on what you followed in step 6
 sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml down
 # OR
 sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml down
-
-git pull  ## alternatively you can change the docker tag yourself as described below
-
+```
+2. Run a `git pull` to get all the latest diff from the repository
+3. Edit your `.env` file by copying and adjusting based on the `env.example` file
+4. Adjust the variable `MATTERMOST_IMAGE_TAG` in `.env` file to point the desired Mattermost version (You can find a list of the Mattermost version tags here: [enterprise-edition](https://hub.docker.com/r/mattermost/mattermost-enterprise-edition/tags?page=1&ordering=last_updated) / [team-edition](https://hub.docker.com/r/mattermost/mattermost-team-edition/tags?page=1&ordering=last_updated).)
+5. Restart your Mattermost instance
+```bash
 sudo docker-compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
 ## OR
 sudo docker-compose -f docker-compose.yml -f docker-compose.without-nginx.yml up -d
