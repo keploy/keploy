@@ -41,7 +41,7 @@ MATTERMOST_IMAGE_TAG=5.36
 
 ### 3. Create the needed directores and set permissions (this orientates on the previous *mattermost-docker* structure and the direcories can be changed in the *.env* file)
 ```
-mkdir -p ./volumes/app/mattermost/{config,data,logs,plugins,client/plugins}
+mkdir -p ./volumes/app/mattermost/{config,data,logs,plugins,client/plugins,bleve-indexes}
 sudo chown -R 2000:2000 ./volumes/app/mattermost
 ```
 
