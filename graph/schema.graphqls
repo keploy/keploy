@@ -1,0 +1,223 @@
+extend type Mutation {
+  updateTestCase(tc: [TestCaseInput]): Boolean!
+  deleteTestCase(id: String!): Boolean!
+  # normalizeTest accepts test ID (part of a test run) and updates the respective testcase
+  # with the responses from the test result
+  normalizeTest(id: String!): Boolean!
+}
+
+input TestCaseInput {
+  id: String!
+  created: Time
+  updated: Time
+  captured: Time
+  cid: String
+  app: String
+  uri: String
+  httpReq: HTTPReqInput
+  httpResp: HTTPRespInput
+  deps: [DependencyInput]
+  anchors: [String!]
+  noise: [String!]
+}
+
+input HTTPReqInput {
+  protoMajor: Int
+  protoMinor: Int
+  urlParam: [KVInput]
+  header: [HeaderInput]
+  method: Method
+  body: String
+}
+
+input HTTPRespInput {
+  statusCode: Int
+  header: [HeaderInput]
+  body: String
+}
+
+input HeaderInput {
+  key: String!
+  value: [String!]
+}
+
+input DependencyInput {
+  name: String!
+  type: DependencyType!
+  meta: [KVInput]
+}
+
+input KVInput {
+  key: String!
+  value: String!
+}
+
+type App {
+  id: String!
+}
+
+
+type TestRun {
+  id: String!
+  created: Time!
+  updated: Time!
+  status: TestRunStatus!
+  app: String!
+  user: String!
+  success: Int!
+  failure: Int!
+  total: Int!
+  tests: [Test]
+}
+
+enum TestRunStatus {
+  RUNNING
+  FAILED
+  PASSED
+}
+
+enum TestStatus {
+  PENDING
+  RUNNING
+  FAILED
+  PASSED
+}
+
+type Test {
+  id: String!
+  status: TestStatus!
+  started: Time!
+  completed: Time
+  result: Result
+  testCaseID: String!
+  uri: String
+  req: HTTPReq
+  deps: [Dependency!]
+  noise: [String!]
+}
+
+type Header {
+  key: String!
+  value: [String!]
+}
+
+enum Method {
+  GET
+  PUT
+  HEAD
+  POST
+  PATCH
+  DELETE
+  OPTIONS
+  TRACE
+}
+
+type HTTPReq {
+  protoMajor: Int!
+  protoMinor: Int!
+  urlParam: [Kv]
+  header: [Header]
+  method: Method!
+  body: String!
+}
+
+type Result {
+  statusCode: IntResult!
+  headersResult: [HeaderResult]
+  bodyResult: BodyResult!
+  depResult: [DepResult!]
+}
+
+type DepResult {
+  name: String!
+  type: DependencyType!
+  meta: [DepMetaResult!]
+}
+
+type DepMetaResult {
+  normal: Boolean
+  key: String
+  expected: String
+  actual: String
+}
+
+type IntResult {
+  normal: Boolean
+  expected: Int!
+  actual: Int!
+}
+
+type HeaderResult {
+  normal: Boolean
+  key: String!
+  expected: Header!
+  actual: Header!
+}
+
+type BodyResult {
+  normal: Boolean!
+  type: BodyType!
+  expected: String!
+  actual: String!
+  errors: [JSONError!]
+}
+
+type JSONError {
+  key: String!
+  missingInExpected: Boolean!
+  missingInActual: Boolean!
+}
+
+enum BodyType {
+  PLAIN
+  JSON
+}
+
+type Kv {
+  key: String!
+  value: String!
+}
+
+type TestCase {
+  id: String!
+  created: Time!
+  updated: Time!
+  captured: Time!
+  cid: String!
+  app: String!
+  uri: String!
+  httpReq: HTTPReq!
+  httpResp: HTTPResp!
+  deps: [Dependency!]
+  anchors: [String!]
+  noise: [String!]
+}
+
+type HTTPResp {
+  statusCode: Int!
+  header: [Header!]
+  body: String!
+}
+
+type Dependency {
+  name: String!
+  type: DependencyType!
+  meta: [Kv!]
+}
+
+enum DependencyType {
+  NO_SQL_DB
+  SQL_DB
+}
+
+extend type Query {
+  apps: [App!]
+  testRun(user: String, app: String, id: String, from: Time, To: Time): [TestRun]
+  testCase(app: String, id: String): [TestCase]
+}
+
+type Subscription {
+  TestRun(user: String, app: String, id: String): [TestRun]
+}
+
+scalar Time
