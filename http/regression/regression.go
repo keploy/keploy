@@ -109,12 +109,12 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 func (rg *regression) GetTC(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	app := rg.getMeta(w, r, false)
-	tcs, err := rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
+	tcs, err := rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id,nil,nil)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	tcs, err = rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
+	tcs, err = rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id,nil,nil)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -139,8 +139,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	if app == "" {
 		return
 	}
-
-	tcs, err := rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app)
+	tcs, err := rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app,nil,nil)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -151,12 +150,12 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
-	key := r.Header.Get("key")
-	if key == "" {
-		rg.logger.Error("missing api key")
-		render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
-		return
-	}
+	// key := r.Header.Get("key")
+	// if key == "" {
+	// 	rg.logger.Error("missing api key")
+	// 	render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
+	// 	return
+	// }
 
 	data := &TestCaseReq{}
 	if err := render.Bind(r, data); err != nil {
@@ -196,12 +195,12 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
-	key := r.Header.Get("key")
-	if key == "" {
-		rg.logger.Error("missing api key")
-		render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
-		return
-	}
+	// key := r.Header.Get("key")
+	// if key == "" {
+	// 	rg.logger.Error("missing api key")
+	// 	render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
+	// 	return
+	// }
 
 	data := &TestReq{}
 	if err := render.Bind(r, data); err != nil {
@@ -230,7 +229,7 @@ func (rg *regression) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pass, err := rg.svc.Test(r.Context(), graph.DEFAULT_COMPANY, data.RunID, data.ID, data.AppID, data.Resp)
+	pass, err := rg.svc.Test(r.Context(), graph.DEFAULT_COMPANY ,data.AppID, data.RunID, data.ID, data.Resp)
 
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))

@@ -128,8 +128,8 @@ type ComplexityRoot struct {
 
 	Query struct {
 		Apps     func(childComplexity int) int
-		TestCase func(childComplexity int, app *string, id *string) int
-		TestRun  func(childComplexity int, user *string, app *string, id *string, from *time.Time, to *time.Time) int
+		TestCase func(childComplexity int, app *string, id *string, offset *int, limit *int) int
+		TestRun  func(childComplexity int, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) int
 	}
 
 	Result struct {
@@ -192,8 +192,8 @@ type MutationResolver interface {
 }
 type QueryResolver interface {
 	Apps(ctx context.Context) ([]*model.App, error)
-	TestRun(ctx context.Context, user *string, app *string, id *string, from *time.Time, to *time.Time) ([]*model.TestRun, error)
-	TestCase(ctx context.Context, app *string, id *string) ([]*model.TestCase, error)
+	TestRun(ctx context.Context, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) ([]*model.TestRun, error)
+	TestCase(ctx context.Context, app *string, id *string, offset *int, limit *int) ([]*model.TestCase, error)
 }
 type SubscriptionResolver interface {
 	TestRun(ctx context.Context, user *string, app *string, id *string) (<-chan []*model.TestRun, error)
@@ -540,7 +540,7 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 			return 0, false
 		}
 
-		return e.complexity.Query.TestCase(childComplexity, args["app"].(*string), args["id"].(*string)), true
+		return e.complexity.Query.TestCase(childComplexity, args["app"].(*string), args["id"].(*string), args["offset"].(*int), args["limit"].(*int)), true
 
 	case "Query.testRun":
 		if e.complexity.Query.TestRun == nil {
@@ -552,7 +552,7 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 			return 0, false
 		}
 
-		return e.complexity.Query.TestRun(childComplexity, args["user"].(*string), args["app"].(*string), args["id"].(*string), args["from"].(*time.Time), args["To"].(*time.Time)), true
+		return e.complexity.Query.TestRun(childComplexity, args["user"].(*string), args["app"].(*string), args["id"].(*string), args["from"].(*time.Time), args["To"].(*time.Time), args["offset"].(*int), args["limit"].(*int)), true
 
 	case "Result.bodyResult":
 		if e.complexity.Result.BodyResult == nil {
@@ -1115,8 +1115,8 @@ enum DependencyType {
 
 extend type Query {
   apps: [App!]
-  testRun(user: String, app: String, id: String, from: Time, To: Time): [TestRun]
-  testCase(app: String, id: String): [TestCase]
+  testRun(user: String, app: String, id: String, from: Time, To: Time,offset: Int, limit: Int): [TestRun]
+  testCase(app: String, id: String,offset: Int, limit: Int): [TestCase]
 }
 
 type Subscription {
@@ -1213,6 +1213,24 @@ func (ec *executionContext) field_Query_testCase_args(ctx context.Context, rawAr
 		}
 	}
 	args["id"] = arg1
+	var arg2 *int
+	if tmp, ok := rawArgs["offset"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("offset"))
+		arg2, err = ec.unmarshalOInt2ᚖint(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["offset"] = arg2
+	var arg3 *int
+	if tmp, ok := rawArgs["limit"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("limit"))
+		arg3, err = ec.unmarshalOInt2ᚖint(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["limit"] = arg3
 	return args, nil
 }
 
@@ -1264,6 +1282,24 @@ func (ec *executionContext) field_Query_testRun_args(ctx context.Context, rawArg
 		}
 	}
 	args["To"] = arg4
+	var arg5 *int
+	if tmp, ok := rawArgs["offset"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("offset"))
+		arg5, err = ec.unmarshalOInt2ᚖint(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["offset"] = arg5
+	var arg6 *int
+	if tmp, ok := rawArgs["limit"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("limit"))
+		arg6, err = ec.unmarshalOInt2ᚖint(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["limit"] = arg6
 	return args, nil
 }
 
@@ -2847,7 +2883,7 @@ func (ec *executionContext) _Query_testRun(ctx context.Context, field graphql.Co
 	fc.Args = args
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Query().TestRun(rctx, args["user"].(*string), args["app"].(*string), args["id"].(*string), args["from"].(*time.Time), args["To"].(*time.Time))
+		return ec.resolvers.Query().TestRun(rctx, args["user"].(*string), args["app"].(*string), args["id"].(*string), args["from"].(*time.Time), args["To"].(*time.Time), args["offset"].(*int), args["limit"].(*int))
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -2886,7 +2922,7 @@ func (ec *executionContext) _Query_testCase(ctx context.Context, field graphql.C
 	fc.Args = args
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Query().TestCase(rctx, args["app"].(*string), args["id"].(*string))
+		return ec.resolvers.Query().TestCase(rctx, args["app"].(*string), args["id"].(*string), args["offset"].(*int), args["limit"].(*int))
 	})
 	if err != nil {
 		ec.Error(ctx, err)

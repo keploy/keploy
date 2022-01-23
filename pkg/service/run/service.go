@@ -8,13 +8,13 @@ import (
 )
 
 type Service interface {
-	Get(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time) ([]*TestRun, error)
+	Get(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time,offset *int, limit *int) ([]*TestRun, error)
 	Put(ctx context.Context, run TestRun) error
 	Normalize(ctx context.Context, cid, id string) error
 }
 
 type DB interface {
-	Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time) ([]*TestRun, error)
+	Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time,offset *int, limit *int) ([]*TestRun, error)
 	Upsert(ctx context.Context, run TestRun) error
 	ReadTest(ctx context.Context, id string) (Test, error)
 	ReadTests(ctx context.Context, runID string) ([]Test, error)

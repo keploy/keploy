@@ -5,18 +5,15 @@ import (
 	"net/http"
 	"os"
 	"time"
-
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/cors"
-	"github.com/go-chi/jwtauth"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
-
 	"github.com/99designs/gqlgen/graphql/handler"
 	"go.uber.org/zap"
 )
@@ -25,8 +22,6 @@ import (
 
 func Server() *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
-
-	secret := os.Getenv("SECRET")
 
 	mongoHost := os.Getenv("MONGO_HOST")
 	mongoUser := os.Getenv("MONGO_USER")
@@ -37,7 +32,6 @@ func Server() *chi.Mux {
 	testRunTable := os.Getenv("TEST_RUN_TABLE")
 	testTable := os.Getenv("TEST_TABLE")
 
-	tokenAuth := jwtauth.New("HS256", []byte(secret), nil)
 
 	logger, err := zap.NewProduction()
 	if err != nil {
@@ -79,21 +73,9 @@ func Server() *chi.Mux {
 		w.Write([]byte("ok"))
 	})
 
-	r.Handle("/", playground.Handler("johari backend", "/query"))
+	r.Handle("/", playground.Handler("johari backend", "/query"))	
 
-	// Protected routes
-	r.Group(func(r chi.Router) {
-		// Seek, verify and validate JWT tokens
-		r.Use(jwtauth.Verifier(tokenAuth))
-
-		// Handle valid / invalid tokens. In this example, we use
-		// the provided authenticator middleware, but you can write your
-		// own very easily, look at the Authenticator method in jwtauth.go
-		// and tweak it, its not scary.
-		r.Use(jwtauth.Authenticator)
-
-		r.Handle("/query", srv)
-	})
-
+	r.Handle("/query", srv)
+	
 	return r
 }
