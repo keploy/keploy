@@ -1,10 +1,13 @@
 package server
 
 import (
+	"fmt"
 	"math/rand"
 	"net/http"
 	"os"
 	"time"
+	"context"
+	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/cors"
@@ -14,18 +17,40 @@ import (
 	"go.keploy.io/server/pkg/platform/mgo"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
-	"github.com/99designs/gqlgen/graphql/handler"
+	// "go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
 )
 
 // const defaultPort = "8080"
 
+
+
 func Server() *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
+// Set client options
+clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
 
-	mongoHost := os.Getenv("MONGO_HOST")
-	mongoUser := os.Getenv("MONGO_USER")
-	mongoPassword := os.Getenv("MONGO_PASSWORD")
+// Connect to MongoDB
+client, err := mongo.Connect(context.TODO(), clientOptions)
+
+if err != nil {
+fmt.Println(err)
+}
+
+// Check the connection
+err = client.Ping(context.TODO(), nil)
+
+if err != nil {
+	fmt.Println(err)
+}
+
+fmt.Println("Connected to MongoDB!")
+
+	// mongoHost := os.Getenv("MONGO_HOST")
+	// mongoUser := os.Getenv("MONGO_USER")
+	// mongoPassword := os.Getenv("MONGO_PASSWORD")
 	mongoDB := os.Getenv("MONGO_DB")
 	testCaseTable := os.Getenv("TESTCASE_TABLE")
 
@@ -39,7 +64,7 @@ func Server() *chi.Mux {
 	}
 	defer logger.Sync() // flushes buffer, if any
 
-	client, err := mgo.New(mongoUser, mongoPassword, mongoHost, mongoDB)
+	// client, err := mgo.New(mongoUser, mongoPassword, mongoHost, mongoDB)
 	if err != nil {
 		logger.Fatal("failed to create mgo db client", zap.Error(err))
 	}

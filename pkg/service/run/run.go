@@ -43,7 +43,7 @@ func (r *Run) Normalize(ctx context.Context, cid, id string) error {
 	return nil
 }
 
-func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time,offset *int, limit *int) ([]*TestRun, error) {
+func (r *Run) Get(ctx context.Context, summary bool, cid , user string, app, id *string, from, to *time.Time,offset *int, limit *int) ([]*TestRun, error) {
 	res, err := r.rdb.Read(ctx, cid, user, app, id, from, to,offset,limit)
 	if err != nil {
 		r.log.Error("failed to read test runs from DB", zap.String("cid", cid), zap.Any("user", user), zap.Any("app", app), zap.Any("id", id), zap.Any("from", from), zap.Any("to", to), zap.Error(err))

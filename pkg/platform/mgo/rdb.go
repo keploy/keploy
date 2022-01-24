@@ -86,21 +86,22 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 	return nil
 }
 
-func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset *int, limit *int) ([]*run.TestRun, error) {
+func (r *RunDB) Read(ctx context.Context, cid , user string, app, id *string, from, to *time.Time, offset *int, limit *int) ([]*run.TestRun, error) {
 	off, lim := 0, 25
 	if offset != nil {
 		off = *offset
 	}
-	if limit == nil {
+	if limit != nil {
 		lim = *limit
 	}
 
 	filter := bson.M{
 		"cid": cid,
+		"user":user,
 	}
-	if user != nil {
-		filter["user"] = user
-	}
+	// if user != nil {
+	// 	filter["user"] = user
+	// }
 	if app != nil {
 		filter["app"] = app
 	}
@@ -123,7 +124,8 @@ func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, fro
 	} else {
 		off = 0
 	}
-	options.SetSort(bson.M{"$lte": to.Unix()})
+	// bson.M{"$lte": to.Unix()}
+	options.SetSort(filter["updated"])
 	options.SetSkip(int64(off))
 	options.SetLimit(int64(lim))
 
