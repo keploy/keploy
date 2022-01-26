@@ -226,7 +226,7 @@ func (t *testCaseDB) Get(ctx context.Context, cid, id string,offset *int, limit 
 	findOptions := options.FindOne()
 	findOptions.SetSkip(int64(off))
 	// findOptions.SetLimit(int64(lim))
-	findOptions.SetSort(bson.M{"_id": id})
+	findOptions.SetSort(bson.M{"created": -1})
 
 	var tc models.TestCase
 	err := t.c.FindOne(ctx, filter).Decode(&tc)
@@ -273,15 +273,14 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool,o
 	if !anchors {
 		findOptions.SetProjection(bson.M{"anchors": 0, "all_keys": 0})
 	}
-	if offset > 0 {
-		offset = ((offset - 1) * limit)
-	} else {
-		offset = 0
-	}
+	if offset < 0 {
+		offset = 0 
+	} 
 	findOptions.SetSkip(int64(offset))
 	findOptions.SetLimit(int64(limit))
-	// findOptions.SetSort(bson.M{"app_id": app})
-	 tcs,err:= t.getAll(ctx, filter, findOptions)
+	findOptions.SetSort(bson.M{"created": -1}) //reverse sort 
+	
+	 tcs,err:= t.getAll(ctx, filter, findOptions) 
 	if err!=nil {
 		fmt.Println("After getAll ",err)
 	}
