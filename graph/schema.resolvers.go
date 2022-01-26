@@ -55,14 +55,14 @@ func (r *queryResolver) Apps(ctx context.Context) ([]*model.App, error) {
 	return res, nil
 }
 
-func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, id *string, from *time.Time, to *time.Time) ([]*model.TestRun, error) {
+func (r *queryResolver) TestRun(ctx context.Context, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) ([]*model.TestRun, error) {
 	preloads := GetPreloads(ctx)
 	summary := true
 	if pkg.Contains(preloads, "tests") {
 		summary = false
 	}
 
-	runs, err := r.run.Get(ctx, summary, DEFAULT_COMPANY, user, app, id, from, to)
+	runs, err := r.run.Get(ctx, summary, DEFAULT_COMPANY, DEFAULT_USER, app, id, from, to, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, 
 			Created: time.Unix(run.Created, 0),
 			Updated: time.Unix(run.Updated, 0),
 			App:     run.App,
-			User:    run.User,
+			// User:    run.User,
 			Success: run.Success,
 			Failure: run.Failure,
 			Total:   run.Total,
@@ -130,21 +130,21 @@ func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, 
 	return res, nil
 }
 
-func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string) ([]*model.TestCase, error) {
+func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, offset *int, limit *int) ([]*model.TestCase, error) {
 	a := ""
 	if app != nil {
 		a = *app
 	}
 
 	if id != nil {
-		tc, err := r.reg.Get(ctx, DEFAULT_COMPANY, a, *id)
+		tc, err := r.reg.Get(ctx, DEFAULT_COMPANY, a, *id, nil, nil)
 		if err != nil {
 			return nil, err
 		}
 		return []*model.TestCase{ConvertTestCase(tc)}, nil
 	}
 
-	tcs, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a)
+	tcs, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -152,11 +152,10 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string) (
 	for _, v := range tcs {
 		res = append(res, ConvertTestCase(v))
 	}
-
 	return res, nil
 }
 
-func (r *subscriptionResolver) TestRun(ctx context.Context, user *string, app *string, id *string) (<-chan []*model.TestRun, error) {
+func (r *subscriptionResolver) TestRun(ctx context.Context, app *string, id *string) (<-chan []*model.TestRun, error) {
 	panic(fmt.Errorf("not implemented"))
 }
 

@@ -6,7 +6,6 @@ require (
 	github.com/99designs/gqlgen v0.15.1
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/cors v1.2.0
-	github.com/go-chi/jwtauth v1.2.0
 	github.com/go-chi/render v1.0.1
 	github.com/go-test/deep v1.0.8
 	github.com/google/uuid v1.3.0
@@ -18,16 +17,10 @@ require (
 require (
 	github.com/agnivade/levenshtein v1.1.0 // indirect
 	github.com/go-stack/stack v1.8.0 // indirect
-	github.com/goccy/go-json v0.3.5 // indirect
 	github.com/golang/snappy v0.0.1 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/hashicorp/golang-lru v0.5.0 // indirect
 	github.com/klauspost/compress v1.13.6 // indirect
-	github.com/lestrrat-go/backoff/v2 v2.0.7 // indirect
-	github.com/lestrrat-go/httpcc v1.0.0 // indirect
-	github.com/lestrrat-go/iter v1.0.0 // indirect
-	github.com/lestrrat-go/jwx v1.1.0 // indirect
-	github.com/lestrrat-go/option v1.0.0 // indirect
 	github.com/mitchellh/mapstructure v1.2.3 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
