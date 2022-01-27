@@ -171,6 +171,7 @@ type TestRun struct {
 	Updated time.Time     `json:"updated"`
 	Status  TestRunStatus `json:"status"`
 	App     string        `json:"app"`
+	User    string        `json:"user"`
 	Success int           `json:"success"`
 	Failure int           `json:"failure"`
 	Total   int           `json:"total"`

@@ -95,7 +95,7 @@ func (r *queryResolver) TestRun(ctx context.Context, app *string, id *string, fr
 			Created: time.Unix(run.Created, 0),
 			Updated: time.Unix(run.Updated, 0),
 			App:     run.App,
-			// User:    run.User,
+			User:    run.User,
 			Success: run.Success,
 			Failure: run.Failure,
 			Total:   run.Total,
