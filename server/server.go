@@ -1,62 +1,36 @@
 package server
 
 import (
-	"fmt"
-	"math/rand"
-	"net/http"
-	"os"
-	"time"
-	"context"
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/cors"
+	"github.com/kelseyhightower/envconfig"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
-	// "go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.keploy.io/server/web"
 	"go.uber.org/zap"
+	"math/rand"
+	"net/http"
+	"time"
 )
 
 // const defaultPort = "8080"
 
-
+type config struct {
+	MongoURI      string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
+	DB            string `envconfig:"DB" default:"keploy"`
+	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
+	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
+	testTable     string `envconfig:"TEST_TABLE" default:"tests"`
+}
 
 func Server() *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
-// Set client options
-clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
-
-// Connect to MongoDB
-client, err := mongo.Connect(context.TODO(), clientOptions)
-
-if err != nil {
-fmt.Println(err)
-}
-
-// Check the connection
-err = client.Ping(context.TODO(), nil)
-
-if err != nil {
-	fmt.Println(err)
-}
-
-fmt.Println("Connected to MongoDB!")
-
-	// mongoHost := os.Getenv("MONGO_HOST")
-	// mongoUser := os.Getenv("MONGO_USER")
-	// mongoPassword := os.Getenv("MONGO_PASSWORD")
-	mongoDB := os.Getenv("MONGO_DB")
-	testCaseTable := os.Getenv("TESTCASE_TABLE")
-
-	testRunTable := os.Getenv("TEST_RUN_TABLE")
-	testTable := os.Getenv("TEST_TABLE")
-
 
 	logger, err := zap.NewProduction()
 	if err != nil {
@@ -64,16 +38,22 @@ fmt.Println("Connected to MongoDB!")
 	}
 	defer logger.Sync() // flushes buffer, if any
 
-	// client, err := mgo.New(mongoUser, mongoPassword, mongoHost, mongoDB)
+	var conf config
+	err = envconfig.Process("keploy", &conf)
+	if err != nil {
+		logger.Error("failed to read/process configuration", zap.Error(err))
+	}
+
+	cl, err := mgo.New(conf.MongoURI)
 	if err != nil {
 		logger.Fatal("failed to create mgo db client", zap.Error(err))
 	}
 
-	db := client.Database(mongoDB)
+	db := cl.Database(conf.DB)
 
-	tdb := mgo.NewTestCase(db.Collection(testCaseTable), logger)
+	tdb := mgo.NewTestCase(db.Collection(conf.TestCaseTable), logger)
 
-	rdb := mgo.NewRun(db.Collection(testRunTable), db.Collection(testTable), logger)
+	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.testTable), logger)
 
 	regSrv := regression2.New(tdb, rdb, logger)
 	runSrv := run.New(rdb, logger)
@@ -92,15 +72,18 @@ fmt.Println("Connected to MongoDB!")
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 	}))
 
-	regression.New(r, logger, regSrv, runSrv)
-
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
 
-	r.Handle("/", playground.Handler("johari backend", "/query"))	
+	r.Handle("/*", web.Handler())
 
-	r.Handle("/query", srv)
-	
+	// add api routes
+	r.Route("/api", func(r chi.Router) {
+		regression.New(r, logger, regSrv, runSrv)
+		r.Handle("/", playground.Handler("johari backend", "/query"))
+		r.Handle("/query", srv)
+	})
+
 	return r
 }
