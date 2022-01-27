@@ -63,7 +63,7 @@ type TestRun {
   updated: Time!
   status: TestRunStatus!
   app: String!
-  # user: String!
+  user: String!
   success: Int!
   failure: Int!
   total: Int!
