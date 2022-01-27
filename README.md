@@ -1,5 +1,7 @@
-# api-server
+# Keploy
 
+## Quickstart
 ```shell
-docker biuildx build --platform linux/amd64,linux/arm64 -t slayerjain/keploy-api-server:$(date +%s) -t slayerjain/keploy-api-server --push .
+docker-compose up
 ```
+The UI can be accessed at http://localhost:8081
