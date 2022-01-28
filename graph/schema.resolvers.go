@@ -62,7 +62,9 @@ func (r *queryResolver) TestRun(ctx context.Context, app *string, id *string, fr
 		summary = false
 	}
 
-	runs, err := r.run.Get(ctx, summary, DEFAULT_COMPANY, DEFAULT_USER, app, id, from, to, offset, limit)
+	usr := DEFAULT_USER
+
+	runs, err := r.run.Get(ctx, summary, DEFAULT_COMPANY, &usr, app, id, from, to, offset, limit)
 	if err != nil {
 		return nil, err
 	}
