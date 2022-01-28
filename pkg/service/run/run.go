@@ -82,7 +82,7 @@ func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *
 func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 	for _, tr := range trs {
 		if tr.Status != TestRunStatusRunning {
-			return nil
+			continue
 		}
 		tests, err1 := r.rdb.ReadTests(ctx, tr.ID)
 		if err1 != nil {
@@ -91,7 +91,12 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 			return errors.New(msg)
 		}
 		if len(tests) == 0 {
-			return nil
+			// check if the testrun is more than 5 mins old
+			err := r.failOldTestRuns(ctx, tr.Created, tr)
+			if err != nil {
+				return err
+			}
+			continue
 		}
 		// find the newest test
 		ts := tests[0].Started
@@ -100,19 +105,26 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 				ts = test.Started
 			}
 		}
-
 		// if the oldest test is older than 5 minutes then fail the whole test run
-		diff := time.Now().Sub(time.Unix(ts, 0))
-		if diff < 5*time.Minute {
-			return nil
+		err := r.failOldTestRuns(ctx, ts, tr)
+		if err != nil {
+			return err
 		}
-		tr.Status = TestRunStatusFailed
-		err2 := r.rdb.Upsert(ctx, *tr)
-		if err2 != nil {
-			msg := "failed validating and updating test run status"
-			r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err2))
-			return errors.New(msg)
-		}
+	}
+	return nil
+}
+
+func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error {
+	diff := time.Now().Sub(time.Unix(ts, 0))
+	if diff < 5*time.Minute {
+		return nil
+	}
+	tr.Status = TestRunStatusFailed
+	err2 := r.rdb.Upsert(ctx, *tr)
+	if err2 != nil {
+		msg := "failed validating and updating test run status"
+		r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err2))
+		return errors.New(msg)
 	}
 	return nil
 }
