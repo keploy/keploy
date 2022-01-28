@@ -204,29 +204,13 @@ func (t *testCaseDB) Upsert(ctx context.Context, tc models.TestCase) error {
 	return nil
 }
 
-func (t *testCaseDB) Get(ctx context.Context, cid, id string,offset *int, limit *int) (models.TestCase, error) {
+func (t *testCaseDB) Get(ctx context.Context, cid, id string) (models.TestCase, error) {
 	// too repetitive
 	// TODO write a generic FindOne for all get calls
 	filter := bson.M{"_id": id}
 	if cid != "" {
 		filter["cid"] = cid
 	}
-	off ,lim := 0,25
-	if offset!=nil {
-		off = *offset
-	}
-	if limit != nil {
-		lim= *limit
-	}
-	if off > 0 {
-		off = ((off - 1) * lim)
-	} else {
-		off = 0
-	}
-	findOptions := options.FindOne()
-	findOptions.SetSkip(int64(off))
-	// findOptions.SetLimit(int64(lim))
-	findOptions.SetSort(bson.M{"created": -1})
 
 	var tc models.TestCase
 	err := t.c.FindOne(ctx, filter).Decode(&tc)
@@ -266,7 +250,7 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 	return tcs, nil
 }
 
-func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool,offset int, limit int) ([]models.TestCase, error) {
+func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
 
 	filter := bson.M{"cid": cid, "app_id": app}
 	findOptions := options.Find()
@@ -274,15 +258,15 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool,o
 		findOptions.SetProjection(bson.M{"anchors": 0, "all_keys": 0})
 	}
 	if offset < 0 {
-		offset = 0 
-	} 
+		offset = 0
+	}
 	findOptions.SetSkip(int64(offset))
 	findOptions.SetLimit(int64(limit))
-	findOptions.SetSort(bson.M{"created": -1}) //reverse sort 
-	
-	 tcs,err:= t.getAll(ctx, filter, findOptions) 
-	if err!=nil {
-		fmt.Println("After getAll ",err)
+	findOptions.SetSort(bson.M{"created": -1}) //reverse sort
+
+	tcs, err := t.getAll(ctx, filter, findOptions)
+	if err != nil {
+		fmt.Println("After getAll ", err)
 	}
-	return tcs,nil
+	return tcs, nil
 }

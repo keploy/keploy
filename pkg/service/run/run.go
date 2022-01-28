@@ -28,7 +28,7 @@ func (r *Run) Normalize(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to fetch test from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("test not found")
 	}
-	tc, err := r.tdb.Get(ctx, cid, t.TestCaseID, nil, nil)
+	tc, err := r.tdb.Get(ctx, cid, t.TestCaseID)
 	if err != nil {
 		r.log.Error("failed to fetch testcase from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("testcase not found")

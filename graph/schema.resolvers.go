@@ -139,7 +139,7 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, o
 	}
 
 	if id != nil {
-		tc, err := r.reg.Get(ctx, DEFAULT_COMPANY, a, *id, nil, nil)
+		tc, err := r.reg.Get(ctx, DEFAULT_COMPANY, a, *id)
 		if err != nil {
 			return nil, err
 		}

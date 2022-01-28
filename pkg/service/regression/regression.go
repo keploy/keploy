@@ -52,7 +52,7 @@ func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
 	// reset cache
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	t, err := r.tdb.Get(ctx, cid, id, nil, nil)
+	t, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
 		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.Error(err))
 		return errors.New("internal failure")
@@ -71,9 +71,9 @@ func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) 
 	return r.tdb.GetApps(ctx, cid)
 }
 
-func (r *Regression) Get(ctx context.Context, cid, appID, id string, offset *int, limit *int) (models.TestCase, error) {
+func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
 
-	tcs, err := r.tdb.Get(ctx, cid, id, offset, limit)
+	tcs, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
 		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", appID), zap.Error(err))
 		return models.TestCase{}, errors.New("internal failure")
@@ -152,7 +152,7 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 
 func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp) (bool, *run.Result, *models.TestCase, error) {
 
-	tc, err := r.tdb.Get(ctx, cid, id, nil, nil)
+	tc, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
 		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return false, nil, nil, err
@@ -271,7 +271,7 @@ func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 
 func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h http.Header) error {
 
-	tc, err := r.tdb.Get(ctx, cid, id, nil, nil)
+	tc, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
 		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
