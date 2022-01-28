@@ -212,7 +212,7 @@ enum DependencyType {
 
 extend type Query {
   apps: [App!]
-  testRun(app: String, id: String, from: Time, To: Time,offset: Int, limit: Int): [TestRun]
+  testRun(user: String, app: String, id: String, from: Time, To: Time,offset: Int, limit: Int): [TestRun]
   testCase(app: String, id: String,offset: Int, limit: Int): [TestCase]
 }
 
