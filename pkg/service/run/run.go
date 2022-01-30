@@ -9,9 +9,10 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(rdb DB, log *zap.Logger) *Run {
+func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger) *Run {
 	return &Run{
 		rdb: rdb,
+		tdb: tdb,
 		log: log,
 	}
 }

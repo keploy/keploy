@@ -30,7 +30,7 @@ func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
 	// TODO write a generic FindOne for all get calls
 	filter := bson.M{"_id": id}
 	var t run.Test
-	err := r.c.FindOne(ctx, filter).Decode(&t)
+	err := r.test.FindOne(ctx, filter).Decode(&t)
 	if err != nil {
 		return t, err
 	}
