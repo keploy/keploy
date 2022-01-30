@@ -56,7 +56,7 @@ func Server() *chi.Mux {
 	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.testTable), logger)
 
 	regSrv := regression2.New(tdb, rdb, logger)
-	runSrv := run.New(rdb, logger)
+	runSrv := run.New(rdb, tdb, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
