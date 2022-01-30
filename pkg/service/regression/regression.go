@@ -227,7 +227,7 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id string, resp 
 			URI:        tc.URI,
 			Req:        tc.HttpReq,
 			Dep:        tc.Deps,
-			Resp:       tc.HttpResp,
+			Resp:       resp,
 			Result:     *res,
 			Noise:      tc.Noise,
 		}
