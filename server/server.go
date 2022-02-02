@@ -26,7 +26,7 @@ type config struct {
 	DB            string `envconfig:"DB" default:"keploy"`
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
-	testTable     string `envconfig:"TEST_TABLE" default:"tests"`
+	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
 }
 
 func Server() *chi.Mux {
@@ -53,7 +53,7 @@ func Server() *chi.Mux {
 
 	tdb := mgo.NewTestCase(db.Collection(conf.TestCaseTable), logger)
 
-	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.testTable), logger)
+	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.TestTable), logger)
 
 	regSrv := regression2.New(tdb, rdb, logger)
 	runSrv := run.New(rdb, tdb, logger)
