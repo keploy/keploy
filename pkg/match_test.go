@@ -17,6 +17,12 @@ func TestJsonDiff(t *testing.T) {
 		result bool
 	}{
 		{
+			exp:    `{"data":{"url":"http://localhost:8080/GMWJGSAP"},"status":200}`,
+			actual: `{"data":{"foo":"bar","url":"http://localhost:8080/GMWJGSAP"},"status":200}`,
+			noise:  []string{"data.url"},
+			result: false,
+		},
+		{
 			exp:    `{"name": "Ritik", "set": 21}`,
 			actual: `{"name": "Ritik", "set": false}`,
 			noise:  []string{"set"},
