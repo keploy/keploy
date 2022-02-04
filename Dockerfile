@@ -20,6 +20,9 @@ RUN apk add -U --no-cache ca-certificates
 
 ENV GO111MODULE=on
 
+# Build Delve
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
 WORKDIR /app
 
 COPY go.mod .
@@ -39,6 +42,7 @@ FROM alpine
 COPY --from=alpine /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 #COPY --from=builder /app/health /app/
 COPY --from=go-builder /app/keploy /app/
+COPY --from=go-builder /go/bin/dlv /
 
 EXPOSE 8081
 ENTRYPOINT ["/app/keploy"]
