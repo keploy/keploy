@@ -1,6 +1,10 @@
 package server
 
 import (
+	"math/rand"
+	"net/http"
+	"time"
+
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
@@ -14,9 +18,6 @@ import (
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
-	"math/rand"
-	"net/http"
-	"time"
 )
 
 // const defaultPort = "8080"
@@ -52,7 +53,7 @@ func Server() *chi.Mux {
 	db := cl.Database(conf.DB)
 
 	tdb := mgo.NewTestCase(db.Collection(conf.TestCaseTable), logger)
-
+	
 	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.TestTable), logger)
 
 	regSrv := regression2.New(tdb, rdb, logger)
