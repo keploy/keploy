@@ -10,6 +10,8 @@ type Dependency struct {
 type DependencyType string
 
 const (
-	NoSqlDB DependencyType = "NO_SQL_DB"
-	SqlDB                  = "SQL_DB"
+	NoSqlDB    DependencyType = "NO_SQL_DB"
+	SqlDB                     = "SQL_DB"
+	GRPC                      = "GRPC"
+	HttpClient                = "HTTP_CLIENT"
 )
