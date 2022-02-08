@@ -11,7 +11,7 @@ type DependencyType string
 
 const (
 	NoSqlDB    DependencyType = "NO_SQL_DB"
-	SqlDB                     = "SQL_DB"
-	GRPC                      = "GRPC"
-	HttpClient                = "HTTP_CLIENT"
+	SqlDB      DependencyType = "SQL_DB"
+	GRPC       DependencyType = "GRPC"
+	HttpClient DependencyType = "HTTP_CLIENT"
 )
