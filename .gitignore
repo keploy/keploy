@@ -16,6 +16,8 @@
 # vendor/
 .idea/
 web/public/*
+!web/public/README.md
+
 
 .vscode
 .env

@@ -1,5 +1,7 @@
 package graph
 
+//go:generate go run github.com/99designs/gqlgen
+
 import (
 	"go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
