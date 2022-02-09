@@ -55,7 +55,7 @@ func (r *queryResolver) Apps(ctx context.Context) ([]*model.App, error) {
 	return res, nil
 }
 
-func (r *queryResolver) TestRun(ctx context.Context, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) ([]*model.TestRun, error) {
+func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) ([]*model.TestRun, error) {
 	preloads := GetPreloads(ctx)
 	summary := true
 	if pkg.Contains(preloads, "tests") {
