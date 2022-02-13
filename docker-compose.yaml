@@ -8,3 +8,5 @@ services:
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"
   mongo:
     image: "mongo"
+    ports:
+    - "27017:27017"

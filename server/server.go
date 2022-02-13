@@ -18,13 +18,15 @@ import (
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
+	"github.com/keploy/go-sdk/integrations/kchi"
+	"github.com/keploy/go-sdk/keploy"
 )
 
 // const defaultPort = "8080"
 
 type config struct {
 	MongoURI      string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
-	DB            string `envconfig:"DB" default:"keploy"`
+	DB            string `envconfig:"DB" default:"keploy-test"`
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
@@ -61,9 +63,23 @@ func Server() *chi.Mux {
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
-	// initialize the serveri
+	// initialize the client serveri
 	r := chi.NewRouter()
+	port := "8082"
+	kApp := keploy.New(keploy.Config{
+		App: keploy.AppConfig{
+			Name: "Keploy-app",
+			Port: port,
+		},
+		Server: keploy.ServerConfig{
+			LicenseKey:"81f83aeeedddf453966347dc136c66",
+			// URL: "http://localhost:8081/api",
+			
+		},
+	})
 
+	kchi.ChiV5(kApp, r)
+	
 	r.Use(cors.Handler(cors.Options{
 
 		AllowedOrigins:   []string{"*"},
@@ -72,7 +88,8 @@ func Server() *chi.Mux {
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 	}))
-
+	
+	
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
@@ -85,6 +102,5 @@ func Server() *chi.Mux {
 		r.Handle("/", playground.Handler("johari backend", "/query"))
 		r.Handle("/query", srv)
 	})
-
 	return r
 }
