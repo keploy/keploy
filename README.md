@@ -1,15 +1,45 @@
 # Keploy
+Keploy is a no-code testing platform that generates tests from API calls. 
+
+It captures the external dependency network calls (like database queries, internal/external services) for each request to replay them (including writes/mutations!) later during testing. 
+
+Developers can use keploy alongside their favorite unit testing framework to save time writing testcases.  
+
+## Coolest features
+* **Generates test cases** from API calls. Say B-Bye! to writing unit and API test cases.
+* **Automatically mock** network/external dependencies with correct responses. No more manually writing mocks for dependencies like DBs, internal services, or third party services like twilio, shopify or stripe.
+* **Safely replay writes** or mutations by capturing from local or other environments. Idempotency guarantees are also not required in the application. Multiple Read after write operations can be replicated automatically too.
+* **Statistical deduplication** ensures that redundant testcases are not generated. We're planning to make this more robust (ref #27).
+* **Web Console** to visually understand the results, update behaviour and share findings across your team.
+* **Native interoperability** with popular testing libraries like go-test to enable compatibility with existing test cases and CI pipelines/infrastructure.
+* **Automatic instrumentation** for popular libraries/drivers like sql, http, grpc, etc. 
+* **Instrumentation/Integration framework** to easily add the new libraries/drivers with ~100 lines of code.   
 
 ## Quickstart
+### Start keploy server
 ```shell
+git clone https://github.com/keploy/keploy.git && cd keploy
 docker-compose up
 ```
 The UI can be accessed at http://localhost:8081
 
+### Integrate the SDK
+#### Router
+Example of integrating the [gin router](https://github.com/gin-gonic/gin). Other [routers](https://github.com/keploy/go-sdk#supported-routers) like echo, chi, etc are support too. 
+#### Datastore
+Example of integrating the official [mongo driver](https://github.com/mongodb/mongo-go-driver). Other datastore/database libraries like go's sql   
+
+
+## Language Support
+- [x] [Go SDK](https://github.com/keploy/go-sdk)
+
+[//]: # (- [ ] Java SDK &#40;coming soon&#41;)
+
+[//]: # (- [ ] Javascript &#40;coming soon&#41;)
+- [ ] Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 ## Development
 There's a separate [docker-compose](docker-compose-dev.yaml) file which helps which exposes the mongo server and also remote debugging port. The `build` flag ensures that the binary is built again to reflect the latest code changes. 
 ```shell
-git clone https://github.com/keploy/keploy.git && cd keploy
 docker-compose -f docker-compose-dev.yaml up --build
 ```
 If you are not using docker, you can build and run the keploy server directly. Ensure to provide the Mongo connection string via the `KEPLOY_MONGO_URI` env variable.  
