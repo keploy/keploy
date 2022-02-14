@@ -15,53 +15,11 @@ Developers can use keploy alongside their favorite unit testing framework to sav
 * **Automatic instrumentation** for popular libraries/drivers like sql, http, grpc, etc. 
 * **Instrumentation/Integration framework** to easily add the new libraries/drivers with ~100 lines of code.   
 
-
-# Introduction to Keploy
-
-**[Keploy](https://keploy.io)** is an **[open-source](https://github.com/keploy/keploy)** API testing platform that eliminates the need for writing unit cases by
-**automatically generating unit test-cases from API calls and mocking external dependencies/libraries**.
-
-## Why Keploy?
-
-![Difference](https://raw.githubusercontent.com/keploy/docs/master/static/img/difference.png)
-
-
-* Generates test-case automatically when an API call happens. Say, B-Bye! to writing unit test cases.
-
-* Mocks all your external libraries/dependencies while testing. Any dependency like DBs, other internal services, third party libraries like twilio, shopify, stripe behaviour/results are recorded automatically.
-
-
-* **Supports non-Idempotency** : All WRITE, DELETE, UPDATE operations are mocked and can replayed automatically.
-
-
-* Test Coverage can be increased to more than 90% from production traffic or lower environments.
-
-* Maintenance effort of unit-testing is reduced and anyone can maintain the test suite since test-cases can be updated from the console(no-code required).
-
-
 ## How it works?
 
 ![How it works](https://raw.githubusercontent.com/keploy/docs/master/static/img/how-it-works.png)
 
-### Step 1 : Record network interactions with Keploy SDK
-
-Integrate Keploy SDK with the application. Start the SDK in record mode to capture API calls as test cases.
-
-```bash
-export KEPLOY_SDK_MODE="record"
-```
-
-Now, when the application serves an API, all of the unique network interactions are stored within Keploy as a test-case.
-
-### Step 2 :  Replay Test-suite locally
-
-Let's say you developed new application version v2. To test locally, start the SDK in test mode to replay all recorded API calls/test cases.
-
-```bash
-export KEPLOY_SDK_MODE="test"
-```
-
-Now, when the application starts, keploy will download all the previously recorded test-cases/API calls with dependency responses and a report will be generated on the Keploy console.
+**Note:** You can generate test cases from **any environment** which has all the infrastructure dependencies setup. Please consider using this to generate tests from low-traffic environments first. The deduplication feature necessary for high-traffic environments is currently experimental.   
 
 ## Quickstart
 ### Start keploy server
