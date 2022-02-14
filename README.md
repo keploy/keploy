@@ -24,11 +24,67 @@ docker-compose up
 The UI can be accessed at http://localhost:8081
 
 ### Integrate the SDK
-#### Router
-Example of integrating the [gin router](https://github.com/gin-gonic/gin). Other [routers](https://github.com/keploy/go-sdk#supported-routers) like echo, chi, etc are support too. 
-#### Datastore
-Example of integrating the official [mongo driver](https://github.com/mongodb/mongo-go-driver). Other datastore/database libraries like go's sql   
+Install the [Go SDK](https://github.com/keploy/go-sdk)
+```shell
+go get -u github.com/keploy/go-sdk
+```
+#### Routers
+Example of integrating the [gin router](https://github.com/gin-gonic/gin). Other [routers](https://github.com/keploy/go-sdk#supported-routers) like echo, chi, etc are support too.
+```go
+    import (
+            "github.com/keploy/go-sdk/integrations/kgin/v1"
+            "github.com/keploy/go-sdk/keploy"
+            )
 
+	r := gin.New()
+	port := "6060"
+	
+	k := keploy.New(keploy.Config{
+		App: keploy.AppConfig{
+            // your application
+			Name: "my-app",
+			Port: port,
+		},
+		Server: keploy.ServerConfig{
+			URL: "http://localhost:8081/api",
+		},
+	})
+	//Call kgin.GinV1 before routes handling
+	kgin.GinV1(k, r)
+	
+	r.Run(":" + port)
+```
+
+#### Datastore
+Example of integrating the official [mongo driver](https://github.com/mongodb/mongo-go-driver). Other [datastore/database](https://github.com/keploy/go-sdk#supported-databases) libraries like go's sql   
+```go
+import "github.com/keploy/go-sdk/integrations/kmongo"
+
+db  := client.Database("MyDB")
+
+// wrap collection with keploy for automatic instrumentation and mocking
+col := kmongo.NewMongoCollection(db.Collection("MyCollection"))
+
+```
+
+Thats it! All the requests after integration will be automatically captured and available it at http://localhost:8081/testlist
+
+#### Integration with native go test framework
+You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
+```go
+
+import (
+	"github.com/keploy/go-sdk/keploy"
+	"testing"
+)
+
+func TestKeploy(t *testing.T) {
+	keploy.SetTestMode()
+	go main()
+	keploy.AssertTests(t)
+}
+```
+Note: You can also try a sample [URL shortner application](https://github.com/keploy/example-url-shortener) for better understanding.  
 
 ## Language Support
 - [x] [Go SDK](https://github.com/keploy/go-sdk)
