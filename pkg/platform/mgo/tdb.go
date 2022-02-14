@@ -173,11 +173,14 @@ func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, f
 		}
 	}
 
-	_, err = t.c.DeleteMany(ctx, bson.M{
-		"_id": bson.M{
-			"$in": dups,
-		},
-	})
+	if len(dups) > 0 {
+		_, err = t.c.DeleteMany(ctx, bson.M{
+			"_id": bson.M{
+				"$in": dups,
+			},
+		})
+	}
+
 	if err != nil {
 		return err
 	}
