@@ -4,7 +4,13 @@ import (
 	"math/rand"
 	"net/http"
 	"time"
-
+	// "log"
+	// "fmt"
+	// "context"
+	
+	// "go.mongodb.org/mongo-driver/mongo/options"
+	// "go.mongodb.org/mongo-driver/mongo"
+	
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
@@ -20,6 +26,8 @@ import (
 	"go.uber.org/zap"
 	"github.com/keploy/go-sdk/integrations/kchi"
 	"github.com/keploy/go-sdk/keploy"
+	"github.com/keploy/go-sdk/integrations/kmongo"
+
 )
 
 // const defaultPort = "8080"
@@ -30,6 +38,7 @@ type config struct {
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
+	APIKey  	  string `envconfig:"API_KEY"`
 }
 
 func Server() *chi.Mux {
@@ -54,9 +63,9 @@ func Server() *chi.Mux {
 
 	db := cl.Database(conf.DB)
 
-	tdb := mgo.NewTestCase(db.Collection(conf.TestCaseTable), logger)
+	tdb := mgo.NewTestCase(kmongo.NewMongoCollection( db.Collection(conf.TestCaseTable) ), logger)
 	
-	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.TestTable), logger)
+	rdb := mgo.NewRun(kmongo.NewMongoCollection( db.Collection(conf.TestRunTable) ), kmongo.NewMongoCollection( db.Collection(conf.TestTable) ), logger)
 
 	regSrv := regression2.New(tdb, rdb, logger)
 	runSrv := run.New(rdb, tdb, logger)
@@ -68,11 +77,11 @@ func Server() *chi.Mux {
 	port := "8082"
 	kApp := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
-			Name: "Keploy-app",
+			Name: "Keploy-Test-App",
 			Port: port,
 		},
 		Server: keploy.ServerConfig{
-			LicenseKey:"81f83aeeedddf453966347dc136c66",
+			LicenseKey:conf.APIKey,
 			// URL: "http://localhost:8081/api",
 			
 		},

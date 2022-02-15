@@ -139,7 +139,26 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	if app == "" {
 		return
 	}
-	tcs, err := rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, nil, nil)
+	offsetStr := r.URL.Query().Get("offset")
+	limitStr  := r.URL.Query().Get("limit")
+	var (
+		offset int
+		limit int
+		err error
+	)
+	if offsetStr != ""{
+		offset, err = strconv.Atoi(offsetStr)
+		if err!=nil{
+			rg.logger.Error("request for fetching testcases in converting offset to integer")
+		}
+	}
+	if limitStr != ""{
+		limit, err = strconv.Atoi(limitStr)
+		if err!=nil{
+			rg.logger.Error("request for fetching testcases in converting limit to integer")
+		}
+	}
+	tcs, err := rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return

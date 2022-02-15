@@ -6,12 +6,13 @@ import (
 
 	"go.keploy.io/server/pkg/service/run"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
+	// "go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
+	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
-func NewRun(c *mongo.Collection, test *mongo.Collection, log *zap.Logger) *RunDB {
+func NewRun(c *kmongo.MongoCollection, test *kmongo.MongoCollection, log *zap.Logger) *RunDB {
 	return &RunDB{
 		c:    c,
 		log:  log,
@@ -20,8 +21,8 @@ func NewRun(c *mongo.Collection, test *mongo.Collection, log *zap.Logger) *RunDB
 }
 
 type RunDB struct {
-	c    *mongo.Collection
-	test *mongo.Collection
+	c    *kmongo.MongoCollection
+	test *kmongo.MongoCollection
 	log  *zap.Logger
 }
 
