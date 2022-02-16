@@ -1,3 +1,9 @@
+[![contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen?logo=github)](CODE_OF_CONDUCT.md) 
+[![Tests](https://github.com/keploy/keploy/actions/workflows/go.yml/badge.svg)](https://github.com/keploy/keploy/actions) 
+[![codecov](https://codecov.io/gh/keploy/keploy/branch/main/graph/badge.svg?token=ILUM3CXWG5)](https://codecov.io/gh/keploy/keploy)  
+[![Slack](.github/slack.svg)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
+[![License](.github/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 # Keploy
 Keploy is a no-code testing platform that generates tests from API calls. 
 
