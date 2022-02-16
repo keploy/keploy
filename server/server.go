@@ -28,6 +28,7 @@ type config struct {
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
+	APIKey        string `envconfig:"API_KEY"`
 }
 
 func Server() *chi.Mux {
@@ -53,7 +54,7 @@ func Server() *chi.Mux {
 	db := cl.Database(conf.DB)
 
 	tdb := mgo.NewTestCase(db.Collection(conf.TestCaseTable), logger)
-	
+
 	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.TestTable), logger)
 
 	regSrv := regression2.New(tdb, rdb, logger)
