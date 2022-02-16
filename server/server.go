@@ -28,7 +28,6 @@ type config struct {
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
-	APIKey        string `envconfig:"API_KEY"`
 }
 
 func Server() *chi.Mux {
