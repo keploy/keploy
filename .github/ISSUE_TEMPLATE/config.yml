@@ -1,0 +1,7 @@
+contact_links:
+  - name: Help and support
+    url: https://github.com/keploy/keploy#community-support
+    about: Reach out to us on our Slack channel or Discourse discussions or GitHub discussions.
+  - name: Dedicated support
+    url: mailto:hello@keploy.io
+    about: Write to us if you'd like dedicated support using Keploy
