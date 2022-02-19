@@ -6,5 +6,7 @@ services:
       - "8081:8081"
     environment:
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"
+    depends_on:
+      - mongo
   mongo:
     image: "mongo"
