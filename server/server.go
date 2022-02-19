@@ -77,7 +77,7 @@ func Server() *chi.Mux {
 	port := "8082"
 	kApp := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
-			Name: "Keploy-Test-App",
+			Name: "Test-Keploy-Client",
 			Port: port,
 		},
 		Server: keploy.ServerConfig{
