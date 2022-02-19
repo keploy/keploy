@@ -116,12 +116,13 @@ func (r *Regression) putTC(ctx context.Context, cid string, t models.TestCase) (
 
 	// check if already exists
 	dup, err := r.isDup(ctx, &t)
+	fmt.Println("\n Hey mein fattt gya    \n",dup)
 	if err != nil {
 		r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
 		return "", errors.New("internal failure")
 	}
 	if dup {
-		r.log.Error("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.URI))
+		r.log.Info("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.URI))
 		return "", nil
 	}
 	err = r.tdb.Upsert(ctx, t)

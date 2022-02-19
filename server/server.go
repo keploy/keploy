@@ -7,15 +7,16 @@ import (
 	// "log"
 	// "fmt"
 	// "context"
-	
 	// "go.mongodb.org/mongo-driver/mongo/options"
 	// "go.mongodb.org/mongo-driver/mongo"
-	
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/cors"
 	"github.com/kelseyhightower/envconfig"
+	"github.com/keploy/go-sdk/integrations/kchi"
+	"github.com/keploy/go-sdk/integrations/kmongo"
+	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
 	"go.keploy.io/server/http/regression"
@@ -24,10 +25,6 @@ import (
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
-	"github.com/keploy/go-sdk/integrations/kchi"
-	"github.com/keploy/go-sdk/keploy"
-	"github.com/keploy/go-sdk/integrations/kmongo"
-
 )
 
 // const defaultPort = "8080"
@@ -38,13 +35,13 @@ type config struct {
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
-	APIKey  	  string `envconfig:"API_KEY"`
+	APIKey        string `envconfig:"API_KEY"`
 }
 
 func Server() *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	logger, err := zap.NewProduction()
+	logger, err := zap.NewDevelopment()
 	if err != nil {
 		panic(err)
 	}
@@ -63,9 +60,9 @@ func Server() *chi.Mux {
 
 	db := cl.Database(conf.DB)
 
-	tdb := mgo.NewTestCase(kmongo.NewMongoCollection( db.Collection(conf.TestCaseTable) ), logger)
-	
-	rdb := mgo.NewRun(kmongo.NewMongoCollection( db.Collection(conf.TestRunTable) ), kmongo.NewMongoCollection( db.Collection(conf.TestTable) ), logger)
+	tdb := mgo.NewTestCase(kmongo.NewCollection(db.Collection(conf.TestCaseTable)), logger)
+
+	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
 	regSrv := regression2.New(tdb, rdb, logger)
 	runSrv := run.New(rdb, tdb, logger)
@@ -81,14 +78,14 @@ func Server() *chi.Mux {
 			Port: port,
 		},
 		Server: keploy.ServerConfig{
-			LicenseKey:conf.APIKey,
+			LicenseKey: conf.APIKey,
 			// URL: "http://localhost:8081/api",
-			
+
 		},
 	})
 
 	kchi.ChiV5(kApp, r)
-	
+
 	r.Use(cors.Handler(cors.Options{
 
 		AllowedOrigins:   []string{"*"},
@@ -97,8 +94,7 @@ func Server() *chi.Mux {
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 	}))
-	
-	
+
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})

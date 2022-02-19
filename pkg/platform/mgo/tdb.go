@@ -14,7 +14,7 @@ import (
 	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
-func NewTestCase(c *kmongo.MongoCollection, log *zap.Logger) *testCaseDB {
+func NewTestCase(c *kmongo.Collection, log *zap.Logger) *testCaseDB {
 	return &testCaseDB{
 		c:   c,
 		log: log,
@@ -22,7 +22,7 @@ func NewTestCase(c *kmongo.MongoCollection, log *zap.Logger) *testCaseDB {
 }
 
 type testCaseDB struct {
-	c   *kmongo.MongoCollection
+	c   *kmongo.Collection
 	log *zap.Logger
 }
 
