@@ -3,7 +3,7 @@ services:
   web:
     build: .
     ports:
-      - "8082:8082"
+      - "8081:8081"
     environment:
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"
     security_opt:

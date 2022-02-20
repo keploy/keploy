@@ -116,7 +116,6 @@ func (r *Regression) putTC(ctx context.Context, cid string, t models.TestCase) (
 
 	// check if already exists
 	dup, err := r.isDup(ctx, &t)
-	fmt.Println("\n Hey mein fattt gya    \n",dup)
 	if err != nil {
 		r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
 		return "", errors.New("internal failure")
@@ -300,7 +299,7 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
 	}
-
+	r.log.Debug("denoise between",zap.Any("stored object",a),zap.Any("coming object",b))
 	var noise []string
 	for k, v := range a {
 		v2, ok := b[k]
@@ -312,6 +311,7 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 			noise = append(noise, k)
 		}
 	}
+	r.log.Debug("Noise Array : ",zap.Any("",noise))
 	tc.Noise = noise
 	err = r.tdb.Upsert(ctx, tc)
 	if err != nil {

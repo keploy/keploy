@@ -1,7 +1,8 @@
+   
 module go.keploy.io/server
 
 go 1.17
-
+replace github.com/keploy/go-sdk => ../go-sdk
 require (
 	github.com/99designs/gqlgen v0.16.0
 	github.com/go-chi/chi v1.5.4
@@ -10,13 +11,11 @@ require (
 	github.com/go-test/deep v1.0.8
 	github.com/google/uuid v1.3.0
 	github.com/kelseyhightower/envconfig v1.4.0
-	// github.com/keploy/go-sdk v0.0.0-00010101000000-000000000000
+	github.com/keploy/go-sdk v0.0.0-00010101000000-000000000000
 	github.com/vektah/gqlparser/v2 v2.3.1
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.21.0
 )
-
-require github.com/keploy/go-sdk v0.2.2
 
 require (
 	github.com/agnivade/levenshtein v1.1.1 // indirect
