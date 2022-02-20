@@ -4,7 +4,6 @@ services:
     build: .
     ports:
       - "8081:8081"
-      - "40000:40000"
     environment:
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"
     security_opt:

@@ -73,7 +73,7 @@ func TestJsonDiff(t *testing.T) {
 			result: true,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP",
 					"body": "lorem ipsum jibrish"
@@ -112,7 +112,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP",
 					"body": "lorem ipsum jibrish"
@@ -131,7 +131,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP"
 				},
@@ -148,7 +148,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"foo":"bar",
 					"url":"http://localhost:8080/GMWJGSAP"

@@ -12,7 +12,7 @@ import (
 	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
-func NewRun(c *kmongo.MongoCollection, test *kmongo.MongoCollection, log *zap.Logger) *RunDB {
+func NewRun(c *kmongo.Collection, test *kmongo.Collection, log *zap.Logger) *RunDB {
 	return &RunDB{
 		c:    c,
 		log:  log,
@@ -21,8 +21,8 @@ func NewRun(c *kmongo.MongoCollection, test *kmongo.MongoCollection, log *zap.Lo
 }
 
 type RunDB struct {
-	c    *kmongo.MongoCollection
-	test *kmongo.MongoCollection
+	c    *kmongo.Collection
+	test *kmongo.Collection
 	log  *zap.Logger
 }
 
