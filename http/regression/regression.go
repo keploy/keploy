@@ -183,7 +183,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	rg.logger.Debug("testcase posted",zap.Any("testcase request",data))
+	// rg.logger.Debug("testcase posted",zap.Any("testcase request",data))
 
 	now := time.Now().Unix()
 	inserted, err := rg.svc.Put(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
@@ -204,7 +204,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		
 	}
 	
-	rg.logger.Debug("testcase inserted",zap.Any("testcase ids",inserted))
+	// rg.logger.Debug("testcase inserted",zap.Any("testcase ids",inserted))
 	if len(inserted) == 0 {
 		rg.logger.Error("unknown failure while inserting testcase")
 		render.Render(w, r, ErrInvalidRequest(err))
