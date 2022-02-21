@@ -24,6 +24,7 @@ input TestCaseInput {
 input HTTPReqInput {
   protoMajor: Int
   protoMinor: Int
+  url: String
   urlParam: [KVInput]
   header: [HeaderInput]
   method: Method
@@ -115,6 +116,7 @@ enum Method {
 type HTTPReq {
   protoMajor: Int!
   protoMinor: Int!
+  url: string
   urlParam: [Kv]
   header: [Header]
   method: Method!
