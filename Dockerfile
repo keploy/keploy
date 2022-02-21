@@ -16,7 +16,7 @@ RUN gatsby build
 # build stage
 FROM golang:alpine as go-builder
 
-RUN apk add -U --no-cache ca-certificates
+RUN apk add -U --no-cache ca-certificates && apk add build-base
 
 ENV GO111MODULE=on
 
