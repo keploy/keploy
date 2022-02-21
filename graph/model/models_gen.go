@@ -49,6 +49,7 @@ type DependencyInput struct {
 type HTTPReq struct {
 	ProtoMajor int       `json:"protoMajor"`
 	ProtoMinor int       `json:"protoMinor"`
+	URL        *string   `json:"url"`
 	URLParam   []*Kv     `json:"urlParam"`
 	Header     []*Header `json:"header"`
 	Method     Method    `json:"method"`
@@ -58,6 +59,7 @@ type HTTPReq struct {
 type HTTPReqInput struct {
 	ProtoMajor *int           `json:"protoMajor"`
 	ProtoMinor *int           `json:"protoMinor"`
+	URL        *string        `json:"url"`
 	URLParam   []*KVInput     `json:"urlParam"`
 	Header     []*HeaderInput `json:"header"`
 	Method     *Method        `json:"method"`
