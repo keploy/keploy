@@ -6,13 +6,11 @@
 [![License](.github/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 # Keploy
-Keploy is a no-code testing platform that generates tests from API calls. 
+Keploy is a no-code testing platform that generates tests from API calls.
 
-It captures the external dependency network calls (like database queries, internal/external services) for each request to replay them (including writes/mutations!) later during testing. 
+It converts API calls into testcases. Mocks are automatically generated with the actual request/responses. 
 
-Developers can use keploy alongside their favorite unit testing framework to save time writing testcases.  
-
-## Coolest features
+## Features
 * **Generates test cases** from API calls. Say B-Bye! to writing unit and API test cases.
 * **Automatically mock** network/external dependencies with correct responses. No more manually writing mocks for dependencies like DBs, internal services, or third party services like twilio, shopify or stripe.
 * **Safely replay writes** or mutations by capturing from local or other environments. Idempotency guarantees are also not required in the application. Multiple Read after write operations can be replicated automatically too.
@@ -28,7 +26,7 @@ Developers can use keploy alongside their favorite unit testing framework to sav
 
 **Note:** You can generate test cases from **any environment** which has all the infrastructure dependencies setup. Please consider using this to generate tests from low-traffic environments first. The deduplication feature necessary for high-traffic environments is currently experimental.   
 
-## Quickstart
+## Installation
 ### Start keploy server
 ```shell
 git clone https://github.com/keploy/keploy.git && cd keploy
@@ -37,46 +35,55 @@ docker-compose up
 The UI can be accessed at http://localhost:8081
 
 ### Integrate the SDK
-Install the [Go SDK](https://github.com/keploy/go-sdk)
+Install the [Go SDK](https://github.com/keploy/go-sdk) with
 ```shell
 go get -u github.com/keploy/go-sdk
 ```
+
+## Example
+### Sample application
+You can try out the sample application with the go SDK integrated [here](https://github.com/keploy/example-url-shortener) 
+
 #### Routers
 Example of integrating the [gin router](https://github.com/gin-gonic/gin). Other [routers](https://github.com/keploy/go-sdk#supported-routers) like echo, chi, etc are support too.
 ```go
-    import (
-            "github.com/keploy/go-sdk/integrations/kgin/v1"
-            "github.com/keploy/go-sdk/keploy"
-            )
+import (
+        "github.com/gin-gonic/gin"
+        "github.com/keploy/go-sdk/integrations/kgin/v1"
+        "github.com/keploy/go-sdk/keploy"
+        )
 
-	r := gin.New()
-	port := "6060"
-	
-	k := keploy.New(keploy.Config{
-		App: keploy.AppConfig{
-            // your application
-			Name: "my-app",
-			Port: port,
-		},
-		Server: keploy.ServerConfig{
-			URL: "http://localhost:8081/api",
-		},
-	})
-	//Call kgin.GinV1 before routes handling
-	kgin.GinV1(k, r)
-	
-	r.Run(":" + port)
+r := gin.New()
+port := "6060"
+
+k := keploy.New(keploy.Config{
+    App: keploy.AppConfig{
+        // your application
+        Name: "my-app",
+        Port: port,
+    },
+    Server: keploy.ServerConfig{
+        URL: "http://localhost:8081/api",
+    },
+})
+//Call kgin.GinV1 before routes handling
+kgin.GinV1(k, r)
+
+r.Run(":" + port)
 ```
 
 #### Datastore
 Example of integrating the official [mongo driver](https://github.com/mongodb/mongo-go-driver). Other [datastore/database](https://github.com/keploy/go-sdk#supported-databases) libraries like go's sql   
 ```go
-import "github.com/keploy/go-sdk/integrations/kmongo"
+import (
+        "go.mongodb.org/mongo-driver/mongo"
+        "github.com/keploy/go-sdk/integrations/kmongo"
+        )
 
 db  := client.Database("MyDB")
 
 // wrap collection with keploy for automatic instrumentation and mocking
-col := kmongo.NewMongoCollection(db.Collection("MyCollection"))
+col := kmongo.NewCollection(db.Collection("MyCollection"))
 
 ```
 
@@ -97,8 +104,6 @@ func TestKeploy(t *testing.T) {
 	keploy.AssertTests(t)
 }
 ```
-Note: You can also try a sample [URL shortner application](https://github.com/keploy/example-url-shortener) for better understanding.  
-
 ## Language Support
 - [x] [Go SDK](https://github.com/keploy/go-sdk)
 
