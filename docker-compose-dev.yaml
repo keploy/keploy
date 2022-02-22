@@ -5,7 +5,7 @@ services:
     ports:
       - "8081:8081"
     environment:
-      KEPLOY_MODE: "off"
+      KEPLOY_MODE: "record"
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"
     depends_on:
       - mongo
