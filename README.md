@@ -112,7 +112,7 @@ func TestKeploy(t *testing.T) {
 [//]: # (- [ ] Javascript &#40;coming soon&#41;)
 - [ ] Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 ## Development
-There's a separate [docker-compose](docker-compose-dev.yaml) file which helps which exposes the mongo server and also builds the dockerfile from local code.  The `build` flag ensures that the binary is built again to reflect the latest code changes. There's also [docker-compose-debug.yaml](docker-compose-debug.yaml) which can help remote debugging the go server on port 40000.  
+There's a separate [docker-compose](docker-compose-dev.yaml) file which helps with exposing the mongo server and also builds the dockerfile from local code.  The `build` flag ensures that the binary is built again to reflect the latest code changes. There's also [docker-compose-debug.yaml](docker-compose-debug.yaml) which can help remote debugging the go server on port 40000.  
 ```shell
 docker-compose -f docker-compose-dev.yaml up --build
 ```
