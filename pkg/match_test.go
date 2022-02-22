@@ -73,7 +73,7 @@ func TestJsonDiff(t *testing.T) {
 			result: true,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP",
 					"body": "lorem ipsum jibrish"
@@ -112,7 +112,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP",
 					"body": "lorem ipsum jibrish"
@@ -131,7 +131,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP"
 				},
@@ -148,7 +148,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"foo":"bar",
 					"url":"http://localhost:8080/GMWJGSAP"
@@ -283,14 +283,14 @@ func TestJsonDiff(t *testing.T) {
 				{
 					"Name": "Robert",
 					"Address": {
-						"City": "Delhi",
+						"City": "New York",
 						"Pin": 110031
 					}
 				},
 				{
 					"Name": "Ken",
 					"Address": {
-						"City": "Jaipur",
+						"City": "London",
 						"Pin": 919191
 					}
 				}
@@ -372,7 +372,7 @@ func TestJsonDiff(t *testing.T) {
 					"Profiles": [
 						{
 							"Name": "Henry",
-							"Contact": ["123", "456"],
+							"Contact": ["456", "123"],
 							"Address": {
 								"City": "Pennsylvania",
 								"Pin": 110082
@@ -380,7 +380,7 @@ func TestJsonDiff(t *testing.T) {
 						},
 						{
 							"Name": "Ford",
-							"Contact": ["123", "456"], 
+							"Contact": ["456", "123"], 
 							"Address": {
 								"City": "Chicago",
 								"Pin": 110081
@@ -435,6 +435,14 @@ func TestJsonDiff(t *testing.T) {
 							}
 						},
 						{
+							"Name": "Ansvi",
+							"Contact": ["123", "456"],
+							"Address": {
+								"City": "Geogia",
+								"Pin": 19001
+							}
+						},
+						{
 							"Name": "Ford",
 							"Contact": ["123", "456"], 
 							"Address": {
@@ -446,7 +454,7 @@ func TestJsonDiff(t *testing.T) {
 				}
 			`,
 			noise:  []string{"set.somethingNotPresent", "Profiles.Address.Pin"},
-			result: false,
+			result: true,
 		},
 		{
 			exp: `
@@ -592,6 +600,18 @@ func TestJsonDiff(t *testing.T) {
 			exp:    `{"name": "Rob Pike", "set": {"date": "21/01/2030", "time":"20:08"}}`,
 			actual: `{"name": "Rob Pike", "set": {"date": "10/11/2051", "time":"12:21"}}`,
 			noise:  []string{"set.date", "set.time"},
+			result: true,
+		},
+		{
+			exp:    `{"contacts": [12345, 98765]}`,
+			actual: `{"contacts": [98765, 12345]}`,
+			noise:  []string{},
+			result: true,
+		},
+		{
+			exp:    `[{"url": "www.google.com/sasdde"}, {"url": "www.google.com/jjhhd", "deadline": 123}]`,
+			actual: `[{"url": "www.google.com/jjhhd", "deadline": 123}, {"url": "www.google.com/sasdde"}]`,
+			noise:  []string{"body.url"},
 			result: true,
 		},
 	} {
