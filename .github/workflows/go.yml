@@ -22,7 +22,11 @@ jobs:
         run: go build -v ./...
 
       - name: Test
-        run: go test -coverpkg=./... -coverprofile=coverage.txt -covermode=atomic ./...
+        run: |
+          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./... || true
+          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" > coverage.txt
+        env:
+          KEPLOY_API_KEY: ${{ secrets.KEPLOY_API_KEY }}
       - uses: codecov/codecov-action@v2
         with:
           files: ./coverage.txt

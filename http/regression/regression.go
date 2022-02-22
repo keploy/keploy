@@ -2,6 +2,7 @@ package regression
 
 import (
 	"errors"
+	// "fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -175,13 +176,14 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	// 	render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
 	// 	return
 	// }
-
 	data := &TestCaseReq{}
 	if err := render.Bind(r, data); err != nil {
 		rg.logger.Error("error parsing request", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
+	
+	// rg.logger.Debug("testcase posted",zap.Any("testcase request",data))
 
 	now := time.Now().Unix()
 	inserted, err := rg.svc.Put(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
@@ -195,13 +197,14 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		HttpResp: data.HttpResp,
 		Deps:     data.Deps,
 	}})
-
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
+		
 	}
-
+	
+	// rg.logger.Debug("testcase inserted",zap.Any("testcase ids",inserted))
 	if len(inserted) == 0 {
 		rg.logger.Error("unknown failure while inserting testcase")
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -220,7 +223,7 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 	// 	render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
 	// 	return
 	// }
-
+	
 	data := &TestReq{}
 	if err := render.Bind(r, data); err != nil {
 		rg.logger.Error("error parsing request", zap.Error(err))

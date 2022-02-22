@@ -159,6 +159,7 @@ func jsonMatch(expected, actual interface{}) (bool, error) {
 		}
 		isMatched := true
 		for i := 0; i < expSlice.Len(); i++ {
+
 			isMatchedElement := false
 			for j := 0; j< actSlice.Len() ;j++{
 				if x, err := jsonMatch(expSlice.Index(i).Interface(), actSlice.Index(j).Interface()); err == nil && x {

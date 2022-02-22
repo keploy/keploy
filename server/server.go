@@ -4,12 +4,19 @@ import (
 	"math/rand"
 	"net/http"
 	"time"
-
+	// "log"
+	// "fmt"
+	// "context"
+	// "go.mongodb.org/mongo-driver/mongo/options"
+	// "go.mongodb.org/mongo-driver/mongo"
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/cors"
 	"github.com/kelseyhightower/envconfig"
+	"github.com/keploy/go-sdk/integrations/kchi"
+	"github.com/keploy/go-sdk/integrations/kmongo"
+	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
 	"go.keploy.io/server/http/regression"
@@ -24,16 +31,17 @@ import (
 
 type config struct {
 	MongoURI      string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
-	DB            string `envconfig:"DB" default:"keploy"`
+	DB            string `envconfig:"DB" default:"keploy-test"`
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
+	APIKey        string `envconfig:"API_KEY"`
 }
 
 func Server() *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	logger, err := zap.NewProduction()
+	logger, err := zap.NewDevelopment()
 	if err != nil {
 		panic(err)
 	}
@@ -52,17 +60,32 @@ func Server() *chi.Mux {
 
 	db := cl.Database(conf.DB)
 
-	tdb := mgo.NewTestCase(db.Collection(conf.TestCaseTable), logger)
+	tdb := mgo.NewTestCase(kmongo.NewCollection(db.Collection(conf.TestCaseTable)), logger)
 
-	rdb := mgo.NewRun(db.Collection(conf.TestRunTable), db.Collection(conf.TestTable), logger)
+	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
+
 
 	regSrv := regression2.New(tdb, rdb, logger)
 	runSrv := run.New(rdb, tdb, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
-	// initialize the serveri
+	// initialize the client serveri
 	r := chi.NewRouter()
+	port := "8081"
+	kApp := keploy.New(keploy.Config{
+		App: keploy.AppConfig{
+			Name: "Client_KEPLOY",
+			Port: port,
+		},
+		Server: keploy.ServerConfig{
+			LicenseKey: conf.APIKey,
+			// URL: "http://localhost:8082/api",
+
+		},
+	})
+
+	kchi.ChiV5(kApp, r)
 
 	r.Use(cors.Handler(cors.Options{
 
@@ -85,6 +108,5 @@ func Server() *chi.Mux {
 		r.Handle("/", playground.Handler("johari backend", "/query"))
 		r.Handle("/query", srv)
 	})
-
 	return r
 }
