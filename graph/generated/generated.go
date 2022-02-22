@@ -82,6 +82,7 @@ type ComplexityRoot struct {
 		Method     func(childComplexity int) int
 		ProtoMajor func(childComplexity int) int
 		ProtoMinor func(childComplexity int) int
+		URL        func(childComplexity int) int
 		URLParam   func(childComplexity int) int
 	}
 
@@ -360,6 +361,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.HTTPReq.ProtoMinor(childComplexity), true
+
+	case "HTTPReq.url":
+		if e.complexity.HTTPReq.URL == nil {
+			break
+		}
+
+		return e.complexity.HTTPReq.URL(childComplexity), true
 
 	case "HTTPReq.urlParam":
 		if e.complexity.HTTPReq.URLParam == nil {
@@ -927,6 +935,7 @@ input TestCaseInput {
 input HTTPReqInput {
   protoMajor: Int
   protoMinor: Int
+  url: String
   urlParam: [KVInput]
   header: [HeaderInput]
   method: Method
@@ -1018,6 +1027,7 @@ enum Method {
 type HTTPReq {
   protoMajor: Int!
   protoMinor: Int!
+  url: String
   urlParam: [Kv]
   header: [Header]
   method: Method!
@@ -1972,6 +1982,38 @@ func (ec *executionContext) _HTTPReq_protoMinor(ctx context.Context, field graph
 	res := resTmp.(int)
 	fc.Result = res
 	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _HTTPReq_url(ctx context.Context, field graphql.CollectedField, obj *model.HTTPReq) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "HTTPReq",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   false,
+		IsResolver: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.URL, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*string)
+	fc.Result = res
+	return ec.marshalOString2ᚖstring(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) _HTTPReq_urlParam(ctx context.Context, field graphql.CollectedField, obj *model.HTTPReq) (ret graphql.Marshaler) {
@@ -5457,6 +5499,14 @@ func (ec *executionContext) unmarshalInputHTTPReqInput(ctx context.Context, obj 
 			if err != nil {
 				return it, err
 			}
+		case "url":
+			var err error
+
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("url"))
+			it.URL, err = ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
 		case "urlParam":
 			var err error
 
@@ -5989,6 +6039,13 @@ func (ec *executionContext) _HTTPReq(ctx context.Context, sel ast.SelectionSet, 
 			if out.Values[i] == graphql.Null {
 				invalids++
 			}
+		case "url":
+			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._HTTPReq_url(ctx, field, obj)
+			}
+
+			out.Values[i] = innerFunc(ctx)
+
 		case "urlParam":
 			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._HTTPReq_urlParam(ctx, field, obj)
