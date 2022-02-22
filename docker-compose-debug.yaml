@@ -6,7 +6,7 @@ services:
       - "8081:8081"
       - "40000:40000"
     environment:
-      KEPLOY_MODE: "record"
+      KEPLOY_MODE: "off"
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"
     security_opt:
       - "seccomp:unconfined"
