@@ -116,7 +116,7 @@ enum Method {
 type HTTPReq {
   protoMajor: Int!
   protoMinor: Int!
-  url: string
+  url: String
   urlParam: [Kv]
   header: [Header]
   method: Method!
