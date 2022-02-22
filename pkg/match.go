@@ -157,18 +157,22 @@ func jsonMatch(expected, actual interface{}) (bool, error) {
 		if expSlice.Len() != actSlice.Len() {
 			return false, nil
 		}
+		isMatched := true
 		for i := 0; i < expSlice.Len(); i++ {
+			isMatchedElement := false
 			for j := 0; j< actSlice.Len() ;j++{
-				if x, err := jsonMatch(expSlice.Index(i).Interface(), actSlice.Index(j).Interface()); err == nil || x {
-					return true, nil
+				if x, err := jsonMatch(expSlice.Index(i).Interface(), actSlice.Index(j).Interface()); err == nil && x {
+					isMatchedElement = true
+					break
 				}
 			}
+			isMatched = isMatchedElement && isMatched
 			// if x, err := jsonMatch(expSlice.Index(i).Interface(), actSlice.Index(i).Interface()); err != nil || !x {
 			// 	return false, nil
 			// }
 
 		}
-		return false, nil
+		return isMatched, nil
 	default:
 		return false, errors.New("type not registered for json")
 	}
