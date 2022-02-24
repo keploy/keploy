@@ -41,6 +41,9 @@ go get -u github.com/keploy/go-sdk
 ```
 
 ## Example
+
+[![link-to-video-demo](https://raw.githubusercontent.com/keploy/docs/master/static/img/link-to-demo-video.png)](https://www.youtube.com/watch?v=i7OqSVHjY1k)
+
 ### Sample application
 You can try out the sample application with the go SDK integrated [here](https://github.com/keploy/example-url-shortener) 
 
