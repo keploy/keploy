@@ -53,6 +53,7 @@ func Match(exp, act string, noise []string, log *zap.Logger) (bool, error) {
 
 // removeNoisy removes the noisy key-value fields(storend in noise map) from given element JSON. It is a recursive function.
 func removeNoisy(element interface{}, noise map[string][]string) interface{} {
+	
 	y := reflect.ValueOf(element)
 	switch y.Kind() {
 	case reflect.Map:
