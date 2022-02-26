@@ -24,3 +24,7 @@ web/public/*
 
 coverage.tmp.txt
 coverage.txt
+.DS_Store
+._.DS_Store
+**/.DS_Store
+**/._.DS_Store
