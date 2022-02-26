@@ -19,13 +19,14 @@ It converts API calls into testcases. Mocks are automatically generated with the
 
 <img src="https://github.com/keploy/docs/blob/master/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
 
+## Other Features
 * **Automatically mock** network/external dependencies with correct responses. No more manually writing mocks for dependencies like DBs, internal services, or third party services like twilio, shopify or stripe.
 * **Safely replay writes** or mutations by capturing from local or other environments. Idempotency guarantees are also not required in the application. Multiple Read after write operations can be replicated automatically too.
+* **Accurate noise detection** in responses like (timestamps, random values) to ensure high quality tests.
 * **Statistical deduplication** ensures that redundant testcases are not generated. We're planning to make this more robust (ref #27).
 * **Web Console** to visually understand the results, update behaviour and share findings across your team.
 * **Automatic instrumentation** for popular libraries/drivers like sql, http, grpc, etc. 
 * **Instrumentation/Integration framework** to easily add the new libraries/drivers with ~100 lines of code.   
-* **Accurate noise detection** in responses like (timestamps, random values) to ensure high quality tests.
 
 ## How it works?
 
