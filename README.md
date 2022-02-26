@@ -11,14 +11,21 @@ Keploy is a no-code testing platform that generates tests from API calls.
 It converts API calls into testcases. Mocks are automatically generated with the actual request/responses. 
 
 ## Features
-* **Generates test cases** from API calls. Say B-Bye! to writing unit and API test cases.
+**Generates test cases** from API calls. Say B-Bye! to writing unit and API test cases.
+
+<img src="https://github.com/keploy/docs/blob/master/static/gif/record-testcase.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
+
+**Native interoperability** with popular testing libraries like `go-test`. Code coverage will be reported with existing and Keploy recorded test cases and can also be integrated in CI pipelines/infrastructure.
+
+<img src="https://github.com/keploy/docs/blob/master/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
+
 * **Automatically mock** network/external dependencies with correct responses. No more manually writing mocks for dependencies like DBs, internal services, or third party services like twilio, shopify or stripe.
 * **Safely replay writes** or mutations by capturing from local or other environments. Idempotency guarantees are also not required in the application. Multiple Read after write operations can be replicated automatically too.
 * **Statistical deduplication** ensures that redundant testcases are not generated. We're planning to make this more robust (ref #27).
 * **Web Console** to visually understand the results, update behaviour and share findings across your team.
-* **Native interoperability** with popular testing libraries like go-test to enable compatibility with existing test cases and CI pipelines/infrastructure.
 * **Automatic instrumentation** for popular libraries/drivers like sql, http, grpc, etc. 
 * **Instrumentation/Integration framework** to easily add the new libraries/drivers with ~100 lines of code.   
+* **Accurate noise detection** in responses like (timestamps, random values) to ensure high quality tests.
 
 ## How it works?
 
