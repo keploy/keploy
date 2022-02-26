@@ -74,8 +74,11 @@ func Server() *chi.Mux {
 	port := "8081"
 	kApp := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
-			Name: "Keploy-Client-App",
+			Name: "TestKeploy",
 			Port: port,
+			Filter: keploy.Filter{
+				UrlRegex: "^/api",
+			},
 		},
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
