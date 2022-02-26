@@ -4,9 +4,15 @@ services:
     build: .
     ports:
       - "8081:8081"
+      - "40000:40000"
     environment:
       KEPLOY_MODE: "off"
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"
+    security_opt:
+      - "seccomp:unconfined"
+    cap_add:
+      - SYS_PTRACE
+    entrypoint: /dlv --headless --listen=:40000 --api-version=2 exec /app/keploy
     depends_on:
       - mongo
   mongo:

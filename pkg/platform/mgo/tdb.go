@@ -8,12 +8,13 @@ import (
 
 	"go.keploy.io/server/pkg/models"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
+	// "go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
+	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
-func NewTestCase(c *mongo.Collection, log *zap.Logger) *testCaseDB {
+func NewTestCase(c *kmongo.Collection, log *zap.Logger) *testCaseDB {
 	return &testCaseDB{
 		c:   c,
 		log: log,
@@ -21,7 +22,7 @@ func NewTestCase(c *mongo.Collection, log *zap.Logger) *testCaseDB {
 }
 
 type testCaseDB struct {
-	c   *mongo.Collection
+	c   *kmongo.Collection
 	log *zap.Logger
 }
 

@@ -21,3 +21,6 @@ web/public/*
 
 .vscode
 .env
+
+coverage.tmp.txt
+coverage.txt
