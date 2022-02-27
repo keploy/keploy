@@ -44,7 +44,7 @@ The UI can be accessed at http://localhost:8081
 
 ### Keeping keploy up-to-date
 ```shell
-docker pull ghcr.io/keploy/keploy:latest
+docker-compose pull
 ```
 
 ### Integrate the SDK
