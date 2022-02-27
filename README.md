@@ -42,6 +42,11 @@ docker-compose up
 ```
 The UI can be accessed at http://localhost:8081
 
+### Keeping keploy up-to-date
+```shell
+docker-compose pull
+```
+
 ### Integrate the SDK
 Install the [Go SDK](https://github.com/keploy/go-sdk) with
 ```shell
