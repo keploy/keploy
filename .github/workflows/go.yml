@@ -3,10 +3,10 @@ name: Go
 on:
   push:
     branches: [ main ]
-#  pull_request:
-#     branches: [ main ]
-  pull_request_target:
-    types: [assigned, opened, synchronize, reopened]
+  pull_request:
+    branches: [ main ]
+#   pull_request_target:
+#     types: [assigned, opened, synchronize, reopened]
 
 jobs:
 
@@ -28,7 +28,13 @@ jobs:
           go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./... || true
           cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" > coverage.txt
         env:
-          KEPLOY_API_KEY: ${{ secrets.KEPLOY_API_KEY }}
-      - uses: codecov/codecov-action@v2
-        with:
-          files: ./coverage.txt
+          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
+#       - uses: codecov/codecov-action@v2
+#         with:
+#           files: ./coverage.txt
+      - name: Install goveralls
+        run: go install github.com/mattn/goveralls@latest
+      - name: Send coverage
+        env:
+          COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: goveralls -coverprofile=coverage.txt -service=github
