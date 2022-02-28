@@ -29,9 +29,9 @@ jobs:
           cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" > coverage.txt
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-      - uses: codecov/codecov-action@v2
-        with:
-          files: ./coverage.txt
+#       - uses: codecov/codecov-action@v2
+#         with:
+#           files: ./coverage.txt
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
       - name: Send coverage
