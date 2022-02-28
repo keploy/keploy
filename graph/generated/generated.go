@@ -124,6 +124,7 @@ type ComplexityRoot struct {
 	Mutation struct {
 		DeleteTestCase func(childComplexity int, id string) int
 		NormalizeTest  func(childComplexity int, id string) int
+		NormalizeTests func(childComplexity int, ids []string) int
 		UpdateTestCase func(childComplexity int, tc []*model.TestCaseInput) int
 	}
 
@@ -190,6 +191,7 @@ type MutationResolver interface {
 	UpdateTestCase(ctx context.Context, tc []*model.TestCaseInput) (bool, error)
 	DeleteTestCase(ctx context.Context, id string) (bool, error)
 	NormalizeTest(ctx context.Context, id string) (bool, error)
+	NormalizeTests(ctx context.Context, ids []string) (bool, error)
 }
 type QueryResolver interface {
 	Apps(ctx context.Context) ([]*model.App, error)
@@ -518,6 +520,18 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.Mutation.NormalizeTest(childComplexity, args["id"].(string)), true
+
+	case "Mutation.normalizeTests":
+		if e.complexity.Mutation.NormalizeTests == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_normalizeTests_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.NormalizeTests(childComplexity, args["ids"].([]string)), true
 
 	case "Mutation.updateTestCase":
 		if e.complexity.Mutation.UpdateTestCase == nil {
@@ -915,6 +929,7 @@ type Mutation`, BuiltIn: false},
   # normalizeTest accepts test ID (part of a test run) and updates the respective testcase
   # with the responses from the test result
   normalizeTest(id: String!): Boolean!
+  normalizeTests(ids: [String!]!): Boolean!
 }
 
 input TestCaseInput {
@@ -1172,6 +1187,21 @@ func (ec *executionContext) field_Mutation_normalizeTest_args(ctx context.Contex
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_normalizeTests_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 []string
+	if tmp, ok := rawArgs["ids"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("ids"))
+		arg0, err = ec.unmarshalNString2ᚕstringᚄ(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["ids"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_updateTestCase_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
 	var err error
 	args := map[string]interface{}{}
@@ -1334,6 +1364,21 @@ func (ec *executionContext) field_Subscription_TestRun_args(ctx context.Context,
 		}
 	}
 	args["id"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field___Field_args_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 *bool
+	if tmp, ok := rawArgs["includeDeprecated"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("includeDeprecated"))
+		arg0, err = ec.unmarshalOBoolean2ᚖbool(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["includeDeprecated"] = arg0
 	return args, nil
 }
 
@@ -2843,6 +2888,48 @@ func (ec *executionContext) _Mutation_normalizeTest(ctx context.Context, field g
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
 		return ec.resolvers.Mutation().NormalizeTest(rctx, args["id"].(string))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_normalizeTests(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   true,
+		IsResolver: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_normalizeTests_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().NormalizeTests(rctx, args["ids"].([]string))
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -4702,6 +4789,13 @@ func (ec *executionContext) ___Field_args(ctx context.Context, field graphql.Col
 	}
 
 	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field___Field_args_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
 		return obj.Args, nil
@@ -6424,6 +6518,16 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				invalids++
 			}
+		case "normalizeTests":
+			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_normalizeTests(ctx, field)
+			}
+
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, innerFunc)
+
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -7559,6 +7663,38 @@ func (ec *executionContext) marshalNString2string(ctx context.Context, sel ast.S
 		}
 	}
 	return res
+}
+
+func (ec *executionContext) unmarshalNString2ᚕstringᚄ(ctx context.Context, v interface{}) ([]string, error) {
+	var vSlice []interface{}
+	if v != nil {
+		vSlice = graphql.CoerceList(v)
+	}
+	var err error
+	res := make([]string, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNString2string(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel ast.SelectionSet, v []string) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	for i := range v {
+		ret[i] = ec.marshalNString2string(ctx, sel, v[i])
+	}
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
 }
 
 func (ec *executionContext) unmarshalNTestRunStatus2goᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestRunStatus(ctx context.Context, v interface{}) (model.TestRunStatus, error) {

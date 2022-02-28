@@ -6,6 +6,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/graph/generated"
@@ -38,6 +39,20 @@ func (r *mutationResolver) NormalizeTest(ctx context.Context, id string) (bool, 
 	err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
 	if err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+func (r *mutationResolver) NormalizeTests(ctx context.Context, ids []string) (bool, error) {
+	var errStrings []string
+	for _, id := range ids {
+		_, err := r.NormalizeTest(ctx, id)
+		if err != nil {
+			errStrings = append(errStrings, id+": "+err.Error())
+		}
+	}
+	if len(errStrings) != 0 {
+		return false, fmt.Errorf(strings.Join(errStrings, "\n"))
 	}
 	return true, nil
 }
