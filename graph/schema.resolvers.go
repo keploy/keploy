@@ -75,11 +75,11 @@ func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, 
 		if run.Tests != nil {
 			for _, t := range run.Tests {
 				uri := t.URI
-				completed := time.Unix(t.Completed, 0)
+				completed := time.Unix(t.Completed, 0).UTC()
 				tests = append(tests, &model.Test{
 					ID:         t.ID,
 					Status:     ConvertTestStatus(t.Status),
-					Started:    time.Unix(t.Started, 0),
+					Started:    time.Unix(t.Started, 0).UTC(),
 					Completed:  &completed,
 					TestCaseID: t.TestCaseID,
 					URI:        &uri,
@@ -94,8 +94,8 @@ func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, 
 		ts := &model.TestRun{
 			ID:      run.ID,
 			Status:  ConvertTestRunStatus(run.Status),
-			Created: time.Unix(run.Created, 0),
-			Updated: time.Unix(run.Updated, 0),
+			Created: time.Unix(run.Created, 0).UTC(),
+			Updated: time.Unix(run.Updated, 0).UTC(),
 			App:     run.App,
 			User:    run.User,
 			Success: run.Success,

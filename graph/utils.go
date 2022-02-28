@@ -263,9 +263,9 @@ func ConvertTestCase(t models.TestCase) *model.TestCase {
 
 	return &model.TestCase{
 		ID:       t.ID,
-		Created:  time.Unix(t.Created, 0),
-		Updated:  time.Unix(t.Updated, 0),
-		Captured: time.Unix(t.Captured, 0),
+		Created:  time.Unix(t.Created, 0).UTC(),
+		Updated:  time.Unix(t.Updated, 0).UTC(),
+		Captured: time.Unix(t.Captured, 0).UTC(),
 		Cid:      t.CID,
 		App:      t.AppID,
 		URI:      t.URI,

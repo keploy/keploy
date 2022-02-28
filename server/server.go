@@ -64,7 +64,6 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-
 	regSrv := regression2.New(tdb, rdb, logger)
 	runSrv := run.New(rdb, tdb, logger)
 
@@ -75,12 +74,15 @@ func Server() *chi.Mux {
 	port := "8081"
 	kApp := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
-			Name: "Client_KEPLOY",
+			Name: "Keploy-Test-App",
 			Port: port,
+			// Filter: keploy.Filter{
+			// 	UrlRegex: "^/api",
+			// },
 		},
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
-			// URL: "http://localhost:8082/api",
+			// URL: "http://localhost:8081/api",
 
 		},
 	})

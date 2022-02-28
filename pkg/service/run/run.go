@@ -116,7 +116,7 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 }
 
 func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error {
-	diff := time.Now().Sub(time.Unix(ts, 0))
+	diff := time.Now().UTC().Sub(time.Unix(ts, 0))
 	if diff < 5*time.Minute {
 		return nil
 	}

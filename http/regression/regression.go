@@ -185,7 +185,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	
 	// rg.logger.Debug("testcase posted",zap.Any("testcase request",data))
 
-	now := time.Now().Unix()
+	now := time.Now().UTC().Unix()
 	inserted, err := rg.svc.Put(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,

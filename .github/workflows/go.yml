@@ -3,7 +3,7 @@ name: Go
 on:
   push:
     branches: [ main ]
-#   pull_request:
+#  pull_request:
 #     branches: [ main ]
   pull_request_target:
     types: [assigned, opened, synchronize, reopened]

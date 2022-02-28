@@ -216,7 +216,7 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
-	started := time.Now()
+	started := time.Now().UTC()
 	ok, res, tc, err := r.test(ctx, cid, id, app, resp)
 	if tc != nil {
 		t = &run.Test{
@@ -232,7 +232,7 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id string, resp 
 			Noise:      tc.Noise,
 		}
 	}
-	t.Completed = time.Now().Unix()
+	t.Completed = time.Now().UTC().Unix()
 	defer func() {
 		err2 := r.saveResult(ctx, t)
 		if err2 != nil {
