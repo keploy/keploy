@@ -1,0 +1,20 @@
+<svg width="58.7" height="20" viewBox="0 0 587 200" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" role="img" aria-label="slack">
+  <title>slack</title>
+  <linearGradient id="a" x2="0" y2="100%">
+    <stop offset="0" stop-opacity=".1" stop-color="#EEE"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <mask id="m"><rect width="587" height="200" rx="30" fill="#FFF"/></mask>
+  <g mask="url(#m)">
+    <rect width="212" height="200" fill="#555"/>
+    <rect width="375" height="200" fill="#08C" x="212"/>
+    <rect width="587" height="200" fill="url(#a)"/>
+  </g>
+  <g aria-hidden="true" fill="#fff" text-anchor="start" font-family="Verdana,DejaVu Sans,sans-serif" font-size="110">
+    <text x="172" y="148" textLength="0" fill="#000" opacity="0.25"></text>
+    <text x="162" y="138" textLength="0"></text>
+    <text x="267" y="148" textLength="275" fill="#000" opacity="0.25">slack</text>
+    <text x="257" y="138" textLength="275">slack</text>
+  </g>
+  <image x="40" y="35" width="130" height="130" xlink:href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjIuOCAxMjIuOCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTI1LjggNzcuNmMwIDcuMS01LjggMTIuOS0xMi45IDEyLjlTMCA4NC43IDAgNzcuNmMwLTcuMSA1LjgtMTIuOSAxMi45LTEyLjloMTIuOXYxMi45em02LjUgMGMwLTcuMSA1LjgtMTIuOSAxMi45LTEyLjlzMTIuOSA1LjggMTIuOSAxMi45djMyLjNjMCA3LjEtNS44IDEyLjktMTIuOSAxMi45cy0xMi45LTUuOC0xMi45LTEyLjlWNzcuNnptMTIuOS01MS44Yy03LjEgMC0xMi45LTUuOC0xMi45LTEyLjlTMzguMSAwIDQ1LjIgMHMxMi45IDUuOCAxMi45IDEyLjl2MTIuOUg0NS4yem0wIDYuNWM3LjEgMCAxMi45IDUuOCAxMi45IDEyLjlzLTUuOCAxMi45LTEyLjkgMTIuOUgxMi45QzUuOCA1OC4xIDAgNTIuMyAwIDQ1LjJzNS44LTEyLjkgMTIuOS0xMi45aDMyLjN6TTk3IDQ1LjJjMC03LjEgNS44LTEyLjkgMTIuOS0xMi45IDcuMSAwIDEyLjkgNS44IDEyLjkgMTIuOXMtNS44IDEyLjktMTIuOSAxMi45SDk3VjQ1LjJ6bS02LjUgMGMwIDcuMS01LjggMTIuOS0xMi45IDEyLjktNy4xIDAtMTIuOS01LjgtMTIuOS0xMi45VjEyLjlDNjQuNyA1LjggNzAuNSAwIDc3LjYgMGM3LjEgMCAxMi45IDUuOCAxMi45IDEyLjl2MzIuM3pNNzcuNiA5N2M3LjEgMCAxMi45IDUuOCAxMi45IDEyLjkgMCA3LjEtNS44IDEyLjktMTIuOSAxMi45LTcuMSAwLTEyLjktNS44LTEyLjktMTIuOVY5N2gxMi45em0wLTYuNWMtNy4xIDAtMTIuOS01LjgtMTIuOS0xMi45IDAtNy4xIDUuOC0xMi45IDEyLjktMTIuOWgzMi4zYzcuMSAwIDEyLjkgNS44IDEyLjkgMTIuOSAwIDcuMS01LjggMTIuOS0xMi45IDEyLjlINzcuNnoiLz48L3N2Zz4K"/>
+</svg>
