@@ -10,6 +10,9 @@ Keploy is a no-code testing platform that generates tests from API calls.
 
 It converts API calls into testcases. Mocks are automatically generated with the actual request/responses. 
 
+<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/master/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
+
+
 ## Features
 **Generates test cases** from API calls. Say B-Bye! to writing unit and API test cases.
 
@@ -53,59 +56,11 @@ Install the [Go SDK](https://github.com/keploy/go-sdk) with
 go get -u github.com/keploy/go-sdk
 ```
 
-## Example
+## Sample application
+You can try out the sample application with the go SDK integrated:
+https://github.com/keploy/example-url-shortener
 
-<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/master/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
-
-### Sample application
-You can try out the sample application with the go SDK integrated [here](https://github.com/keploy/example-url-shortener) 
-
-#### Routers
-Example of integrating the [gin router](https://github.com/gin-gonic/gin). Other [routers](https://github.com/keploy/go-sdk#supported-routers) like echo, chi, etc are support too.
-```go
-import (
-        "github.com/gin-gonic/gin"
-        "github.com/keploy/go-sdk/integrations/kgin/v1"
-        "github.com/keploy/go-sdk/keploy"
-        )
-
-r := gin.New()
-port := "6060"
-
-k := keploy.New(keploy.Config{
-    App: keploy.AppConfig{
-        // your application
-        Name: "my-app",
-        Port: port,
-    },
-    Server: keploy.ServerConfig{
-        URL: "http://localhost:8081/api",
-    },
-})
-//Call kgin.GinV1 before routes handling
-kgin.GinV1(k, r)
-
-r.Run(":" + port)
-```
-
-#### Datastore
-Example of integrating the official [mongo driver](https://github.com/mongodb/mongo-go-driver). Other [datastore/database](https://github.com/keploy/go-sdk#supported-databases) libraries like go's sql   
-```go
-import (
-        "go.mongodb.org/mongo-driver/mongo"
-        "github.com/keploy/go-sdk/integrations/kmongo"
-        )
-
-db  := client.Database("MyDB")
-
-// wrap collection with keploy for automatic instrumentation and mocking
-col := kmongo.NewCollection(db.Collection("MyCollection"))
-
-```
-
-Thats it! All the requests after integration will be automatically captured and available it at http://localhost:8081/testlist
-
-#### Integration with native go test framework
+## Integration with native go test framework
 You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
 ```go
 
@@ -122,12 +77,41 @@ func TestKeploy(t *testing.T) {
 ```
 ## Language Support
 - [x] [Go SDK](https://github.com/keploy/go-sdk)
-
-[//]: # (- [ ] Java SDK &#40;coming soon&#41;)
-
-[//]: # (- [ ] Javascript &#40;coming soon&#41;)
+- [ ] Java SDK - WIP [#51](https://github.com/keploy/keploy/issues/51)
+- [ ] Typescript/Javascript SDK - WIP [#61](https://github.com/keploy/keploy/issues/61)
+- [ ] Python SDK - WIP [#58](https://github.com/keploy/keploy/issues/58)
 - [ ] Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
-## Development
+
+## FAQs
+### Is Keploy a unit testing framework? 
+No, keploy is designed to reduce time writing tests manually. It integrates with exising unit testing frameworks like (eg: go test, Junit, pytest, etc.) to ensure compatibility with existing tooling like code coverage, IDE support and CI pipeline/infrastructure support.
+
+###Does Keploy replace unit tests entirely?
+If all your code paths can be invoked from API calls then yes, else you can still write testcases for some methods, but the idea is to save at least 80% of the effort.  
+
+### What code changes do I need to do?
+1. **Web Framework/Router middleware** needs to be added to ensure keploy can intercept incoming request and inject instrumentation data in the request context.
+2. **Wrapping External calls** like database queries, http/gRPC calls needs to be done to ensure they are captured and correct mocks are generated for testing those requests.
+
+### How do I run keploy in my CI pipeline? 
+No changes necessary. You can reuse the pipeline which runs unit tests. 
+
+### Does Keploy support read after write to DB scenarios?
+Yes. Keploy records the write requests and read requests in the correct order. It then expects the application to perform the writes and reads in the same order. It would return the same database responses as captured earlier. 
+
+### How does keploy handle fields like timestamps, random numbers (eg: uuids)? 
+A request only becomes a testcase if it passes our deduplication algorithm. If its becoming a testcase, a second request is sent to the same application instance (with the same request params) to check for difference in responses. Fields such as timestamps, uuids would be automatically flagged by comparing the second response with the first response. These fields are then ignored during testing going forward. 
+
+### Can I use keploy to generate tests from production environments automatically? 
+Not yet. We are working on making our deduplication algorithm scalable enough to be used safely in production. If you are interested in this use-case, please connect with us on slack. We'd love to work with you to build the deduplication system and load test it with your systems.  
+
+### What if my application behaviour changes? 
+If your application behaviour changes, the respective testcases would fail. You can then mark the new behaviour as normal by clicking on the normalise button.   
+
+### Would keploy know if an external service changes? 
+Not yet. Unless that application is also using keploy, keploy would only test the functionality of the current application. We are working to detect scanning for API contract violations and adding multiple application to perform comprehensive integration tests. All contributions are welcome.  
+
+## Contributing
 There's a separate [docker-compose](docker-compose-dev.yaml) file which helps with exposing the mongo server and also builds the dockerfile from local code.  The `build` flag ensures that the binary is built again to reflect the latest code changes. There's also [docker-compose-debug.yaml](docker-compose-debug.yaml) which can help remote debugging the go server on port 40000.  
 ```shell
 docker-compose -f docker-compose-dev.yaml up --build
