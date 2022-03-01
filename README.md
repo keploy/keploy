@@ -57,7 +57,13 @@ go get -u github.com/keploy/go-sdk
 ```
 
 ## Sample application
-You can try out the sample application with the go SDK integrated:
+```shell
+git clone https://github.com/keploy/example-url-shortener && cd example-url-shortener
+go mod download
+go run handler.go main.go
+```
+
+You try generating testcases and testing the sample application:
 https://github.com/keploy/example-url-shortener
 
 ## Integration with native go test framework
