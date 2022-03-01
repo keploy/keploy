@@ -7,6 +7,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
+// Service
 type Service interface {
 	Get(ctx context.Context, cid, appID, id string) (models.TestCase, error)
 	GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error)

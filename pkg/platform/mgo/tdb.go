@@ -14,6 +14,10 @@ import (
 	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
+// NewTestCase contructs testCaseDB which is having methods on mongo collection.
+//
+// c input parameter is the testcase mongodb collection. It will be stored in 
+// testCaseDB to perform operations on the mongo collection.
 func NewTestCase(c *kmongo.Collection, log *zap.Logger) *testCaseDB {
 	return &testCaseDB{
 		c:   c,
@@ -26,6 +30,8 @@ type testCaseDB struct {
 	log *zap.Logger
 }
 
+// Delete performs delete operation on testcase collection. Testcase whose id matches with input id
+// string is deleted. 
 func (t *testCaseDB) Delete(ctx context.Context, id string) error {
 	_, err := t.c.DeleteOne(ctx, bson.M{"_id": id})
 	if err != nil {
@@ -34,6 +40,7 @@ func (t *testCaseDB) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// GetApps returns all the app_ids which are under the company with cid.
 func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) {
 	filter := bson.M{"cid": cid}
 	values, err := t.c.Distinct(ctx, "app_id", filter)
@@ -50,6 +57,7 @@ func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) 
 	return apps, nil
 }
 
+// GetKeys returns all the testaceses with cid as input cid, app_id as app and uri as uri string.
 func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri string) ([]models.TestCase, error) {
 	filter := bson.M{"cid": cid, "app_id": app, uri: uri}
 	findOptions := options.Find()
@@ -57,6 +65,7 @@ func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri string) ([]model
 	return t.getAll(ctx, filter, findOptions)
 }
 
+// Exists checks whether there exists a testcase matching with input tc parameter in the mopngo collection.
 func (t *testCaseDB) Exists(ctx context.Context, tc models.TestCase) (bool, error) {
 	opts := options.Count().SetMaxTime(2 * time.Second)
 	filters := bson.M{
@@ -84,6 +93,7 @@ func (t *testCaseDB) Exists(ctx context.Context, tc models.TestCase) (bool, erro
 	return false, nil
 }
 
+// DeleteByAnchor
 func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, field string) error {
 	filters := bson.M{
 		"cid":    cid,
@@ -188,6 +198,7 @@ func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, f
 	return nil
 }
 
+// Upsert
 func (t *testCaseDB) Upsert(ctx context.Context, tc models.TestCase) error {
 	// sort arrays before insert
 	for _, v := range tc.Anchors {
@@ -208,6 +219,7 @@ func (t *testCaseDB) Upsert(ctx context.Context, tc models.TestCase) error {
 	return nil
 }
 
+// Get returns testcase containing id as _id. If cid is not an empty string then testcase should have cid as the value of cid field.
 func (t *testCaseDB) Get(ctx context.Context, cid, id string) (models.TestCase, error) {
 	// too repetitive
 	// TODO write a generic FindOne for all get calls
@@ -254,6 +266,7 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 	return tcs, nil
 }
 
+// GetAll returns the limited number of testcases havinng cid and app as the values of cid and app_id fields. Testcases in between the interval of [offset, offset+limit] are returned.
 func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
 
 	filter := bson.M{"cid": cid, "app_id": app}

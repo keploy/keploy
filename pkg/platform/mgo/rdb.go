@@ -12,21 +12,22 @@ import (
 	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
-func NewRun(c *kmongo.Collection, test *kmongo.Collection, log *zap.Logger) *RunDB {
-	return &RunDB{
+// NewRun constructs runDB that contains testrun and test mongo collections. Methods of runDB performs operations on the mongo collections.
+func NewRun(c *kmongo.Collection, test *kmongo.Collection, log *zap.Logger) *runDB {
+	return &runDB{
 		c:    c,
 		log:  log,
 		test: test,
 	}
 }
 
-type RunDB struct {
+type runDB struct {
 	c    *kmongo.Collection
 	test *kmongo.Collection
 	log  *zap.Logger
 }
 
-func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
+func (r *runDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
 	// too repetitive
 	// TODO write a generic FindOne for all get calls
 	filter := bson.M{"_id": id}
@@ -38,7 +39,7 @@ func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
 	return t, nil
 }
 
-func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error) {
+func (r *runDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error) {
 	filter := bson.M{"run_id": runID}
 	findOptions := options.Find()
 
@@ -71,7 +72,7 @@ func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error)
 	return res, nil
 }
 
-func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
+func (r *runDB) PutTest(ctx context.Context, t run.Test) error {
 	upsert := true
 	opt := &options.UpdateOptions{
 		Upsert: &upsert,
@@ -87,7 +88,7 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 	return nil
 }
 
-func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*run.TestRun, error) {
+func (r *runDB) Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*run.TestRun, error) {
 	filter := bson.M{
 		"cid": cid,
 	}
@@ -145,7 +146,7 @@ func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, fro
 	return tcs, nil
 }
 
-func (r *RunDB) Upsert(ctx context.Context, run run.TestRun) error {
+func (r *runDB) Upsert(ctx context.Context, run run.TestRun) error {
 	upsert := true
 	opt := &options.UpdateOptions{
 		Upsert: &upsert,
@@ -161,7 +162,7 @@ func (r *RunDB) Upsert(ctx context.Context, run run.TestRun) error {
 	return nil
 }
 
-func (r *RunDB) Increment(ctx context.Context, success, failure bool, id string) error {
+func (r *runDB) Increment(ctx context.Context, success, failure bool, id string) error {
 	update := bson.M{}
 	if success {
 		update["$inc"] = bson.D{{"success", 1}}

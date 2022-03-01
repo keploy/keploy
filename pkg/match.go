@@ -73,7 +73,7 @@ func removeNoisy(element interface{}, noise map[string][]string) interface{} {
 					delete(noise, k)
 					continue
 				}
-				// update key of noisy to match heirarchy of noisy field.
+				// update key of noisy to match hierarchy of noisy field.
 				strArr := noise[k][1:]
 				delete(noise, k)
 				if seperatorIndx != -1 {
@@ -98,7 +98,7 @@ func removeNoisy(element interface{}, noise map[string][]string) interface{} {
 }
 
 // convertToMap converts array of string into map with key as str(string element of given array)
-// and value as array of string formed by seperating str into substrings (using "." as seperator).
+// and value as array of string formed by separating str into substrings (using "." as separator).
 func convertToMap(arr []string) map[string][]string {
 	res := map[string][]string{}
 	for i := range arr {

@@ -2,6 +2,7 @@ package models
 
 import "net/http"
 
+// HttpReq 
 type HttpReq struct {
 	Method     Method            `json:"method" bson:"method,omitempty"`
 	ProtoMajor int               `json:"proto_major" bson:"proto_major,omitempty"` // e.g. 1

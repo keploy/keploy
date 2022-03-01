@@ -6,6 +6,9 @@ import (
 	"go.keploy.io/server/pkg/service/run"
 )
 
+// CompareHeaders compares 2 input http.Headers. It adds the result of compare as
+// run.HeaderResult into pointer of an input array. Normal field of run.HeaderResult
+// contains the result of compare.
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult) bool {
 	match := true
 	for k, v := range h1 {
@@ -122,6 +125,7 @@ func checkKey(res *[]run.HeaderResult, key string) bool {
 	return true
 }
 
+// Contains checks that whether an array of strings contains the input string.
 func Contains(elems []string, v string) bool {
 	for _, s := range elems {
 		if v == s {
