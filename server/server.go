@@ -107,7 +107,7 @@ func Server() *chi.Mux {
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
 		regression.New(r, logger, regSrv, runSrv)
-		r.Handle("/", playground.Handler("johari backend", "/query"))
+		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
 	return r
