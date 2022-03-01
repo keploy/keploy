@@ -64,7 +64,6 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-
 	regSrv := regression2.New(tdb, rdb, logger)
 	runSrv := run.New(rdb, tdb, logger)
 
@@ -105,7 +104,7 @@ func Server() *chi.Mux {
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
 		regression.New(r, logger, regSrv, runSrv)
-		r.Handle("/", playground.Handler("johari backend", "/query"))
+		r.Handle("/", playground.Handler("johari backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
 	return r
