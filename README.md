@@ -57,16 +57,48 @@ go get -u github.com/keploy/go-sdk
 ```
 
 ## Sample application
+The full demo is available here - https://github.com/keploy/example-url-shortener
 ```shell
 git clone https://github.com/keploy/example-url-shortener && cd example-url-shortener
 go mod download
 go run handler.go main.go
 ```
+### Generate testcases
+To genereate testcases we just need to make some API calls. You can use Postman, Hoppscotch, or simply curl
+#### 1. Generate shortned url
+```shell
+curl --request POST \
+  --url http://localhost:8080/url \
+  --header 'content-type: application/json' \
+  --data '{
+  "url": "https://google.com"
+}'
+```
+this will return the shortened url. The ts would automatically be ignored during testing because it'll always be different.
+```shell
+{
+  "ts": 1645540022,
+  "url": "http://localhost:8080/Lhr4BWAi"
+}
+```
+#### 2. Redirect to original url from shortened url
+```shell
+curl --request GET \
+  --url http://localhost:8080/Lhr4BWAi
+```
 
-You try generating testcases and testing the sample application:
-https://github.com/keploy/example-url-shortener
+### Run the testcases
+```shell
+go test -coverpkg=./... -covermode=atomic  ./...
+```
+this should show you have 80.3% coverage without writing any code!
+```shell
+ok      test-app-url-shortener  6.268s  coverage: 80.3% of statements in ./...
+```
 
-## Integration with native go test framework
+All of these can be visualised here - http://localhost:8081/testlist
+
+### Integration with native Go test framework
 You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
 ```go
 
