@@ -50,12 +50,6 @@ The UI can be accessed at http://localhost:8081
 docker-compose pull
 ```
 
-### Integrate the SDK
-Install the [Go SDK](https://github.com/keploy/go-sdk) with
-```shell
-go get -u github.com/keploy/go-sdk
-```
-
 ## Sample application
 The full demo is available here - https://github.com/keploy/example-url-shortener
 ```shell
@@ -88,6 +82,7 @@ curl --request GET \
 ```
 
 ### Run the testcases
+**Note: Before running tests stop the sample application**
 ```shell
 go test -coverpkg=./... -covermode=atomic  ./...
 ```
