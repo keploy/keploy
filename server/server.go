@@ -31,7 +31,7 @@ import (
 
 type config struct {
 	MongoURI      string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
-	DB            string `envconfig:"DB" default:"keploy-test"`
+	DB            string `envconfig:"DB" default:"keploy"`
 	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
