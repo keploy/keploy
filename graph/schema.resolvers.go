@@ -6,6 +6,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/graph/generated"
@@ -34,10 +35,16 @@ func (r *mutationResolver) DeleteTestCase(ctx context.Context, id string) (bool,
 	return true, nil
 }
 
-func (r *mutationResolver) NormalizeTest(ctx context.Context, id string) (bool, error) {
-	err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
-	if err != nil {
-		return false, err
+func (r *mutationResolver) NormalizeTests(ctx context.Context, ids []string) (bool, error) {
+	var errStrings []string
+	for _, id := range ids {
+		err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
+		if err != nil {
+			errStrings = append(errStrings, id+": "+err.Error())
+		}
+	}
+	if len(errStrings) != 0 {
+		return false, fmt.Errorf(strings.Join(errStrings, "\n"))
 	}
 	return true, nil
 }
@@ -165,3 +172,17 @@ func (r *subscriptionResolver) TestRun(ctx context.Context, app *string, id *str
 func (r *Resolver) Subscription() generated.SubscriptionResolver { return &subscriptionResolver{r} }
 
 type subscriptionResolver struct{ *Resolver }
+
+// !!! WARNING !!!
+// The code below was going to be deleted when updating resolvers. It has been copied here so you have
+// one last chance to move it out of harms way if you want. There are two reasons this happens:
+//  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
+//    it when you're done.
+//  - You have helper methods in this file. Move them out to keep these resolver files clean.
+func (r *mutationResolver) NormalizeTest(ctx context.Context, id string) (bool, error) {
+	err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}

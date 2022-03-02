@@ -1,9 +1,9 @@
 extend type Mutation {
   updateTestCase(tc: [TestCaseInput]): Boolean!
   deleteTestCase(id: String!): Boolean!
-  # normalizeTest accepts test ID (part of a test run) and updates the respective testcase
-  # with the responses from the test result
-  normalizeTest(id: String!): Boolean!
+  # normalizeTests accepts array of test IDs (part of a test run) and updates the respective testcases
+  # with the responses from the test results
+  normalizeTests(ids: [String!]!): Boolean!
 }
 
 input TestCaseInput {
