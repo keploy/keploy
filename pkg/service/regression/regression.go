@@ -480,6 +480,7 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 		}
 	}
 
+	isAnchorChange := false
 	for k, v := range reqKeys {
 		if !r.noisyFields[index][k] {
 			// update field count
@@ -491,10 +492,11 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 			}
 			if !isAnchor(r.fieldCounts[index][k]) {
 				r.noisyFields[index][k] = true
-				err = r.tdb.DeleteByAnchor(context.TODO(), t.CID, t.AppID, t.URI, k)
-				if err != nil {
-					return false, err
-				}
+				isAnchorChange = true
+				// err = r.tdb.DeleteByAnchor(context.TODO(), t.CID, t.AppID, t.URI, k)
+				// if err != nil {
+				// 	return false, err
+				// }
 				continue
 			}
 			filterKeys[k] = v
@@ -509,6 +511,13 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 	dup, err := r.exists(ctx, filterKeys, index)
 	if err != nil {
 		return false, err
+	}
+
+	if isAnchorChange {
+		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, t.URI, filterKeys)
+		if err != nil {
+			return false, err
+		}
 	}
 
 	t.AllKeys = reqKeys
@@ -540,9 +549,11 @@ func isAnchor(m map[string]int) bool {
 	for _, v := range m {
 		totalCount = totalCount + v
 	}
+	// 
 	if totalCount < 20 {
 		return true
 	}
+	// 
 	if float64(totalCount)*0.40 > float64(len(m)) {
 		return true
 	}
