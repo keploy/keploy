@@ -39,12 +39,20 @@ type Regression struct {
 	log *zap.Logger
 	mu  sync.Mutex
 	// index is `cid-appID-uri`
+	//
 	// anchors is map[index][]map[key][]value or map[index]combinationOfAnchors
 	// anchors stores all the combinations of anchor fields for a particular index
+	// anchor field is a low variance field which is used in the deduplication algorithm.
+	// example: user-type or blood-group could be good anchor fields whereas timestamps
+	// and usernames are bad anchor fields.
+	// during deduplication only anchor fields are compared for new requests to determine whether its a duplicate or not.
+	// other fields are ignored.
 	anchors map[string][]map[string][]string
 	// noisyFields is map[index][key]bool
 	noisyFields map[string]map[string]bool
 	// fieldCounts is map[index][key][value]count
+	// fieldCounts stores the count of all values of a particular field in an index.
+	// eg: lets say field is bloodGroup then the value would be {A+: 20, B+: 10,...}
 	fieldCounts map[string]map[string]map[string]int
 }
 
@@ -506,6 +514,12 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 	if len(filterKeys) == 0 {
 		return true, nil
 	}
+	if isAnchorChange {
+		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, t.URI, filterKeys)
+		if err != nil {
+			return false, err
+		}
+	}
 
 	// check if testcase based on anchor keys already exists
 	dup, err := r.exists(ctx, filterKeys, index)
@@ -513,12 +527,6 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 		return false, err
 	}
 
-	if isAnchorChange {
-		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, t.URI, filterKeys)
-		if err != nil {
-			return false, err
-		}
-	}
 
 	t.AllKeys = reqKeys
 	//var keys []string
@@ -549,11 +557,13 @@ func isAnchor(m map[string]int) bool {
 	for _, v := range m {
 		totalCount = totalCount + v
 	}
-	// 
+	// if total values for that field is less than 20 then,
+	// the sample size is too small to know if its high variance.
 	if totalCount < 20 {
 		return true
 	}
-	// 
+	// if the unique values are less than 40% of the total value count them,
+	// the field is low varient.
 	if float64(totalCount)*0.40 > float64(len(m)) {
 		return true
 	}

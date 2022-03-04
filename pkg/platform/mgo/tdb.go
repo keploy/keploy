@@ -175,6 +175,7 @@ func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, f
 	}
 
 	if len(dups) > 0 {
+		t.log.Info("duplicate testcases deleted", zap.Any("testcase ids: ", dups))
 		_, err = t.c.DeleteMany(ctx, bson.M{
 			"_id": bson.M{
 				"$in": dups,
