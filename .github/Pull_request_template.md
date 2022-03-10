@@ -18,9 +18,9 @@ Example how to mark a checkbox:-
 - [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
 - [ ] This change requires a documentation update
 
-## How Has This Been Tested?
+## Please let us know if any test cases are added
 
-Please describe the tests that you ran to verify your changes. Provide instructions so we can reproduce. 
+Please describe the tests(if any). Provide instructions how its affecting the coverage.
 
 #### Describe if there is any unusual behaviour of your code(Write `NA` if there isn't)
 A clear and concise description of it.
@@ -38,7 +38,7 @@ Example how to mark a checkbox:-
 - [ ] I have added tests that prove my fix is effective or that my feature works.
 - [ ] New and existing unit tests pass locally with my changes.
 
-## Screenshots
+## Screenshots (if any)
 
  Original           | Updated
  :--------------------: |:--------------------:
