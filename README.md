@@ -172,6 +172,6 @@ We'd love to collaborate with you to make Keploy great. To get started:
 * [GitHub](https://github.com/keploy/keploy/issues) - For bug reports and feature requests.
 
 [![Generic badge](https://img.shields.io/badge/Slack-teal.svg?style=for-the-badge)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
-[![Generic badge](https://img.shields.io/badge/LinkedIn-blue.svg?style=for-the-badge)](https://github.com/vinitshahdeo/jobtweets/raw/master/report/REPORT.pdf)
+[![Generic badge](https://img.shields.io/badge/LinkedIn-blue.svg?style=for-the-badge)](https://www.linkedin.com/company/keploy/)
 [![Generic badge](https://img.shields.io/badge/Youtube-teal.svg?style=for-the-badge)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
-[![Generic badge](https://img.shields.io/badge/Twitter-API-orange.svg?style=for-the-badge&logo=twitter&logoColor=white)](https://twitter.com/Keployio)
+[![Generic badge](https://img.shields.io/badge/Twitter-blue.svg?style=for-the-badge)](https://twitter.com/Keployio)
