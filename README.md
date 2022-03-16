@@ -17,17 +17,17 @@ Keploy is a no-code testing platform that generates tests from API calls.
 
 It converts API calls into testcases. Mocks are automatically generated with the actual request/responses. 
 
-<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/master/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
+<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
 
 
 ## Features
 **Generates test cases** from API calls. Say B-Bye! to writing unit and API test cases.
 
-<img src="https://github.com/keploy/docs/blob/master/static/gif/record-testcase.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
+<img src="https://github.com/keploy/docs/blob/main/static/gif/record-testcase.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
 
 **Native interoperability** with popular testing libraries like `go-test`. Code coverage will be reported with existing and Keploy recorded test cases and can also be integrated in CI pipelines/infrastructure.
 
-<img src="https://github.com/keploy/docs/blob/master/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
+<img src="https://github.com/keploy/docs/blob/main/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
 
 ## Other Features
 * **Automatically mock** network/external dependencies with correct responses. No more manually writing mocks for dependencies like DBs, internal services, or third party services like twilio, shopify or stripe.
@@ -40,7 +40,7 @@ It converts API calls into testcases. Mocks are automatically generated with the
 
 ## How it works?
 
-![How it works](https://raw.githubusercontent.com/keploy/docs/master/static/img/how-it-works.png)
+![How it works](https://raw.githubusercontent.com/keploy/docs/main/static/img/how-it-works.png)
 
 **Note:** You can generate test cases from **any environment** which has all the infrastructure dependencies setup. Please consider using this to generate tests from low-traffic environments first. The deduplication feature necessary for high-traffic environments is currently experimental.   
 
