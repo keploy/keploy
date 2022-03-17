@@ -141,21 +141,21 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	offsetStr := r.URL.Query().Get("offset")
-	limitStr  := r.URL.Query().Get("limit")
+	limitStr := r.URL.Query().Get("limit")
 	var (
 		offset int
-		limit int
-		err error
+		limit  int
+		err    error
 	)
-	if offsetStr != ""{
+	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
-		if err!=nil{
+		if err != nil {
 			rg.logger.Error("request for fetching testcases in converting offset to integer")
 		}
 	}
-	if limitStr != ""{
+	if limitStr != "" {
 		limit, err = strconv.Atoi(limitStr)
-		if err!=nil{
+		if err != nil {
 			rg.logger.Error("request for fetching testcases in converting limit to integer")
 		}
 	}
@@ -182,7 +182,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	
+
 	// rg.logger.Debug("testcase posted",zap.Any("testcase request",data))
 
 	now := time.Now().UTC().Unix()
@@ -201,9 +201,9 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		rg.logger.Error("error putting testcase", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
-		
+
 	}
-	
+
 	// rg.logger.Debug("testcase inserted",zap.Any("testcase ids",inserted))
 	if len(inserted) == 0 {
 		rg.logger.Error("unknown failure while inserting testcase")
@@ -223,7 +223,7 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 	// 	render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
 	// 	return
 	// }
-	
+
 	data := &TestReq{}
 	if err := render.Bind(r, data); err != nil {
 		rg.logger.Error("error parsing request", zap.Error(err))

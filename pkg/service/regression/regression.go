@@ -20,7 +20,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool) *Regression {
 	return &Regression{
 		tdb:         tdb,
 		log:         log,
@@ -29,6 +29,7 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger) *Regression {
 		anchors:     map[string][]map[string][]string{},
 		noisyFields: map[string]map[string]bool{},
 		fieldCounts: map[string]map[string]map[string]int{},
+		EnableDeDup: EnableDeDup,
 	}
 }
 
@@ -54,6 +55,7 @@ type Regression struct {
 	// fieldCounts stores the count of all values of a particular field in an index.
 	// eg: lets say field is bloodGroup then the value would be {A+: 20, B+: 10,...}
 	fieldCounts map[string]map[string]map[string]int
+	EnableDeDup bool
 }
 
 func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
@@ -122,15 +124,18 @@ func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 func (r *Regression) putTC(ctx context.Context, cid string, t models.TestCase) (string, error) {
 	t.CID = cid
 
-	// check if already exists
-	dup, err := r.isDup(ctx, &t)
-	if err != nil {
-		r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-		return "", errors.New("internal failure")
-	}
-	if dup {
-		r.log.Info("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.URI))
-		return "", nil
+	var err error
+	if r.EnableDeDup {
+		// check if already exists
+		dup, err := r.isDup(ctx, &t)
+		if err != nil {
+			r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
+			return "", errors.New("internal failure")
+		}
+		if dup {
+			r.log.Info("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.URI))
+			return "", nil
+		}
 	}
 	err = r.tdb.Upsert(ctx, t)
 	if err != nil {
@@ -526,7 +531,6 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 	if err != nil {
 		return false, err
 	}
-
 
 	t.AllKeys = reqKeys
 	//var keys []string
