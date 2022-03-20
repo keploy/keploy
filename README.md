@@ -58,34 +58,46 @@ docker-compose pull
 ```
 
 ## Sample application
-The full demo is available here - https://github.com/keploy/example-url-shortener
-```shell
-git clone https://github.com/keploy/example-url-shortener && cd example-url-shortener
+Demos using Echo/PostgreSQL and Gin/MongoDB are available [here](https://github.com/keploy/samples-go). For this example, we will use the Echo/PostgreSQL sample.
+
+```bash
+git clone https://github.com/keploy/samples-go && cd samples-go/echo-sql
 go mod download
+```
+
+### Start PostgreSQL instance
+```bash
+docker-compose up -d
+```
+
+### Run the application
+```shell
 go run handler.go main.go
 ```
+
 ### Generate testcases
-To genereate testcases we just need to make some API calls. You can use Postman, Hoppscotch, or simply curl
+To genereate testcases we just need to make some API calls. You can use [Postman](https://www.postman.com/), [Hoppscotch](https://hoppscotch.io/), or simply `curl`
+
 #### 1. Generate shortned url
 ```shell
 curl --request POST \
   --url http://localhost:8080/url \
   --header 'content-type: application/json' \
   --data '{
-  "url": "https://google.com"
+  "url": "https://github.com"
 }'
 ```
 this will return the shortened url. The ts would automatically be ignored during testing because it'll always be different.
-```shell
+```json
 {
-  "ts": 1645540022,
-  "url": "http://localhost:8080/Lhr4BWAi"
+	"ts": 1647802058801841100,
+	"url": "http://localhost:8080/GuwHCgoQ"
 }
 ```
 #### 2. Redirect to original url from shortened url
-```shell
+```bash
 curl --request GET \
-  --url http://localhost:8080/Lhr4BWAi
+  --url http://localhost:8080/GuwHCgoQ
 ```
 
 ### Run the testcases
@@ -93,9 +105,9 @@ curl --request GET \
 ```shell
 go test -coverpkg=./... -covermode=atomic  ./...
 ```
-this should show you have 80.3% coverage without writing any code!
+this should show you have 74.4% coverage without writing any code!
 ```shell
-ok      test-app-url-shortener  6.268s  coverage: 80.3% of statements in ./...
+ok      echo-psql-url-shortener 5.820s  coverage: 74.4% of statements in ./...
 ```
 
 All of these can be visualised here - http://localhost:8081/testlist
