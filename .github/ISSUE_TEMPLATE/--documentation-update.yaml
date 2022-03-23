@@ -4,7 +4,6 @@ title: "docs📄: "
 labels: [docs]
 
 body:
-
   - type: checkboxes
     attributes:
       label: Is there an existing issue for this?
