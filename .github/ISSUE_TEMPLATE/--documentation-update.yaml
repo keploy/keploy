@@ -15,7 +15,4 @@ body:
     attributes:
       label: Where is this stated?
       description: "Please explain why the statement needs to be updated. This can be because it is confusing, incorrect, spelling/grammatical errors, etc."
-  - type: textarea
-    attributes:
-      label: Proposed Statement
      
