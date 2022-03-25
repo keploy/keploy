@@ -25,11 +25,12 @@ jobs:
 
       - name: Test
         run: |
-          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./... || true
+          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
           cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" > coverage.txt
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           KEPLOY_ENABLE_DEDUP: true
+
 #       - uses: codecov/codecov-action@v2
 #         with:
 #           files: ./coverage.txt
