@@ -51,7 +51,7 @@ func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) 
 }
 
 func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri string) ([]models.TestCase, error) {
-	filter := bson.M{"cid": cid, "app_id": app, uri: uri}
+	filter := bson.M{"cid": cid, "app_id": app, "uri": uri}
 	findOptions := options.Find()
 	findOptions.SetProjection(bson.M{"anchors": 1, "all_keys": 1})
 	return t.getAll(ctx, filter, findOptions)
@@ -84,7 +84,7 @@ func (t *testCaseDB) Exists(ctx context.Context, tc models.TestCase) (bool, erro
 	return false, nil
 }
 
-func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, field string) error {
+func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, filterKeys map[string][]string) error {
 	filters := bson.M{
 		"cid":    cid,
 		"app_id": app,
@@ -122,7 +122,7 @@ func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, f
 	//}
 
 	_, err := t.c.UpdateMany(ctx, filters, bson.M{
-		"$unset": bson.M{"anchors." + field: ""},
+		"$set": bson.M{"anchors": filterKeys},
 	})
 	if err != nil {
 		return err
@@ -175,6 +175,7 @@ func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, f
 	}
 
 	if len(dups) > 0 {
+		t.log.Info("duplicate testcases deleted", zap.Any("testcase ids: ", dups))
 		_, err = t.c.DeleteMany(ctx, bson.M{
 			"_id": bson.M{
 				"$in": dups,
