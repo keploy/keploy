@@ -29,7 +29,8 @@ jobs:
           cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" > coverage.txt
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-          ENABLE_DEDUP: true
+          KEPLOY_ENABLE_DEDUP: true
+
 #       - uses: codecov/codecov-action@v2
 #         with:
 #           files: ./coverage.txt
