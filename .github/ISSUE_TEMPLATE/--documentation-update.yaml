@@ -1,0 +1,18 @@
+name: Documentation Update📄
+description: Suggest an improvement/addition in the Keploy Server Docs.
+title: "docs📄: "
+labels: [docs]
+
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for taking the time to file a Documentation update.
+  - type: textarea
+    attributes:
+      label: What do you want to add to the docs? (please state reasons if any)
+      description: "Copy and paste the text currently in the documentation. If you want to improve graphs or photos, please provide a screenshot of the original."
+  - type: textarea
+    attributes:
+      label: Where is this stated?
+      description: "Please explain why the statement needs to be updated. This can be because it is confusing, incorrect, spelling/grammatical errors, etc."
+     
