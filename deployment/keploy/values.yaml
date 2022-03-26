@@ -1,24 +1,25 @@
-# Default values for api-server.
+# Default values for keploy.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
 replicaCount: 1
 
 image:
-  repository: slayerjain/keploy-api-server
-  pullPolicy: IfNotPresent
+  repository: ghcr.io/keploy/keploy
+  pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: ""
+  tag: "latest"
 
-command: ["/app/api"]
 httpPort: 8081
 
-imagePullSecrets: 
-  - name: "shubham-docker-secret-2"
+# imagePullSecrets: 
+#   - name: "shubham-docker-secret-2"
 nameOverride: ""
 fullnameOverride: ""
 
 env:
+  KEPLOY_MODE: "off"
+  KEPLOY_MONGO_URI: "mongodb://keploy-mongodb:27017"
 #  CLUSTER_TABLE: "hybridk8s-cluster-regression"
 
 serviceAccount:
@@ -84,3 +85,11 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# for production deployments it's recommended to disable this and use a production grade mongodb cluster
+mongodb:
+  enabled: true
+  auth:
+    enabled: false
+  service:
+    nameOverride: "keploy-mongo"
