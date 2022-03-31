@@ -1,12 +1,8 @@
 name: Go
 
 on:
-#  push:
-#    branches: [ main ]
-  pull_request:
+  push:
     branches: [ main ]
-#   pull_request_target:
-#     types: [assigned, opened, synchronize, reopened]
 
 jobs:
 
@@ -36,9 +32,9 @@ jobs:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           KEPLOY_ENABLE_DEDUP: true
 
-#       - uses: codecov/codecov-action@v2
-#         with:
-#           files: ./coverage.txt
+      #       - uses: codecov/codecov-action@v2
+      #         with:
+      #           files: ./coverage.txt
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
       - name: Send coverage
@@ -46,3 +42,6 @@ jobs:
           COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: goveralls -coverprofile=coverage.txt -service=github
 
+      - uses: codfish/semantic-release-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
