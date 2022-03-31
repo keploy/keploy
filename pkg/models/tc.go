@@ -25,6 +25,6 @@ type TestCaseDB interface {
 	GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]TestCase, error)
 	GetKeys(ctx context.Context, cid, app, uri string) ([]TestCase, error)
 	Exists(context.Context, TestCase) (bool, error)
-	DeleteByAnchor(ctx context.Context, cid, app, uri string, field string) error
+	DeleteByAnchor(ctx context.Context, cid, app, uri string, filterKeys map[string][]string) error
 	GetApps(ctx context.Context, cid string) ([]string, error)
 }

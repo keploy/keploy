@@ -36,6 +36,7 @@ type config struct {
 	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
 	APIKey        string `envconfig:"API_KEY"`
+	EnableDeDup   bool   `envconfig:"ENABLE_DEDUP" default:"false"`
 }
 
 func Server() *chi.Mux {
@@ -64,7 +65,7 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	regSrv := regression2.New(tdb, rdb, logger)
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup)
 	runSrv := run.New(rdb, tdb, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
@@ -76,9 +77,9 @@ func Server() *chi.Mux {
 		App: keploy.AppConfig{
 			Name: "Keploy-Test-App",
 			Port: port,
-			// Filter: keploy.Filter{
-			// 	UrlRegex: "^/api",
-			// },
+			Filter: keploy.Filter{
+				UrlRegex: "^/api",
+			},
 		},
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
