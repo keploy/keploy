@@ -189,10 +189,13 @@ We'd love to collaborate with you to make Keploy great. To get started:
 [![Generic badge](https://img.shields.io/badge/Twitter-blue.svg?style=for-the-badge)](https://twitter.com/Keployio)
 
 ## 📌 Our valuable Contributors👩‍💻👨‍💻 :
+## Contributors
+
+Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)): 
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
 <table>
   <tr>
-    <a href="https://github.com/keploy/keploy/graphs/contributors">
-      <img src="https://contrib.rocks/image?repo=keploy/keploy" />
-    </a>
-  </tr>
-</table>
+    <td align="center"><a href="https://github.com/slayerjain"><img src="https://avatars.githubusercontent.com/u/12831254?v=4" width="100px;" alt=""/><br /><sub><b>Shubham Jain</b></sub></a><br /><a href="#maintenance-slayerjain" title="Maintenance">🚧</a></td>
