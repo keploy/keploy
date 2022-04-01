@@ -199,3 +199,20 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <table>
   <tr>
     <td align="center"><a href="https://github.com/slayerjain"><img src="https://avatars.githubusercontent.com/u/12831254?v=4" width="100px;" alt=""/><br /><sub><b>Shubham Jain</b></sub></a><br /><a href="#maintenance-slayerjain" title="Maintenance">🚧</a></td>
+     <td align="center"><a href="https://github.com/Sarthak160"><img src="https://avatars.githubusercontent.com/u/50234097?v=4" width="100px;" alt=""/><br /><sub><b>Sarthak</b></sub></a><br /><a href="contributer-Sarthak160" title="Contributer">🚧</a></td>
+      <td align="center"><a href="https://github.com/re-Tick"><img src="https://avatars.githubusercontent.com/u/60597329?v=4" width="100px;" alt=""/><br /><sub><b>Ritik Jain</b></sub></a><br /><a href="#contributer-slayerjain" title="Contributer">🚧</a></td>
+       <td align="center"><a href="https://github.com/nehagup"><img src="https://avatars.githubusercontent.com/u/15074229?v=4" width="100px;" alt=""/><br /><sub><b>Neha Gupta</b></sub></a><br /><a href="#maintenance-nehagup" title="Maintenance">🚧</a></td>
+        <td align="center"><a href="https://github.com/Ayush7614"><img src="https://avatars.githubusercontent.com/u/12831254?v=4" width="100px;" alt=""/><br /><sub><b>Felix-Ayush</b></sub></a><br /><a href="#contributer-Ayush7614" title="Contributer">🚧</a></td>
+         <td align="center"><a href="https://github.com/madhavsikka"><img src="https://avatars.githubusercontent.com/u/39848688?v=4" width="100px;" alt=""/><br /><sub><b>Madhav Sikka</b></sub></a><br /><a href="#maintenance-madhavsikka" title="Contributer">🚧</a></td>
+          <td align="center"><a href="https://github.com/unnati914"><img src="https://avatars.githubusercontent.com/u/69121168?v=4" width="100px;" alt=""/><br /><sub><b>Unnati</b></sub></a><br /><a href="#contributer-unnati914" title="Contributer">🚧</a></td>
+           <td align="center"><a href="https://github.com/thunderboltsid"><img src="https://avatars.githubusercontent.com/u/6081171?v=4" width="100px;" alt=""/><br /><sub><b>Sid Shukla</b></sub></a><br /><a href="#contributer-thunderboltsid" title="Contributer">🚧</a></td>
+            <td align="center"><a href="https://github.com/petergeorgas"><img src="https://avatars.githubusercontent.com/u/21143531?v=4" width="100px;" alt=""/><br /><sub><b>Peter Georgas</b></sub></a><br /><a href="#contributer-petergeorgas" title="Contributer">🚧</a></td>
+             <td align="center"><a href="https://github.com/michaelgrigoryan25"><img src="https://avatars.githubusercontent.com/u/56165400?v=4" width="100px;" alt=""/><br /><sub><b>Michael Grigoryan</b></sub></a><br /><a href="#contributer-michaelgrigoryan25" title="Contributer">🚧</a></td>
+             <td align="center"><a href="https://github.com/skant7"><img src="https://avatars.githubusercontent.com/u/65185019?v=4" width="100px;" alt=""/><br /><sub><b>Surya Kant</b></sub></a><br /><a href="#contributer-skant7" title="Contributer">🚧</a></td>
+              </tr>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
