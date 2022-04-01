@@ -213,7 +213,8 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
               <td align="center"><a href="https://github.com/namantaneja167"><img src="https://avatars.githubusercontent.com/u/42579074?v=4" width="100px;" alt=""/><br /><sub><b>Naman Taneja</b></sub></a><br /><a href="#contributer-namantaneja167" title="Contributer">🚧</a></td>
               <td align="center"><a href="https://github.com/rajatsharma"><img src="https://avatars.githubusercontent.com/u/13231434?v=4" width="100px;" alt=""/><br /><sub><b>Rajat Sharma</b></sub></a><br /><a href="#contributer-rajatsharma" title="Contributer">🚧</a></td>
                <td align="center"><a href="https://github.com/nwf03"><img src="https://avatars.githubusercontent.com/u/36502791?v=4" width="100px;" alt=""/><br /><sub><b>Nawaf</b></sub></a><br /><a href="#contributer-nwf03" title="Contributer">🚧</a></td>
-              </tr>
+               <td align="center"><a href="https://github.com/praneshr"><img src="https://avatars.githubusercontent.com/u/10805204?v=4" width="100px;" alt=""/><br /><sub><b>Pranesh Ravi</b></sub></a><br /><a href="#contributer-praneshr" title="Contributer">🚧</a></td>
+               </tr>
 </table>
 
 <!-- markdownlint-restore -->
