@@ -17,8 +17,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check commit messages
-        uses: wagoid/commitlint-github-action@v4
+#      - name: Check commit messages
+#        uses: wagoid/commitlint-github-action@v4
 
       - name: Set up Go
         uses: actions/setup-go@v2
