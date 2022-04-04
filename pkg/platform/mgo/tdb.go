@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/telemetry"
 	"go.mongodb.org/mongo-driver/bson"
+
 	// "go.mongodb.org/mongo-driver/mongo"
+	"github.com/keploy/go-sdk/integrations/kmongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
-	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
 func NewTestCase(c *kmongo.Collection, log *zap.Logger) *testCaseDB {
@@ -46,6 +48,31 @@ func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) 
 		if ok {
 			apps = append(apps, s)
 		}
+	}
+
+	if telemetry.AnalyticDB != nil && telemetry.EnableTelemetry {
+		go func() {
+			meta := map[string]interface{}{
+				"Total-Apps": len(apps),
+			}
+			var (
+				testcases int64
+				testArr   []int64 = []int64{}
+			)
+			// form an array containg number of testcases of distinct app_ids
+			for _, app_id := range apps {
+				atcs, err := t.c.CountDocuments(context.TODO(), bson.M{"app_id": app_id})
+				if err != nil {
+					t.log.Error("failed to count total number of testcases", zap.Error(err))
+					return
+				}
+				testArr = append(testArr, atcs)
+				testcases += atcs
+			}
+			meta["Total-Testcases"] = testcases
+			meta["Testcases"] = testArr
+			telemetry.SendTelemetry("GetTC", t.log, meta)
+		}()
 	}
 	return apps, nil
 }

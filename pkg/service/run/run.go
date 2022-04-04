@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/telemetry"
 	"go.uber.org/zap"
 )
 
@@ -41,6 +42,9 @@ func (r *Run) Normalize(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("could not update testcase")
 	}
+	go func() {
+		telemetry.SendTelemetry("NormaliseTC", r.log)
+	}()
 	return nil
 }
 

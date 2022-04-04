@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/telemetry"
 	"go.uber.org/zap"
 )
 
@@ -74,6 +75,9 @@ func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to delete testcase from the DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
 		return errors.New("internal failure")
 	}
+	go func() {
+		telemetry.SendTelemetry("DeleteTC", r.log)
+	}()
 	return nil
 }
 
@@ -117,7 +121,9 @@ func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 			return errors.New("internal failure")
 		}
 	}
-
+	go func() {
+		telemetry.SendTelemetry("EditTC", r.log)
+	}()
 	return nil
 }
 

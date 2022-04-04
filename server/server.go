@@ -23,20 +23,23 @@ import (
 	"go.keploy.io/server/pkg/platform/mgo"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/telemetry"
 	"go.keploy.io/server/web"
+
 	"go.uber.org/zap"
 )
 
 // const defaultPort = "8080"
 
 type config struct {
-	MongoURI      string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
-	DB            string `envconfig:"DB" default:"keploy"`
-	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
-	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
-	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
-	APIKey        string `envconfig:"API_KEY"`
-	EnableDeDup   bool   `envconfig:"ENABLE_DEDUP" default:"false"`
+	MongoURI        string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
+	DB              string `envconfig:"DB" default:"keploy"`
+	TestCaseTable   string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
+	TestRunTable    string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
+	TestTable       string `envconfig:"TEST_TABLE" default:"tests"`
+	APIKey          string `envconfig:"API_KEY"`
+	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"false"`
+	EnableTelemetry bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
 }
 
 func Server() *chi.Mux {
@@ -81,14 +84,12 @@ func Server() *chi.Mux {
 				UrlRegex: "^/api",
 			},
 			Timeout: 80 * time.Second,
-
 		},
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
 			// URL: "http://localhost:8081/api",
 
 		},
-		
 	})
 
 	kchi.ChiV5(kApp, r)
@@ -114,5 +115,10 @@ func Server() *chi.Mux {
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
+
+	telemetry.EnableTelemetry = conf.EnableTelemetry
+	if keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry {
+		telemetry.PingTelemetry(db, logger)
+	}
 	return r
 }

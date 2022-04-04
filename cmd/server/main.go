@@ -1,9 +1,9 @@
 package main
 
 import (
+	"go.keploy.io/server/server"
 	"log"
 	"net/http"
-	"go.keploy.io/server/server"
 	// "github.com/go-chi/chi"
 )
 
