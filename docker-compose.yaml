@@ -2,7 +2,6 @@ version: "3.9"
 services:
   keploy:
     image: ghcr.io/keploy/keploy
-    container_name: keploy
     ports:
       - "8081:8081"
     environment:
