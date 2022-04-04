@@ -1,6 +1,7 @@
 version: "3.9"
 services:
   web:
+    container_name: keploy
     build: .
     ports:
       - "8081:8081"
