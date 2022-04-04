@@ -1,6 +1,6 @@
 version: "3.9"
 services:
-  web:
+  keploy:
     image: ghcr.io/keploy/keploy
     container_name: keploy
     ports:

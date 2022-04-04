@@ -1,6 +1,6 @@
 version: "3.9"
 services:
-  web:
+  keploy:
     container_name: keploy
     build: .
     ports:
