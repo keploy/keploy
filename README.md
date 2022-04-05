@@ -200,13 +200,13 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 
 ### Prod
 
-<a href="https://github.com/keploy/keploy/contributors-img/graphs/contributors">
+<a href="https://github.com/keploy/contributors-img/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=keploy/contributors-img" />
 </a>
 
 ### Staging
 
-<a href="https://github.com/keploy/keploy/contributors-img/graphs/contributors">
+<a href="https://github.com/keploy/contributors-img/graphs/contributors">
   <img src="https://stg.contrib.rocks/image?repo=keploy/contributors-img" />
 </a>
 
