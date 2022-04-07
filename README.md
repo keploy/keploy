@@ -155,6 +155,8 @@ We'd love to collaborate with you to make Keploy great. To get started:
 [![Generic badge](https://img.shields.io/badge/Youtube-teal.svg?style=for-the-badge)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Generic badge](https://img.shields.io/badge/Twitter-blue.svg?style=for-the-badge)](https://twitter.com/Keployio)
 
+## 📌 Our valuable Contributors👩‍💻👨‍💻 :
+
 Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)): 
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->
@@ -177,8 +179,6 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <td align="center"><a href="https://github.com/namantaneja167"><img src="https://avatars.githubusercontent.com/u/42579074?v=4" width="100px;" alt=""/><br /><sub><b>Naman Taneja</b></sub></a><br /><a href="#contributer-namantaneja167" title="Contributer">🚧</a></td>
 <td align="center"><a href="https://github.com/rajatsharma"><img src="https://avatars.githubusercontent.com/u/13231434?v=4" width="100px;" alt=""/><br /><sub><b>Rajat Sharma</b></sub></a><br /><a href="#contributer-rajatsharma" title="Contributer">🚧</a></td>
 <td align="center"><a href="https://github.com/nwf03"><img src="https://avatars.githubusercontent.com/u/36502791?v=4" width="100px;" alt=""/><br /><sub><b>Nawaf</b></sub></a><br /><a href="#contributer-nwf03" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/praneshr"><img src="https://avatars.githubusercontent.com/u/10805204?v=4" width="100px;" alt=""/><br /><sub><b>Pranesh Ravi</b></sub></a><br /><a href="#contributer-praneshr" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/orevron"><img src="https://avatars.githubusercontent.com/u/20145882?v=4" width="100px;" alt=""/><br /><sub><b>Or Evron</b></sub></a><br /><a href="#contributer-orevron" title="Contributer">🚧</a></td>
 
 </tr>
 </table>
