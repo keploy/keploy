@@ -1,6 +1,6 @@
 version: "3.9"
 services:
-  web:
+  keploy:
     image: ghcr.io/keploy/keploy
     ports:
       - "8081:8081"
