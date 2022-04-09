@@ -5,10 +5,9 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/service/run"
-	"go.keploy.io/server/telemetry"
+
 	"go.mongodb.org/mongo-driver/bson"
 
-	// "go.mongodb.org/mongo-driver/mongo"
 	"github.com/keploy/go-sdk/integrations/kmongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
@@ -159,25 +158,6 @@ func (r *RunDB) Upsert(ctx context.Context, testRun run.TestRun) error {
 	if err != nil {
 		//t.log.Error("failed to insert testcase into DB", zap.String("cid", tc.CID), zap.String("appid", tc.AppID), zap.String("id", tc.ID), zap.Error())
 		return err
-	}
-	if telemetry.AnalyticDB != nil && telemetry.EnableTelemetry {
-		go func() {
-			sr := r.c.FindOne(context.TODO(), bson.M{"_id": testRun.ID})
-			if sr.Err() != nil {
-				r.log.Error("failed to get the testrun", zap.Error(err))
-				return
-			}
-			var tc *run.TestRun
-			err = sr.Decode(&tc)
-			if err != nil {
-				r.log.Error("failed to get the testrun", zap.Error(err))
-				return
-			}
-			// insert telemetry only on End http call
-			if tc.Success > 0 || tc.Failure > 0 {
-				telemetry.SendTelemetry("TestRun", r.log, map[string]interface{}{"Passed-Tests": tc.Success, "Failed-Tests": tc.Failure})
-			}
-		}()
 	}
 	return nil
 }

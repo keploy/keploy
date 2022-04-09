@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"net/http"
 	"time"
+
 	// "log"
 	// "fmt"
 	// "context"
@@ -21,9 +22,9 @@ import (
 	"go.keploy.io/server/graph/generated"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
-	"go.keploy.io/server/telemetry"
 	"go.keploy.io/server/web"
 
 	"go.uber.org/zap"
@@ -68,8 +69,10 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup)
-	runSrv := run.New(rdb, tdb, logger)
+	analyticsConfig := telemetry.NewAnalyticsConfig(db, keploy.GetMode() == keploy.MODE_TEST, conf.EnableTelemetry, logger)
+
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig)
+	runSrv := run.New(rdb, tdb, logger, analyticsConfig)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
@@ -116,9 +119,9 @@ func Server() *chi.Mux {
 		r.Handle("/query", srv)
 	})
 
-	telemetry.EnableTelemetry = conf.EnableTelemetry
-	if keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry {
-		telemetry.PingTelemetry(db, logger)
-	}
+	analyticsConfig.PingTelemetry()
+	// telemetry.EnableTelemetry = conf.EnableTelemetry
+	// if keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry {
+	// }
 	return r
 }

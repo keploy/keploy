@@ -16,14 +16,15 @@ import (
 	"github.com/google/uuid"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/run"
-	"go.keploy.io/server/telemetry"
 	"go.uber.org/zap"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.AnalyticsConfig) *Regression {
 	return &Regression{
 		tdb:         tdb,
+		adb:         adb,
 		log:         log,
 		rdb:         rdb,
 		mu:          sync.Mutex{},
@@ -36,7 +37,7 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool) *
 
 type Regression struct {
 	tdb models.TestCaseDB
-
+	adb telemetry.AnalyticsConfig
 	rdb run.DB
 	log *zap.Logger
 	mu  sync.Mutex
@@ -75,14 +76,20 @@ func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to delete testcase from the DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
 		return errors.New("internal failure")
 	}
-	go func() {
-		telemetry.SendTelemetry("DeleteTC", r.log)
-	}()
+
+	r.adb.DeleteTcTelemetry()
+	// go func() {
+	// 	telemetry.SendTelemetry("DeleteTC", r.log)
+	// }()
 	return nil
 }
 
 func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) {
-	return r.tdb.GetApps(ctx, cid)
+	apps, err := r.tdb.GetApps(ctx, cid)
+	if apps != nil {
+		r.adb.GetAppsTelemetry(len(apps))
+	}
+	return apps, err
 }
 
 func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
@@ -121,9 +128,11 @@ func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 			return errors.New("internal failure")
 		}
 	}
-	go func() {
-		telemetry.SendTelemetry("EditTC", r.log)
-	}()
+
+	r.adb.EditTcTelemetry()
+	// go func() {
+	// 	telemetry.SendTelemetry("EditTC", r.log)
+	// }()
 	return nil
 }
 
