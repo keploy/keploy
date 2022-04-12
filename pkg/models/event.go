@@ -6,9 +6,10 @@ import (
 )
 
 type Event struct {
-	InstallationID string                 `json:"installationId" bson:"installationId,omitempty"`
-	EventType      string                 `json:"eventType" bson:"eventType,omitempty"`
-	Meta           map[string]interface{} `json:"meta" bson:"meta"`
+	InstallationID string                 `json:"installationId"`
+	EventType      string                 `json:"eventType"`
+	Meta           map[string]interface{} `json:"meta"`
+	CreatedAt      int64                  `json:"createdAt"`
 }
 
 func (e *Event) Bind(r *http.Request) error {

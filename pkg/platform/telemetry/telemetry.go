@@ -12,29 +12,24 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	AnalyticDB      *mongo.Collection
-	EnableTelemetry bool
-)
-
-type AnalyticsConfig struct {
+type TelemetryConfig struct {
 	AnalyticDB      DB
 	EnableTelemetry bool
 	logger          *zap.Logger
 }
 
-func NewAnalyticsConfig(db *mongo.Database, isTestMode bool, enableTelemetry bool, logger *zap.Logger) AnalyticsConfig {
-	adb := AnalyticsConfig{
+func NewTelemetryConfig(db *mongo.Database, isTestMode bool, enableTelemetry bool, logger *zap.Logger) TelemetryConfig {
+	adb := TelemetryConfig{
 		EnableTelemetry: enableTelemetry,
 		logger:          logger,
 	}
 	if !isTestMode && enableTelemetry {
-		adb.AnalyticDB = NewAnalyticsDB(db, isTestMode, enableTelemetry, logger)
+		adb.AnalyticDB = NewTelemetryDB(db, isTestMode, enableTelemetry, logger)
 	}
 	return adb
 }
 
-func (ac *AnalyticsConfig) PingTelemetry() {
+func (ac *TelemetryConfig) PingTelemetry() {
 	if ac.AnalyticDB == nil || !ac.EnableTelemetry {
 		return
 	}
@@ -46,6 +41,7 @@ func (ac *AnalyticsConfig) PingTelemetry() {
 			}
 			event := models.Event{
 				EventType: "Ping",
+				CreatedAt: time.Now().Unix(),
 			}
 			if count == 0 {
 				bin, err := marshalEvent(event, ac.logger)
@@ -72,7 +68,7 @@ func (ac *AnalyticsConfig) PingTelemetry() {
 
 }
 
-func (ac *AnalyticsConfig) NormalizeTelemetry() {
+func (ac *TelemetryConfig) NormalizeTelemetry() {
 	if ac.AnalyticDB == nil || !ac.EnableTelemetry {
 		return
 	}
@@ -81,7 +77,7 @@ func (ac *AnalyticsConfig) NormalizeTelemetry() {
 	}()
 }
 
-func (ac *AnalyticsConfig) DeleteTcTelemetry() {
+func (ac *TelemetryConfig) DeleteTcTelemetry() {
 	if ac.AnalyticDB == nil || !ac.EnableTelemetry {
 		return
 	}
@@ -90,7 +86,7 @@ func (ac *AnalyticsConfig) DeleteTcTelemetry() {
 	}()
 }
 
-func (ac *AnalyticsConfig) EditTcTelemetry() {
+func (ac *TelemetryConfig) EditTcTelemetry() {
 	if ac.AnalyticDB == nil || !ac.EnableTelemetry {
 		return
 	}
@@ -99,7 +95,7 @@ func (ac *AnalyticsConfig) EditTcTelemetry() {
 	}()
 }
 
-func (ac *AnalyticsConfig) TestrunTelemetry(success int, failure int) {
+func (ac *TelemetryConfig) TestrunTelemetry(success int, failure int) {
 	if ac.AnalyticDB == nil || !ac.EnableTelemetry {
 		return
 	}
@@ -108,7 +104,7 @@ func (ac *AnalyticsConfig) TestrunTelemetry(success int, failure int) {
 	}()
 }
 
-func (ac *AnalyticsConfig) GetAppsTelemetry(apps int) {
+func (ac *TelemetryConfig) GetAppsTelemetry(apps int) {
 	if ac.AnalyticDB == nil || !ac.EnableTelemetry {
 		return
 	}
@@ -117,10 +113,11 @@ func (ac *AnalyticsConfig) GetAppsTelemetry(apps int) {
 	}()
 }
 
-func (ac *AnalyticsConfig) SendTelemetry(eventType string, output ...map[string]interface{}) {
+func (ac *TelemetryConfig) SendTelemetry(eventType string, output ...map[string]interface{}) {
 	if ac.AnalyticDB != nil && ac.EnableTelemetry {
 		event := models.Event{
 			EventType: eventType,
+			CreatedAt: time.Now().Unix(),
 		}
 		// only 1 or no meta is passed in output array parameter
 		if len(output) == 1 {
