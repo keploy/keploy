@@ -38,6 +38,7 @@ type config struct {
 	TestCaseTable   string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
 	TestRunTable    string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
 	TestTable       string `envconfig:"TEST_TABLE" default:"tests"`
+	TelemetryTable  string `envconfig:"TELEMETRY_TABLE" default:"telemetry"`
 	APIKey          string `envconfig:"API_KEY"`
 	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"false"`
 	EnableTelemetry bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
@@ -69,7 +70,8 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	analyticsConfig := telemetry.NewTelemetryConfig(db, keploy.GetMode() == keploy.MODE_TEST, conf.EnableTelemetry, logger)
+	enabled := keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, logger)
 
 	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig)
 	runSrv := run.New(rdb, tdb, logger, analyticsConfig)
@@ -119,9 +121,6 @@ func Server() *chi.Mux {
 		r.Handle("/query", srv)
 	})
 
-	analyticsConfig.PingTelemetry()
-	// telemetry.EnableTelemetry = conf.EnableTelemetry
-	// if keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry {
-	// }
+	analyticsConfig.Ping()
 	return r
 }

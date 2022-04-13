@@ -21,7 +21,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.TelemetryConfig) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb *telemetry.Telemetry) *Regression {
 	return &Regression{
 		tdb:         tdb,
 		adb:         adb,
@@ -37,7 +37,7 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, a
 
 type Regression struct {
 	tdb models.TestCaseDB
-	adb telemetry.TelemetryConfig
+	adb *telemetry.Telemetry
 	rdb run.DB
 	log *zap.Logger
 	mu  sync.Mutex
@@ -77,17 +77,14 @@ func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
 		return errors.New("internal failure")
 	}
 
-	r.adb.DeleteTcTelemetry()
-	// go func() {
-	// 	telemetry.SendTelemetry("DeleteTC", r.log)
-	// }()
+	r.adb.DeleteTc()
 	return nil
 }
 
 func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) {
 	apps, err := r.tdb.GetApps(ctx, cid)
 	if apps != nil {
-		r.adb.GetAppsTelemetry(len(apps))
+		r.adb.GetApps(len(apps))
 	}
 	return apps, err
 }
@@ -129,10 +126,7 @@ func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 		}
 	}
 
-	r.adb.EditTcTelemetry()
-	// go func() {
-	// 	telemetry.SendTelemetry("EditTC", r.log)
-	// }()
+	r.adb.EditTc()
 	return nil
 }
 

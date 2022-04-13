@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.TelemetryConfig) *Run {
+func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb *telemetry.Telemetry) *Run {
 	return &Run{
 		adb: adb,
 		rdb: rdb,
@@ -20,7 +20,7 @@ func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Telemetry
 }
 
 type Run struct {
-	adb telemetry.TelemetryConfig
+	adb *telemetry.Telemetry
 	rdb DB
 	tdb models.TestCaseDB
 	log *zap.Logger
@@ -45,10 +45,7 @@ func (r *Run) Normalize(ctx context.Context, cid, id string) error {
 		return errors.New("could not update testcase")
 	}
 
-	r.adb.NormalizeTelemetry()
-	// go func() {
-	// 	telemetry.SendTelemetry("NormaliseTC", r.log)
-	// }()
+	r.adb.Normalize()
 	return nil
 }
 
@@ -91,7 +88,7 @@ func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *
 func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 	for _, tr := range trs {
 		if tr.Status != TestRunStatusRunning {
-			r.adb.TestrunTelemetry(tr.Success, tr.Failure)
+			r.adb.Testrun(tr.Success, tr.Failure)
 			continue
 		}
 		tests, err1 := r.rdb.ReadTests(ctx, tr.ID)
