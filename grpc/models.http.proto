@@ -1,0 +1,25 @@
+syntax = "proto3";
+package models;
+
+// message MessageName {
+//   repeated int64 b = 1;
+//   bytes c = 2;
+// }
+message Method {
+    string Method = 1;
+}
+message HttpReq {
+    string Method = 1;
+    int64 ProtoMajor = 2;
+    int64 ProtoMinor = 3;
+    string URL = 4;
+    map<string,string> URLParams = 5;
+    map<string,string> Header = 6;
+    string Body = 7;
+}
+
+message HttpResp {
+    string StatusCode = 1;
+    string Header  = 2;
+    string Body = 3; 
+}

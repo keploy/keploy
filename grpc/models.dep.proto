@@ -1,0 +1,13 @@
+syntax = "proto3";
+package models;
+
+message Dependency {
+    string Name = 1;
+    DependencyType Type = 2;
+    map<string,string> Meta = 3;
+    bytes Data = 4;
+}
+
+message DependencyType{
+    string DependencyType = 1;
+}

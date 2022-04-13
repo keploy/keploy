@@ -1,0 +1,26 @@
+syntax = "proto3";
+import public "grpc/models.http.proto";
+import "grpc/models.dep.proto";
+package proto;
+
+message TestCaseReq {
+    int64 Captured = 1; 
+    string AppID = 2;
+    string URI = 3;
+    models.HttpReq HttpReq = 4;
+    models.HttpResp HttpResp = 5;
+    models.Dependency Dependency = 6;
+  }
+
+// message abc {
+//     map<string,int> a = 1; 
+// }
+
+
+message TestReq {
+    string ID = 1; 
+    string AppID = 2;
+    string RunID = 3;
+    models.HttpResp Resp = 4;
+  }
+  
