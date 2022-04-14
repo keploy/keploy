@@ -21,7 +21,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb *telemetry.Telemetry) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service) *Regression {
 	return &Regression{
 		tdb:         tdb,
 		adb:         adb,
@@ -37,7 +37,7 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, a
 
 type Regression struct {
 	tdb models.TestCaseDB
-	adb *telemetry.Telemetry
+	adb telemetry.Service
 	rdb run.DB
 	log *zap.Logger
 	mu  sync.Mutex

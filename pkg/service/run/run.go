@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb *telemetry.Telemetry) *Run {
+func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service) *Run {
 	return &Run{
 		adb: adb,
 		rdb: rdb,
@@ -20,7 +20,7 @@ func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb *telemetry.Telemetr
 }
 
 type Run struct {
-	adb *telemetry.Telemetry
+	adb telemetry.Service
 	rdb DB
 	tdb models.TestCaseDB
 	log *zap.Logger
