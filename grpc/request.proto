@@ -1,4 +1,5 @@
 syntax = "proto3";
+option go_package = "go.keploy.io/server/grpc/regression";
 import public "grpc/models.http.proto";
 import "grpc/models.dep.proto";
 package proto;

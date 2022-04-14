@@ -1,11 +1,16 @@
 syntax = "proto3";
+option go_package = "go.keploy.io/server/grpc/regression";
 package models;
 
 message Dependency {
     string Name = 1;
     DependencyType Type = 2;
     map<string,string> Meta = 3;
-    bytes Data = 4;
+    repeated DataBytes Data = 4;
+}
+
+message DataBytes {
+    bytes Bin = 1;
 }
 
 message DependencyType{

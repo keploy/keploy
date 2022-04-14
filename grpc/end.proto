@@ -1,0 +1,17 @@
+syntax = "proto3";
+option go_package = "go.keploy.io/server/grpc/regression";
+package end;
+
+message endrequest {
+    string status = 1;
+    string id = 2;
+}
+
+message endresponse {
+    string message = 1;
+}
+
+service EndService{
+    rpc End (endrequest) returns (endresponse);
+}
+

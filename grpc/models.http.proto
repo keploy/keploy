@@ -1,4 +1,5 @@
 syntax = "proto3";
+option go_package = "go.keploy.io/server/grpc/regression";
 package models;
 
 // message MessageName {
@@ -14,8 +15,12 @@ message HttpReq {
     int64 ProtoMinor = 3;
     string URL = 4;
     map<string,string> URLParams = 5;
-    map<string,string> Header = 6;
+    map<string, HeaderVal> Header = 6;
     string Body = 7;
+}
+
+message HeaderVal {
+    repeated string Value = 1;
 }
 
 message HttpResp {

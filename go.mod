@@ -16,13 +16,13 @@ require (
 	github.com/vektah/gqlparser/v2 v2.3.1
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.21.0
+	google.golang.org/protobuf v1.28.0
 )
 
 require (
 	github.com/golang/protobuf v1.5.2 // indirect
 	golang.org/x/net v0.0.0-20211209124913-491a49abca63 // indirect
 	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
-	google.golang.org/protobuf v1.26.0 // indirect
 )
 
 require (
