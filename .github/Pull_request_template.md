@@ -40,6 +40,6 @@ Example how to mark a checkbox:-
 
 ## Screenshots (if any)
 
- Original           | Updated
- :--------------------: |:--------------------:
- **original screenshot**  | <b>updated screenshot </b> |
+|        Original         |          Updated           |
+|:-----------------------:|:--------------------------:|
+| **original screenshot** | <b>updated screenshot </b> |
