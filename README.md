@@ -19,6 +19,12 @@ Dependency-mocks are automatically generated with the recorded request/responses
 > Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main)](https://coveralls.io/github/keploy/keploy?branch=main) &nbsp;  without writing any test-cases and data-mocks. 😎
 <a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
 
+## Quick Start
+The fastest way to start with Keploy is the Gitpod-hosted version. When you're ready, you can install locally or host yourself.
+
+One-click deploy sample URL Shortener application sample with Keploy using Gitpod 
+
+[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/keploy/samples-go)
 
 ## Features
 **Convert API calls from any source to Test-Case** : Keploy captures all the API calls and subsequent network traffic served by the application. You can use any existing API management tools like Postman, Hoppscotch, Curl to generate test-case.
