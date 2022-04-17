@@ -62,7 +62,7 @@ docker-compose up
 The UI can be accessed at http://localhost:8081
 
 ### Helm chart
-Keploy can also be installed to your your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
+Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
 
 ### Run Sample application
 Demos using Echo/PostgreSQL and Gin/MongoDB are available [here](https://github.com/keploy/samples-go). For this example, we will use the Echo/PostgreSQL sample.
