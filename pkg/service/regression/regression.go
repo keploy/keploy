@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,11 +83,19 @@ func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) 
 	return r.tdb.GetApps(ctx, cid)
 }
 
-func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
+// sanitiseInput sanitises user input strings before logging them for safety, removing newlines
+// and escaping HTML tags. This is to prevent log injection, including forgery of log records.
+// Reference: https://www.owasp.org/index.php/Log_Injection
+func sanitiseInput(s string) string {
+	re := regexp.MustCompile(`(\n|\n\r|\r\n|\r)`)
+	return html.EscapeString(string(re.ReplaceAll([]byte(s), []byte(""))))
+}
 
+func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
 	tcs, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", appID), zap.Error(err))
+		sanitizedAppID := sanitiseInput(appID)
+		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
 		return models.TestCase{}, errors.New("internal failure")
 	}
 	return tcs, nil
@@ -103,7 +113,8 @@ func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int,
 	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
 
 	if err != nil {
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", appID), zap.Error(err))
+		sanitizedAppID := sanitiseInput(appID)
+		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
 		return nil, errors.New("internal failure")
 	}
 	return tcs, nil
