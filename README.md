@@ -62,7 +62,7 @@ docker-compose up
 The UI can be accessed at http://localhost:8081
 
 ### Helm chart
-Keploy can also be installed to your your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
+Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
 
 ### Run Sample application
 Demos using Echo/PostgreSQL and Gin/MongoDB are available [here](https://github.com/keploy/samples-go). For this example, we will use the Echo/PostgreSQL sample.
@@ -184,6 +184,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <td align="center"><a href="https://github.com/mahi-official"><img src="https://avatars.githubusercontent.com/u/25299699?v=4" width="100px;" alt=""/><br /><sub><b>Mahesh Gupta</b></sub></a><br /><a href="#contributer-mahi-official" title="Contributer">🚧</a></td>
 <td align="center"><a href="https://github.com/namantaneja167"><img src="https://avatars.githubusercontent.com/u/42579074?v=4" width="100px;" alt=""/><br /><sub><b>Naman Taneja</b></sub></a><br /><a href="#contributer-namantaneja167" title="Contributer">🚧</a></td>
 <td align="center"><a href="https://github.com/rajatsharma"><img src="https://avatars.githubusercontent.com/u/13231434?v=4" width="100px;" alt=""/><br /><sub><b>Rajat Sharma</b></sub></a><br /><a href="#contributer-rajatsharma" title="Contributer">🚧</a></td>
+<td align="center"><a href="https://github.com/Akshit42-hue"><img src="https://avatars.githubusercontent.com/u/59443454?v=4" width="100px;" alt=""/><br /><sub><b>Axit Patel</b></sub></a><br /><a href="#contributer-Akshit42-hue" title="Contributer">🚧</a></td>
 
 </tr>
 </table>
