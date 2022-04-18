@@ -83,6 +83,9 @@ func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) 
 	return r.tdb.GetApps(ctx, cid)
 }
 
+// sanitiseInput sanitises user input strings before logging them for safety, removing newlines
+// and escaping HTML tags. This is to prevent log injection, including forgery of log records.
+// Reference: https://www.owasp.org/index.php/Log_Injection
 func sanitiseInput(s string) string {
 	re := regexp.MustCompile(`(\n|\n\r|\r\n|\r)`)
 	return html.EscapeString(string(re.ReplaceAll([]byte(s), []byte(""))))
