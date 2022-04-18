@@ -85,7 +85,7 @@ func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) 
 
 func sanitiseInput(s string) string {
 	re := regexp.MustCompile(`(\n|\n\r|\r\n|\r)`)
-	return html.EscapeString(string(re.ReplaceAll([]byte(s), []byte(" "))))
+	return html.EscapeString(string(re.ReplaceAll([]byte(s), []byte(""))))
 }
 
 func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
