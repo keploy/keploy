@@ -70,10 +70,10 @@ func Server() *chi.Mux {
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
-	// initialize the client serveri
+	// initialize the client server for testing keploy itself
 	r := chi.NewRouter()
 	port := "8081"
-	kApp := keploy.New(keploy.Config{
+	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
 			Name: "Keploy-Test-App",
 			Port: port,
@@ -90,8 +90,8 @@ func Server() *chi.Mux {
 		},
 		
 	})
-
-	kchi.ChiV5(kApp, r)
+	// r.Use(kchi.ChiMiddlewareV5(k))
+	kchi.ChiV5(k, r)
 
 	r.Use(cors.Handler(cors.Options{
 

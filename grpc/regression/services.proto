@@ -1,0 +1,56 @@
+syntax = "proto3";
+option go_package = "go.keploy.io/server/grpc/regression";
+import public "grpc/regression/request.proto";
+package services;
+
+message endRequest {
+    string status = 1;
+    string id = 2;
+}
+
+message endResponse {
+    string message = 1;
+}
+
+message startRequest {
+    string total = 1;
+    string app = 2;
+}
+
+message startResponse {
+    string id = 1;
+}
+
+message getTCRequest {
+    string id = 1;
+    string app = 2;
+}
+message getTCSRequest{
+    string app = 1;
+    string  offset = 2;
+    string limit  = 3;
+}
+message getTCSResponse{
+    repeated proto.TestCase tcs = 1; 
+}
+message postTCResponse{
+    map<string,string> tcsId = 1;
+}
+message deNoiseResponse {
+    string message = 1;
+}
+message testResponse{
+    map<string,bool> pass = 1;
+}
+
+
+service GrpcService{
+    rpc End (endRequest) returns (endResponse);
+    rpc Start (startRequest) returns (startResponse);
+    rpc GetTC (getTCRequest) returns (proto.TestCase);
+    rpc GetTCS (getTCSRequest) returns (getTCSResponse);
+    rpc PostTC (proto.TestCaseReq) returns (postTCResponse);
+    rpc DeNoise (proto.TestReq) returns(deNoiseResponse);
+    rpc Test (proto.TestReq) returns (testResponse);
+}
+

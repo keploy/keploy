@@ -1,0 +1,42 @@
+syntax = "proto3";
+option go_package = "go.keploy.io/server/grpc/regression";
+import public "grpc/regression/models.http.proto";
+import "grpc/regression/models.dep.proto";
+package proto;
+
+message TestCaseReq {
+    int64 Captured = 1; 
+    string AppID = 2;
+    string URI = 3;
+    models.HttpReq HttpReq = 4;
+    models.HttpResp HttpResp = 5;
+    repeated models.Dependency Dependency = 6;
+  }
+
+// message abc {
+//     map<string,int> a = 1; 
+// }
+
+
+message TestReq {
+  string ID = 1; 
+  string AppID = 2;
+  string RunID = 3;
+  models.HttpResp Resp = 4;
+}
+  
+message TestCase {
+  string id = 1;
+  int64 created = 2;
+  int64 updated = 3;
+  int64 captured = 4;
+  string CID = 5;
+  string appID = 6;
+  string URI = 7;
+  models.HttpReq HttpReq = 8;
+  models.HttpResp HttpResp = 9;
+  repeated models.Dependency Deps = 10;
+  map<string, models.StrArr> allKeys = 11;
+  map<string, models.StrArr> anchors = 12;
+  repeated string noise = 13;
+}

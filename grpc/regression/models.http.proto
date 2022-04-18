@@ -15,16 +15,16 @@ message HttpReq {
     int64 ProtoMinor = 3;
     string URL = 4;
     map<string,string> URLParams = 5;
-    map<string, HeaderVal> Header = 6;
+    map<string, StrArr> Header = 6;
     string Body = 7;
 }
 
-message HeaderVal {
+message StrArr {
     repeated string Value = 1;
 }
 
 message HttpResp {
-    string StatusCode = 1;
-    string Header  = 2;
+    int64 StatusCode = 1;
+    map<string, StrArr> Header  = 2;
     string Body = 3; 
 }
