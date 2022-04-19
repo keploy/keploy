@@ -1,5 +1,5 @@
 # build ui
-FROM node:14-bullseye as ui-builder
+FROM --platform=${BUILDPLATFORM} node:14-bullseye as ui-builder
 
 #RUN apt-get update && apt-get install libvips-dev -y
 
@@ -14,7 +14,7 @@ RUN npm install
 RUN gatsby build
 
 # build stage
-FROM golang:alpine as go-builder
+FROM --platform=${BUILDPLATFORM} golang:alpine as go-builder
 
 RUN apk add -U --no-cache ca-certificates && apk add build-base
 
@@ -38,7 +38,7 @@ COPY --from=ui-builder /ui/public /app/web/public
 RUN CGO_ENABLED=0 GOOS=linux go build -o keploy cmd/server/main.go
 
 # final stage
-FROM alpine
+FROM --platform=${BUILDPLATFORM} alpine
 COPY --from=alpine /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 #COPY --from=builder /app/health /app/
 COPY --from=go-builder /app/keploy /app/
