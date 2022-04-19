@@ -21,7 +21,7 @@ RUN apk add -U --no-cache ca-certificates && apk add build-base
 ENV GO111MODULE=on
 
 # Build Delve
-RUN GOOS=linux GOARCH=${BUILDPLATFORM} go install github.com/go-delve/delve/cmd/dlv@latest
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
 
 WORKDIR /app
 
@@ -35,7 +35,7 @@ COPY . .
 COPY --from=ui-builder /ui/public /app/web/public
 
 #RUN CGO_ENABLED=0 GOOS=linux go build -o health cmd/health/main.go
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${BUILDPLATFORM} go build -o keploy cmd/server/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o keploy cmd/server/main.go
 
 # final stage
 FROM --platform=${BUILDPLATFORM} alpine
