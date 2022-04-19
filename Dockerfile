@@ -32,7 +32,6 @@ RUN go mod download
 
 COPY . .
 
-# @todo: can't this be moved below?
 COPY --from=ui-builder /ui/public /app/web/public
 
 #RUN CGO_ENABLED=0 GOOS=linux go build -o health cmd/health/main.go
