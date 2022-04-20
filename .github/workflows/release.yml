@@ -42,11 +42,11 @@ jobs:
           COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: goveralls -coverprofile=coverage.txt -service=github
 
-#      - name: Install extra dependencies
-#        run: npm install -g @semantic-release/exec
-      - uses: codfish/semantic-release-action@additional-packages
-        with:
-          additional_packages: |
-            ['@semantic-release/exec']
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# #      - name: Install extra dependencies
+# #        run: npm install -g @semantic-release/exec
+#       - uses: codfish/semantic-release-action@additional-packages
+#         with:
+#           additional_packages: |
+#             ['@semantic-release/exec']
+#         env:
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
