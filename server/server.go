@@ -1,14 +1,12 @@
 package server
 
 import (
+	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"time"
-	// "log"
-	// "fmt"
-	// "context"
-	// "go.mongodb.org/mongo-driver/mongo/options"
-	// "go.mongodb.org/mongo-driver/mongo"
+
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
@@ -17,14 +15,17 @@ import (
 	"github.com/keploy/go-sdk/integrations/kchi"
 	"github.com/keploy/go-sdk/integrations/kmongo"
 	"github.com/keploy/go-sdk/keploy"
+	"github.com/soheilhy/cmux"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
+	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // const defaultPort = "8080"
@@ -70,10 +71,10 @@ func Server() *chi.Mux {
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
-	// initialize the client server for testing keploy itself
+	// initialize the client serveri
 	r := chi.NewRouter()
 	port := "8081"
-	k := keploy.New(keploy.Config{
+	kApp := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
 			Name: "Keploy-Test-App",
 			Port: port,
@@ -81,17 +82,14 @@ func Server() *chi.Mux {
 				UrlRegex: "^/api",
 			},
 			Timeout: 80 * time.Second,
-
 		},
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
 			// URL: "http://localhost:8081/api",
 
 		},
-		
 	})
-	// r.Use(kchi.ChiMiddlewareV5(k))
-	kchi.ChiV5(k, r)
+	kchi.ChiV5(kApp, r)
 
 	r.Use(cors.Handler(cors.Options{
 
@@ -114,5 +112,29 @@ func Server() *chi.Mux {
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
+
+	listener, err := net.Listen("tcp", ":8081")
+	if err != nil {
+		panic(err)
+	}
+
+	m := cmux.New(listener)
+	grpcListener := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
+
+	httpListener := m.Match(cmux.HTTP1Fast())
+
+	log.Println("connect to http://localhost:8081/ for GraphQL playground")
+	
+	g := new(errgroup.Group)
+	g.Go(func() error { return grpcserver.New(logger, regSrv, runSrv, grpcListener) })
+	
+	g.Go(func() error {
+		srv := http.Server{Handler: r}
+		err := srv.Serve(httpListener)
+		return err
+	})
+	g.Go(func() error { return m.Serve() })
+	g.Wait()
+
 	return r
 }

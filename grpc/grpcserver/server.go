@@ -6,7 +6,11 @@ import (
 	"context"
 	"errors"
 	"net"
+
+	// "fmt"
+	// "net/http"
 	"strconv"
+	// "strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,20 +31,12 @@ type Server struct {
 	proto.UnimplementedGrpcServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, run run.Service) {
-	listener, err := net.Listen("tcp", ":4040")
-	if err != nil {
-		panic(err)
-	}
-
+func New(logger *zap.Logger, svc regression2.Service, run run.Service, listener net.Listener) error {
 	srv := grpc.NewServer()
 	proto.RegisterGrpcServiceServer(srv, &Server{logger: logger, svc: svc, run: run})
 	reflection.Register(srv)
-
-	if e := srv.Serve(listener); e != nil {
-		panic(e)
-	}
-
+	err := srv.Serve(listener)
+	return err
 }
 
 func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.EndResponse, error) {
@@ -92,20 +88,22 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 }
 
 // map[string]*StrArr --> map[string][]string
-func getStringMap(m map[string]*proto.StrArr) (res map[string][]string) {
+func getStringMap(m map[string]*proto.StrArr) map[string][]string {
+	res := map[string][]string{}
 	for k, v := range m {
 		res[k] = v.Value
 	}
 	return res
 }
 
-func getProtoMap(m map[string][]string) (res map[string]*proto.StrArr) {
+func getProtoMap(m map[string][]string) map[string]*proto.StrArr {
+	res := map[string]*proto.StrArr{}
 	for k, v := range m {
 		arr := &proto.StrArr{}
 		arr.Value = append(arr.Value, v...)
 		res[k] = arr
 	}
-	return
+	return res
 }
 func getProtoTC(tcs models.TestCase) (*proto.TestCase, error) {
 	reqHeader := getProtoMap(map[string][]string(tcs.HttpReq.Header))
@@ -217,11 +215,12 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 	return &proto.GetTCSResponse{Tcs: ptcs}, nil
 }
 
-func getHttpHeader(m map[string]*proto.StrArr) (res map[string][]string) {
+func getHttpHeader(m map[string]*proto.StrArr) map[string][]string {
+	res := map[string][]string{}
 	for k, v := range m {
 		res[k] = v.Value
 	}
-	return
+	return res
 }
 
 func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*proto.PostTCResponse, error) {
@@ -283,7 +282,6 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 
 }
 
-
 func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.DeNoiseResponse, error) {
 
 	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, request.Resp.Body, getStringMap(request.Resp.Header))
@@ -297,8 +295,8 @@ func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.Tes
 
 	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, models.HttpResp{
 		StatusCode: int(request.Resp.StatusCode),
-		Header: getStringMap(request.Resp.Header),
-		Body: request.Resp.Body,
+		Header:     getStringMap(request.Resp.Header),
+		Body:       request.Resp.Body,
 	})
 	if err != nil {
 		return nil, err

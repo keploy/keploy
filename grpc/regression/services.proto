@@ -1,7 +1,82 @@
 syntax = "proto3";
 option go_package = "go.keploy.io/server/grpc/regression";
-import public "grpc/regression/request.proto";
+// import public "grpc/regression/request.proto";
 package services;
+
+message Dependency {
+    string Name = 1;
+    string Type = 2;
+    map<string,string> Meta = 3;
+    repeated DataBytes Data = 4;
+}
+
+message DataBytes {
+    bytes Bin = 1;
+}
+
+message TestCaseReq {
+    int64 Captured = 1; 
+    string AppID = 2;
+    string URI = 3;
+    HttpReq HttpReq = 4;
+    HttpResp HttpResp = 5;
+    repeated Dependency Dependency = 6;
+  }
+
+// message abc {
+//     map<string,int> a = 1; 
+// }
+
+message TestReq {
+  string ID = 1; 
+  string AppID = 2;
+  string RunID = 3;
+  HttpResp Resp = 4;
+}
+  
+message TestCase {
+  string id = 1;
+  int64 created = 2;
+  int64 updated = 3;
+  int64 captured = 4;
+  string CID = 5;
+  string appID = 6;
+  string URI = 7;
+  HttpReq HttpReq = 8;
+  HttpResp HttpResp = 9;
+  repeated Dependency Deps = 10;
+  map<string, StrArr> allKeys = 11;
+  map<string, StrArr> anchors = 12;
+  repeated string noise = 13;
+}
+
+// message MessageName {
+//   repeated int64 b = 1;
+//   bytes c = 2;
+// }
+
+message Method {
+    string Method = 1;
+}
+message HttpReq {
+    string Method = 1;
+    int64 ProtoMajor = 2;
+    int64 ProtoMinor = 3;
+    string URL = 4;
+    map<string,string> URLParams = 5;
+    map<string, StrArr> Header = 6;
+    string Body = 7;
+}
+
+message StrArr {
+    repeated string Value = 1;
+}
+
+message HttpResp {
+    int64 StatusCode = 1;
+    map<string, StrArr> Header  = 2;
+    string Body = 3; 
+}
 
 message endRequest {
     string status = 1;
@@ -31,7 +106,7 @@ message getTCSRequest{
     string limit  = 3;
 }
 message getTCSResponse{
-    repeated proto.TestCase tcs = 1; 
+    repeated TestCase tcs = 1; 
 }
 message postTCResponse{
     map<string,string> tcsId = 1;
@@ -47,10 +122,10 @@ message testResponse{
 service GrpcService{
     rpc End (endRequest) returns (endResponse);
     rpc Start (startRequest) returns (startResponse);
-    rpc GetTC (getTCRequest) returns (proto.TestCase);
+    rpc GetTC (getTCRequest) returns (TestCase);
     rpc GetTCS (getTCSRequest) returns (getTCSResponse);
-    rpc PostTC (proto.TestCaseReq) returns (postTCResponse);
-    rpc DeNoise (proto.TestReq) returns(deNoiseResponse);
-    rpc Test (proto.TestReq) returns (testResponse);
+    rpc PostTC (TestCaseReq) returns (postTCResponse);
+    rpc DeNoise (TestReq) returns(deNoiseResponse);
+    rpc Test (TestReq) returns (testResponse);
 }
 
