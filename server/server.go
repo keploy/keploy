@@ -70,7 +70,7 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	enabled := keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry
+	enabled := conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, logger)
 
 	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig)
@@ -97,7 +97,8 @@ func Server() *chi.Mux {
 		},
 	})
 
-	kchi.ChiV5(kApp, r)
+	// kchi.ChiV5(kApp, r)
+	r.Use(kchi.ChiMiddlewareV5(kApp))
 
 	r.Use(cors.Handler(cors.Options{
 

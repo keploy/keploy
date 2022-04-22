@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/models"
-	"go.mongodb.org/mongo-driver/bson"
+	// "go.mongodb.org/mongo-driver/bson"
 	"go.uber.org/zap"
 )
 
@@ -108,23 +108,23 @@ func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interf
 
 		if ac.InstallationID == "" {
 			sr := ac.db.Find()
-			if sr.Err() != nil {
-				ac.logger.Error("failed to find installationId", zap.Error(sr.Err()))
-				return
-			}
-			doc := bson.D{}
-			err := sr.Decode(&doc)
-			if err != nil {
-				ac.logger.Error("failed to decode transactionID", zap.Error(err))
-				return
-			}
-			m := doc.Map()
-			tid, ok := m["InstallationID"].(string)
-			if !ok {
-				ac.logger.Error("InstallationID not present")
-				return
-			}
-			ac.InstallationID = tid
+			// if sr.Err() != nil {
+			// 	ac.logger.Error("failed to find installationId", zap.Error(sr.Err()))
+			// 	return
+			// }
+			// doc := bson.D{}
+			// err := sr.Decode(&doc)
+			// if err != nil {
+			// 	ac.logger.Error("failed to decode transactionID", zap.Error(err))
+			// 	return
+			// }
+			// m := doc.Map()
+			// tid, ok := m["InstallationID"].(string)
+			// if !ok {
+			// 	ac.logger.Error("InstallationID not present")
+			// 	return
+			// }
+			ac.InstallationID = sr
 		}
 		event.InstallationID = ac.InstallationID
 		bin, err := marshalEvent(event, ac.logger)

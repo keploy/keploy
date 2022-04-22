@@ -11,7 +11,7 @@ import (
 type DB interface {
 	Count() (int64, error)
 	Insert(id string) (*mongo.InsertOneResult, error)
-	Find() *mongo.SingleResult
+	Find() string
 }
 
 type Service interface {
