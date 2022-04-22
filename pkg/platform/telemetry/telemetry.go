@@ -11,18 +11,19 @@ import (
 )
 
 type Telemetry struct {
-	TelemetryDB DB
-	Enabled     bool
-	logger      *zap.Logger
+	db             DB
+	Enabled        bool
+	logger         *zap.Logger
+	InstallationID string
 }
 
 func NewTelemetry(col DB, enabled bool, logger *zap.Logger) *Telemetry {
-	adb := Telemetry{
-		Enabled:     enabled,
-		logger:      logger,
-		TelemetryDB: col,
+	tele := Telemetry{
+		Enabled: enabled,
+		logger:  logger,
+		db:      col,
 	}
-	return &adb
+	return &tele
 }
 
 func (ac *Telemetry) Ping() {
@@ -31,7 +32,7 @@ func (ac *Telemetry) Ping() {
 	}
 	go func() {
 		for {
-			count, err := ac.TelemetryDB.Count()
+			count, err := ac.db.Count()
 			if err != nil {
 				ac.logger.Fatal("failed to countDocuments in analytics collection", zap.Error(err))
 			}
@@ -53,7 +54,8 @@ func (ac *Telemetry) Ping() {
 				if err != nil {
 					break
 				}
-				ac.TelemetryDB.Insert(id)
+				ac.InstallationID = id
+				ac.db.Insert(id)
 			} else {
 				ac.SendTelemetry("Ping")
 			}
@@ -103,26 +105,31 @@ func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interf
 		if len(output) == 1 {
 			event.Meta = output[0]
 		}
-		sr := ac.TelemetryDB.Find()
-		if sr == nil {
-			ac.logger.Error("")
-			return
+
+		if ac.InstallationID == "" {
+			sr := ac.db.Find()
+			if sr.Err() != nil {
+				ac.logger.Error("failed to find installationId", zap.Error(sr.Err()))
+				return
+			}
+			doc := bson.D{}
+			err := sr.Decode(&doc)
+			if err != nil {
+				ac.logger.Error("failed to decode transactionID", zap.Error(err))
+				return
+			}
+			m := doc.Map()
+			tid, ok := m["InstallationID"].(string)
+			if !ok {
+				ac.logger.Error("InstallationID not present")
+				return
+			}
+			ac.InstallationID = tid
 		}
-		doc := bson.D{}
-		err := sr.Decode(&doc)
-		if err != nil {
-			ac.logger.Error("failed to decode transactionID", zap.Error(err))
-			return
-		}
-		m := doc.Map()
-		tid, ok := m["InstallationID"].(string)
-		if !ok {
-			ac.logger.Error("InstallationID not present")
-			return
-		}
-		event.InstallationID = tid
+		event.InstallationID = ac.InstallationID
 		bin, err := marshalEvent(event, ac.logger)
 		if err != nil {
+			ac.logger.Error("failed to marshal event", zap.Error(err))
 			return
 		}
 		_, err = http.Post("http://localhost:3030/analytics", "application/json", bytes.NewBuffer(bin))

@@ -12,18 +12,18 @@ import (
 
 func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service) *Run {
 	return &Run{
-		adb: adb,
-		rdb: rdb,
-		tdb: tdb,
-		log: log,
+		tele: adb,
+		rdb:  rdb,
+		tdb:  tdb,
+		log:  log,
 	}
 }
 
 type Run struct {
-	adb telemetry.Service
-	rdb DB
-	tdb models.TestCaseDB
-	log *zap.Logger
+	tele telemetry.Service
+	rdb  DB
+	tdb  models.TestCaseDB
+	log  *zap.Logger
 }
 
 func (r *Run) Normalize(ctx context.Context, cid, id string) error {
@@ -45,7 +45,7 @@ func (r *Run) Normalize(ctx context.Context, cid, id string) error {
 		return errors.New("could not update testcase")
 	}
 
-	r.adb.Normalize()
+	r.tele.Normalize()
 	return nil
 }
 
@@ -88,7 +88,7 @@ func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *
 func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 	for _, tr := range trs {
 		if tr.Status != TestRunStatusRunning {
-			r.adb.Testrun(tr.Success, tr.Failure)
+			r.tele.Testrun(tr.Success, tr.Failure)
 			continue
 		}
 		tests, err1 := r.rdb.ReadTests(ctx, tr.ID)

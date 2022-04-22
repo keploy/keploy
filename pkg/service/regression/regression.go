@@ -24,7 +24,7 @@ import (
 func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service) *Regression {
 	return &Regression{
 		tdb:         tdb,
-		adb:         adb,
+		tele:        adb,
 		log:         log,
 		rdb:         rdb,
 		mu:          sync.Mutex{},
@@ -36,11 +36,11 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, a
 }
 
 type Regression struct {
-	tdb models.TestCaseDB
-	adb telemetry.Service
-	rdb run.DB
-	log *zap.Logger
-	mu  sync.Mutex
+	tdb  models.TestCaseDB
+	tele telemetry.Service
+	rdb  run.DB
+	log  *zap.Logger
+	mu   sync.Mutex
 	// index is `cid-appID-uri`
 	//
 	// anchors is map[index][]map[key][]value or map[index]combinationOfAnchors
@@ -77,14 +77,14 @@ func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
 		return errors.New("internal failure")
 	}
 
-	r.adb.DeleteTc()
+	r.tele.DeleteTc()
 	return nil
 }
 
 func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) {
 	apps, err := r.tdb.GetApps(ctx, cid)
 	if apps != nil {
-		r.adb.GetApps(len(apps))
+		r.tele.GetApps(len(apps))
 	}
 	return apps, err
 }
@@ -126,7 +126,7 @@ func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 		}
 	}
 
-	r.adb.EditTc()
+	r.tele.EditTc()
 	return nil
 }
 
