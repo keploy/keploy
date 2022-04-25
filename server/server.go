@@ -70,7 +70,7 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	enabled := conf.EnableTelemetry
+	enabled := keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, logger)
 
 	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig)
