@@ -1,0 +1,7 @@
+cff-version: 1.2.0
+title: 'Keploy: No code API testing platform. Create unit tests and data mocks from API calls.'
+message: 'To cite Keploy in publications use:'
+type: software
+author: Keploy Inc
+repository-code: 'https://github.com/keploy/keploy'
+license: Apache License 2.0
