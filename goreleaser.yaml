@@ -1,0 +1,17 @@
+# GoReleaser configuration
+
+builds:
+  -
+    id: "keploy"
+    main: ./cmd/server/main.go
+    binary: keploy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - 386
+      - arm64

@@ -4,11 +4,13 @@
   <img align="center" src="https://avatars.githubusercontent.com/u/92252339?s=200&v=4" height="20%" width="20%" />
 </p>
 
+
 [![contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen?logo=github)](CODE_OF_CONDUCT.md) 
 [![Tests](https://github.com/keploy/keploy/actions/workflows/go.yml/badge.svg)](https://github.com/keploy/keploy/actions)
 [![Go Report Card](https://goreportcard.com/badge/github.com/keploy/keploy)](https://goreportcard.com/report/github.com/keploy/keploy)
 [![Slack](.github/slack.svg)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 [![Docs](.github/docs.svg)](https://docs.keploy.io)
+[![Gitpod](https://img.shields.io/badge/Gitpod-ready--to--code-FFB45B?logo=gitpod)](https://gitpod.io/#https://github.com/keploy/samples-go) 
 
 
 # Keploy
@@ -19,6 +21,12 @@ Dependency-mocks are automatically generated with the recorded request/responses
 > Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main)](https://coveralls.io/github/keploy/keploy?branch=main) &nbsp;  without writing any test-cases and data-mocks. 😎
 <a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
 
+## Quick Start
+The fastest way to start with Keploy is the Gitpod-hosted version. When you're ready, you can install locally or host yourself.
+
+One-click deploy sample URL Shortener application sample with Keploy using Gitpod 
+
+[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/keploy/samples-go)
 
 ## Features
 **Convert API calls from any source to Test-Case** : Keploy captures all the API calls and subsequent network traffic served by the application. You can use any existing API management tools like Postman, Hoppscotch, Curl to generate test-case.
@@ -56,7 +64,7 @@ docker-compose up
 The UI can be accessed at http://localhost:8081
 
 ### Helm chart
-Keploy can also be installed to your your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
+Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
 
 ### Run Sample application
 Demos using Echo/PostgreSQL and Gin/MongoDB are available [here](https://github.com/keploy/samples-go). For this example, we will use the Echo/PostgreSQL sample.
@@ -178,6 +186,8 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <td align="center"><a href="https://github.com/mahi-official"><img src="https://avatars.githubusercontent.com/u/25299699?v=4" width="100px;" alt=""/><br /><sub><b>Mahesh Gupta</b></sub></a><br /><a href="#contributer-mahi-official" title="Contributer">🚧</a></td>
 <td align="center"><a href="https://github.com/namantaneja167"><img src="https://avatars.githubusercontent.com/u/42579074?v=4" width="100px;" alt=""/><br /><sub><b>Naman Taneja</b></sub></a><br /><a href="#contributer-namantaneja167" title="Contributer">🚧</a></td>
 <td align="center"><a href="https://github.com/rajatsharma"><img src="https://avatars.githubusercontent.com/u/13231434?v=4" width="100px;" alt=""/><br /><sub><b>Rajat Sharma</b></sub></a><br /><a href="#contributer-rajatsharma" title="Contributer">🚧</a></td>
+<td align="center"><a href="https://github.com/Akshit42-hue"><img src="https://avatars.githubusercontent.com/u/59443454?v=4" width="100px;" alt=""/><br /><sub><b>Axit Patel</b></sub></a><br /><a href="#contributer-Akshit42-hue" title="Contributer">🚧</a></td>
+<td align="center"><a href="https://github.com/ditsuke"><img src="https://avatars.githubusercontent.com/u/72784348?v=4" width="100px;" alt=""/><br /><sub><b>Tushar Malik</b></sub></a><br /><a href="#contributer-ditsuke" title="Contributer">🚧</a></td>
 
 </tr>
 </table>

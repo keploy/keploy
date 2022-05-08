@@ -1,13 +1,11 @@
-name: Release
+name: Go
+
 on:
   push:
-    tags:
-    - 'v*.*.*'
-
-permissions:
-  contents: write
+    branches: [ main ]
 
 jobs:
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -15,10 +13,16 @@ jobs:
         with:
           fetch-depth: 0
 
+#      - name: Check commit messages
+#        uses: wagoid/commitlint-github-action@v4
+
       - name: Set up Go
         uses: actions/setup-go@v2
         with:
           go-version: 1.17
+
+      - name: Build
+        run: go build -v ./...
 
       - name: Test
         run: |
@@ -28,38 +32,21 @@ jobs:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           KEPLOY_ENABLE_DEDUP: true
 
+      #       - uses: codecov/codecov-action@v2
+      #         with:
+      #           files: ./coverage.txt
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
-
       - name: Send coverage
         env:
           COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: goveralls -coverprofile=coverage.txt -service=github
 
-      - name: Checkout UI
-        uses: actions/checkout@v2
-        with:
-          repository: keploy/ui
-          path: ui
-
-      - name: Set up Node
-        uses: actions/setup-node@v3
-        with:
-          node-version: '14'
-
-      - name: Build web app
-        run: |
-          cd $GITHUB_WORKSPACE/ui
-          npm install
-          npm run build
-          cp -r public $GITHUB_WORKSPACE/web
-          rm -rf $GITHUB_WORKSPACE/ui
-      -
-        name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v2
-        with:
-          distribution: goreleaser
-          version: latest
-          args: release --rm-dist
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# #      - name: Install extra dependencies
+# #        run: npm install -g @semantic-release/exec
+#       - uses: codfish/semantic-release-action@additional-packages
+#         with:
+#           additional_packages: |
+#             ['@semantic-release/exec']
+#         env:
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
