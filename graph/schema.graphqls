@@ -57,7 +57,7 @@ type App {
   id: String!
 }
 
-type Count {
+type TcCount {
   count : Int!
 }
 
@@ -217,7 +217,7 @@ enum DependencyType {
 
 extend type Query {
   apps: [App!]
-  lengthOfTestCases: Count!
+  lengthOfTestCases(app: String): TcCount!
   testRun(user: String, app: String, id: String, from: Time, To: Time,offset: Int, limit: Int): [TestRun]
   testCase(app: String, id: String,offset: Int, limit: Int): [TestCase]
 }
