@@ -101,7 +101,7 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 	return tcs, nil
 }
 
-func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
+func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase,int64, error) {
 	off, lim := 0, 25
 	if offset != nil {
 		off = *offset
@@ -110,14 +110,14 @@ func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int,
 		lim = *limit
 	}
 
-	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
+	tcs,count, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
 
 	if err != nil {
 		sanitizedAppID := sanitiseInput(appID)
 		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
-		return nil, errors.New("internal failure")
+		return nil,count, errors.New("internal failure")
 	}
-	return tcs, nil
+	return tcs,count, nil
 }
 
 func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {

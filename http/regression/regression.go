@@ -159,7 +159,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 			rg.logger.Error("request for fetching testcases in converting limit to integer")
 		}
 	}
-	tcs, err := rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
+	tcs,_,err := rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return

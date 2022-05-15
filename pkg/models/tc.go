@@ -22,7 +22,7 @@ type TestCaseDB interface {
 	Upsert(context.Context, TestCase) error
 	Get(ctx context.Context, cid, id string) (TestCase, error)
 	Delete(ctx context.Context, id string) error
-	GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]TestCase, error)
+	GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]TestCase,int64, error)
 	GetKeys(ctx context.Context, cid, app, uri string) ([]TestCase, error)
 	Exists(context.Context, TestCase) (bool, error)
 	DeleteByAnchor(ctx context.Context, cid, app, uri string, filterKeys map[string][]string) error
