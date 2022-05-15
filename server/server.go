@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/keploy/go-sdk/integrations/kchi"
+	"github.com/keploy/go-sdk/integrations/khttpclient"
 	"github.com/keploy/go-sdk/integrations/kmongo"
 	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
@@ -70,11 +71,14 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	enabled := keploy.GetMode() != keploy.MODE_TEST && conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, logger)
+	enabled := conf.EnableTelemetry
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig)
-	runSrv := run.New(rdb, tdb, logger, analyticsConfig)
+	client := http.Client{
+		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
+	}
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client)
+	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
@@ -122,6 +126,6 @@ func Server() *chi.Mux {
 		r.Handle("/query", srv)
 	})
 
-	analyticsConfig.Ping()
+	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
 	return r
 }
