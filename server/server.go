@@ -101,7 +101,6 @@ func Server() *chi.Mux {
 		},
 	})
 
-	// kchi.ChiV5(kApp, r)
 	r.Use(kchi.ChiMiddlewareV5(kApp))
 
 	r.Use(cors.Handler(cors.Options{
