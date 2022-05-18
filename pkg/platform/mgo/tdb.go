@@ -8,10 +8,10 @@ import (
 
 	"go.keploy.io/server/pkg/models"
 	"go.mongodb.org/mongo-driver/bson"
-	// "go.mongodb.org/mongo-driver/mongo"
+
+	"github.com/keploy/go-sdk/integrations/kmongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
-	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
 func NewTestCase(c *kmongo.Collection, log *zap.Logger) *testCaseDB {
@@ -47,6 +47,7 @@ func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) 
 			apps = append(apps, s)
 		}
 	}
+
 	return apps, nil
 }
 

@@ -3,24 +3,31 @@ package run
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
 )
 
-func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger) *Run {
+func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service, cl http.Client) *Run {
 	return &Run{
-		rdb: rdb,
-		tdb: tdb,
-		log: log,
+		tele:   adb,
+		rdb:    rdb,
+		tdb:    tdb,
+		client: cl,
+		log:    log,
 	}
 }
 
 type Run struct {
-	rdb DB
-	tdb models.TestCaseDB
-	log *zap.Logger
+	tele     telemetry.Service
+	runCount int
+	rdb      DB
+	tdb      models.TestCaseDB
+	client   http.Client
+	log      *zap.Logger
 }
 
 func (r *Run) Normalize(ctx context.Context, cid, id string) error {
@@ -41,6 +48,7 @@ func (r *Run) Normalize(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("could not update testcase")
 	}
+	r.tele.Normalize(r.client, ctx)
 	return nil
 }
 
@@ -81,8 +89,11 @@ func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *
 }
 
 func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
+	tests := 0
 	for _, tr := range trs {
 		if tr.Status != TestRunStatusRunning {
+			// r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
+			tests++
 			continue
 		}
 		tests, err1 := r.rdb.ReadTests(ctx, tr.ID)
@@ -111,6 +122,14 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 		if err != nil {
 			return err
 		}
+	}
+	if tests != r.runCount {
+		for _, tr := range trs {
+			if tr.Status != TestRunStatusRunning {
+				r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
+			}
+		}
+		r.runCount = tests
 	}
 	return nil
 }
