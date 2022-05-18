@@ -126,11 +126,14 @@ func Server() *chi.Mux {
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
-
+	
+	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
+	
 	listener, err := net.Listen("tcp", ":8081")
 	if err != nil {
 		panic(err)
 	}
+	
 
 	m := cmux.New(listener)
 	grpcListener := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
@@ -150,7 +153,5 @@ func Server() *chi.Mux {
 	g.Go(func() error { return m.Serve() })
 	g.Wait()
 
-
-	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
 	return r
 }
