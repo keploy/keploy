@@ -5,11 +5,12 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/service/run"
+
 	"go.mongodb.org/mongo-driver/bson"
-	// "go.mongodb.org/mongo-driver/mongo"
+
+	"github.com/keploy/go-sdk/integrations/kmongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
-	"github.com/keploy/go-sdk/integrations/kmongo"
 )
 
 func NewRun(c *kmongo.Collection, test *kmongo.Collection, log *zap.Logger) *RunDB {
@@ -145,13 +146,13 @@ func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, fro
 	return tcs, nil
 }
 
-func (r *RunDB) Upsert(ctx context.Context, run run.TestRun) error {
+func (r *RunDB) Upsert(ctx context.Context, testRun run.TestRun) error {
 	upsert := true
 	opt := &options.UpdateOptions{
 		Upsert: &upsert,
 	}
-	filter := bson.M{"_id": run.ID}
-	update := bson.D{{"$set", run}}
+	filter := bson.M{"_id": testRun.ID}
+	update := bson.D{{"$set", testRun}}
 
 	_, err := r.c.UpdateOne(ctx, filter, update, opt)
 	if err != nil {
