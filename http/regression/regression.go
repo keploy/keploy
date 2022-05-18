@@ -76,11 +76,6 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err != nil {
-		render.Render(w, r, ErrInvalidRequest(err))
-		return
-	}
-
 	id := uuid.New().String()
 	now := time.Now().Unix()
 
@@ -111,11 +106,6 @@ func (rg *regression) GetTC(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	app := rg.getMeta(w, r, false)
 	tcs, err := rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
-	if err != nil {
-		render.Render(w, r, ErrInvalidRequest(err))
-		return
-	}
-	tcs, err = rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
