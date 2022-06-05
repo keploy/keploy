@@ -258,6 +258,8 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 
 func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
 
+	// ToDo: Implement Pagination Once its required. Currently Fetching all entries from Database
+
 	filter := bson.M{"cid": cid, "app_id": app}
 	findOptions := options.Find()
 	if !anchors {
@@ -266,8 +268,8 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, 
 	if offset < 0 {
 		offset = 0
 	}
-	findOptions.SetSkip(int64(offset))
-	findOptions.SetLimit(int64(limit))
+	//findOptions.SetSkip(int64(offset))
+	//findOptions.SetLimit(int64(limit))
 	findOptions.SetSort(bson.M{"created": -1}) //reverse sort
 
 	tcs, err := t.getAll(ctx, filter, findOptions)

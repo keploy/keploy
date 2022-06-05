@@ -114,6 +114,7 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 }
 
 func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
+	// ToDo: Implement Pagination Once its required. Currently Fetching all entries from Database
 	off, lim := 0, 25
 	if offset != nil {
 		off = *offset
