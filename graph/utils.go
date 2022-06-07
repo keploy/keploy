@@ -200,7 +200,7 @@ func ConvertTestCaseInput(input *model.TestCaseInput) models.TestCase {
 			req.Body = *input.HTTPReq.Body
 		}
 		if input.HTTPReq.URL != nil {
-			req.Body = *input.HTTPReq.URL
+			req.URL = *input.HTTPReq.URL
 		}
 		tc.HttpReq = req
 	}
