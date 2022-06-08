@@ -119,7 +119,7 @@ message testResponse{
 }
 
 
-service GrpcService{
+service RegressionService{
     rpc End (endRequest) returns (endResponse);
     rpc Start (startRequest) returns (startResponse);
     rpc GetTC (getTCRequest) returns (TestCase);

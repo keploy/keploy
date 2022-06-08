@@ -28,12 +28,12 @@ type Server struct {
 	logger *zap.Logger
 	svc    regression2.Service
 	run    run.Service
-	proto.UnimplementedGrpcServiceServer
+	proto.UnimplementedRegressionServiceServer
 }
 
 func New(logger *zap.Logger, svc regression2.Service, run run.Service, listener net.Listener) error {
 	srv := grpc.NewServer()
-	proto.RegisterGrpcServiceServer(srv, &Server{logger: logger, svc: svc, run: run})
+	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
