@@ -195,3 +195,11 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- markdownlint-restore -->
 <!-- prettier-ignore-end -->
 <!-- ALL-CONTRIBUTORS-LIST:END -->
+
+## Launching keploy Rewards
+ Contributed to keploy? Here is a big thank you from our community to you.
+ Claim your badge and showcase them with pride.
+ Let us inspire more folks !
+
+ ![keploy Badges](https://aviyel.com/assets/uploads/rewards/share/project/41/512/share.png)
+ ### **[Claim Now!](https://aviyel.com/projects/41/keploy/rewards)**
