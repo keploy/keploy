@@ -87,7 +87,6 @@ func ConvertHttpReq(r models.HttpReq) *model.HTTPReq {
 		Header:     header,
 		Method:     ConvertMethod(r.Method),
 		Body:       r.Body,
-		URL:        &r.URL,
 	}
 }
 
@@ -198,9 +197,6 @@ func ConvertTestCaseInput(input *model.TestCaseInput) models.TestCase {
 
 		if input.HTTPReq.Body != nil {
 			req.Body = *input.HTTPReq.Body
-		}
-		if input.HTTPReq.URL != nil {
-			req.URL = *input.HTTPReq.URL
 		}
 		tc.HttpReq = req
 	}
