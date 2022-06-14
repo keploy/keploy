@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"net/http"
 	"time"
+
 	// "log"
 	// "fmt"
 	// "context"
@@ -15,28 +16,33 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/keploy/go-sdk/integrations/kchi"
+	"github.com/keploy/go-sdk/integrations/khttpclient"
 	"github.com/keploy/go-sdk/integrations/kmongo"
 	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
+
 	"go.uber.org/zap"
 )
 
 // const defaultPort = "8080"
 
 type config struct {
-	MongoURI      string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
-	DB            string `envconfig:"DB" default:"keploy"`
-	TestCaseTable string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
-	TestRunTable  string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
-	TestTable     string `envconfig:"TEST_TABLE" default:"tests"`
-	APIKey        string `envconfig:"API_KEY"`
-	EnableDeDup   bool   `envconfig:"ENABLE_DEDUP" default:"false"`
+	MongoURI        string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
+	DB              string `envconfig:"DB" default:"keploy"`
+	TestCaseTable   string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
+	TestRunTable    string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
+	TestTable       string `envconfig:"TEST_TABLE" default:"tests"`
+	TelemetryTable  string `envconfig:"TELEMETRY_TABLE" default:"telemetry"`
+	APIKey          string `envconfig:"API_KEY"`
+	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"false"`
+	EnableTelemetry bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
 }
 
 func Server() *chi.Mux {
@@ -65,8 +71,14 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup)
-	runSrv := run.New(rdb, tdb, logger)
+	enabled := conf.EnableTelemetry
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
+
+	client := http.Client{
+		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
+	}
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client)
+	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
@@ -81,17 +93,15 @@ func Server() *chi.Mux {
 				UrlRegex: "^/api",
 			},
 			Timeout: 80 * time.Second,
-
 		},
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
 			// URL: "http://localhost:8081/api",
 
 		},
-		
 	})
 
-	kchi.ChiV5(kApp, r)
+	r.Use(kchi.ChiMiddlewareV5(kApp))
 
 	r.Use(cors.Handler(cors.Options{
 
@@ -114,5 +124,7 @@ func Server() *chi.Mux {
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
+
+	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
 	return r
 }

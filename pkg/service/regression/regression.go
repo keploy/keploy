@@ -18,15 +18,18 @@ import (
 	"github.com/google/uuid"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/run"
 	"go.uber.org/zap"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client) *Regression {
 	return &Regression{
 		tdb:         tdb,
+		tele:        adb,
 		log:         log,
 		rdb:         rdb,
+		client:      client,
 		mu:          sync.Mutex{},
 		anchors:     map[string][]map[string][]string{},
 		noisyFields: map[string]map[string]bool{},
@@ -36,11 +39,13 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool) *
 }
 
 type Regression struct {
-	tdb models.TestCaseDB
-
-	rdb run.DB
-	log *zap.Logger
-	mu  sync.Mutex
+	tdb      models.TestCaseDB
+	tele     telemetry.Service
+	rdb      run.DB
+	client   http.Client
+	log      *zap.Logger
+	mu       sync.Mutex
+	appCount int
 	// index is `cid-appID-uri`
 	//
 	// anchors is map[index][]map[key][]value or map[index]combinationOfAnchors
@@ -76,11 +81,18 @@ func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to delete testcase from the DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
 		return errors.New("internal failure")
 	}
+
+	r.tele.DeleteTc(r.client, ctx)
 	return nil
 }
 
 func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) {
-	return r.tdb.GetApps(ctx, cid)
+	apps, err := r.tdb.GetApps(ctx, cid)
+	if apps != nil && len(apps) != r.appCount {
+		r.tele.GetApps(len(apps), r.client, ctx)
+		r.appCount = len(apps)
+	}
+	return apps, err
 }
 
 // sanitiseInput sanitises user input strings before logging them for safety, removing newlines
@@ -128,7 +140,7 @@ func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 			return errors.New("internal failure")
 		}
 	}
-
+	r.tele.EditTc(r.client, ctx)
 	return nil
 }
 
