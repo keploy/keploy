@@ -190,6 +190,17 @@ func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, f
 	return nil
 }
 
+// UpdateTC only updates the http request and response of the given testcase.
+func (t *testCaseDB) UpdateTC(ctx context.Context, tc models.TestCase) error {
+	filter := bson.M{"_id": tc.ID}
+	update := bson.D{{"$set", bson.M{"http_req": tc.HttpReq, "http_resp": tc.HttpResp}}}
+	_, err := t.c.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (t *testCaseDB) Upsert(ctx context.Context, tc models.TestCase) error {
 	// sort arrays before insert
 	for _, v := range tc.Anchors {
