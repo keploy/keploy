@@ -134,7 +134,7 @@ func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int,
 
 func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 	for _, v := range t {
-		err := r.tdb.Upsert(ctx, v)
+		err := r.tdb.UpdateTC(ctx, v)
 		if err != nil {
 			r.log.Error("failed to insert testcase into DB", zap.String("appID", v.AppID), zap.Error(err))
 			return errors.New("internal failure")
