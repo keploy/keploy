@@ -1,39 +1,39 @@
 syntax = "proto3";
+option java_package = "io.keploy.grpc.stubs";
 option go_package = "go.keploy.io/server/grpc/regression";
-// import public "grpc/regression/request.proto";
 package services;
 
 message Dependency {
-    string Name = 1;
-    string Type = 2;
-    map<string,string> Meta = 3;
-    repeated DataBytes Data = 4;
+  string Name = 1;
+  string Type = 2;
+  map<string, string> Meta = 3;
+  repeated DataBytes Data = 4;
 }
 
 message DataBytes {
-    bytes Bin = 1;
+  bytes Bin = 1;
 }
 
 message TestCaseReq {
-    int64 Captured = 1; 
-    string AppID = 2;
-    string URI = 3;
-    HttpReq HttpReq = 4;
-    HttpResp HttpResp = 5;
-    repeated Dependency Dependency = 6;
-  }
+  int64 Captured = 1;
+  string AppID = 2;
+  string URI = 3;
+  HttpReq HttpReq = 4;
+  HttpResp HttpResp = 5;
+  repeated Dependency Dependency = 6;
+}
 
 // message abc {
-//     map<string,int> a = 1; 
+//     map<string,int> a = 1;
 // }
 
 message TestReq {
-  string ID = 1; 
+  string ID = 1;
   string AppID = 2;
   string RunID = 3;
   HttpResp Resp = 4;
 }
-  
+
 message TestCase {
   string id = 1;
   int64 created = 2;
@@ -56,76 +56,75 @@ message TestCase {
 // }
 
 message Method {
-    string Method = 1;
+  string Method = 1;
 }
 message HttpReq {
-    string Method = 1;
-    int64 ProtoMajor = 2;
-    int64 ProtoMinor = 3;
-    string URL = 4;
-    map<string,string> URLParams = 5;
-    map<string, StrArr> Header = 6;
-    string Body = 7;
+  string Method = 1;
+  int64 ProtoMajor = 2;
+  int64 ProtoMinor = 3;
+  string URL = 4;
+  map<string, string> URLParams = 5;
+  map<string, StrArr> Header = 6;
+  string Body = 7;
 }
 
 message StrArr {
-    repeated string Value = 1;
+  repeated string Value = 1;
 }
 
 message HttpResp {
-    int64 StatusCode = 1;
-    map<string, StrArr> Header  = 2;
-    string Body = 3; 
+  int64 StatusCode = 1;
+  map<string, StrArr> Header = 2;
+  string Body = 3;
 }
 
 message endRequest {
-    string status = 1;
-    string id = 2;
+  string status = 1;
+  string id = 2;
 }
 
 message endResponse {
-    string message = 1;
+  string message = 1;
 }
 
 message startRequest {
-    string total = 1;
-    string app = 2;
+  string total = 1;
+  string app = 2;
 }
 
 message startResponse {
-    string id = 1;
+  string id = 1;
 }
 
 message getTCRequest {
-    string id = 1;
-    string app = 2;
+  string id = 1;
+  string app = 2;
 }
 message getTCSRequest{
-    string app = 1;
-    string  offset = 2;
-    string limit  = 3;
+  string app = 1;
+  string  offset = 2;
+  string limit = 3;
 }
 message getTCSResponse{
-    repeated TestCase tcs = 1; 
+  repeated TestCase tcs = 1;
 }
 message postTCResponse{
-    map<string,string> tcsId = 1;
+  map<string, string> tcsId = 1;
 }
 message deNoiseResponse {
-    string message = 1;
+  string message = 1;
 }
 message testResponse{
-    map<string,bool> pass = 1;
+  map<string, bool> pass = 1;
 }
 
 
 service RegressionService{
-    rpc End (endRequest) returns (endResponse);
-    rpc Start (startRequest) returns (startResponse);
-    rpc GetTC (getTCRequest) returns (TestCase);
-    rpc GetTCS (getTCSRequest) returns (getTCSResponse);
-    rpc PostTC (TestCaseReq) returns (postTCResponse);
-    rpc DeNoise (TestReq) returns(deNoiseResponse);
-    rpc Test (TestReq) returns (testResponse);
+  rpc End (endRequest) returns (endResponse);
+  rpc Start (startRequest) returns (startResponse);
+  rpc GetTC (getTCRequest) returns (TestCase);
+  rpc GetTCS (getTCSRequest) returns (getTCSResponse);
+  rpc PostTC (TestCaseReq) returns (postTCResponse);
+  rpc DeNoise (TestReq) returns(deNoiseResponse);
+  rpc Test (TestReq) returns (testResponse);
 }
-
