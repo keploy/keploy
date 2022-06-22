@@ -62,6 +62,16 @@ func (r *queryResolver) Apps(ctx context.Context) ([]*model.App, error) {
 	return res, nil
 }
 
+func (r *queryResolver) LengthOfTestCases(ctx context.Context, app *string) (*model.TcCount, error) {
+	a := ""
+	if app != nil {
+		a = *app
+	}
+	_, count, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a, nil, nil)
+	res := &model.TcCount{Count: int(count)}
+	return res, err
+}
+
 func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) ([]*model.TestRun, error) {
 	preloads := GetPreloads(ctx)
 	summary := true
@@ -153,7 +163,7 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, o
 		return []*model.TestCase{ConvertTestCase(tc)}, nil
 	}
 
-	tcs, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit)
+	tcs, _, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit)
 	if err != nil {
 		return nil, err
 	}

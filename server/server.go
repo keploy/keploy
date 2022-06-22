@@ -84,8 +84,10 @@ func Server() *chi.Mux {
 
 	// initialize the client serveri
 	r := chi.NewRouter()
-	port := "8081"
-	kApp := keploy.New(keploy.Config{
+	
+  port := "8081"
+
+  k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
 			Name: "Keploy-Test-App",
 			Port: port,
@@ -101,7 +103,7 @@ func Server() *chi.Mux {
 		},
 	})
 
-	r.Use(kchi.ChiMiddlewareV5(kApp))
+  r.Use(kchi.ChiMiddlewareV5(k))
 
 	r.Use(cors.Handler(cors.Options{
 

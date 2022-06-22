@@ -124,6 +124,10 @@ type Result struct {
 	DepResult     []*DepResult    `json:"depResult"`
 }
 
+type TcCount struct {
+	Count int `json:"count"`
+}
+
 type Test struct {
 	ID         string        `json:"id"`
 	Status     TestStatus    `json:"status"`

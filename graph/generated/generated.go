@@ -9,6 +9,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
@@ -128,9 +129,10 @@ type ComplexityRoot struct {
 	}
 
 	Query struct {
-		Apps     func(childComplexity int) int
-		TestCase func(childComplexity int, app *string, id *string, offset *int, limit *int) int
-		TestRun  func(childComplexity int, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) int
+		Apps              func(childComplexity int) int
+		LengthOfTestCases func(childComplexity int, app *string) int
+		TestCase          func(childComplexity int, app *string, id *string, offset *int, limit *int) int
+		TestRun           func(childComplexity int, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) int
 	}
 
 	Result struct {
@@ -142,6 +144,10 @@ type ComplexityRoot struct {
 
 	Subscription struct {
 		TestRun func(childComplexity int, app *string, id *string) int
+	}
+
+	TcCount struct {
+		Count func(childComplexity int) int
 	}
 
 	Test struct {
@@ -193,6 +199,7 @@ type MutationResolver interface {
 }
 type QueryResolver interface {
 	Apps(ctx context.Context) ([]*model.App, error)
+	LengthOfTestCases(ctx context.Context, app *string) (*model.TcCount, error)
 	TestRun(ctx context.Context, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) ([]*model.TestRun, error)
 	TestCase(ctx context.Context, app *string, id *string, offset *int, limit *int) ([]*model.TestCase, error)
 }
@@ -538,6 +545,18 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.Query.Apps(childComplexity), true
 
+	case "Query.lengthOfTestCases":
+		if e.complexity.Query.LengthOfTestCases == nil {
+			break
+		}
+
+		args, err := ec.field_Query_lengthOfTestCases_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Query.LengthOfTestCases(childComplexity, args["app"].(*string)), true
+
 	case "Query.testCase":
 		if e.complexity.Query.TestCase == nil {
 			break
@@ -601,6 +620,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.Subscription.TestRun(childComplexity, args["app"].(*string), args["id"].(*string)), true
+
+	case "TcCount.count":
+		if e.complexity.TcCount.Count == nil {
+			break
+		}
+
+		return e.complexity.TcCount.Count(childComplexity), true
 
 	case "Test.completed":
 		if e.complexity.Test.Completed == nil {
@@ -968,6 +994,9 @@ type App {
   id: String!
 }
 
+type TcCount {
+  count : Int!
+}
 
 type TestRun {
   id: String!
@@ -1125,6 +1154,7 @@ enum DependencyType {
 
 extend type Query {
   apps: [App!]
+  lengthOfTestCases(app: String): TcCount!
   testRun(user: String, app: String, id: String, from: Time, To: Time,offset: Int, limit: Int): [TestRun]
   testCase(app: String, id: String,offset: Int, limit: Int): [TestCase]
 }
@@ -1199,6 +1229,21 @@ func (ec *executionContext) field_Query___type_args(ctx context.Context, rawArgs
 		}
 	}
 	args["name"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_lengthOfTestCases_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 *string
+	if tmp, ok := rawArgs["app"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("app"))
+		arg0, err = ec.unmarshalOString2ᚖstring(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["app"] = arg0
 	return args, nil
 }
 
@@ -1334,21 +1379,6 @@ func (ec *executionContext) field_Subscription_TestRun_args(ctx context.Context,
 		}
 	}
 	args["id"] = arg1
-	return args, nil
-}
-
-func (ec *executionContext) field___Field_args_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
-	var err error
-	args := map[string]interface{}{}
-	var arg0 *bool
-	if tmp, ok := rawArgs["includeDeprecated"]; ok {
-		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("includeDeprecated"))
-		arg0, err = ec.unmarshalOBoolean2ᚖbool(ctx, tmp)
-		if err != nil {
-			return nil, err
-		}
-	}
-	args["includeDeprecated"] = arg0
 	return args, nil
 }
 
@@ -2906,6 +2936,48 @@ func (ec *executionContext) _Query_apps(ctx context.Context, field graphql.Colle
 	return ec.marshalOApp2ᚕᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐAppᚄ(ctx, field.Selections, res)
 }
 
+func (ec *executionContext) _Query_lengthOfTestCases(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   true,
+		IsResolver: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Query_lengthOfTestCases_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Query().LengthOfTestCases(rctx, args["app"].(*string))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*model.TcCount)
+	fc.Result = res
+	return ec.marshalNTcCount2ᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTcCount(ctx, field.Selections, res)
+}
+
 func (ec *executionContext) _Query_testRun(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -3236,6 +3308,41 @@ func (ec *executionContext) _Subscription_TestRun(ctx context.Context, field gra
 			w.Write([]byte{'}'})
 		})
 	}
+}
+
+func (ec *executionContext) _TcCount_count(ctx context.Context, field graphql.CollectedField, obj *model.TcCount) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "TcCount",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   false,
+		IsResolver: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Count, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) _Test_id(ctx context.Context, field graphql.CollectedField, obj *model.Test) (ret graphql.Marshaler) {
@@ -4717,13 +4824,6 @@ func (ec *executionContext) ___Field_args(ctx context.Context, field graphql.Col
 	}
 
 	ctx = graphql.WithFieldContext(ctx, fc)
-	rawArgs := field.ArgumentMap(ec.Variables)
-	args, err := ec.field___Field_args_args(ctx, rawArgs)
-	if err != nil {
-		ec.Error(ctx, err)
-		return graphql.Null
-	}
-	fc.Args = args
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
 		return obj.Args, nil
@@ -6496,6 +6596,29 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			out.Concurrently(i, func() graphql.Marshaler {
 				return rrm(innerCtx)
 			})
+		case "lengthOfTestCases":
+			field := field
+
+			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_lengthOfTestCases(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx, innerFunc)
+			}
+
+			out.Concurrently(i, func() graphql.Marshaler {
+				return rrm(innerCtx)
+			})
 		case "testRun":
 			field := field
 
@@ -6634,6 +6757,37 @@ func (ec *executionContext) _Subscription(ctx context.Context, sel ast.Selection
 	default:
 		panic("unknown field " + strconv.Quote(fields[0].Name))
 	}
+}
+
+var tcCountImplementors = []string{"TcCount"}
+
+func (ec *executionContext) _TcCount(ctx context.Context, sel ast.SelectionSet, obj *model.TcCount) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, tcCountImplementors)
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("TcCount")
+		case "count":
+			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._TcCount_count(ctx, field, obj)
+			}
+
+			out.Values[i] = innerFunc(ctx)
+
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
 }
 
 var testImplementors = []string{"Test"}
@@ -7613,6 +7767,20 @@ func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel
 	}
 
 	return ret
+}
+
+func (ec *executionContext) marshalNTcCount2goᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTcCount(ctx context.Context, sel ast.SelectionSet, v model.TcCount) graphql.Marshaler {
+	return ec._TcCount(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNTcCount2ᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTcCount(ctx context.Context, sel ast.SelectionSet, v *model.TcCount) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._TcCount(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNTestRunStatus2goᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestRunStatus(ctx context.Context, v interface{}) (model.TestRunStatus, error) {

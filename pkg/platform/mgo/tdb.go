@@ -267,7 +267,7 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 	return tcs, nil
 }
 
-func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
+func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase,int64, error) {
 
 	filter := bson.M{"cid": cid, "app_id": app}
 	findOptions := options.Find()
@@ -285,5 +285,9 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, 
 	if err != nil {
 		fmt.Println("After getAll ", err)
 	}
-	return tcs, nil
+	count,err:= t.c.CountDocuments(ctx,filter)
+	if err != nil {
+		fmt.Println("After CountDocuments ", err)
+	}
+	return tcs,count, nil
 }
