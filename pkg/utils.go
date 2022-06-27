@@ -6,53 +6,38 @@ import (
 	"go.keploy.io/server/pkg/service/run"
 )
 
-func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult) bool {
+func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noise map[string]string) bool {
 	match := true
+	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
 		// Ignore go http router default headers
-		if k == "Date" || k == "Content-Length" {
-			continue
-		}
+		// if k == "Date" || k == "Content-Length" || k == "date" || k == "connection" {
+		// 	continue
+		// }
+		_, isNoisy := noise[k]
+		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h2[k]
-		if !ok {
-			//fmt.Println("header not present", k)
-			if checkKey(res, k) {
-				*res = append(*res, run.HeaderResult{
-					Normal: false,
-					Expected: run.Header{
-						Key:   k,
-						Value: v,
-					},
-					Actual: run.Header{
-						Key:   k,
-						Value: nil,
-					},
-				})
-			}
+		if !isNoisy {
+			if !ok {
+				//fmt.Println("header not present", k)
+				if checkKey(res, k) {
+					*res = append(*res, run.HeaderResult{
+						Normal: false,
+						Expected: run.Header{
+							Key:   k,
+							Value: v,
+						},
+						Actual: run.Header{
+							Key:   k,
+							Value: nil,
+						},
+					})
+				}
 
-			match = false
-			continue
-		}
-		if len(v) != len(val) {
-			//fmt.Println("value not same", k, v, val)
-			if checkKey(res, k) {
-				*res = append(*res, run.HeaderResult{
-					Normal: false,
-					Expected: run.Header{
-						Key:   k,
-						Value: v,
-					},
-					Actual: run.Header{
-						Key:   k,
-						Value: val,
-					},
-				})
+				match = false
+				continue
 			}
-			match = false
-			continue
-		}
-		for i, e := range v {
-			if val[i] != e {
+			if len(v) != len(val) {
 				//fmt.Println("value not same", k, v, val)
 				if checkKey(res, k) {
 					*res = append(*res, run.HeaderResult{
@@ -69,6 +54,26 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult) boo
 				}
 				match = false
 				continue
+			}
+			for i, e := range v {
+				if val[i] != e {
+					//fmt.Println("value not same", k, v, val)
+					if checkKey(res, k) {
+						*res = append(*res, run.HeaderResult{
+							Normal: false,
+							Expected: run.Header{
+								Key:   k,
+								Value: v,
+							},
+							Actual: run.Header{
+								Key:   k,
+								Value: val,
+							},
+						})
+					}
+					match = false
+					continue
+				}
 			}
 		}
 		if checkKey(res, k) {
@@ -87,10 +92,26 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult) boo
 	}
 	for k, v := range h2 {
 		// Ignore go http router default headers
-		if k == "Date" || k == "Content-Length" {
+		// if k == "Date" || k == "Content-Length" || k == "date" || k == "connection" {
+		// 	continue
+		// }
+		_, isNoisy := noise[k]
+		isNoisy = isNoisy || isHeaderNoisy
+		val, ok := h1[k]
+		if isNoisy && checkKey(res, k) {
+			*res = append(*res, run.HeaderResult{
+				Normal: true,
+				Expected: run.Header{
+					Key:   k,
+					Value: val,
+				},
+				Actual: run.Header{
+					Key:   k,
+					Value: v,
+				},
+			})
 			continue
 		}
-		_, ok := h1[k]
 		if !ok {
 			//fmt.Println("header not present", k)
 			if checkKey(res, k) {
