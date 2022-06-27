@@ -5,7 +5,7 @@ go 1.17
 // replace github.com/keploy/go-sdk => ../go-sdk
 
 require (
-	github.com/99designs/gqlgen v0.16.0
+	github.com/99designs/gqlgen v0.15.1
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/cors v1.2.0
 	github.com/go-chi/render v1.0.1

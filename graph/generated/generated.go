@@ -1121,6 +1121,7 @@ type Dependency {
 enum DependencyType {
   NO_SQL_DB
   SQL_DB
+  HTTP_CLIENT
 }
 
 extend type Query {

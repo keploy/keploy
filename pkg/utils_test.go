@@ -18,6 +18,7 @@ func TestCompareHeader(t *testing.T) {
 		exp       http.Header
 		actual    http.Header
 		hdrResult []run.HeaderResult
+		noise     map[string]string
 		result    bool
 	}{
 		//keys and values matches
@@ -54,6 +55,7 @@ func TestCompareHeader(t *testing.T) {
 					},
 				},
 			},
+			noise:  map[string]string{},
 			result: true,
 		},
 		//key present in actual but not in exp
@@ -90,7 +92,19 @@ func TestCompareHeader(t *testing.T) {
 						Value: []string{"sports", "study"},
 					},
 				},
+				{
+					Normal: false,
+					Expected: run.Header{
+						Key:   "Content-Length",
+						Value: []string{"gg"},
+					},
+					Actual: run.Header{
+						Key:   "Content-Length",
+						Value: []string{"sj"},
+					},
+				},
 			},
+			noise:  map[string]string{},
 			result: false,
 		},
 		//key present in exp but not in actual
@@ -126,6 +140,7 @@ func TestCompareHeader(t *testing.T) {
 					},
 				},
 			},
+			noise:  map[string]string{},
 			result: false,
 		},
 		//key present in both but value array aren't equal
@@ -162,6 +177,7 @@ func TestCompareHeader(t *testing.T) {
 					},
 				},
 			},
+			noise:  map[string]string{},
 			result: false,
 		},
 		//key present but length of value array aren't equal
@@ -198,6 +214,7 @@ func TestCompareHeader(t *testing.T) {
 					},
 				},
 			},
+			noise:  map[string]string{},
 			result: false,
 		},
 		//key present but length of value array are empty
@@ -227,13 +244,98 @@ func TestCompareHeader(t *testing.T) {
 			exp:       http.Header{},
 			actual:    http.Header{},
 			hdrResult: []run.HeaderResult{},
+			noise:     map[string]string{},
 			result:    true,
+		},
+		{
+			exp: http.Header{
+				"etag":           {"0/dfjnrgs"},
+				"content-length": {"26"},
+			},
+			actual: http.Header{
+				"etag":           {"2/fdvtgt"},
+				"content-length": {"22"},
+			},
+			hdrResult: []run.HeaderResult{
+				{
+					Normal: true,
+					Expected: run.Header{
+						Key:   "etag",
+						Value: []string{"0/dfjnrgs"},
+					},
+					Actual: run.Header{
+						Key:   "etag",
+						Value: []string{"2/fdvtgt"},
+					},
+				},
+				{
+					Normal: true,
+					Expected: run.Header{
+						Key:   "content-length",
+						Value: []string{"26"},
+					},
+					Actual: run.Header{
+						Key:   "content-length",
+						Value: []string{"22"},
+					},
+				},
+			},
+			noise:  map[string]string{"etag": "etag", "content-length": "content-length"},
+			result: true,
+		},
+		{
+			exp: http.Header{
+				"etag":           {"0/dfjnrgs"},
+				"content-length": {"26"},
+			},
+			actual: http.Header{
+				"etag":           {"2/fdvtgt"},
+				"content-length": {"22"},
+				"host":           {"express"},
+			},
+			hdrResult: []run.HeaderResult{
+				{
+					Normal: false,
+					Expected: run.Header{
+						Key:   "etag",
+						Value: []string{"0/dfjnrgs"},
+					},
+					Actual: run.Header{
+						Key:   "etag",
+						Value: []string{"2/fdvtgt"},
+					},
+				},
+				{
+					Normal: false,
+					Expected: run.Header{
+						Key:   "content-length",
+						Value: []string{"26"},
+					},
+					Actual: run.Header{
+						Key:   "content-length",
+						Value: []string{"22"},
+					},
+				},
+				{
+					Normal: true,
+					Expected: run.Header{
+						Key:   "host",
+						Value: nil,
+					},
+					Actual: run.Header{
+						Key:   "host",
+						Value: []string{"express"},
+					},
+				},
+			},
+			noise:  map[string]string{"host": "host"},
+			result: false,
 		},
 	} {
 		logger, _ := zap.NewProduction()
 		defer logger.Sync()
 		hdrResult := []run.HeaderResult{}
-		res := CompareHeaders(tt.exp, tt.actual, &hdrResult)
+		res := CompareHeaders(tt.exp, tt.actual, &hdrResult, tt.noise)
 		if res != tt.result {
 			t.Fatal(tt.exp, tt.actual, "THIS IS EXP", tt.hdrResult, " \n THIS IS ACT", hdrResult)
 		}

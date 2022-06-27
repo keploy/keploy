@@ -224,18 +224,20 @@ func (e BodyType) MarshalGQL(w io.Writer) {
 type DependencyType string
 
 const (
-	DependencyTypeNoSQLDb DependencyType = "NO_SQL_DB"
-	DependencyTypeSQLDb   DependencyType = "SQL_DB"
+	DependencyTypeNoSQLDb    DependencyType = "NO_SQL_DB"
+	DependencyTypeSQLDb      DependencyType = "SQL_DB"
+	DependencyTypeHTTPClient DependencyType = "HTTP_CLIENT"
 )
 
 var AllDependencyType = []DependencyType{
 	DependencyTypeNoSQLDb,
 	DependencyTypeSQLDb,
+	DependencyTypeHTTPClient,
 }
 
 func (e DependencyType) IsValid() bool {
 	switch e {
-	case DependencyTypeNoSQLDb, DependencyTypeSQLDb:
+	case DependencyTypeNoSQLDb, DependencyTypeSQLDb, DependencyTypeHTTPClient:
 		return true
 	}
 	return false
