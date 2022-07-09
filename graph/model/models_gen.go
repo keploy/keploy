@@ -167,6 +167,11 @@ type TestCaseInput struct {
 	Noise    []string           `json:"noise"`
 }
 
+type TestCases struct {
+	Tc    []*TestCase `json:"tc"`
+	Count int         `json:"count"`
+}
+
 type TestRun struct {
 	ID      string        `json:"id"`
 	Created time.Time     `json:"created"`

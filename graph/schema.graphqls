@@ -180,6 +180,11 @@ type Kv {
   value: String!
 }
 
+type TestCases {
+  tc: [TestCase!]
+  count: Int!
+}
+
 type TestCase {
   id: String!
   created: Time!
@@ -216,6 +221,7 @@ extend type Query {
   apps: [App!]
   testRun(user: String, app: String, id: String, from: Time, To: Time,offset: Int, limit: Int): [TestRun]
   testCase(app: String, id: String,offset: Int, limit: Int): [TestCase]
+  testCases(app: String, id: String,offset: Int, limit: Int): TestCases
 }
 
 type Subscription {
