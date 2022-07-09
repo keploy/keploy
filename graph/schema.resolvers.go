@@ -158,9 +158,42 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, o
 		return nil, err
 	}
 	var res []*model.TestCase
-	for _, v := range tcs {
+	for _, v := range tcs.TestCases {
 		res = append(res, ConvertTestCase(v))
 	}
+
+	return res, nil
+}
+
+func (r *queryResolver) TestCases(ctx context.Context, app *string, id *string, offset *int, limit *int) (*model.TestCases, error) {
+	a := ""
+	if app != nil {
+		a = *app
+	}
+
+	if id != nil {
+		tc, err := r.reg.Get(ctx, DEFAULT_COMPANY, a, *id)
+		if err != nil {
+			return nil, err
+		}
+		return &model.TestCases{
+			Tc:    []*model.TestCase{ConvertTestCase(tc)},
+			Count: 1,
+		}, nil
+	}
+
+	tcs, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	res := &model.TestCases{
+		Tc:    []*model.TestCase{},
+		Count: 0,
+	}
+	for _, v := range tcs.TestCases {
+		res.Tc = append(res.Tc, ConvertTestCase(v))
+	}
+	res.Count = int(tcs.Count)
 	return res, nil
 }
 

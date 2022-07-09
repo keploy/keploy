@@ -128,9 +128,10 @@ type ComplexityRoot struct {
 	}
 
 	Query struct {
-		Apps     func(childComplexity int) int
-		TestCase func(childComplexity int, app *string, id *string, offset *int, limit *int) int
-		TestRun  func(childComplexity int, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) int
+		Apps      func(childComplexity int) int
+		TestCase  func(childComplexity int, app *string, id *string, offset *int, limit *int) int
+		TestCases func(childComplexity int, app *string, id *string, offset *int, limit *int) int
+		TestRun   func(childComplexity int, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) int
 	}
 
 	Result struct {
@@ -172,6 +173,11 @@ type ComplexityRoot struct {
 		Updated  func(childComplexity int) int
 	}
 
+	TestCases struct {
+		Count func(childComplexity int) int
+		Tc    func(childComplexity int) int
+	}
+
 	TestRun struct {
 		App     func(childComplexity int) int
 		Created func(childComplexity int) int
@@ -195,6 +201,7 @@ type QueryResolver interface {
 	Apps(ctx context.Context) ([]*model.App, error)
 	TestRun(ctx context.Context, user *string, app *string, id *string, from *time.Time, to *time.Time, offset *int, limit *int) ([]*model.TestRun, error)
 	TestCase(ctx context.Context, app *string, id *string, offset *int, limit *int) ([]*model.TestCase, error)
+	TestCases(ctx context.Context, app *string, id *string, offset *int, limit *int) (*model.TestCases, error)
 }
 type SubscriptionResolver interface {
 	TestRun(ctx context.Context, app *string, id *string) (<-chan []*model.TestRun, error)
@@ -550,6 +557,18 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.Query.TestCase(childComplexity, args["app"].(*string), args["id"].(*string), args["offset"].(*int), args["limit"].(*int)), true
 
+	case "Query.testCases":
+		if e.complexity.Query.TestCases == nil {
+			break
+		}
+
+		args, err := ec.field_Query_testCases_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Query.TestCases(childComplexity, args["app"].(*string), args["id"].(*string), args["offset"].(*int), args["limit"].(*int)), true
+
 	case "Query.testRun":
 		if e.complexity.Query.TestRun == nil {
 			break
@@ -755,6 +774,20 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.TestCase.Updated(childComplexity), true
+
+	case "TestCases.count":
+		if e.complexity.TestCases.Count == nil {
+			break
+		}
+
+		return e.complexity.TestCases.Count(childComplexity), true
+
+	case "TestCases.tc":
+		if e.complexity.TestCases.Tc == nil {
+			break
+		}
+
+		return e.complexity.TestCases.Tc(childComplexity), true
 
 	case "TestRun.app":
 		if e.complexity.TestRun.App == nil {
@@ -1091,6 +1124,11 @@ type Kv {
   value: String!
 }
 
+type TestCases {
+  tc: [TestCase!]
+  count: Int!
+}
+
 type TestCase {
   id: String!
   created: Time!
@@ -1127,6 +1165,7 @@ extend type Query {
   apps: [App!]
   testRun(user: String, app: String, id: String, from: Time, To: Time,offset: Int, limit: Int): [TestRun]
   testCase(app: String, id: String,offset: Int, limit: Int): [TestCase]
+  testCases(app: String, id: String,offset: Int, limit: Int): TestCases
 }
 
 type Subscription {
@@ -1203,6 +1242,48 @@ func (ec *executionContext) field_Query___type_args(ctx context.Context, rawArgs
 }
 
 func (ec *executionContext) field_Query_testCase_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 *string
+	if tmp, ok := rawArgs["app"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("app"))
+		arg0, err = ec.unmarshalOString2ᚖstring(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["app"] = arg0
+	var arg1 *string
+	if tmp, ok := rawArgs["id"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("id"))
+		arg1, err = ec.unmarshalOString2ᚖstring(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["id"] = arg1
+	var arg2 *int
+	if tmp, ok := rawArgs["offset"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("offset"))
+		arg2, err = ec.unmarshalOInt2ᚖint(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["offset"] = arg2
+	var arg3 *int
+	if tmp, ok := rawArgs["limit"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("limit"))
+		arg3, err = ec.unmarshalOInt2ᚖint(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["limit"] = arg3
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_testCases_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
 	var err error
 	args := map[string]interface{}{}
 	var arg0 *string
@@ -2984,6 +3065,45 @@ func (ec *executionContext) _Query_testCase(ctx context.Context, field graphql.C
 	return ec.marshalOTestCase2ᚕᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCase(ctx, field.Selections, res)
 }
 
+func (ec *executionContext) _Query_testCases(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   true,
+		IsResolver: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Query_testCases_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Query().TestCases(rctx, args["app"].(*string), args["id"].(*string), args["offset"].(*int), args["limit"].(*int))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*model.TestCases)
+	fc.Result = res
+	return ec.marshalOTestCases2ᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCases(ctx, field.Selections, res)
+}
+
 func (ec *executionContext) _Query___type(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -3979,6 +4099,73 @@ func (ec *executionContext) _TestCase_noise(ctx context.Context, field graphql.C
 	res := resTmp.([]string)
 	fc.Result = res
 	return ec.marshalOString2ᚕstringᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _TestCases_tc(ctx context.Context, field graphql.CollectedField, obj *model.TestCases) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "TestCases",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   false,
+		IsResolver: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Tc, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.([]*model.TestCase)
+	fc.Result = res
+	return ec.marshalOTestCase2ᚕᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCaseᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _TestCases_count(ctx context.Context, field graphql.CollectedField, obj *model.TestCases) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "TestCases",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   false,
+		IsResolver: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Count, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) _TestRun_id(ctx context.Context, field graphql.CollectedField, obj *model.TestRun) (ret graphql.Marshaler) {
@@ -6536,6 +6723,26 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			out.Concurrently(i, func() graphql.Marshaler {
 				return rrm(innerCtx)
 			})
+		case "testCases":
+			field := field
+
+			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_testCases(ctx, field)
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx, innerFunc)
+			}
+
+			out.Concurrently(i, func() graphql.Marshaler {
+				return rrm(innerCtx)
+			})
 		case "__type":
 			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Query___type(ctx, field)
@@ -6860,6 +7067,44 @@ func (ec *executionContext) _TestCase(ctx context.Context, sel ast.SelectionSet,
 
 			out.Values[i] = innerFunc(ctx)
 
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var testCasesImplementors = []string{"TestCases"}
+
+func (ec *executionContext) _TestCases(ctx context.Context, sel ast.SelectionSet, obj *model.TestCases) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, testCasesImplementors)
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("TestCases")
+		case "tc":
+			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._TestCases_tc(ctx, field, obj)
+			}
+
+			out.Values[i] = innerFunc(ctx)
+
+		case "count":
+			innerFunc := func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._TestCases_count(ctx, field, obj)
+			}
+
+			out.Values[i] = innerFunc(ctx)
+
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -7613,6 +7858,16 @@ func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel
 	}
 
 	return ret
+}
+
+func (ec *executionContext) marshalNTestCase2ᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCase(ctx context.Context, sel ast.SelectionSet, v *model.TestCase) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._TestCase(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNTestRunStatus2goᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestRunStatus(ctx context.Context, v interface{}) (model.TestRunStatus, error) {
@@ -8701,6 +8956,53 @@ func (ec *executionContext) marshalOTestCase2ᚕᚖgoᚗkeployᚗioᚋserverᚋg
 	return ret
 }
 
+func (ec *executionContext) marshalOTestCase2ᚕᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCaseᚄ(ctx context.Context, sel ast.SelectionSet, v []*model.TestCase) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNTestCase2ᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCase(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
 func (ec *executionContext) marshalOTestCase2ᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCase(ctx context.Context, sel ast.SelectionSet, v *model.TestCase) graphql.Marshaler {
 	if v == nil {
 		return graphql.Null
@@ -8734,6 +9036,13 @@ func (ec *executionContext) unmarshalOTestCaseInput2ᚖgoᚗkeployᚗioᚋserver
 	}
 	res, err := ec.unmarshalInputTestCaseInput(ctx, v)
 	return &res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalOTestCases2ᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestCases(ctx context.Context, sel ast.SelectionSet, v *model.TestCases) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._TestCases(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalOTestRun2ᚕᚖgoᚗkeployᚗioᚋserverᚋgraphᚋmodelᚐTestRun(ctx context.Context, sel ast.SelectionSet, v []*model.TestRun) graphql.Marshaler {
