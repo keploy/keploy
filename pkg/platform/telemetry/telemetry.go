@@ -30,8 +30,9 @@ func NewTelemetry(col DB, enabled, offMode bool, logger *zap.Logger) *Telemetry 
 }
 
 func (ac *Telemetry) Ping(isTestMode bool) {
+	check := false
 	if !ac.Enabled || isTestMode {
-		return
+		check = true
 	}
 	go func() {
 		for {
@@ -39,16 +40,17 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			if err != nil {
 				ac.logger.Fatal("failed to countDocuments in analytics collection", zap.Error(err))
 			}
-			event := models.Event{
+			event := models.TeleEvent{
 				EventType: "Ping",
 				CreatedAt: time.Now().Unix(),
+				TeleCheck: check,
 			}
 			if count == 0 {
 				bin, err := marshalEvent(event, ac.logger)
 				if err != nil {
 					break
 				}
-				resp, err := http.Post("https://telemetry.keploy.io/analytics", "application/json", bytes.NewBuffer(bin))
+				resp, err := http.Post("http://localhost:3030/analytics", "application/json", bytes.NewBuffer(bin))
 				if err != nil {
 					ac.logger.Fatal("failed to send request for analytics", zap.Error(err))
 					break
@@ -90,8 +92,7 @@ func (ac *Telemetry) GetApps(apps int, client http.Client, ctx context.Context) 
 
 func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx context.Context, output ...map[string]interface{}) {
 	if ac.Enabled {
-
-		event := models.Event{
+		event := models.TeleEvent{
 			EventType: eventType,
 			CreatedAt: time.Now().Unix(),
 		}
@@ -109,7 +110,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 			ac.logger.Error("failed to marshal event", zap.Error(err))
 			return
 		}
-		req, err := http.NewRequest(http.MethodPost, "https://telemetry.keploy.io/analytics", bytes.NewBuffer(bin))
+		req, err := http.NewRequest(http.MethodPost, "http://localhost:3030/analytics", bytes.NewBuffer(bin))
 		if err != nil {
 			ac.logger.Fatal("failed to create request for analytics", zap.Error(err))
 			return

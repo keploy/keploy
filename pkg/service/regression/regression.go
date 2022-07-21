@@ -516,7 +516,7 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 		}
 	}
 
-	isAnchorChange := false
+	isAnchorChange := true
 	for k, v := range reqKeys {
 		if !r.noisyFields[index][k] {
 			// update field count
@@ -529,10 +529,6 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 			if !isAnchor(r.fieldCounts[index][k]) {
 				r.noisyFields[index][k] = true
 				isAnchorChange = true
-				// err = r.tdb.DeleteByAnchor(context.TODO(), t.CID, t.AppID, t.URI, k)
-				// if err != nil {
-				// 	return false, err
-				// }
 				continue
 			}
 			filterKeys[k] = v
@@ -590,7 +586,7 @@ func isAnchor(m map[string]int) bool {
 		return true
 	}
 	// if the unique values are less than 40% of the total value count them,
-	// the field is low varient.
+	// the field is low variant.
 	if float64(totalCount)*0.40 > float64(len(m)) {
 		return true
 	}

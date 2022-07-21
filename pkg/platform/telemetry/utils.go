@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func marshalEvent(event models.Event, log *zap.Logger) (bin []byte, err error) {
+func marshalEvent(event models.TeleEvent, log *zap.Logger) (bin []byte, err error) {
 	bin, err = json.Marshal(event)
 	if err != nil {
 		log.Fatal("failed to marshal event struct into json", zap.Error(err))

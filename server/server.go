@@ -41,7 +41,7 @@ type config struct {
 	TestTable       string `envconfig:"TEST_TABLE" default:"tests"`
 	TelemetryTable  string `envconfig:"TELEMETRY_TABLE" default:"telemetry"`
 	APIKey          string `envconfig:"API_KEY"`
-	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"false"`
+	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"true"`
 	EnableTelemetry bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
 }
 
@@ -99,7 +99,6 @@ func Server() *chi.Mux {
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
 			// URL: "http://localhost:8081/api",
-
 		},
 	})
 
