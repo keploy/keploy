@@ -36,7 +36,12 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 	}
 	go func() {
 		for {
-			count, err := ac.db.Count()
+			var count int64
+			var err error
+			if ac.Enabled && !isTestMode {
+				count, err = ac.db.Count()
+			}
+
 			if err != nil {
 				ac.logger.Fatal("failed to countDocuments in analytics collection", zap.Error(err))
 			}
