@@ -50,7 +50,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 				if err != nil {
 					break
 				}
-				resp, err := http.Post("http://localhost:3030/analytics", "application/json", bytes.NewBuffer(bin))
+				resp, err := http.Post("https://telemetry.keploy.io/analytics", "application/json", bytes.NewBuffer(bin))
 				if err != nil {
 					ac.logger.Fatal("failed to send request for analytics", zap.Error(err))
 					break
@@ -110,7 +110,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 			ac.logger.Error("failed to marshal event", zap.Error(err))
 			return
 		}
-		req, err := http.NewRequest(http.MethodPost, "http://localhost:3030/analytics", bytes.NewBuffer(bin))
+		req, err := http.NewRequest(http.MethodPost, "https://telemetry.keploy.io/analytics", bytes.NewBuffer(bin))
 		if err != nil {
 			ac.logger.Fatal("failed to create request for analytics", zap.Error(err))
 			return
