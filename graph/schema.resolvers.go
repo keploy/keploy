@@ -169,6 +169,7 @@ func (r *subscriptionResolver) TestRun(ctx context.Context, app *string, id *str
 }
 
 // Subscription returns generated.SubscriptionResolver implementation.
+
 func (r *Resolver) Subscription() generated.SubscriptionResolver { return &subscriptionResolver{r} }
 
 type subscriptionResolver struct{ *Resolver }
@@ -179,10 +180,10 @@ type subscriptionResolver struct{ *Resolver }
 //  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
 //    it when you're done.
 //  - You have helper methods in this file. Move them out to keep these resolver files clean.
-func (r *mutationResolver) NormalizeTest(ctx context.Context, id string) (bool, error) {
-	err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
+// func (r *mutationResolver) NormalizeTest(ctx context.Context, id string) (bool, error) {
+// 	err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
+// 	if err != nil {
+// 		return false, err
+// 	}
+// 	return true, nil
+// }

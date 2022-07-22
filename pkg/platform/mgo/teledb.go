@@ -32,7 +32,6 @@ func (tele *telemetryDB) Find() string {
 	if tele.c == nil {
 		return ""
 	}
-
 	sr := tele.c.FindOne(context.TODO(), bson.M{})
 	if sr.Err() != nil {
 		tele.log.Error("failed to find installationId", zap.Error(sr.Err()))
@@ -54,6 +53,7 @@ func (tele *telemetryDB) Find() string {
 }
 
 func NewTelemetryDB(db *mongo.Database, telemetryTable string, enabled bool, logger *zap.Logger) *telemetryDB {
+
 	tele := telemetryDB{
 		log: logger,
 	}
@@ -61,4 +61,5 @@ func NewTelemetryDB(db *mongo.Database, telemetryTable string, enabled bool, log
 		tele.c = kmongo.NewCollection(db.Collection(telemetryTable))
 	}
 	return &tele
+
 }

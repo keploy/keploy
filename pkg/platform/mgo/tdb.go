@@ -15,6 +15,7 @@ import (
 )
 
 func NewTestCase(c *kmongo.Collection, log *zap.Logger) *testCaseDB {
+
 	return &testCaseDB{
 		c:   c,
 		log: log,
@@ -32,9 +33,11 @@ func (t *testCaseDB) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	return nil
+
 }
 
 func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) {
+
 	filter := bson.M{"cid": cid}
 	values, err := t.c.Distinct(ctx, "app_id", filter)
 	if err != nil {
@@ -58,79 +61,48 @@ func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri string) ([]model
 	return t.getAll(ctx, filter, findOptions)
 }
 
-func (t *testCaseDB) Exists(ctx context.Context, tc models.TestCase) (bool, error) {
-	opts := options.Count().SetMaxTime(2 * time.Second)
-	filters := bson.M{
-		"cid":    tc.CID,
-		"app_id": tc.AppID,
-		"uri":    tc.URI,
-	}
-	for k, v := range tc.Anchors {
-		//if len(v) == 1 {
-		//	filters[k] = v[0]
-		//	continue
-		//}
-		filters["anchors."+k] = bson.M{
-			"$size": len(v),
-			"$all":  v,
-		}
-	}
-	count, err := t.c.CountDocuments(ctx, filters, opts)
-	if err != nil {
-		return false, err
-	}
-	if count > 0 {
-		return true, nil
-	}
-	return false, nil
-}
+// <---- TO-DO ---->
+//func (t *testCaseDB) Exists(ctx context.Context, tc models.TestCase) (bool, error) {
+//	opts := options.Count().SetMaxTime(2 * time.Second)
+//	filters := bson.M{
+//		"cid":    tc.CID,
+//		"app_id": tc.AppID,
+//		"uri":    tc.URI,
+//	}
+//	for k, v := range tc.Anchors {
+//		//if len(v) == 1 {
+//		//	filters[k] = v[0]
+//		//	continue
+//		//}
+//		filters["anchors."+k] = bson.M{
+//			"$size": len(v),
+//			"$all":  v,
+//		}
+//	}
+//	count, err := t.c.CountDocuments(ctx, filters, opts)
+//	if err != nil {
+//		return false, err
+//	}
+//	if count > 0 {
+//		return true, nil
+//	}
+//	return false, nil
+//}
 
 func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, filterKeys map[string][]string) error {
+
 	filters := bson.M{
 		"cid":    cid,
 		"app_id": app,
 		"uri":    uri,
 	}
-	//filters["anchors." + field] = bson.D{{ "$exists", true }}
-	//
-	//groupBy := bson.D{}
-	//for _, v := range anchors {
-	//	groupBy = append(groupBy, bson.E{Key: "anchors." + v, Value: "$anchors." + v})
-	//}
-	//
-	//matchStage := bson.M{"$match": filters}
-	//groupStage := bson.M{"$group": bson.M{
-	//	"_id": groupBy,
-	//	"doc": bson.M{ "$first": "$$ROOT" },
-	//	}}
-	//
-	//pipeline := []bson.M{
-	//	{ "$sort": bson.M{ "_id": 1 } },
-	//	{
-	//		"$match": matchStage,
-	//	},
-	//	{
-	//		"$group": groupStage,
-	//	},
-	//	{ "$replaceRoot": bson.M{ "newRoot": "$doc" } },
-	//	{ "$out": "collection" },
-	//
-	//}
-	//
-	//_, err := t.c.Aggregate(ctx, pipeline, opts)
-	//if err != nil {
-	//	return err
-	//}
-
 	_, err := t.c.UpdateMany(ctx, filters, bson.M{
 		"$set": bson.M{"anchors": filterKeys},
 	})
 	if err != nil {
 		return err
 	}
-
 	// remove duplicates
-
 	var dups []string
 
 	filters["anchors"] = bson.M{"$ne": ""}
@@ -202,6 +174,7 @@ func (t *testCaseDB) UpdateTC(ctx context.Context, tc models.TestCase) error {
 }
 
 func (t *testCaseDB) Upsert(ctx context.Context, tc models.TestCase) error {
+
 	// sort arrays before insert
 	for _, v := range tc.Anchors {
 		sort.Strings(v)
@@ -277,6 +250,7 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, 
 	if offset < 0 {
 		offset = 0
 	}
+
 	findOptions.SetSkip(int64(offset))
 	findOptions.SetLimit(int64(limit))
 	findOptions.SetSort(bson.M{"created": -1}) //reverse sort

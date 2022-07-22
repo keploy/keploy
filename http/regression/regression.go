@@ -166,6 +166,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	// 	render.Render(w, r, ErrInvalidRequest(errors.New("missing api key")))
 	// 	return
 	// }
+
 	data := &TestCaseReq{}
 	if err := render.Bind(r, data); err != nil {
 		rg.logger.Error("error parsing request", zap.Error(err))
