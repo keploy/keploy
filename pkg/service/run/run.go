@@ -90,25 +90,30 @@ func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *
 
 func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 	tests := 0
+
 	for _, tr := range trs {
+
 		if tr.Status != TestRunStatusRunning {
 			// r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
 			tests++
 			continue
 		}
 		tests, err1 := r.rdb.ReadTests(ctx, tr.ID)
+
 		if err1 != nil {
 			msg := "failed getting tests from DB"
 			r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err1))
 			return errors.New(msg)
 		}
 		if len(tests) == 0 {
+
 			// check if the testrun is more than 5 mins old
 			err := r.failOldTestRuns(ctx, tr.Created, tr)
 			if err != nil {
 				return err
 			}
 			continue
+
 		}
 		// find the newest test
 		ts := tests[0].Started
@@ -124,8 +129,11 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 		}
 	}
 	if tests != r.runCount {
+
 		for _, tr := range trs {
+
 			if tr.Status != TestRunStatusRunning {
+
 				r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
 			}
 		}
@@ -147,6 +155,7 @@ func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error 
 		return errors.New(msg)
 	}
 	return nil
+
 }
 
 func (r *Run) Put(ctx context.Context, run TestRun) error {

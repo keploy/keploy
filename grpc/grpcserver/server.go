@@ -32,11 +32,13 @@ type Server struct {
 }
 
 func New(logger *zap.Logger, svc regression2.Service, run run.Service, listener net.Listener) error {
+
 	srv := grpc.NewServer()
 	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
+
 }
 
 func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.EndResponse, error) {

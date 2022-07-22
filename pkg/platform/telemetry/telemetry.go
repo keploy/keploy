@@ -20,6 +20,7 @@ type Telemetry struct {
 }
 
 func NewTelemetry(col DB, enabled, offMode bool, logger *zap.Logger) *Telemetry {
+
 	tele := Telemetry{
 		Enabled: enabled,
 		OffMode: offMode,
@@ -30,6 +31,7 @@ func NewTelemetry(col DB, enabled, offMode bool, logger *zap.Logger) *Telemetry 
 }
 
 func (ac *Telemetry) Ping(isTestMode bool) {
+
 	check := false
 	if !ac.Enabled || isTestMode {
 		check = true
@@ -97,6 +99,7 @@ func (ac *Telemetry) GetApps(apps int, client http.Client, ctx context.Context) 
 }
 
 func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx context.Context, output ...map[string]interface{}) {
+
 	if ac.Enabled {
 		event := models.TeleEvent{
 			EventType: eventType,

@@ -46,6 +46,7 @@ type config struct {
 }
 
 func Server() *chi.Mux {
+
 	rand.Seed(time.Now().UTC().UnixNano())
 
 	logger, err := zap.NewDevelopment()
@@ -77,6 +78,7 @@ func Server() *chi.Mux {
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
+	
 	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client)
 	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
 

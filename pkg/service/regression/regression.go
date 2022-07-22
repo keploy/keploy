@@ -434,6 +434,7 @@ func flatten(j interface{}) map[string][]string {
 }
 
 func (r *Regression) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
+
 	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
 	_, ok1 := r.noisyFields[index]
 	_, ok2 := r.fieldCounts[index]

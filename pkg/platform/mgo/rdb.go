@@ -28,6 +28,7 @@ type RunDB struct {
 }
 
 func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
+	
 	// too repetitive
 	// TODO write a generic FindOne for all get calls
 	filter := bson.M{"_id": id}
@@ -40,6 +41,7 @@ func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
 }
 
 func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error) {
+
 	filter := bson.M{"run_id": runID}
 	findOptions := options.Find()
 
@@ -55,7 +57,6 @@ func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error)
 		err = cur.Decode(&t)
 		if err != nil {
 			return nil, err
-
 		}
 		res = append(res, t)
 	}
@@ -73,6 +74,7 @@ func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error)
 }
 
 func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
+
 	upsert := true
 	opt := &options.UpdateOptions{
 		Upsert: &upsert,
@@ -89,6 +91,7 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 }
 
 func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*run.TestRun, error) {
+
 	filter := bson.M{
 		"cid": cid,
 	}
@@ -147,6 +150,7 @@ func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, fro
 }
 
 func (r *RunDB) Upsert(ctx context.Context, testRun run.TestRun) error {
+
 	upsert := true
 	opt := &options.UpdateOptions{
 		Upsert: &upsert,
@@ -163,6 +167,7 @@ func (r *RunDB) Upsert(ctx context.Context, testRun run.TestRun) error {
 }
 
 func (r *RunDB) Increment(ctx context.Context, success, failure bool, id string) error {
+
 	update := bson.M{}
 	if success {
 		update["$inc"] = bson.D{{"success", 1}}

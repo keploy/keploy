@@ -32,7 +32,6 @@ func (tele *telemetryDB) Find() string {
 	if tele.c == nil {
 		return ""
 	}
-
 	sr := tele.c.FindOne(context.TODO(), bson.M{})
 	if sr.Err() != nil {
 		tele.log.Error("failed to find installationId", zap.Error(sr.Err()))
