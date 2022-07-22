@@ -39,9 +39,8 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			var count int64
 			var err error
 
-			count, err = ac.db.Count()
-			if ac.Enabled && isTestMode {
-				count = 0
+			if ac.Enabled && !isTestMode {
+				count, err = ac.db.Count()
 			}
 
 			if err != nil {
