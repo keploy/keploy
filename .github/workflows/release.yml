@@ -20,14 +20,6 @@ jobs:
         with:
           go-version: 1.17
 
-      - name: Test-withDeDupEnabled
-        run: |
-          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
-          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
-        env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-          ENABLE_DEDUP: true
-
       - name: Test
         run: |
           go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
@@ -36,8 +28,13 @@ jobs:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: false
 
-
-
+      - name: Test-withDeDupEnabled
+        run: |
+          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
+          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
+        env:
+          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
+          ENABLE_DEDUP: true
 
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
