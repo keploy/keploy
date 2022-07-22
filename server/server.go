@@ -84,10 +84,10 @@ func Server() *chi.Mux {
 
 	// initialize the client serveri
 	r := chi.NewRouter()
-	
-  port := "8081"
 
-  k := keploy.New(keploy.Config{
+	port := "8081"
+
+	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
 			Name: "Keploy-Test-App",
 			Port: port,
@@ -125,14 +125,13 @@ func Server() *chi.Mux {
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
-	
+
 	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
-	
+
 	listener, err := net.Listen("tcp", ":8081")
 	if err != nil {
 		panic(err)
 	}
-	
 
 	m := cmux.New(listener)
 	grpcListener := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
@@ -140,10 +139,10 @@ func Server() *chi.Mux {
 	httpListener := m.Match(cmux.HTTP1Fast())
 
 	log.Println("connect to http://localhost:8081/ for GraphQL playground")
-	
+
 	g := new(errgroup.Group)
 	g.Go(func() error { return grpcserver.New(logger, regSrv, runSrv, grpcListener) })
-	
+
 	g.Go(func() error {
 		srv := http.Server{Handler: r}
 		err := srv.Serve(httpListener)
