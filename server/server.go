@@ -78,7 +78,7 @@ func Server() *chi.Mux {
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
-	
+
 	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client)
 	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
 
@@ -98,6 +98,7 @@ func Server() *chi.Mux {
 			},
 			Timeout: 80 * time.Second,
 		},
+
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
 			// URL: "http://localhost:8081/api",
@@ -131,6 +132,7 @@ func Server() *chi.Mux {
 	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
 
 	listener, err := net.Listen("tcp", ":8081")
+
 	if err != nil {
 		panic(err)
 	}

@@ -33,6 +33,7 @@ type Server struct {
 
 func New(logger *zap.Logger, svc regression2.Service, run run.Service, listener net.Listener) error {
 
+	// create an instance for grpc server
 	srv := grpc.NewServer()
 	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run})
 	reflection.Register(srv)
@@ -48,7 +49,6 @@ func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.E
 		stat = run.TestRunStatusPassed
 	}
 	now := time.Now().Unix()
-
 	err := srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Updated: now,
@@ -85,7 +85,6 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	if err != nil {
 		return nil, err
 	}
-	//check
 	return &proto.StartResponse{Id: id}, nil
 }
 
@@ -174,7 +173,6 @@ func (srv *Server) GetTC(ctx context.Context, request *proto.GetTCRequest) (*pro
 		return nil, err
 	}
 	return ptcs, nil
-
 }
 
 func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*proto.GetTCSResponse, error) {
@@ -213,7 +211,6 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		}
 		ptcs = append(ptcs, ptc)
 	}
-
 	return &proto.GetTCSResponse{Tcs: ptcs}, nil
 }
 
@@ -226,7 +223,6 @@ func getHttpHeader(m map[string]*proto.StrArr) map[string][]string {
 }
 
 func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*proto.PostTCResponse, error) {
-
 	deps := []models.Dependency{}
 	for _, j := range request.Dependency {
 		data := [][]byte{}
@@ -240,7 +236,6 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			Data: data,
 		})
 	}
-
 	now := time.Now().UTC().Unix()
 	inserted, err := srv.svc.Put(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
@@ -265,27 +260,20 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		},
 		Deps: deps,
 	}})
-
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err
-
 	}
-
-	// rg.logger.Debug("testcase inserted",zap.Any("testcase ids",inserted))
 	if len(inserted) == 0 {
 		srv.logger.Error("unknown failure while inserting testcase")
 		return nil, err
 	}
-
 	return &proto.PostTCResponse{
 		TcsId: map[string]string{"id": inserted[0]},
 	}, nil
-
 }
 
 func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.DeNoiseResponse, error) {
-
 	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, request.Resp.Body, getStringMap(request.Resp.Header))
 	if err != nil {
 		return &proto.DeNoiseResponse{Message: err.Error()}, nil
@@ -294,7 +282,6 @@ func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.
 }
 
 func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.TestResponse, error) {
-
 	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, models.HttpResp{
 		StatusCode: int(request.Resp.StatusCode),
 		Header:     getStringMap(request.Resp.Header),

@@ -28,7 +28,7 @@ type RunDB struct {
 }
 
 func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
-	
+
 	// too repetitive
 	// TODO write a generic FindOne for all get calls
 	filter := bson.M{"_id": id}
@@ -172,6 +172,7 @@ func (r *RunDB) Increment(ctx context.Context, success, failure bool, id string)
 	if success {
 		update["$inc"] = bson.D{{"success", 1}}
 	}
+
 	if failure {
 		update["$inc"] = bson.D{{"failure", 1}}
 	}

@@ -15,6 +15,7 @@ import (
 )
 
 func NewTestCase(c *kmongo.Collection, log *zap.Logger) *testCaseDB {
+
 	return &testCaseDB{
 		c:   c,
 		log: log,
@@ -32,9 +33,11 @@ func (t *testCaseDB) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	return nil
+
 }
 
 func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) {
+
 	filter := bson.M{"cid": cid}
 	values, err := t.c.Distinct(ctx, "app_id", filter)
 	if err != nil {
@@ -87,6 +90,7 @@ func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri string) ([]model
 //}
 
 func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, filterKeys map[string][]string) error {
+
 	filters := bson.M{
 		"cid":    cid,
 		"app_id": app,
@@ -159,6 +163,7 @@ func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, f
 }
 
 func (t *testCaseDB) Upsert(ctx context.Context, tc models.TestCase) error {
+
 	// sort arrays before insert
 	for _, v := range tc.Anchors {
 		sort.Strings(v)
@@ -234,6 +239,7 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, 
 	if offset < 0 {
 		offset = 0
 	}
+
 	findOptions.SetSkip(int64(offset))
 	findOptions.SetLimit(int64(limit))
 	findOptions.SetSort(bson.M{"created": -1}) //reverse sort
