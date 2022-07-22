@@ -41,7 +41,7 @@ type config struct {
 	TestTable       string `envconfig:"TEST_TABLE" default:"tests"`
 	TelemetryTable  string `envconfig:"TELEMETRY_TABLE" default:"telemetry"`
 	APIKey          string `envconfig:"API_KEY"`
-	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"true"`
+	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"false"`
 	EnableTelemetry bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
 }
 
