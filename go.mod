@@ -16,6 +16,13 @@ require (
 	github.com/vektah/gqlparser/v2 v2.3.1
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.21.0
+	google.golang.org/protobuf v1.28.0
+)
+
+require (
+	github.com/golang/protobuf v1.5.2 // indirect
+	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
+	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
 )
 
 require (
@@ -35,6 +42,7 @@ require (
 	github.com/mitchellh/mapstructure v1.4.3 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/soheilhy/cmux v0.1.5
 	github.com/urfave/cli/v2 v2.3.0 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.1.0 // indirect
@@ -44,10 +52,11 @@ require (
 	go.uber.org/multierr v1.7.0 // indirect
 	golang.org/x/crypto v0.0.0-20220214200702-86341886e292 // indirect
 	golang.org/x/mod v0.5.1 // indirect
-	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
+	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20220227234510-4e6760a101f9 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/tools v0.1.9 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
+	google.golang.org/grpc v1.45.0
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

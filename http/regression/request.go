@@ -7,6 +7,8 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
+
+// TestCaseReq
 type TestCaseReq struct {
 	Captured int64               `json:"captured" bson:"captured"`
 	AppID    string              `json:"app_id" bson:"app_id"`
