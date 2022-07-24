@@ -96,6 +96,7 @@ func Server() *chi.Mux {
 			Filter: keploy.Filter{
 				UrlRegex: "^/api",
 			},
+
 			Timeout: 80 * time.Second,
 		},
 

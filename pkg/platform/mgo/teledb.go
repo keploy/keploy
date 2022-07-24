@@ -60,6 +60,7 @@ func NewTelemetryDB(db *mongo.Database, telemetryTable string, enabled bool, log
 	if enabled {
 		tele.c = kmongo.NewCollection(db.Collection(telemetryTable))
 	}
+
 	return &tele
 
 }
