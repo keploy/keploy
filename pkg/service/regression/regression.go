@@ -213,18 +213,28 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 		},
 	}
 
-	var noise []string
+	var (
+		bodyNoise   []string
+		headerNoise = map[string]string{}
+	)
 
 	for _, n := range tc.Noise {
 		a := strings.Split(n, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			noise = append(noise, x)
+			bodyNoise = append(bodyNoise, x)
+		} else if a[0] == "header" {
+			// if len(a) == 2 {
+			// 	headerNoise[a[1]] = a[1]
+			// 	continue
+			// }
+			headerNoise[a[len(a)-1]] = a[len(a)-1]
+			// headerNoise[a[0]] = a[0]
 		}
 	}
 
-	if bodyType == run.BodyTypeJSON {
-		pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, noise, r.log)
+	if !pkg.Contains(tc.Noise, "body") && bodyType == run.BodyTypeJSON {
+		pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 		if err != nil {
 			return false, res, &tc, err
 		}
@@ -236,7 +246,7 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 	res.BodyResult.Normal = pass
 
-	if !pkg.CompareHeaders(tc.HttpResp.Header, resp.Header, hRes) {
+	if !pkg.CompareHeaders(tc.HttpResp.Header, resp.Header, hRes, headerNoise) {
 		pass = false
 	}
 	res.HeadersResult = *hRes
