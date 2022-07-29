@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/pkg/service/sDeps"
 	"go.keploy.io/server/web"
 
 	"go.uber.org/zap"
@@ -71,6 +72,8 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
+	sdb := mgo.NewSDeps(kmongo.NewCollection(db.Collection("seleniumDeps")), logger)
+	sSrv := sDeps.NewSDepsService(sdb, logger)
 	enabled := conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
 
@@ -120,7 +123,7 @@ func Server() *chi.Mux {
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
-		regression.New(r, logger, regSrv, runSrv)
+		regression.New(r, logger, regSrv, runSrv, sSrv)
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
