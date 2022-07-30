@@ -17,8 +17,8 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, sSvc deps.Service) {
-	s := &regression{logger: logger, svc: svc, run: run, sSvc: sSvc}
+func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, deps deps.Service) {
+	s := &regression{logger: logger, svc: svc, run: run, deps: deps}
 
 	r.Route("/regression", func(r chi.Router) {
 		r.Route("/testcase", func(r chi.Router) {
@@ -41,13 +41,13 @@ type regression struct {
 	logger *zap.Logger
 	svc    regression2.Service
 	run    run.Service
-	sSvc   deps.Service
+	deps   deps.Service
 }
 
 func (rg *regression) GetInfraDeps(w http.ResponseWriter, r *http.Request) {
 	app := r.URL.Query().Get("appid")
 	testName := r.URL.Query().Get("testName")
-	res, err := rg.sSvc.Get(r.Context(), app, testName)
+	res, err := rg.deps.Get(r.Context(), app, testName)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -63,7 +63,7 @@ func (rg *regression) InsertInfraDeps(w http.ResponseWriter, r *http.Request) {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	err := rg.sSvc.Insert(r.Context(), models.InfraDeps(*data))
+	err := rg.deps.Insert(r.Context(), models.InfraDeps(*data))
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 	}
