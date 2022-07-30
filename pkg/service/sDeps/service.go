@@ -7,6 +7,6 @@ import (
 )
 
 type Service interface {
-	Insert(context.Context, models.SeleniumDeps) error
-	Get(ctx context.Context, app string, testName string) ([]models.SeleniumDeps, error)
+	Insert(context.Context, models.InfraDeps) error
+	Get(ctx context.Context, app string, testName string) ([]models.InfraDeps, error)
 }

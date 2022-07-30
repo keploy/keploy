@@ -9,7 +9,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
-type SDepsReq struct {
+type InfraDeps struct {
 	ID       string                            `json:"id" bson:"_id"`
 	Created  int64                             `json:"created" bson:"created"`
 	Updated  int64                             `json:"updated" bson:"updated"`
@@ -18,7 +18,7 @@ type SDepsReq struct {
 	Deps     []map[string]models.FetchResponse `json:"deps" bson:"deps,omitempty"`
 }
 
-func (req *SDepsReq) Bind(r *http.Request) error {
+func (req *InfraDeps) Bind(r *http.Request) error {
 	if req.ID == "" {
 		req.ID = uuid.New().String()
 	}

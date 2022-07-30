@@ -2,8 +2,6 @@ package regression
 
 import (
 	"errors"
-	"fmt"
-	// "fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,8 +30,8 @@ func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Serv
 		r.Post("/denoise", s.DeNoise)
 		r.Get("/start", s.Start)
 		r.Get("/end", s.End)
-		r.Get("/selenium/get", s.SGet)
-		r.Post("/selenium/insert", s.SInsert)
+		r.Get("/selenium/get", s.GetInfraDeps)
+		r.Post("/selenium/insert", s.InsertInfraDeps)
 
 		//r.Get("/search", searchArticles)                                  // GET /articles/search
 	})
@@ -46,28 +44,26 @@ type regression struct {
 	sSvc   sDeps.Service
 }
 
-func (rg *regression) SGet(w http.ResponseWriter, r *http.Request) {
+func (rg *regression) GetInfraDeps(w http.ResponseWriter, r *http.Request) {
 	app := r.URL.Query().Get("appid")
 	testName := r.URL.Query().Get("testName")
-	fmt.Println(" **** app and testname", app, " & ", testName)
 	res, err := rg.sSvc.Get(r.Context(), app, testName)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	fmt.Println("found deps: ", res)
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, res)
 }
 
-func (rg *regression) SInsert(w http.ResponseWriter, r *http.Request) {
-	data := &SDepsReq{}
+func (rg *regression) InsertInfraDeps(w http.ResponseWriter, r *http.Request) {
+	data := &InfraDeps{}
 	if err := render.Bind(r, data); err != nil {
 		rg.logger.Error("error parsing request", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	err := rg.sSvc.Insert(r.Context(), models.SeleniumDeps(*data))
+	err := rg.sSvc.Insert(r.Context(), models.InfraDeps(*data))
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 	}
