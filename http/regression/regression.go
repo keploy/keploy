@@ -11,13 +11,13 @@ import (
 	"github.com/google/uuid"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/service/deps"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
-	"go.keploy.io/server/pkg/service/sDeps"
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, sSvc sDeps.Service) {
+func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, sSvc deps.Service) {
 	s := &regression{logger: logger, svc: svc, run: run, sSvc: sSvc}
 
 	r.Route("/regression", func(r chi.Router) {
@@ -41,7 +41,7 @@ type regression struct {
 	logger *zap.Logger
 	svc    regression2.Service
 	run    run.Service
-	sSvc   sDeps.Service
+	sSvc   deps.Service
 }
 
 func (rg *regression) GetInfraDeps(w http.ResponseWriter, r *http.Request) {

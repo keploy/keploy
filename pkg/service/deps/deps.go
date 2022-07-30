@@ -1,4 +1,4 @@
-package sDeps
+package deps
 
 import (
 	"context"
