@@ -72,8 +72,8 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	sdb := mgo.NewSDeps(kmongo.NewCollection(db.Collection("seleniumDeps")), logger)
-	sSrv := sDeps.NewSDepsService(sdb, logger)
+	sdb := mgo.NewInfraDepsDB(kmongo.NewCollection(db.Collection("seleniumDeps")), logger)
+	sSrv := sDeps.NewInrfaDepsService(sdb, logger)
 	enabled := conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
 
