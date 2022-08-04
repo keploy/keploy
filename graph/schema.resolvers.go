@@ -158,9 +158,42 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, o
 		return nil, err
 	}
 	var res []*model.TestCase
-	for _, v := range tcs {
+	for _, v := range tcs.TestCases {
 		res = append(res, ConvertTestCase(v))
 	}
+	
+	return res, nil
+}
+
+func (r *queryResolver) TestCases(ctx context.Context, app *string, id *string, offset *int, limit *int) (*model.TestCases, error) {
+	a := ""
+	if app != nil {
+		a = *app
+	}
+
+	if id != nil {
+		tc, err := r.reg.Get(ctx, DEFAULT_COMPANY, a, *id)
+		if err != nil {
+			return nil, err
+		}
+		return &model.TestCases{
+			Tc:    []*model.TestCase{ConvertTestCase(tc)},
+			Count: 1,
+		}, nil
+	}
+
+	tcs, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	res := &model.TestCases{
+		Tc:    []*model.TestCase{},
+		Count: 0,
+	}
+	for _, v := range tcs.TestCases {
+		res.Tc = append(res.Tc, ConvertTestCase(v))
+	}
+	res.Count = int(tcs.Count)
 	return res, nil
 }
 
@@ -169,21 +202,6 @@ func (r *subscriptionResolver) TestRun(ctx context.Context, app *string, id *str
 }
 
 // Subscription returns generated.SubscriptionResolver implementation.
-
 func (r *Resolver) Subscription() generated.SubscriptionResolver { return &subscriptionResolver{r} }
 
 type subscriptionResolver struct{ *Resolver }
-
-// !!! WARNING !!!
-// The code below was going to be deleted when updating resolvers. It has been copied here so you have
-// one last chance to move it out of harms way if you want. There are two reasons this happens:
-//  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
-//    it when you're done.
-//  - You have helper methods in this file. Move them out to keep these resolver files clean.
-// func (r *mutationResolver) NormalizeTest(ctx context.Context, id string) (bool, error) {
-// 	err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
-// 	if err != nil {
-// 		return false, err
-// 	}
-// 	return true, nil
-// }

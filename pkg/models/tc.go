@@ -18,12 +18,17 @@ type TestCase struct {
 	Noise    []string            `json:"noise" bson:"noise,omitempty"`
 }
 
+type TestCases struct {
+	TestCases []TestCase
+	Count     int64
+}
+
 type TestCaseDB interface {
 	Upsert(context.Context, TestCase) error
 	UpdateTC(context.Context, TestCase) error
 	Get(ctx context.Context, cid, id string) (TestCase, error)
 	Delete(ctx context.Context, id string) error
-	GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]TestCase, error)
+	GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) (*TestCases, error)
 	GetKeys(ctx context.Context, cid, app, uri string) ([]TestCase, error)
 	//Exists(context.Context, TestCase) (bool, error)
 	DeleteByAnchor(ctx context.Context, cid, app, uri string, filterKeys map[string][]string) error

@@ -204,8 +204,8 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		return nil, err
 	}
 	var ptcs []*proto.TestCase
-	for i := 0; i < len(tcs); i++ {
-		ptc, err := getProtoTC(tcs[i])
+	for i := 0; i < len(tcs.TestCases); i++ {
+		ptc, err := getProtoTC(tcs.TestCases[i])
 		if err != nil {
 			return nil, err
 		}

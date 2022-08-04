@@ -113,7 +113,7 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 	return tcs, nil
 }
 
-func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
+func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) (*models.TestCases, error) {
 	off, lim := 0, 25
 	if offset != nil {
 		off = *offset

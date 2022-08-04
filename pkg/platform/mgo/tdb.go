@@ -27,6 +27,17 @@ type testCaseDB struct {
 	log *zap.Logger
 }
 
+func (t *testCaseDB) countDocuments(ctx context.Context, filter bson.M, findOptions *options.CountOptions) (int64, error) {
+	var count int64
+
+	count, err := t.c.CountDocuments(ctx, filter, findOptions)
+	if err != nil {
+		return -1, err
+	}
+
+	return count, nil
+}
+
 func (t *testCaseDB) Delete(ctx context.Context, id string) error {
 	_, err := t.c.DeleteOne(ctx, bson.M{"_id": id})
 	if err != nil {
@@ -240,9 +251,13 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 	return tcs, nil
 }
 
-func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
+func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) (*models.TestCases, error) {
 
 	filter := bson.M{"cid": cid, "app_id": app}
+
+	findOptionsForCount := &options.CountOptions{}
+	count, err := t.c.CountDocuments(ctx, filter, findOptionsForCount)
+
 	findOptions := options.Find()
 	if !anchors {
 		findOptions.SetProjection(bson.M{"anchors": 0, "all_keys": 0})
@@ -250,14 +265,18 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, 
 	if offset < 0 {
 		offset = 0
 	}
-
 	findOptions.SetSkip(int64(offset))
 	findOptions.SetLimit(int64(limit))
 	findOptions.SetSort(bson.M{"created": -1}) //reverse sort
-
 	tcs, err := t.getAll(ctx, filter, findOptions)
 	if err != nil {
 		fmt.Println("After getAll ", err)
 	}
-	return tcs, nil
+
+	tcwc := &models.TestCases{
+		TestCases: tcs,
+		Count:     count,
+	}
+
+	return tcwc, nil
 }
