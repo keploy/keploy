@@ -6,7 +6,7 @@ go 1.17
 
 require (
 	github.com/99designs/gqlgen v0.15.1
-	github.com/go-chi/chi v3.3.2+incompatible
+	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/cors v1.2.0
 	github.com/go-chi/render v1.0.1
 	github.com/go-test/deep v1.0.8
