@@ -2,7 +2,7 @@ package models
 
 import "context"
 
-type InfraDeps struct {
+type TestMock struct {
 	ID       string                     `json:"id" bson:"_id"`
 	Created  int64                      `json:"created" bson:"created,omitempty"`
 	Updated  int64                      `json:"updated" bson:"updated,omitempty"`
@@ -18,9 +18,9 @@ type FetchResponse struct {
 	ResponseType string            `json:"response_type" bson;"response_type"`
 }
 
-type InfraDepsDB interface {
-	Insert(context.Context, InfraDeps) error
-	Get(ctx context.Context, app string, testName string) ([]InfraDeps, error)
+type TestMockDB interface {
+	Insert(context.Context, TestMock) error
+	Get(ctx context.Context, app string, testName string) ([]TestMock, error)
 	CountDocs(ctx context.Context, app string, testName string) (int64, error)
-	UpdateArr(ctx context.Context, app string, testName string, doc InfraDeps) error
+	UpdateArr(ctx context.Context, app string, testName string, doc TestMock) error
 }

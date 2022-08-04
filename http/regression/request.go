@@ -9,7 +9,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
-type InfraDeps struct {
+type TestMocksReq struct {
 	ID       string                            `json:"id" bson:"_id"`
 	Created  int64                             `json:"created" bson:"created"`
 	Updated  int64                             `json:"updated" bson:"updated"`
@@ -18,7 +18,7 @@ type InfraDeps struct {
 	Deps     []map[string]models.FetchResponse `json:"deps" bson:"deps,omitempty"`
 }
 
-func (req *InfraDeps) Bind(r *http.Request) error {
+func (req *TestMocksReq) Bind(r *http.Request) error {
 	if req.ID == "" {
 		req.ID = uuid.New().String()
 	}

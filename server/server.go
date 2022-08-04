@@ -24,7 +24,7 @@ import (
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/service/deps"
+	"go.keploy.io/server/pkg/service/mocks"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
@@ -72,8 +72,8 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	sdb := mgo.NewInfraDepsDB(kmongo.NewCollection(db.Collection("seleniumDeps")), logger)
-	sSrv := deps.NewInrfaDepsService(sdb, logger)
+	sdb := mgo.NewTestMockDB(kmongo.NewCollection(db.Collection("test-mocks")), logger)
+	sSrv := mocks.NewTestMockService(sdb, logger)
 	enabled := conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
 

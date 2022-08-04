@@ -9,36 +9,36 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewInfraDepsDB(c *kmongo.Collection, log *zap.Logger) *infraDepsDB {
-	return &infraDepsDB{
+func NewTestMockDB(c *kmongo.Collection, log *zap.Logger) *testMockDB {
+	return &testMockDB{
 		c:   c,
 		log: log,
 	}
 }
 
-type infraDepsDB struct {
+type testMockDB struct {
 	c   *kmongo.Collection
 	log *zap.Logger
 }
 
-func (s *infraDepsDB) UpdateArr(ctx context.Context, app string, testName string, doc models.InfraDeps) error {
+func (s *testMockDB) UpdateArr(ctx context.Context, app string, testName string, doc models.TestMock) error {
 	filter := bson.M{"app_id": app, "test_name": testName}
 	_, err := s.c.UpdateOne(ctx, filter, bson.M{"$push": bson.M{"deps": bson.M{"$each": doc.Deps}}})
 	return err
 }
 
-func (s *infraDepsDB) CountDocs(ctx context.Context, app string, testName string) (int64, error) {
+func (s *testMockDB) CountDocs(ctx context.Context, app string, testName string) (int64, error) {
 	filter := bson.M{"app_id": app, "test_name": testName}
 	return s.c.CountDocuments(ctx, filter)
 }
 
-func (s *infraDepsDB) Insert(ctx context.Context, doc models.InfraDeps) error {
+func (s *testMockDB) Insert(ctx context.Context, doc models.TestMock) error {
 	_, err := s.c.InsertOne(ctx, doc)
 	return err
 }
 
-func (s *infraDepsDB) Get(ctx context.Context, app string, testName string) ([]models.InfraDeps, error) {
-	var result []models.InfraDeps
+func (s *testMockDB) Get(ctx context.Context, app string, testName string) ([]models.TestMock, error) {
+	var result []models.TestMock
 	filter := bson.M{"app_id": app, "test_name": testName}
 	cur, err := s.c.Find(ctx, filter)
 	if err != nil {
@@ -47,7 +47,7 @@ func (s *infraDepsDB) Get(ctx context.Context, app string, testName string) ([]m
 
 	// Loop through the cursor
 	for cur.Next(ctx) {
-		var doc models.InfraDeps
+		var doc models.TestMock
 		err = cur.Decode(&doc)
 		if err != nil {
 			return nil, err

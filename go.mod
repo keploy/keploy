@@ -5,7 +5,7 @@ go 1.17
 // replace github.com/keploy/go-sdk => ../go-sdk
 
 require (
-	github.com/99designs/gqlgen v0.16.0
+	github.com/99designs/gqlgen v0.16.0 // v should be less or equal 0.15.1
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/cors v1.2.0
 	github.com/go-chi/render v1.0.1
@@ -13,7 +13,7 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/keploy/go-sdk v0.4.1
-	github.com/vektah/gqlparser/v2 v2.3.1
+	github.com/vektah/gqlparser/v2 v2.3.1 // v should b4 less or equal 2.2.0
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.21.0
 )
