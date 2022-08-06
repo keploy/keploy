@@ -48,7 +48,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			}
 
 			if err != nil {
-				ac.logger.Fatal("failed to countDocuments in analytics collection", zap.Error(err))
+				ac.logger.Error("failed to countDocuments in analytics collection", zap.Error(err))
 			}
 			event := models.TeleEvent{
 				EventType: "Ping",
@@ -63,7 +63,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 				}
 				resp, err := http.Post("https://telemetry.keploy.io/analytics", "application/json", bytes.NewBuffer(bin))
 				if err != nil {
-					ac.logger.Fatal("failed to send request for analytics", zap.Error(err))
+					ac.logger.Error("failed to send request for analytics", zap.Error(err))
 					break
 				}
 
