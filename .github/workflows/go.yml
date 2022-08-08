@@ -58,7 +58,7 @@ jobs:
 #      - name: Install extra dependencies
 #        run: npm install -g @semantic-release/exec
 
-      - uses: codfish/semantic-release-action@additional-packages
+      - uses: codfish/semantic-release-action@v1
         with:
           dry_run: true
           additional_packages: |
