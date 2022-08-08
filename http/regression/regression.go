@@ -11,14 +11,13 @@ import (
 	"github.com/google/uuid"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/service/mocks"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, deps mocks.Service) {
-	s := &regression{logger: logger, svc: svc, run: run, deps: deps}
+func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service) {
+	s := &regression{logger: logger, svc: svc, run: run}
 
 	r.Route("/regression", func(r chi.Router) {
 		r.Route("/testcase", func(r chi.Router) {
@@ -30,8 +29,6 @@ func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Serv
 		r.Post("/denoise", s.DeNoise)
 		r.Get("/start", s.Start)
 		r.Get("/end", s.End)
-		r.Get("/extension/dependencies/get", s.GetTestMocks)
-		r.Post("/extension/dependencies/insert", s.InsertTestMocks)
 
 		//r.Get("/search", searchArticles)                                  // GET /articles/search
 	})
@@ -41,35 +38,6 @@ type regression struct {
 	logger *zap.Logger
 	svc    regression2.Service
 	run    run.Service
-	deps   mocks.Service
-}
-
-func (rg *regression) GetTestMocks(w http.ResponseWriter, r *http.Request) {
-	app := r.URL.Query().Get("appid")
-	testName := r.URL.Query().Get("testName")
-	res, err := rg.deps.Get(r.Context(), app, testName)
-	if err != nil {
-		render.Render(w, r, ErrInvalidRequest(err))
-		return
-	}
-	render.Status(r, http.StatusOK)
-	render.JSON(w, r, res)
-}
-
-func (rg *regression) InsertTestMocks(w http.ResponseWriter, r *http.Request) {
-	data := &TestMocksReq{}
-	if err := render.Bind(r, data); err != nil {
-		rg.logger.Error("error parsing request", zap.Error(err))
-		render.Render(w, r, ErrInvalidRequest(err))
-		return
-	}
-	err := rg.deps.Insert(r.Context(), models.TestMock(*data))
-	if err != nil {
-		render.Render(w, r, ErrInvalidRequest(err))
-	}
-	return
-	// render.Status(r, http.StatusOK)
-	// render.JSON(w, r, "Inserted succesfully")
 }
 
 func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
