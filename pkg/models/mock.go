@@ -19,7 +19,7 @@ type FetchResponse struct {
 }
 
 type MockDB interface {
-	Insert(context.Context, Mock) error
+	Put(context.Context, Mock) error
 	Get(ctx context.Context, app string, testName string) ([]Mock, error)
 	CountDocs(ctx context.Context, app string, testName string) (int64, error)
 	UpdateArr(ctx context.Context, app string, testName string, doc Mock) error

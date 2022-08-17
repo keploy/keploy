@@ -1,4 +1,4 @@
-package mocks
+package mock
 
 import (
 	"context"
@@ -7,6 +7,6 @@ import (
 )
 
 type Service interface {
-	Insert(context.Context, models.Mock) error
+	Put(context.Context, models.Mock) error
 	Get(ctx context.Context, app string, testName string) ([]models.Mock, error)
 }

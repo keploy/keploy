@@ -32,7 +32,7 @@ func (s *mockDB) CountDocs(ctx context.Context, app string, testName string) (in
 	return s.c.CountDocuments(ctx, filter)
 }
 
-func (s *mockDB) Insert(ctx context.Context, doc models.Mock) error {
+func (s *mockDB) Put(ctx context.Context, doc models.Mock) error {
 	_, err := s.c.InsertOne(ctx, doc)
 	return err
 }

@@ -1,4 +1,4 @@
-package mocks
+package mock
 
 import (
 	"net/http"
@@ -7,7 +7,7 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/models"
-	mocks2 "go.keploy.io/server/pkg/service/mocks"
+	mocks2 "go.keploy.io/server/pkg/service/mock"
 	"go.uber.org/zap"
 )
 
@@ -41,14 +41,14 @@ func (m *mocks) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *mocks) Post(w http.ResponseWriter, r *http.Request) {
-	data := &MocksReq{}
+	data := &MockReq{}
 	if err := render.Bind(r, data); err != nil {
 		m.logger.Error("error parsing request", zap.Error(err))
 		render.Render(w, r, regression.ErrInvalidRequest(err))
 		return
 	}
 
-	err := m.svc.Insert(r.Context(), models.Mock(*data))
+	err := m.svc.Put(r.Context(), models.Mock(*data))
 	if err != nil {
 		render.Render(w, r, regression.ErrInvalidRequest(err))
 	}
