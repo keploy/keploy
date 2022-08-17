@@ -20,6 +20,7 @@ type Telemetry struct {
 }
 
 func NewTelemetry(col DB, enabled, offMode bool, logger *zap.Logger) *Telemetry {
+
 	tele := Telemetry{
 		Enabled: enabled,
 		OffMode: offMode,
@@ -27,22 +28,34 @@ func NewTelemetry(col DB, enabled, offMode bool, logger *zap.Logger) *Telemetry 
 		db:      col,
 	}
 	return &tele
+
 }
 
 func (ac *Telemetry) Ping(isTestMode bool) {
+
+	check := false
 	if !ac.Enabled || isTestMode {
-		return
+		check = true
 	}
+
 	go func() {
 		for {
-			count, err := ac.db.Count()
+			var count int64
+			var err error
+
+			if ac.Enabled && !isTestMode {
+				count, err = ac.db.Count()
+			}
+
 			if err != nil {
 				ac.logger.Fatal("failed to countDocuments in analytics collection", zap.Error(err))
 			}
-			event := models.Event{
+			event := models.TeleEvent{
 				EventType: "Ping",
 				CreatedAt: time.Now().Unix(),
+				TeleCheck: check,
 			}
+
 			if count == 0 {
 				bin, err := marshalEvent(event, ac.logger)
 				if err != nil {
@@ -53,6 +66,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 					ac.logger.Fatal("failed to send request for analytics", zap.Error(err))
 					break
 				}
+
 				id, err := unmarshalResp(resp, ac.logger)
 				if err != nil {
 					break
@@ -89,9 +103,9 @@ func (ac *Telemetry) GetApps(apps int, client http.Client, ctx context.Context) 
 }
 
 func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx context.Context, output ...map[string]interface{}) {
-	if ac.Enabled {
 
-		event := models.Event{
+	if ac.Enabled {
+		event := models.TeleEvent{
 			EventType: eventType,
 			CreatedAt: time.Now().Unix(),
 		}
@@ -109,11 +123,13 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 			ac.logger.Error("failed to marshal event", zap.Error(err))
 			return
 		}
+
 		req, err := http.NewRequest(http.MethodPost, "https://telemetry.keploy.io/analytics", bytes.NewBuffer(bin))
 		if err != nil {
 			ac.logger.Fatal("failed to create request for analytics", zap.Error(err))
 			return
 		}
+
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
 		if !ac.OffMode {
@@ -123,6 +139,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 				ac.logger.Fatal("failed to send request for analytics", zap.Error(err))
 				return
 			}
+
 			unmarshalResp(resp, ac.logger)
 			return
 		}

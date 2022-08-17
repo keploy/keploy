@@ -213,18 +213,28 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 		},
 	}
 
-	var noise []string
+	var (
+		bodyNoise   []string
+		headerNoise = map[string]string{}
+	)
 
 	for _, n := range tc.Noise {
 		a := strings.Split(n, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			noise = append(noise, x)
+			bodyNoise = append(bodyNoise, x)
+		} else if a[0] == "header" {
+			// if len(a) == 2 {
+			// 	headerNoise[a[1]] = a[1]
+			// 	continue
+			// }
+			headerNoise[a[len(a)-1]] = a[len(a)-1]
+			// headerNoise[a[0]] = a[0]
 		}
 	}
 
-	if bodyType == run.BodyTypeJSON {
-		pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, noise, r.log)
+	if !pkg.Contains(tc.Noise, "body") && bodyType == run.BodyTypeJSON {
+		pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 		if err != nil {
 			return false, res, &tc, err
 		}
@@ -236,7 +246,7 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 	res.BodyResult.Normal = pass
 
-	if !pkg.CompareHeaders(tc.HttpResp.Header, resp.Header, hRes) {
+	if !pkg.CompareHeaders(tc.HttpResp.Header, resp.Header, hRes, headerNoise) {
 		pass = false
 	}
 	res.HeadersResult = *hRes
@@ -434,6 +444,7 @@ func flatten(j interface{}) map[string][]string {
 }
 
 func (r *Regression) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
+
 	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
 	_, ok1 := r.noisyFields[index]
 	_, ok2 := r.fieldCounts[index]
@@ -516,7 +527,7 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 		}
 	}
 
-	isAnchorChange := false
+	isAnchorChange := true
 	for k, v := range reqKeys {
 		if !r.noisyFields[index][k] {
 			// update field count
@@ -529,10 +540,6 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 			if !isAnchor(r.fieldCounts[index][k]) {
 				r.noisyFields[index][k] = true
 				isAnchorChange = true
-				// err = r.tdb.DeleteByAnchor(context.TODO(), t.CID, t.AppID, t.URI, k)
-				// if err != nil {
-				// 	return false, err
-				// }
 				continue
 			}
 			filterKeys[k] = v
@@ -590,7 +597,7 @@ func isAnchor(m map[string]int) bool {
 		return true
 	}
 	// if the unique values are less than 40% of the total value count them,
-	// the field is low varient.
+	// the field is low variant.
 	if float64(totalCount)*0.40 > float64(len(m)) {
 		return true
 	}

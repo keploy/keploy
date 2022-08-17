@@ -11,6 +11,7 @@ import (
 
 // mapClone returns a copy of given src map.
 func mapClone(src map[string][]string) map[string][]string {
+
 	clone := make(map[string][]string, len(src))
 	for k, v := range src {
 		clone[k] = v
@@ -20,6 +21,7 @@ func mapClone(src map[string][]string) map[string][]string {
 
 // convertJson returns unmarshalled JSON object.
 func convertJson(s string, log *zap.Logger) (interface{}, error) {
+
 	var result interface{}
 
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
@@ -28,9 +30,11 @@ func convertJson(s string, log *zap.Logger) (interface{}, error) {
 	} else {
 		return result, nil
 	}
+
 }
 
 func Match(exp, act string, noise []string, log *zap.Logger) (bool, error) {
+
 	noiseMap := convertToMap(noise)
 	expected, err := convertJson(exp, log)
 	if err != nil {
@@ -49,10 +53,12 @@ func Match(exp, act string, noise []string, log *zap.Logger) (bool, error) {
 	tmp = mapClone(noiseMap)
 	actual = removeNoisy(actual, tmp)
 	return jsonMatch(expected, actual)
+
 }
 
 // removeNoisy removes the noisy key-value fields(storend in noise map) from given element JSON. It is a recursive function.
 func removeNoisy(element interface{}, noise map[string][]string) interface{} {
+
 	y := reflect.ValueOf(element)
 	switch y.Kind() {
 	case reflect.Map:
@@ -65,6 +71,7 @@ func removeNoisy(element interface{}, noise map[string][]string) interface{} {
 			if seperatorIndx != -1 {
 				key = k[:seperatorIndx]
 			}
+
 			val, ok := el[key]
 			if ok {
 				// reached the noisy field and it should be deleted.
@@ -83,6 +90,7 @@ func removeNoisy(element interface{}, noise map[string][]string) interface{} {
 			}
 		}
 		return el
+
 	case reflect.Slice:
 		x := reflect.ValueOf(element)
 		var res []interface{}
@@ -100,16 +108,19 @@ func removeNoisy(element interface{}, noise map[string][]string) interface{} {
 // convertToMap converts array of string into map with key as str(string element of given array)
 // and value as array of string formed by seperating str into substrings (using "." as seperator).
 func convertToMap(arr []string) map[string][]string {
+
 	res := map[string][]string{}
 	for i := range arr {
 		x := strings.Split(arr[i], ".")
 		res[arr[i]] = x[1:]
 	}
 	return res
+
 }
 
 // jsonMatch returns true if expected and actual JSON objects matches(are equal).
 func jsonMatch(expected, actual interface{}) (bool, error) {
+
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
 		return false, errors.New("type not matched ")
 	}
@@ -161,7 +172,7 @@ func jsonMatch(expected, actual interface{}) (bool, error) {
 		for i := 0; i < expSlice.Len(); i++ {
 
 			isMatchedElement := false
-			for j := 0; j< actSlice.Len() ;j++{
+			for j := 0; j < actSlice.Len(); j++ {
 				if x, err := jsonMatch(expSlice.Index(i).Interface(), actSlice.Index(j).Interface()); err == nil && x {
 					isMatchedElement = true
 					break
