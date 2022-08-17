@@ -19,14 +19,15 @@ import (
 	"github.com/soheilhy/cmux"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
+	"go.keploy.io/server/http/mock"
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	mock2 "go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
-
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -72,6 +73,8 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
+	mdb := mgo.NewMockDB(kmongo.NewCollection(db.Collection("test-mocks")), logger)
+	mockSrv := mock2.NewMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
 
@@ -126,6 +129,8 @@ func Server() *chi.Mux {
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
 		regression.New(r, logger, regSrv, runSrv)
+		mock.New(r, logger, mockSrv)
+
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
