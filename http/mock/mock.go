@@ -12,7 +12,7 @@ import (
 )
 
 func New(r chi.Router, logger *zap.Logger, svc mocks2.Service) {
-	s := &mocks{
+	s := &mock{
 		logger: logger,
 		svc:    svc,
 	}
@@ -23,12 +23,12 @@ func New(r chi.Router, logger *zap.Logger, svc mocks2.Service) {
 	})
 }
 
-type mocks struct {
+type mock struct {
 	logger *zap.Logger
 	svc    mocks2.Service
 }
 
-func (m *mocks) Get(w http.ResponseWriter, r *http.Request) {
+func (m *mock) Get(w http.ResponseWriter, r *http.Request) {
 	app := r.URL.Query().Get("appid")
 	testName := r.URL.Query().Get("testName")
 	res, err := m.svc.Get(r.Context(), app, testName)
@@ -40,7 +40,7 @@ func (m *mocks) Get(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, res)
 }
 
-func (m *mocks) Post(w http.ResponseWriter, r *http.Request) {
+func (m *mock) Post(w http.ResponseWriter, r *http.Request) {
 	data := &MockReq{}
 	if err := render.Bind(r, data); err != nil {
 		m.logger.Error("error parsing request", zap.Error(err))
