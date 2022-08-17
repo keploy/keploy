@@ -7,11 +7,11 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/models"
-	mocks2 "go.keploy.io/server/pkg/service/mock"
+	mock2 "go.keploy.io/server/pkg/service/mock"
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc mocks2.Service) {
+func New(r chi.Router, logger *zap.Logger, svc mock2.Service) {
 	s := &mock{
 		logger: logger,
 		svc:    svc,
@@ -25,7 +25,7 @@ func New(r chi.Router, logger *zap.Logger, svc mocks2.Service) {
 
 type mock struct {
 	logger *zap.Logger
-	svc    mocks2.Service
+	svc    mock2.Service
 }
 
 func (m *mock) Get(w http.ResponseWriter, r *http.Request) {
