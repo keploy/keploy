@@ -72,8 +72,8 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	mdb := mgo.NewTestMockDB(kmongo.NewCollection(db.Collection("test-mocks")), logger)
-	mockSrv := mocks2.NewTestMockService(mdb, logger)
+	mdb := mgo.NewMockDB(kmongo.NewCollection(db.Collection("test-mocks")), logger)
+	mockSrv := mocks2.NewMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
 

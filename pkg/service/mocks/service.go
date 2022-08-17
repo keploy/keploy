@@ -7,6 +7,6 @@ import (
 )
 
 type Service interface {
-	Insert(context.Context, models.TestMock) error
-	Get(ctx context.Context, app string, testName string) ([]models.TestMock, error)
+	Insert(context.Context, models.Mock) error
+	Get(ctx context.Context, app string, testName string) ([]models.Mock, error)
 }

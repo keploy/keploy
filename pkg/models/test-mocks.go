@@ -2,7 +2,7 @@ package models
 
 import "context"
 
-type TestMock struct {
+type Mock struct {
 	ID       string                     `json:"id" bson:"_id"`
 	Created  int64                      `json:"created" bson:"created,omitempty"`
 	Updated  int64                      `json:"updated" bson:"updated,omitempty"`
@@ -18,9 +18,9 @@ type FetchResponse struct {
 	ResponseType string            `json:"response_type" bson;"response_type"`
 }
 
-type TestMockDB interface {
-	Insert(context.Context, TestMock) error
-	Get(ctx context.Context, app string, testName string) ([]TestMock, error)
+type MockDB interface {
+	Insert(context.Context, Mock) error
+	Get(ctx context.Context, app string, testName string) ([]Mock, error)
 	CountDocs(ctx context.Context, app string, testName string) (int64, error)
-	UpdateArr(ctx context.Context, app string, testName string, doc TestMock) error
+	UpdateArr(ctx context.Context, app string, testName string, doc Mock) error
 }

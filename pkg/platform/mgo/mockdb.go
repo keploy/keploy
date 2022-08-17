@@ -9,36 +9,36 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewTestMockDB(c *kmongo.Collection, log *zap.Logger) *testMockDB {
-	return &testMockDB{
+func NewMockDB(c *kmongo.Collection, log *zap.Logger) *mockDB {
+	return &mockDB{
 		c:   c,
 		log: log,
 	}
 }
 
-type testMockDB struct {
+type mockDB struct {
 	c   *kmongo.Collection
 	log *zap.Logger
 }
 
-func (s *testMockDB) UpdateArr(ctx context.Context, app string, testName string, doc models.TestMock) error {
+func (s *mockDB) UpdateArr(ctx context.Context, app string, testName string, doc models.Mock) error {
 	filter := bson.M{"app_id": app, "test_name": testName}
 	_, err := s.c.UpdateOne(ctx, filter, bson.M{"$push": bson.M{"deps": bson.M{"$each": doc.Deps}}})
 	return err
 }
 
-func (s *testMockDB) CountDocs(ctx context.Context, app string, testName string) (int64, error) {
+func (s *mockDB) CountDocs(ctx context.Context, app string, testName string) (int64, error) {
 	filter := bson.M{"app_id": app, "test_name": testName}
 	return s.c.CountDocuments(ctx, filter)
 }
 
-func (s *testMockDB) Insert(ctx context.Context, doc models.TestMock) error {
+func (s *mockDB) Insert(ctx context.Context, doc models.Mock) error {
 	_, err := s.c.InsertOne(ctx, doc)
 	return err
 }
 
-func (s *testMockDB) Get(ctx context.Context, app string, testName string) ([]models.TestMock, error) {
-	var result []models.TestMock
+func (s *mockDB) Get(ctx context.Context, app string, testName string) ([]models.Mock, error) {
+	var result []models.Mock
 	filter := bson.M{"app_id": app, "test_name": testName}
 	cur, err := s.c.Find(ctx, filter)
 	if err != nil {
@@ -47,7 +47,7 @@ func (s *testMockDB) Get(ctx context.Context, app string, testName string) ([]mo
 
 	// Loop through the cursor
 	for cur.Next(ctx) {
-		var doc models.TestMock
+		var doc models.Mock
 		err = cur.Decode(&doc)
 		if err != nil {
 			return nil, err

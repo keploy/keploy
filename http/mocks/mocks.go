@@ -41,14 +41,14 @@ func (m *mocks) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *mocks) Post(w http.ResponseWriter, r *http.Request) {
-	data := &TestMocksReq{}
+	data := &MocksReq{}
 	if err := render.Bind(r, data); err != nil {
 		m.logger.Error("error parsing request", zap.Error(err))
 		render.Render(w, r, regression.ErrInvalidRequest(err))
 		return
 	}
 
-	err := m.svc.Insert(r.Context(), models.TestMock(*data))
+	err := m.svc.Insert(r.Context(), models.Mock(*data))
 	if err != nil {
 		render.Render(w, r, regression.ErrInvalidRequest(err))
 	}
