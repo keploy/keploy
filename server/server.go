@@ -19,12 +19,13 @@ import (
 	"github.com/soheilhy/cmux"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
-	"go.keploy.io/server/http/mock"
 	"go.keploy.io/server/grpc/grpcserver"
+	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
-	mock2 "go.keploy.io/server/pkg/service/mock"
+	mock2 "go.keploy.io/server/pkg/service/browserMock"
+	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/web"
@@ -73,8 +74,8 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	mdb := mgo.NewMockDB(kmongo.NewCollection(db.Collection("test-mocks")), logger)
-	mockSrv := mock2.NewMockService(mdb, logger)
+	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
+	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
 	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
 
@@ -84,6 +85,7 @@ func Server() *chi.Mux {
 
 	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client)
 	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
+	mockSrv := mock.NewMockService(logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
@@ -129,7 +131,7 @@ func Server() *chi.Mux {
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
 		regression.New(r, logger, regSrv, runSrv)
-		mock.New(r, logger, mockSrv)
+		browserMock.New(r, logger, browserMockSrv)
 
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
@@ -151,7 +153,7 @@ func Server() *chi.Mux {
 	log.Println("connect to http://localhost:8081/ for GraphQL playground")
 
 	g := new(errgroup.Group)
-	g.Go(func() error { return grpcserver.New(logger, regSrv, runSrv, grpcListener) })
+	g.Go(func() error { return grpcserver.New(logger, regSrv, runSrv, mockSrv, grpcListener) })
 
 	g.Go(func() error {
 		srv := http.Server{Handler: r}

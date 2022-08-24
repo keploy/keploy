@@ -1,4 +1,4 @@
-package mock
+package browserMock
 
 import (
 	"net/http"
@@ -8,7 +8,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
-type MockReq struct {
+type BrowserMockReq struct {
 	ID       string                            `json:"id" bson:"_id"`
 	Created  int64                             `json:"created" bson:"created"`
 	Updated  int64                             `json:"updated" bson:"updated"`
@@ -17,7 +17,7 @@ type MockReq struct {
 	Deps     []map[string]models.FetchResponse `json:"deps" bson:"deps,omitempty"`
 }
 
-func (req *MockReq) Bind(r *http.Request) error {
+func (req *BrowserMockReq) Bind(r *http.Request) error {
 	if req.ID == "" {
 		req.ID = uuid.New().String()
 	}
