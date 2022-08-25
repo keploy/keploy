@@ -7,6 +7,6 @@ import (
 )
 
 type Service interface {
-	Put(context.Context, models.Mock) error
-	Get(ctx context.Context, app string, testName string) ([]models.Mock, error)
+	Put(ctx context.Context, path string, doc models.Mock) error
+	GetAll(ctx context.Context, path string, name string) ([]models.Mock, error)
 }

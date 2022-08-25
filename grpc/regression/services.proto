@@ -23,9 +23,6 @@ message TestCaseReq {
   repeated Dependency Dependency = 6;
 }
 
-// message abc {
-//     map<string,int> a = 1;
-// }
 
 message TestReq {
   string ID = 1;
@@ -49,11 +46,6 @@ message TestCase {
   map<string, StrArr> anchors = 12;
   repeated string noise = 13;
 }
-
-// message MessageName {
-//   repeated int64 b = 1;
-//   bytes c = 2;
-// }
 
 message Method {
   string Method = 1;
@@ -118,6 +110,55 @@ message testResponse{
   map<string, bool> pass = 1;
 }
 
+message Mock {
+  message Request {
+    string Method = 1;
+    int64 ProtoMajor = 2;
+    int64 ProtoMinor = 3;
+    string URL = 4;
+    map<string, StrArr> Headers = 5;
+    string Body = 6;
+  }
+  message Response {
+    int64 StatusCode = 1;
+    map<string, StrArr> Headers = 2;
+    string Body = 3;
+  }
+  message Object {
+    string Type = 1;
+    bytes Data = 2;
+  }
+
+  string Version = 1;
+  string Name = 2;
+  string Kind = 3;
+  message SpecSchema {
+    string Type = 1;
+    map<string, string> Metadata = 2;
+    repeated Object Objects = 3;
+    Request Req = 4;
+    Response Res = 5;
+  }
+  SpecSchema Spec = 4;
+}
+
+message PutMockReq {
+  Mock Mock = 1;
+  string Path = 2;
+}
+
+message PutMockResp {
+  int64 Inserted = 1;
+}
+
+message GetMockReq {
+  string Path = 1;
+  string Name = 2;
+}
+
+message getMockResp {
+  repeated Mock Mocks = 1;
+}
 
 service RegressionService{
   rpc End (endRequest) returns (endResponse);
@@ -127,4 +168,6 @@ service RegressionService{
   rpc PostTC (TestCaseReq) returns (postTCResponse);
   rpc DeNoise (TestReq) returns(deNoiseResponse);
   rpc Test (TestReq) returns (testResponse);
+  rpc PutMock (PutMockReq) returns (PutMockResp);
+  rpc GetMocks (GetMockReq) returns (getMockResp);
 }

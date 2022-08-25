@@ -9,36 +9,36 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewMockDB(c *kmongo.Collection, log *zap.Logger) *mockDB {
-	return &mockDB{
+func NewBrowserMockDB(c *kmongo.Collection, log *zap.Logger) *browserMockDB {
+	return &browserMockDB{
 		c:   c,
 		log: log,
 	}
 }
 
-type mockDB struct {
+type browserMockDB struct {
 	c   *kmongo.Collection
 	log *zap.Logger
 }
 
-func (s *mockDB) UpdateArr(ctx context.Context, app string, testName string, doc models.Mock) error {
+func (s *browserMockDB) UpdateArr(ctx context.Context, app string, testName string, doc models.BrowserMock) error {
 	filter := bson.M{"app_id": app, "test_name": testName}
 	_, err := s.c.UpdateOne(ctx, filter, bson.M{"$push": bson.M{"deps": bson.M{"$each": doc.Deps}}})
 	return err
 }
 
-func (s *mockDB) CountDocs(ctx context.Context, app string, testName string) (int64, error) {
+func (s *browserMockDB) CountDocs(ctx context.Context, app string, testName string) (int64, error) {
 	filter := bson.M{"app_id": app, "test_name": testName}
 	return s.c.CountDocuments(ctx, filter)
 }
 
-func (s *mockDB) Put(ctx context.Context, doc models.Mock) error {
+func (s *browserMockDB) Put(ctx context.Context, doc models.BrowserMock) error {
 	_, err := s.c.InsertOne(ctx, doc)
 	return err
 }
 
-func (s *mockDB) Get(ctx context.Context, app string, testName string) ([]models.Mock, error) {
-	var result []models.Mock
+func (s *browserMockDB) Get(ctx context.Context, app string, testName string) ([]models.BrowserMock, error) {
+	var result []models.BrowserMock
 	filter := bson.M{"app_id": app, "test_name": testName}
 	cur, err := s.c.Find(ctx, filter)
 	if err != nil {
@@ -47,7 +47,7 @@ func (s *mockDB) Get(ctx context.Context, app string, testName string) ([]models
 
 	// Loop through the cursor
 	for cur.Next(ctx) {
-		var doc models.Mock
+		var doc models.BrowserMock
 		err = cur.Decode(&doc)
 		if err != nil {
 			return nil, err
