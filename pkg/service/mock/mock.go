@@ -2,30 +2,77 @@ package mock
 
 import (
 	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
 
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
-func NewMockService(c models.MockDB, log *zap.Logger) *Mock {
+func NewMockService(log *zap.Logger) *Mock {
 	return &Mock{
-		sdb: c,
 		log: log,
 	}
 }
 
 type Mock struct {
-	sdb models.MockDB
 	log *zap.Logger
 }
 
-func (s *Mock) Put(ctx context.Context, doc models.Mock) error {
-	if count, err := s.sdb.CountDocs(ctx, doc.AppID, doc.TestName); err == nil && count > 0 {
-		return s.sdb.UpdateArr(ctx, doc.AppID, doc.TestName, doc)
+func (m *Mock) Put(ctx context.Context, path string, doc models.Mock) error {
+
+	file, err := os.OpenFile(filepath.Join(path, "mock.yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+	if err != nil {
+		m.log.Error("failed to open the file", zap.Any("error", err))
+		return err
 	}
-	return s.sdb.Put(ctx, doc)
+
+	d, err := yaml.Marshal(&doc)
+	if err != nil {
+		m.log.Error("failed to marshal document to yaml", zap.Any("error", err))
+		return err
+	}
+	data := []byte(`---
+`)
+	data = append(data, d...)
+
+	_, err = file.Write(data)
+	if err != nil {
+		m.log.Error("failed to embed document into yaml file", zap.Any("error", err))
+		return err
+	}
+	defer file.Close()
+
+	return nil
 }
 
-func (s *Mock) Get(ctx context.Context, app string, testName string) ([]models.Mock, error) {
-	return s.sdb.Get(ctx, app, testName)
+func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
+
+	file, err := os.OpenFile(filepath.Join(path, "mock.yaml"), os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		m.log.Error("failed to open the yaml file", zap.Any("error", err))
+		return nil, err
+	}
+	defer file.Close()
+	decoder := yaml.NewDecoder(file)
+	arr := []models.Mock{}
+	for {
+		var node models.Mock
+		err := decoder.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			m.log.Error("failed to decode the yaml file documents into mock", zap.Any("error", err))
+			return nil, err
+		}
+		if node.Name == name {
+			arr = append(arr, node)
+		}
+	}
+
+	return arr, nil
 }
