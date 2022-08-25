@@ -126,7 +126,7 @@ message Mock {
   }
   message Object {
     string Type = 1;
-    repeated bytes Data = 2;
+    bytes Data = 2;
   }
 
   string Version = 1;

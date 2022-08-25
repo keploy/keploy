@@ -17,5 +17,5 @@ type SpecSchema struct {
 
 type Object struct {
 	Type string `json:"type" bson:"type,omitempty" yaml:"type"`
-	Data [][]byte          `json:"data" bson:"data,omitempty" yaml:"data"`
+	Data string `json:"data" bson:"data,omitempty" yaml:"data"`
 }

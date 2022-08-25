@@ -4,6 +4,7 @@ package grpcserver
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 
@@ -41,23 +42,28 @@ func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Se
 
 }
 
-func toModelObjects(objs []*proto.Mock_Object) []models.Object {
+func (srv *Server) toModelObjects(objs []*proto.Mock_Object) []models.Object {
 	res := []models.Object{}
 	for _, j := range objs {
 		res = append(res, models.Object{
 			Type: j.Type,
-			Data: j.Data,
+			Data: base64.StdEncoding.EncodeToString(j.Data),
+			// j.Data,
 		})
 	}
 	return res
 }
 
-func toProtoObjects(objs []models.Object) []*proto.Mock_Object {
+func (srv *Server) toProtoObjects(objs []models.Object) []*proto.Mock_Object {
 	res := []*proto.Mock_Object{}
 	for _, j := range objs {
+		bin, err := base64.StdEncoding.DecodeString(j.Data)
+		if err != nil {
+			srv.logger.Error("failed to decode base64 data from yaml file into byte array", zap.Error(err))
+		}
 		res = append(res, &proto.Mock_Object{
 			Type: j.Type,
-			Data: j.Data,
+			Data: bin,
 		})
 	}
 	return res
@@ -71,21 +77,25 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 		Spec: models.SpecSchema{
 			Type:     request.Mock.Spec.Type,
 			Metadata: request.Mock.Spec.Metadata,
-			Request: models.HttpReq{
-				Method:     models.Method(request.Mock.Spec.Req.Method),
-				ProtoMajor: int(request.Mock.Spec.Req.ProtoMajor),
-				ProtoMinor: int(request.Mock.Spec.Req.ProtoMinor),
-				URL:        request.Mock.Spec.Req.URL,
-				Header:     getHttpHeader(request.Mock.Spec.Req.Headers),
-				Body:       request.Mock.Spec.Req.Body,
-			},
-			Response: models.HttpResp{
-				StatusCode: int(request.Mock.Spec.Res.StatusCode),
-				Header:     getHttpHeader(request.Mock.Spec.Res.Headers),
-				Body:       request.Mock.Spec.Res.Body,
-			},
-			Objects: toModelObjects(request.Mock.Spec.Objects),
+			Objects:  srv.toModelObjects(request.Mock.Spec.Objects),
 		},
+	}
+	if request.Mock.Spec.Req != nil {
+		mock.Spec.Request = models.HttpReq{
+			Method:     models.Method(request.Mock.Spec.Req.Method),
+			ProtoMajor: int(request.Mock.Spec.Req.ProtoMajor),
+			ProtoMinor: int(request.Mock.Spec.Req.ProtoMinor),
+			URL:        request.Mock.Spec.Req.URL,
+			Header:     getHttpHeader(request.Mock.Spec.Req.Headers),
+			Body:       request.Mock.Spec.Req.Body,
+		}
+	}
+	if request.Mock.Spec.Res != nil {
+		mock.Spec.Response = models.HttpResp{
+			StatusCode: int(request.Mock.Spec.Res.StatusCode),
+			Header:     getHttpHeader(request.Mock.Spec.Res.Headers),
+			Body:       request.Mock.Spec.Res.Body,
+		}
 	}
 	err := srv.mock.Put(ctx, request.Path, mock)
 	if err != nil {
@@ -103,6 +113,23 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 		Mocks: []*proto.Mock{},
 	}
 	for _, j := range mocks {
+		var (
+			protoHttpResp = &proto.Mock_Response{}
+			protoHttpReq  = &proto.Mock_Request{}
+		)
+		if j.Spec.Response.Header != nil {
+			protoHttpResp.Headers = getProtoMap(map[string][]string(j.Spec.Response.Header))
+			protoHttpResp.StatusCode = int64(j.Spec.Response.StatusCode)
+			protoHttpResp.Body = j.Spec.Response.Body
+		}
+		if j.Spec.Request.Header != nil {
+			protoHttpReq.Method = string(j.Spec.Request.Method)
+			protoHttpReq.ProtoMajor = int64(j.Spec.Request.ProtoMajor)
+			protoHttpReq.ProtoMinor = int64(j.Spec.Request.ProtoMinor)
+			protoHttpReq.URL = j.Spec.Request.URL
+			protoHttpReq.Headers = getProtoMap(map[string][]string(j.Spec.Request.Header))
+			protoHttpReq.Body = j.Spec.Request.Body
+		}
 		resp.Mocks = append(resp.Mocks, &proto.Mock{
 			Version: j.Version,
 			Name:    j.Name,
@@ -110,24 +137,12 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 			Spec: &proto.Mock_SpecSchema{
 				Type:     j.Spec.Type,
 				Metadata: j.Spec.Metadata,
-				Objects:  toProtoObjects(j.Spec.Objects), // TODO populate objects
-				Req: &proto.Mock_Request{
-					Method:     string(j.Spec.Request.Method),
-					ProtoMajor: int64(j.Spec.Request.ProtoMajor),
-					ProtoMinor: int64(j.Spec.Request.ProtoMinor),
-					URL:        j.Spec.Request.URL,
-					Headers:    getProtoMap(map[string][]string(j.Spec.Request.Header)),
-					Body:       j.Spec.Request.Body,
-				},
-				Res: &proto.Mock_Response{
-					StatusCode: int64(j.Spec.Response.StatusCode),
-					Headers:    getProtoMap(map[string][]string(j.Spec.Response.Header)),
-					Body:       j.Spec.Response.Body,
-				},
+				Objects:  srv.toProtoObjects(j.Spec.Objects), // TODO populate objects
+				Req:      protoHttpReq,
+				Res:      protoHttpResp,
 			},
 		})
 	}
-
 	return resp, nil
 }
 
