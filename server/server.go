@@ -51,7 +51,9 @@ func Server() *chi.Mux {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	logger, err := zap.NewDevelopment()
+	logConf := zap.NewDevelopmentConfig()
+	logConf.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	logger, err := logConf.Build()
 	if err != nil {
 		panic(err)
 	}
