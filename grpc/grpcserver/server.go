@@ -48,7 +48,6 @@ func (srv *Server) toModelObjects(objs []*proto.Mock_Object) []models.Object {
 		res = append(res, models.Object{
 			Type: j.Type,
 			Data: base64.StdEncoding.EncodeToString(j.Data),
-			// j.Data,
 		})
 	}
 	return res
@@ -60,6 +59,7 @@ func (srv *Server) toProtoObjects(objs []models.Object) []*proto.Mock_Object {
 		bin, err := base64.StdEncoding.DecodeString(j.Data)
 		if err != nil {
 			srv.logger.Error("failed to decode base64 data from yaml file into byte array", zap.Error(err))
+			continue
 		}
 		res = append(res, &proto.Mock_Object{
 			Type: j.Type,
@@ -80,6 +80,8 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 			Objects:  srv.toModelObjects(request.Mock.Spec.Objects),
 		},
 	}
+
+	// prevents nil pointer dereference panic
 	if request.Mock.Spec.Req != nil {
 		mock.Spec.Request = models.HttpReq{
 			Method:     models.Method(request.Mock.Spec.Req.Method),
@@ -97,6 +99,8 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 			Body:       request.Mock.Spec.Res.Body,
 		}
 	}
+
+	// writes to yaml file
 	err := srv.mock.Put(ctx, request.Path, mock)
 	if err != nil {
 		return &proto.PutMockResp{}, err
@@ -105,6 +109,7 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 }
 
 func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*proto.GetMockResp, error) {
+	// reads the mocks from yaml file
 	mocks, err := srv.mock.GetAll(ctx, request.Path, request.Name)
 	if err != nil {
 		return &proto.GetMockResp{}, err
@@ -117,6 +122,8 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 			protoHttpResp = &proto.Mock_Response{}
 			protoHttpReq  = &proto.Mock_Request{}
 		)
+
+		// prevents nil pointer dereference panic
 		if j.Spec.Response.Header != nil {
 			protoHttpResp.Headers = getProtoMap(map[string][]string(j.Spec.Response.Header))
 			protoHttpResp.StatusCode = int64(j.Spec.Response.StatusCode)
@@ -130,6 +137,7 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 			protoHttpReq.Headers = getProtoMap(map[string][]string(j.Spec.Request.Header))
 			protoHttpReq.Body = j.Spec.Request.Body
 		}
+
 		resp.Mocks = append(resp.Mocks, &proto.Mock{
 			Version: j.Version,
 			Name:    j.Name,
@@ -137,7 +145,7 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 			Spec: &proto.Mock_SpecSchema{
 				Type:     j.Spec.Type,
 				Metadata: j.Spec.Metadata,
-				Objects:  srv.toProtoObjects(j.Spec.Objects), // TODO populate objects
+				Objects:  srv.toProtoObjects(j.Spec.Objects),
 				Req:      protoHttpReq,
 				Res:      protoHttpResp,
 			},
