@@ -157,7 +157,7 @@ func Server() *chi.Mux {
 
 	httpListener := m.Match(cmux.HTTP1Fast())
 
-	log.Println("connect to http://localhost:8081/ for GraphQL playground")
+	log.Println("connect to http://localhost:8081/ for GraphQL playground\n ")
 
 	g := new(errgroup.Group)
 	g.Go(func() error { return grpcserver.New(logger, regSrv, runSrv, mockSrv, grpcListener) })
