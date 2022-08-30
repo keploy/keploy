@@ -3,10 +3,12 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/google/uuid"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -30,13 +32,17 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock) error {
 		return err
 	}
 
+	data := []byte("---\n")
+	isGenerated := false
+	if doc.Name == "" {
+		doc.Name = uuid.New().String()
+		isGenerated = true
+	}
 	d, err := yaml.Marshal(&doc)
 	if err != nil {
 		m.log.Error("failed to marshal document to yaml", zap.Any("error", err))
 		return err
 	}
-	data := []byte(`---
-`)
 	data = append(data, d...)
 
 	_, err = file.Write(data)
@@ -45,7 +51,14 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock) error {
 		return err
 	}
 	defer file.Close()
-
+	MockPathStr := fmt.Sprint("\n👍 Mocks are successfully written in yaml file at path: ", path, "\n")
+	if isGenerated {
+		MockConfigStr := fmt.Sprint("\n\n🚨 Note: Please set the mock.Config.Name to auto generated name in your unit test. Ex: \n    mock.Config{\n      Name: ", doc.Name, "\n    }\n")
+		MockNameStr := fmt.Sprint("\n💡 Auto generated name for your mock: ", doc.Name, " for ", doc.Spec.Type, " with meta: {\n", mapToStrLog(doc.Spec.Metadata), "   }")
+		m.log.Info(fmt.Sprint(MockNameStr, MockConfigStr, MockPathStr))
+	} else {
+		m.log.Info(MockPathStr)
+	}
 	return nil
 }
 
@@ -75,4 +88,12 @@ func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.M
 	}
 
 	return arr, nil
+}
+
+func mapToStrLog(meta map[string]string) string {
+	res := ""
+	for k, v := range meta {
+		res += "     " + k + ": " + v + "\n"
+	}
+	return res
 }
