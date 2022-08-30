@@ -34,7 +34,10 @@ func NewTelemetry(col DB, enabled, offMode bool, logger *zap.Logger) *Telemetry 
 func (ac *Telemetry) Ping(isTestMode bool) {
 
 	check := false
-	if !ac.Enabled || isTestMode {
+	if !ac.Enabled {
+		return
+	}
+	if isTestMode {
 		check = true
 	}
 
