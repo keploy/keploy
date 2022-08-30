@@ -45,13 +45,16 @@ type config struct {
 	APIKey          string `envconfig:"API_KEY"`
 	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"false"`
 	EnableTelemetry bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
+	EnableDebugger  bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 }
 
 func Server() *chi.Mux {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	logger, err := zap.NewDevelopment()
+	logConf := zap.NewDevelopmentConfig()
+	logConf.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	logger, err := logConf.Build()
 	if err != nil {
 		panic(err)
 	}
@@ -61,6 +64,10 @@ func Server() *chi.Mux {
 	err = envconfig.Process("keploy", &conf)
 	if err != nil {
 		logger.Error("failed to read/process configuration", zap.Error(err))
+	}
+
+	if conf.EnableDebugger {
+		logConf.Level.SetLevel(zap.DebugLevel)
 	}
 
 	cl, err := mgo.New(conf.MongoURI)
