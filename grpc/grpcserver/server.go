@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
@@ -77,8 +78,21 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 		Spec: models.SpecSchema{
 			Type:     request.Mock.Spec.Type,
 			Metadata: request.Mock.Spec.Metadata,
-			Objects:  srv.toModelObjects(request.Mock.Spec.Objects),
+			// Objects:  srv.toModelObjects(request.Mock.Spec.Objects),
 		},
+	}
+
+	switch request.Mock.Kind {
+	case string(keploy.HTTP_EXPORT):
+		mock.Spec.Objects = []models.Object{{
+			Type: request.Mock.Spec.Objects[0].Type,
+			Data: string(request.Mock.Spec.Objects[0].Data),
+		}}
+	case string(keploy.GENERIC_EXPORT):
+		mock.Spec.Objects = srv.toModelObjects(request.Mock.Spec.Objects)
+	default:
+		srv.logger.Error("Mock is not of a valid kind.")
+		return nil, errors.New("Mock is not of a valid kind.")
 	}
 
 	// prevents nil pointer dereference panic
@@ -88,14 +102,14 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 			ProtoMajor: int(request.Mock.Spec.Req.ProtoMajor),
 			ProtoMinor: int(request.Mock.Spec.Req.ProtoMinor),
 			URL:        request.Mock.Spec.Req.URL,
-			Header:     getHttpHeader(request.Mock.Spec.Req.Headers),
+			Header:     getHttpHeader(request.Mock.Spec.Req.Header),
 			Body:       request.Mock.Spec.Req.Body,
 		}
 	}
 	if request.Mock.Spec.Res != nil {
 		mock.Spec.Response = models.HttpResp{
 			StatusCode: int(request.Mock.Spec.Res.StatusCode),
-			Header:     getHttpHeader(request.Mock.Spec.Res.Headers),
+			Header:     getHttpHeader(request.Mock.Spec.Res.Header),
 			Body:       request.Mock.Spec.Res.Body,
 		}
 	}
@@ -119,13 +133,14 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 	}
 	for _, j := range mocks {
 		var (
-			protoHttpResp = &proto.Mock_Response{}
+			protoHttpResp = &proto.HttpResp{}
 			protoHttpReq  = &proto.Mock_Request{}
+			protoObjects  = []*proto.Mock_Object{}
 		)
 
 		// prevents nil pointer dereference panic
 		if j.Spec.Response.Header != nil {
-			protoHttpResp.Headers = getProtoMap(map[string][]string(j.Spec.Response.Header))
+			protoHttpResp.Header = getProtoMap(map[string][]string(j.Spec.Response.Header))
 			protoHttpResp.StatusCode = int64(j.Spec.Response.StatusCode)
 			protoHttpResp.Body = j.Spec.Response.Body
 		}
@@ -134,8 +149,21 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 			protoHttpReq.ProtoMajor = int64(j.Spec.Request.ProtoMajor)
 			protoHttpReq.ProtoMinor = int64(j.Spec.Request.ProtoMinor)
 			protoHttpReq.URL = j.Spec.Request.URL
-			protoHttpReq.Headers = getProtoMap(map[string][]string(j.Spec.Request.Header))
+			protoHttpReq.Header = getProtoMap(map[string][]string(j.Spec.Request.Header))
 			protoHttpReq.Body = j.Spec.Request.Body
+		}
+
+		switch j.Kind {
+		case string(keploy.HTTP_EXPORT):
+			protoObjects = []*proto.Mock_Object{{
+				Type: j.Spec.Objects[0].Type,
+				Data: []byte(j.Spec.Objects[0].Data),
+			}}
+		case string(keploy.GENERIC_EXPORT):
+			protoObjects = srv.toProtoObjects(j.Spec.Objects)
+		default:
+			srv.logger.Error("Mock is not of a valid kind.")
+			return nil, errors.New("Mock is not of a valid kind.")
 		}
 
 		resp.Mocks = append(resp.Mocks, &proto.Mock{
@@ -145,7 +173,7 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 			Spec: &proto.Mock_SpecSchema{
 				Type:     j.Spec.Type,
 				Metadata: j.Spec.Metadata,
-				Objects:  srv.toProtoObjects(j.Spec.Objects),
+				Objects:  protoObjects,
 				Req:      protoHttpReq,
 				Res:      protoHttpResp,
 			},

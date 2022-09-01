@@ -1,21 +1,23 @@
 package models
 
 type Mock struct {
-	Version string     `json:"version" bson:"version,omitempty" yaml:"version"`
-	Kind    string     `json:"kind" bson:"kind,omitempty" yaml:"kind"`
-	Name    string     `json:"name" bson:"name,omitempty" yaml:"name"`
-	Spec    SpecSchema `json:"spec" bson:"spec,omitempty" yaml:"spec"`
+	Version string     `json:"version" yaml:"version"`
+	Kind    string     `json:"kind" yaml:"kind"`
+	Name    string     `json:"name" yaml:"name"`
+	Spec    SpecSchema `json:"spec" yaml:"spec"`
 }
 
 type SpecSchema struct {
-	Type     string            `json:"type" bson:"type,omitempty" yaml:"type"`
-	Metadata map[string]string `json:"metadata" bson:"metadata,omitempty" yaml:"metadata"`
-	Request  HttpReq           `json:"req" bson:"req,omitempty" yaml:"req"`
-	Response HttpResp          `json:"resp" bson:"resp,omitempty" yaml:"resp"`
-	Objects  []Object          `json:"objects" bson:"objects,omitempty" yaml:"objects"`
+	Type       string              `json:"type" yaml:"type"`
+	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
+	Request    HttpReq             `json:"req" yaml:"req,omitempty"`
+	Response   HttpResp            `json:"resp" yaml:"resp,omitempty"`
+	Objects    []Object            `json:"objects" yaml:"objects"`
+	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
+	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
 }
 
 type Object struct {
-	Type string `json:"type" bson:"type,omitempty" yaml:"type"`
-	Data string `json:"data" bson:"data,omitempty" yaml:"data"`
+	Type string `json:"type" yaml:"type"`
+	Data string `json:"data" yaml:"data"`
 }

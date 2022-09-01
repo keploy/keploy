@@ -116,13 +116,8 @@ message Mock {
     int64 ProtoMajor = 2;
     int64 ProtoMinor = 3;
     string URL = 4;
-    map<string, StrArr> Headers = 5;
+    map<string, StrArr> Header = 5;
     string Body = 6;
-  }
-  message Response {
-    int64 StatusCode = 1;
-    map<string, StrArr> Headers = 2;
-    string Body = 3;
   }
   message Object {
     string Type = 1;
@@ -137,7 +132,9 @@ message Mock {
     map<string, string> Metadata = 2;
     repeated Object Objects = 3;
     Request Req = 4;
-    Response Res = 5;
+    HttpResp Res = 5;
+    repeated string Mocks = 6;
+    map<string, StrArr> Assertions = 7;
   }
   SpecSchema Spec = 4;
 }
