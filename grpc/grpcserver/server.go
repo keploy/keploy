@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
@@ -83,12 +82,12 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 	}
 
 	switch request.Mock.Kind {
-	case string(keploy.HTTP_EXPORT):
+	case string(models.HTTP_EXPORT):
 		mock.Spec.Objects = []models.Object{{
 			Type: request.Mock.Spec.Objects[0].Type,
 			Data: string(request.Mock.Spec.Objects[0].Data),
 		}}
-	case string(keploy.GENERIC_EXPORT):
+	case string(models.GENERIC_EXPORT):
 		mock.Spec.Objects = srv.toModelObjects(request.Mock.Spec.Objects)
 	default:
 		srv.logger.Error("Mock is not of a valid kind.")
@@ -154,12 +153,12 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 		}
 
 		switch j.Kind {
-		case string(keploy.HTTP_EXPORT):
+		case string(models.HTTP_EXPORT):
 			protoObjects = []*proto.Mock_Object{{
 				Type: j.Spec.Objects[0].Type,
 				Data: []byte(j.Spec.Objects[0].Data),
 			}}
-		case string(keploy.GENERIC_EXPORT):
+		case string(models.GENERIC_EXPORT):
 			protoObjects = srv.toProtoObjects(j.Spec.Objects)
 		default:
 			srv.logger.Error("Mock is not of a valid kind.")

@@ -1,5 +1,18 @@
 package models
 
+type Kind string
+
+const (
+	V1_BETA1 Version = Version("api.keploy.io/v1beta1")
+)
+
+type Version string
+
+const (
+	HTTP_EXPORT    Kind = "Http"
+	GENERIC_EXPORT Kind = "Generic"
+)
+
 type Mock struct {
 	Version string     `json:"version" yaml:"version"`
 	Kind    string     `json:"kind" yaml:"kind"`
