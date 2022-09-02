@@ -128,13 +128,12 @@ message Mock {
   string Name = 2;
   string Kind = 3;
   message SpecSchema {
-    string Type = 1;
-    map<string, string> Metadata = 2;
-    repeated Object Objects = 3;
-    Request Req = 4;
-    HttpResp Res = 5;
-    repeated string Mocks = 6;
-    map<string, StrArr> Assertions = 7;
+    map<string, string> Metadata = 1;
+    repeated Object Objects = 2;
+    HttpReq Req = 3;
+    HttpResp Res = 4;
+    repeated string Mocks = 5;
+    map<string, StrArr> Assertions = 6;
   }
   SpecSchema Spec = 4;
 }

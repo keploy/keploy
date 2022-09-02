@@ -4,7 +4,6 @@ package grpcserver
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"net"
 
@@ -42,79 +41,9 @@ func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Se
 
 }
 
-func (srv *Server) toModelObjects(objs []*proto.Mock_Object) []models.Object {
-	res := []models.Object{}
-	for _, j := range objs {
-		res = append(res, models.Object{
-			Type: j.Type,
-			Data: base64.StdEncoding.EncodeToString(j.Data),
-		})
-	}
-	return res
-}
-
-func (srv *Server) toProtoObjects(objs []models.Object) []*proto.Mock_Object {
-	res := []*proto.Mock_Object{}
-	for _, j := range objs {
-		bin, err := base64.StdEncoding.DecodeString(j.Data)
-		if err != nil {
-			srv.logger.Error("failed to decode base64 data from yaml file into byte array", zap.Error(err))
-			continue
-		}
-		res = append(res, &proto.Mock_Object{
-			Type: j.Type,
-			Data: bin,
-		})
-	}
-	return res
-}
-
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
-	mock := models.Mock{
-		Version: request.Mock.Version,
-		Kind:    request.Mock.Kind,
-		Name:    request.Mock.Name,
-		Spec: models.SpecSchema{
-			Type:     request.Mock.Spec.Type,
-			Metadata: request.Mock.Spec.Metadata,
-			// Objects:  srv.toModelObjects(request.Mock.Spec.Objects),
-		},
-	}
-
-	switch request.Mock.Kind {
-	case string(models.HTTP_EXPORT):
-		mock.Spec.Objects = []models.Object{{
-			Type: request.Mock.Spec.Objects[0].Type,
-			Data: string(request.Mock.Spec.Objects[0].Data),
-		}}
-	case string(models.GENERIC_EXPORT):
-		mock.Spec.Objects = srv.toModelObjects(request.Mock.Spec.Objects)
-	default:
-		srv.logger.Error("Mock is not of a valid kind.")
-		return nil, errors.New("Mock is not of a valid kind.")
-	}
-
-	// prevents nil pointer dereference panic
-	if request.Mock.Spec.Req != nil {
-		mock.Spec.Request = models.HttpReq{
-			Method:     models.Method(request.Mock.Spec.Req.Method),
-			ProtoMajor: int(request.Mock.Spec.Req.ProtoMajor),
-			ProtoMinor: int(request.Mock.Spec.Req.ProtoMinor),
-			URL:        request.Mock.Spec.Req.URL,
-			Header:     getHttpHeader(request.Mock.Spec.Req.Header),
-			Body:       request.Mock.Spec.Req.Body,
-		}
-	}
-	if request.Mock.Spec.Res != nil {
-		mock.Spec.Response = models.HttpResp{
-			StatusCode: int(request.Mock.Spec.Res.StatusCode),
-			Header:     getHttpHeader(request.Mock.Spec.Res.Header),
-			Body:       request.Mock.Spec.Res.Body,
-		}
-	}
-
 	// writes to yaml file
-	err := srv.mock.Put(ctx, request.Path, mock)
+	err := srv.mock.Put(ctx, request.Path, srv.Encode(request.Mock), request.Mock.Spec.Metadata)
 	if err != nil {
 		return &proto.PutMockResp{}, err
 	}
@@ -128,55 +57,7 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 		return &proto.GetMockResp{}, err
 	}
 	resp := &proto.GetMockResp{
-		Mocks: []*proto.Mock{},
-	}
-	for _, j := range mocks {
-		var (
-			protoHttpResp = &proto.HttpResp{}
-			protoHttpReq  = &proto.Mock_Request{}
-			protoObjects  = []*proto.Mock_Object{}
-		)
-
-		// prevents nil pointer dereference panic
-		if j.Spec.Response.Header != nil {
-			protoHttpResp.Header = getProtoMap(map[string][]string(j.Spec.Response.Header))
-			protoHttpResp.StatusCode = int64(j.Spec.Response.StatusCode)
-			protoHttpResp.Body = j.Spec.Response.Body
-		}
-		if j.Spec.Request.Header != nil {
-			protoHttpReq.Method = string(j.Spec.Request.Method)
-			protoHttpReq.ProtoMajor = int64(j.Spec.Request.ProtoMajor)
-			protoHttpReq.ProtoMinor = int64(j.Spec.Request.ProtoMinor)
-			protoHttpReq.URL = j.Spec.Request.URL
-			protoHttpReq.Header = getProtoMap(map[string][]string(j.Spec.Request.Header))
-			protoHttpReq.Body = j.Spec.Request.Body
-		}
-
-		switch j.Kind {
-		case string(models.HTTP_EXPORT):
-			protoObjects = []*proto.Mock_Object{{
-				Type: j.Spec.Objects[0].Type,
-				Data: []byte(j.Spec.Objects[0].Data),
-			}}
-		case string(models.GENERIC_EXPORT):
-			protoObjects = srv.toProtoObjects(j.Spec.Objects)
-		default:
-			srv.logger.Error("Mock is not of a valid kind.")
-			return nil, errors.New("Mock is not of a valid kind.")
-		}
-
-		resp.Mocks = append(resp.Mocks, &proto.Mock{
-			Version: j.Version,
-			Name:    j.Name,
-			Kind:    j.Kind,
-			Spec: &proto.Mock_SpecSchema{
-				Type:     j.Spec.Type,
-				Metadata: j.Spec.Metadata,
-				Objects:  protoObjects,
-				Req:      protoHttpReq,
-				Res:      protoHttpResp,
-			},
-		})
+		Mocks: srv.Decode(mocks),
 	}
 	return resp, nil
 }
