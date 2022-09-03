@@ -5,12 +5,15 @@ package grpcserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"path/filepath"
 
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
@@ -39,6 +42,21 @@ func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Se
 	err := srv.Serve(listener)
 	return err
 
+}
+
+func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq) (*proto.StartMockResp, error) {
+	if request.Mode == string(keploy.MODE_TEST) {
+		return &proto.StartMockResp{
+			Exists: false,
+		}, nil
+	}
+	exists := srv.mock.FileExists(ctx, request.Path)
+	if exists {
+		srv.logger.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(request.Path)))
+	}
+	return &proto.StartMockResp{
+		Exists: exists,
+	}, nil
 }
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {

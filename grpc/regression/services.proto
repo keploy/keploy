@@ -156,6 +156,15 @@ message getMockResp {
   repeated Mock Mocks = 1;
 }
 
+message StartMockReq {
+  string Path = 1;
+  string Mode = 2;
+}
+
+message StartMockResp {
+  bool Exists = 1;
+}
+
 service RegressionService{
   rpc End (endRequest) returns (endResponse);
   rpc Start (startRequest) returns (startResponse);
@@ -166,4 +175,5 @@ service RegressionService{
   rpc Test (TestReq) returns (testResponse);
   rpc PutMock (PutMockReq) returns (PutMockResp);
   rpc GetMocks (GetMockReq) returns (getMockResp);
+  rpc StartMocking (StartMockReq) returns (StartMockResp);
 }

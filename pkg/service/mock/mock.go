@@ -41,6 +41,14 @@ func (m *Mock) createMockFile(path string, fileName string) bool {
 	return false
 }
 
+func (m *Mock) FileExists(ctx context.Context, path string) bool {
+	fmt.Println(" -- ", filepath.Base(path))
+	if _, err := os.Stat(filepath.Join(path)); err == nil {
+		return true
+	}
+	return false
+}
+
 func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta interface{}) error {
 
 	isGenerated := false
@@ -72,7 +80,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 		return err
 	}
 	defer file.Close()
-	MockPathStr := fmt.Sprint("\n✅ Mocks are successfully written in yaml file at path: ", path, "\n")
+	MockPathStr := fmt.Sprint("\n✅ Mocks are successfully written in yaml file at path: ", path, "/", doc.Name, ".yaml", "\n")
 	if isGenerated {
 		MockConfigStr := fmt.Sprint("\n\n🚨 Note: Please set the mock.Config.Name to auto generated name in your unit test. Ex: \n    mock.Config{\n      Name: ", doc.Name, "\n    }\n")
 		MockNameStr := fmt.Sprint("\n💡 Auto generated name for your mock: ", doc.Name, " for ", doc.Kind, " with meta: {\n", mapToStrLog(meta.(map[string]string)), "   }")
@@ -107,7 +115,7 @@ func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.M
 			arr = append(arr, node)
 		}
 	}
-	MockPathStr := fmt.Sprint("\n✅ Mocks are read successfully from yaml file at path: ", path, "\n")
+	MockPathStr := fmt.Sprint("\n✅ Mocks are read successfully from yaml file at path: ", path, "/", name, ".yaml", "\n")
 	m.log.Info(MockPathStr)
 
 	return arr, nil
