@@ -4,14 +4,16 @@ package grpcserver
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
+	"path/filepath"
 
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
@@ -42,66 +44,24 @@ func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Se
 
 }
 
-func (srv *Server) toModelObjects(objs []*proto.Mock_Object) []models.Object {
-	res := []models.Object{}
-	for _, j := range objs {
-		res = append(res, models.Object{
-			Type: j.Type,
-			Data: base64.StdEncoding.EncodeToString(j.Data),
-		})
+func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq) (*proto.StartMockResp, error) {
+	if request.Mode == string(keploy.MODE_TEST) {
+		return &proto.StartMockResp{
+			Exists: false,
+		}, nil
 	}
-	return res
-}
-
-func (srv *Server) toProtoObjects(objs []models.Object) []*proto.Mock_Object {
-	res := []*proto.Mock_Object{}
-	for _, j := range objs {
-		bin, err := base64.StdEncoding.DecodeString(j.Data)
-		if err != nil {
-			srv.logger.Error("failed to decode base64 data from yaml file into byte array", zap.Error(err))
-			continue
-		}
-		res = append(res, &proto.Mock_Object{
-			Type: j.Type,
-			Data: bin,
-		})
+	exists := srv.mock.FileExists(ctx, request.Path)
+	if exists {
+		srv.logger.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(request.Path)))
 	}
-	return res
+	return &proto.StartMockResp{
+		Exists: exists,
+	}, nil
 }
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
-	mock := models.Mock{
-		Version: request.Mock.Version,
-		Kind:    request.Mock.Kind,
-		Name:    request.Mock.Name,
-		Spec: models.SpecSchema{
-			Type:     request.Mock.Spec.Type,
-			Metadata: request.Mock.Spec.Metadata,
-			Objects:  srv.toModelObjects(request.Mock.Spec.Objects),
-		},
-	}
-
-	// prevents nil pointer dereference panic
-	if request.Mock.Spec.Req != nil {
-		mock.Spec.Request = models.HttpReq{
-			Method:     models.Method(request.Mock.Spec.Req.Method),
-			ProtoMajor: int(request.Mock.Spec.Req.ProtoMajor),
-			ProtoMinor: int(request.Mock.Spec.Req.ProtoMinor),
-			URL:        request.Mock.Spec.Req.URL,
-			Header:     getHttpHeader(request.Mock.Spec.Req.Headers),
-			Body:       request.Mock.Spec.Req.Body,
-		}
-	}
-	if request.Mock.Spec.Res != nil {
-		mock.Spec.Response = models.HttpResp{
-			StatusCode: int(request.Mock.Spec.Res.StatusCode),
-			Header:     getHttpHeader(request.Mock.Spec.Res.Headers),
-			Body:       request.Mock.Spec.Res.Body,
-		}
-	}
-
 	// writes to yaml file
-	err := srv.mock.Put(ctx, request.Path, mock)
+	err := srv.mock.Put(ctx, request.Path, srv.Encode(request.Mock), request.Mock.Spec.Metadata)
 	if err != nil {
 		return &proto.PutMockResp{}, err
 	}
@@ -115,41 +75,7 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 		return &proto.GetMockResp{}, err
 	}
 	resp := &proto.GetMockResp{
-		Mocks: []*proto.Mock{},
-	}
-	for _, j := range mocks {
-		var (
-			protoHttpResp = &proto.Mock_Response{}
-			protoHttpReq  = &proto.Mock_Request{}
-		)
-
-		// prevents nil pointer dereference panic
-		if j.Spec.Response.Header != nil {
-			protoHttpResp.Headers = getProtoMap(map[string][]string(j.Spec.Response.Header))
-			protoHttpResp.StatusCode = int64(j.Spec.Response.StatusCode)
-			protoHttpResp.Body = j.Spec.Response.Body
-		}
-		if j.Spec.Request.Header != nil {
-			protoHttpReq.Method = string(j.Spec.Request.Method)
-			protoHttpReq.ProtoMajor = int64(j.Spec.Request.ProtoMajor)
-			protoHttpReq.ProtoMinor = int64(j.Spec.Request.ProtoMinor)
-			protoHttpReq.URL = j.Spec.Request.URL
-			protoHttpReq.Headers = getProtoMap(map[string][]string(j.Spec.Request.Header))
-			protoHttpReq.Body = j.Spec.Request.Body
-		}
-
-		resp.Mocks = append(resp.Mocks, &proto.Mock{
-			Version: j.Version,
-			Name:    j.Name,
-			Kind:    j.Kind,
-			Spec: &proto.Mock_SpecSchema{
-				Type:     j.Spec.Type,
-				Metadata: j.Spec.Metadata,
-				Objects:  srv.toProtoObjects(j.Spec.Objects),
-				Req:      protoHttpReq,
-				Res:      protoHttpResp,
-			},
-		})
+		Mocks: srv.Decode(mocks),
 	}
 	return resp, nil
 }
