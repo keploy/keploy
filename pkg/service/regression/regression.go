@@ -187,16 +187,16 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 	return ids, nil
 }
 
-func PrettyPrint(data interface{}) {
-	var p []byte
-	//    var err := error
-	p, err := json.MarshalIndent(data, "", "\t")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Printf("%s \n", p)
-}
+// func PrettyPrint(data interface{}) {
+// 	var p []byte
+// 	//    var err := error
+// 	p, err := json.MarshalIndent(data, "", "\t")
+// 	if err != nil {
+// 		fmt.Println(err)
+// 		return
+// 	}
+// 	fmt.Printf("%s \n", p)
+// }
 
 func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp) (bool, *run.Result, *models.TestCase, error) {
 
@@ -238,8 +238,8 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 			bodyNoise = append(bodyNoise, x)
 		} else if a[0] == "header" {
 			// if len(a) == 2 {
-			// 	headerNoise[a[1]] = a[1]
-			// 	continue
+			//  headerNoise[a[1]] = a[1]
+			//  continue
 			// }
 			headerNoise[a[len(a)-1]] = a[len(a)-1]
 			// headerNoise[a[0]] = a[0]
@@ -264,81 +264,73 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 		pass = false
 	}
 
-	// if res.StatusCode.Actual != res.StatusCode.Expected && !res.BodyResult.Normal {
-	// 	pp.Printf("Testrun failed with test id: %s\n"+
-	// 		"Test Result:\n"+
-	// 		"\tExpected Response:"+
-	// 		"\t%+v\n\n"+"\tActual Response:"+
-	// 		"\t%+v\n\n"+
-	// 		"DIFF:\n\tExpected response status code: %s"+"\n\tActual response status code: %s\n"+
-	// 		"\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n",
-	// 		id, tc.HttpResp, resp, res.StatusCode.Expected, res.StatusCode.Actual, res.BodyResult.Expected, res.BodyResult.Actual)
-	// } else {
-	// 	if res.StatusCode.Actual != res.StatusCode.Expected {
-	// 		pp.Printf("Testrun failed with test id: %s\n"+
-	// 			"Test Result:\n"+
-	// 			"\tExpected Response:"+
-	// 			"\t%+v\n\n"+"\tActual Response:"+
-	// 			"\t%+v\n\n"+
-	// 			"DIFF:\n\tExpected response status code: %s"+"\n\tActual response status code: %s\n\n",
-	// 			id, tc.HttpResp, resp, res.StatusCode.Expected, res.StatusCode.Actual)
-	// 	}
-	// 	if !res.BodyResult.Normal {
-	// 		pp.Printf("Testrun failed with test id: %s\n"+
-	// 			"Test Result:\n"+
-	// 			"\tExpected Response: \n"+
-	// 			"\t\t%+v\n\n"+"\tActual Response: \n"+
-	// 			"\t\t%+v\n\n"+
-	// 			"DIFF:\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", id, tc.HttpResp, resp, res.BodyResult.Expected, res.BodyResult.Actual)
-	// 	}
-	// }
-
-	//pp.Print(tc.HttpReq.Header)
 	res.HeadersResult = *hRes
-	//pp.Print(res.HeadersResult)
-	//var ID string
-	var headers = map[string]map[string]string{}
-	headers[id] = map[string]string{}
-	//headers["Actual"] = map[string]string{}
-	for _, v := range res.HeadersResult {
-
-		if !v.Normal {
-
-			//if ID != id {
-			//	ID = id
-			headers[id]["Expected "+v.Expected.Key] = strings.Join(v.Expected.Value, "")
-			headers[id]["Actual "+v.Actual.Key] = strings.Join(v.Actual.Value, "")
-			//pp.Printf("Testrun failed with Test id : %s\n", id)
-			//pp.Printf("Expected header :\n"+"\t%s: %s\n"+
-			//	"Actual header:\n"+"\t%s: %s\n", v.Expected.Key, v.Expected.Value, v.Actual.Key, v.Actual.Value)
-			// } else {
-			// 	//pp.Printf("Testrun failed with Test id : %s\n", id)
-			// 	pp.Printf("Expected header :\n"+"\t%s: %s\n"+
-			// 		"Actual header:\n"+"\t%s: %s\n", v.Expected.Key, v.Expected.Value, v.Actual.Key, v.Actual.Value)
-
-			// }
-
-		}
-	}
-	if len(headers) != 0 {
-		for k, v := range headers {
-
-			pp.Printf("Test run failed with id: %s \n", k)
-			for i, m := range v {
-				pp.Printf("%s: %s\n\n", i, m)
-			}
-
-		}
-	}
-	//pp.Print(headers)
-
-	//fmt.Printf(fmt.Sprint("%#v\n", res.HeadersResult))
-
 	if tc.HttpResp.StatusCode == resp.StatusCode {
 		res.StatusCode.Normal = true
 	} else {
 
 		pass = false
+	}
+	// var mutex sync.Mutex
+	// mutex.Lock()
+	// var wg sync.WaitGroup
+	// wg.Add(1)
+
+	if !pass {
+		var logs = ""
+		//pp.Printf("Testrun failed with test id: %s\n", tc.ID)
+		//pp.Printf("Expected Response: %+v", tc.HttpResp)
+		//pp.Printf("Actual Response: %+v\n", resp)
+
+		logs = logs + pp.Sprintf("Testrun failed with test id: %s\n"+
+			"Test Result:\n"+
+			"\tExpected Response: "+
+			"%+v\n\n"+"\tActual Response: "+
+			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpResp, resp)
+
+		if !res.StatusCode.Normal {
+			logs += pp.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+
+		}
+		var (
+			actualHeader   = map[string][]string{}
+			expectedHeader = map[string][]string{}
+			unmatched      = true
+		)
+
+		for _, j := range res.HeadersResult {
+			if !j.Normal {
+				unmatched = false
+				actualHeader[j.Actual.Key] = j.Actual.Value
+				expectedHeader[j.Expected.Key] = j.Expected.Value
+			}
+		}
+
+		if !unmatched {
+			//time.Sleep(3 * time.Millisecond)
+
+			logs += "\tExpected Headers: \n"
+			for i, j := range expectedHeader {
+				logs += pp.Sprintf("\t\t%s: %s\n", i, j)
+
+			}
+
+			logs += "\tActual Headers: \n"
+
+			for i, j := range actualHeader {
+				logs += pp.Sprintf("\t\t%s: %s\n", i, j)
+			}
+
+		}
+
+		if !res.BodyResult.Normal {
+
+			logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", res.BodyResult.Expected, res.BodyResult.Actual)
+
+		}
+
+		logs += "--------------------------------------------------------------------\n\n"
+		pp.Printf(logs)
 	}
 
 	return pass, res, &tc, nil
