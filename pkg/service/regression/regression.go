@@ -321,7 +321,7 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 		if !res.BodyResult.Normal {
 
-			logs += pp.Sprintf("\n\tExpected response body: \"{%s"+"\n\tActual response body: \"{%s\n\n", res.BodyResult.Expected, res.BodyResult.Actual)
+			logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", res.BodyResult.Expected, res.BodyResult.Actual)
 
 		}
 
