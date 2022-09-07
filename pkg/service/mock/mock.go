@@ -24,19 +24,48 @@ type Mock struct {
 	log *zap.Logger
 }
 
-func (m *Mock) Put(ctx context.Context, path string, doc models.Mock) error {
+func (m *Mock) createMockFile(path string, fileName string) bool {
+	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
+		err := os.MkdirAll(filepath.Join(path), os.ModePerm)
+		if err != nil {
+			m.log.Error("failed to create a mock dir", zap.Error(err))
+			return false
+		}
+		_, err = os.Create(filepath.Join(path, fileName+".yaml"))
+		if err != nil {
+			m.log.Error("failed to create a yaml file", zap.Error(err))
+			return false
+		}
+		return true
+	}
+	return false
+}
 
-	file, err := os.OpenFile(filepath.Join(path, "mock.yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+func (m *Mock) FileExists(ctx context.Context, path string) bool {
+	fmt.Println(" -- ", filepath.Base(path))
+	if _, err := os.Stat(filepath.Join(path)); err == nil {
+		return true
+	}
+	return false
+}
+
+func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta interface{}) error {
+
+	isGenerated := false
+	if doc.Name == "" {
+		doc.Name = uuid.New().String()
+		isGenerated = true
+	}
+	isFileEmpty := m.createMockFile(path, doc.Name)
+	file, err := os.OpenFile(filepath.Join(path, doc.Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		m.log.Error("failed to open the file", zap.Any("error", err))
 		return err
 	}
 
 	data := []byte("---\n")
-	isGenerated := false
-	if doc.Name == "" {
-		doc.Name = uuid.New().String()
-		isGenerated = true
+	if isFileEmpty {
+		data = []byte{}
 	}
 	d, err := yaml.Marshal(&doc)
 	if err != nil {
@@ -51,10 +80,10 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock) error {
 		return err
 	}
 	defer file.Close()
-	MockPathStr := fmt.Sprint("\n👍 Mocks are successfully written in yaml file at path: ", path, "\n")
+	MockPathStr := fmt.Sprint("\n✅ Mocks are successfully written in yaml file at path: ", path, "/", doc.Name, ".yaml", "\n")
 	if isGenerated {
 		MockConfigStr := fmt.Sprint("\n\n🚨 Note: Please set the mock.Config.Name to auto generated name in your unit test. Ex: \n    mock.Config{\n      Name: ", doc.Name, "\n    }\n")
-		MockNameStr := fmt.Sprint("\n💡 Auto generated name for your mock: ", doc.Name, " for ", doc.Spec.Type, " with meta: {\n", mapToStrLog(doc.Spec.Metadata), "   }")
+		MockNameStr := fmt.Sprint("\n💡 Auto generated name for your mock: ", doc.Name, " for ", doc.Kind, " with meta: {\n", mapToStrLog(meta.(map[string]string)), "   }")
 		m.log.Info(fmt.Sprint(MockNameStr, MockConfigStr, MockPathStr))
 	} else {
 		m.log.Info(MockPathStr)
@@ -64,7 +93,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock) error {
 
 func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
 
-	file, err := os.OpenFile(filepath.Join(path, "mock.yaml"), os.O_RDONLY, os.ModePerm)
+	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		m.log.Error("failed to open the yaml file", zap.Any("error", err))
 		return nil, err
@@ -86,6 +115,8 @@ func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.M
 			arr = append(arr, node)
 		}
 	}
+	MockPathStr := fmt.Sprint("\n✅ Mocks are read successfully from yaml file at path: ", path, "/", name, ".yaml", "\n")
+	m.log.Info(MockPathStr)
 
 	return arr, nil
 }

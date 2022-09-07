@@ -1,21 +1,42 @@
 package models
 
+import "gopkg.in/yaml.v3"
+
+type Kind string
+
+const (
+	V1_BETA1 Version = Version("api.keploy.io/v1beta1")
+)
+
+type Version string
+
+const (
+	HTTP_EXPORT    Kind = "Http"
+	GENERIC_EXPORT Kind = "Generic"
+)
+
 type Mock struct {
-	Version string     `json:"version" bson:"version,omitempty" yaml:"version"`
-	Kind    string     `json:"kind" bson:"kind,omitempty" yaml:"kind"`
-	Name    string     `json:"name" bson:"name,omitempty" yaml:"name"`
-	Spec    SpecSchema `json:"spec" bson:"spec,omitempty" yaml:"spec"`
+	Version string    `json:"version" yaml:"version"`
+	Kind    string    `json:"kind" yaml:"kind"`
+	Name    string    `json:"name" yaml:"name"`
+	Spec    yaml.Node `json:"spec" yaml:"spec"`
 }
 
-type SpecSchema struct {
-	Type     string            `json:"type" bson:"type,omitempty" yaml:"type"`
-	Metadata map[string]string `json:"metadata" bson:"metadata,omitempty" yaml:"metadata"`
-	Request  HttpReq           `json:"req" bson:"req,omitempty" yaml:"req"`
-	Response HttpResp          `json:"resp" bson:"resp,omitempty" yaml:"resp"`
-	Objects  []Object          `json:"objects" bson:"objects,omitempty" yaml:"objects"`
+type GenericSpec struct {
+	Metadata map[string]string `json:"metadata" yaml:"metadata"`
+	Objects  []Object          `json:"objects" yaml:"objects"`
 }
 
 type Object struct {
-	Type string `json:"type" bson:"type,omitempty" yaml:"type"`
-	Data string `json:"data" bson:"data,omitempty" yaml:"data"`
+	Type string `json:"type" yaml:"type"`
+	Data string `json:"data" yaml:"data"`
+}
+
+type HttpSpec struct {
+	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
+	Request    HttpReq             `json:"req" yaml:"req"`
+	Response   HttpResp            `json:"resp" yaml:"resp"`
+	Objects    []Object            `json:"objects" yaml:"objects"`
+	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
+	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
 }

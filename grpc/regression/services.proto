@@ -116,13 +116,8 @@ message Mock {
     int64 ProtoMajor = 2;
     int64 ProtoMinor = 3;
     string URL = 4;
-    map<string, StrArr> Headers = 5;
+    map<string, StrArr> Header = 5;
     string Body = 6;
-  }
-  message Response {
-    int64 StatusCode = 1;
-    map<string, StrArr> Headers = 2;
-    string Body = 3;
   }
   message Object {
     string Type = 1;
@@ -133,11 +128,12 @@ message Mock {
   string Name = 2;
   string Kind = 3;
   message SpecSchema {
-    string Type = 1;
-    map<string, string> Metadata = 2;
-    repeated Object Objects = 3;
-    Request Req = 4;
-    Response Res = 5;
+    map<string, string> Metadata = 1;
+    repeated Object Objects = 2;
+    HttpReq Req = 3;
+    HttpResp Res = 4;
+    repeated string Mocks = 5;
+    map<string, StrArr> Assertions = 6;
   }
   SpecSchema Spec = 4;
 }
@@ -160,6 +156,15 @@ message getMockResp {
   repeated Mock Mocks = 1;
 }
 
+message StartMockReq {
+  string Path = 1;
+  string Mode = 2;
+}
+
+message StartMockResp {
+  bool Exists = 1;
+}
+
 service RegressionService{
   rpc End (endRequest) returns (endResponse);
   rpc Start (startRequest) returns (startResponse);
@@ -170,4 +175,5 @@ service RegressionService{
   rpc Test (TestReq) returns (testResponse);
   rpc PutMock (PutMockReq) returns (PutMockResp);
   rpc GetMocks (GetMockReq) returns (getMockResp);
+  rpc StartMocking (StartMockReq) returns (StartMockResp);
 }

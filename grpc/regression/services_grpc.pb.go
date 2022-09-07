@@ -31,6 +31,7 @@ type RegressionServiceClient interface {
 	Test(ctx context.Context, in *TestReq, opts ...grpc.CallOption) (*TestResponse, error)
 	PutMock(ctx context.Context, in *PutMockReq, opts ...grpc.CallOption) (*PutMockResp, error)
 	GetMocks(ctx context.Context, in *GetMockReq, opts ...grpc.CallOption) (*GetMockResp, error)
+	StartMocking(ctx context.Context, in *StartMockReq, opts ...grpc.CallOption) (*StartMockResp, error)
 }
 
 type regressionServiceClient struct {
@@ -122,6 +123,15 @@ func (c *regressionServiceClient) GetMocks(ctx context.Context, in *GetMockReq, 
 	return out, nil
 }
 
+func (c *regressionServiceClient) StartMocking(ctx context.Context, in *StartMockReq, opts ...grpc.CallOption) (*StartMockResp, error) {
+	out := new(StartMockResp)
+	err := c.cc.Invoke(ctx, "/services.RegressionService/StartMocking", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RegressionServiceServer is the server API for RegressionService service.
 // All implementations must embed UnimplementedRegressionServiceServer
 // for forward compatibility
@@ -135,6 +145,7 @@ type RegressionServiceServer interface {
 	Test(context.Context, *TestReq) (*TestResponse, error)
 	PutMock(context.Context, *PutMockReq) (*PutMockResp, error)
 	GetMocks(context.Context, *GetMockReq) (*GetMockResp, error)
+	StartMocking(context.Context, *StartMockReq) (*StartMockResp, error)
 	mustEmbedUnimplementedRegressionServiceServer()
 }
 
@@ -168,6 +179,9 @@ func (UnimplementedRegressionServiceServer) PutMock(context.Context, *PutMockReq
 }
 func (UnimplementedRegressionServiceServer) GetMocks(context.Context, *GetMockReq) (*GetMockResp, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetMocks not implemented")
+}
+func (UnimplementedRegressionServiceServer) StartMocking(context.Context, *StartMockReq) (*StartMockResp, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartMocking not implemented")
 }
 func (UnimplementedRegressionServiceServer) mustEmbedUnimplementedRegressionServiceServer() {}
 
@@ -344,6 +358,24 @@ func _RegressionService_GetMocks_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RegressionService_StartMocking_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartMockReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RegressionServiceServer).StartMocking(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/services.RegressionService/StartMocking",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RegressionServiceServer).StartMocking(ctx, req.(*StartMockReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RegressionService_ServiceDesc is the grpc.ServiceDesc for RegressionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -386,6 +418,10 @@ var RegressionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMocks",
 			Handler:    _RegressionService_GetMocks_Handler,
+		},
+		{
+			MethodName: "StartMocking",
+			Handler:    _RegressionService_StartMocking_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
