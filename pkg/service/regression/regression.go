@@ -271,10 +271,6 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 		pass = false
 	}
-	// var mutex sync.Mutex
-	// mutex.Lock()
-	// var wg sync.WaitGroup
-	// wg.Add(1)
 
 	if !pass {
 		var logs = ""
@@ -325,14 +321,13 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 		if !res.BodyResult.Normal {
 
-			logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", res.BodyResult.Expected, res.BodyResult.Actual)
-
+			logs += pp.Sprintf("\n\tExpected response body: \"{%s"+"\n\tActual response body: \"{%s\n\n", res.BodyResult.Expected[27:], res.BodyResult.Actual[27:])
+			//logs += pp.Sprintf("\n\tDifference in body: %s \n\n", strings.Join(diff, ","))
 		}
 
 		logs += "--------------------------------------------------------------------\n\n"
 		pp.Printf(logs)
 	}
-
 	return pass, res, &tc, nil
 }
 
