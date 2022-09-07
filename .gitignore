@@ -12,6 +12,10 @@
 *.out
 .deploy.sh
 
+### Go Patch ###
+/vendor/
+/Godeps/
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 .idea/
