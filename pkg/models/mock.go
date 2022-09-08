@@ -19,7 +19,6 @@ type Mock struct {
 	Version  string    `json:"version" yaml:"version"`
 	Kind     string    `json:"kind" yaml:"kind"`
 	Name     string    `json:"name" yaml:"name"`
-	Captured int64     `json:"captured" yaml:"captured,omitempty"`
 	Spec     yaml.Node `json:"spec" yaml:"spec"`
 }
 
@@ -40,5 +39,5 @@ type HttpSpec struct {
 	Objects    []Object            `json:"objects" yaml:"objects"`
 	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
 	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
-	Captured   string              `json:"captured" yaml:"captured,omitempty"`
+	Captured   int64              `json:"captured" yaml:"captured,omitempty"`
 }
