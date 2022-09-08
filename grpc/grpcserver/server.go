@@ -236,7 +236,7 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 			return nil, err
 		}
 	case true:
-		tcs, err = srv.svc.ReadTCS(ctx, request.Path)
+		tcs, err = srv.svc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
 		if err != nil {
 			return nil, err
 		}
@@ -280,6 +280,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		}
 		tc[0].Spec.Encode(&models.HttpSpec{
 			// Metadata: , TODO: What should be here
+			Captured: strconv.Itoa(int(request.Captured)),
 			Request: models.HttpReq{
 				Method:     models.Method(request.HttpReq.Method),
 				ProtoMajor: int(request.HttpReq.ProtoMajor),
@@ -303,7 +304,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 				"noise": {}, // TODO: it should be popuplated after denoise
 			},
 		})
-		inserted, err := srv.svc.WriteTC(ctx, tc, request.Path)
+		inserted, err := srv.svc.WriteTC(ctx, tc, request.TestCasePath, request.MockPath)
 		if err != nil {
 			srv.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			return nil, err
@@ -364,7 +365,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 }
 
 func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.DeNoiseResponse, error) {
-	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, request.Resp.Body, utils.GetStringMap(request.Resp.Header), request.Path)
+	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, request.Resp.Body, utils.GetStringMap(request.Resp.Header), request.TestCasePath)
 	if err != nil {
 		return &proto.DeNoiseResponse{Message: err.Error()}, nil
 	}
@@ -372,7 +373,7 @@ func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.
 }
 
 func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.TestResponse, error) {
-	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.Path, models.HttpResp{
+	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath, models.HttpResp{
 		StatusCode: int(request.Resp.StatusCode),
 		Header:     utils.GetStringMap(request.Resp.Header),
 		Body:       request.Resp.Body,

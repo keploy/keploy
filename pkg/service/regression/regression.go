@@ -123,10 +123,10 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 	return tcs, nil
 }
 
-func (r *Regression) ReadTCS(ctx context.Context, path string) ([]models.TestCase, error) {
-	dir, err := os.OpenFile(path+"/tests", os.O_RDONLY, os.ModePerm)
+func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
+	dir, err := os.OpenFile(testCasePath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		r.log.Error("failed to open the dir containing testcases yaml files", zap.String("path", path), zap.Error(err))
+		r.log.Error("failed to open the dir containing testcases yaml files", zap.String("path", testCasePath), zap.Error(err))
 		return nil, err
 	}
 
@@ -135,16 +135,32 @@ func (r *Regression) ReadTCS(ctx context.Context, path string) ([]models.TestCas
 	)
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		r.log.Error("failed to read the names of testcases yaml files from path directory", zap.String("path", path), zap.Error(err))
+		r.log.Error("failed to read the names of testcases yaml files from path directory", zap.String("path", testCasePath), zap.Error(err))
 		return nil, err
 	}
-	for _, j := range files {
-		tcs, err := mock.ReadAll(r.log, path+"/tests", strings.TrimSuffix(j.Name(), filepath.Ext(j.Name())), false)
+	sort.Slice(files, func(i, j int) bool {
+		info1, err := files[i].Info()
 		if err != nil {
-			r.log.Error("failed to read the testcases from yaml file.", zap.String("path", path), zap.String("file", j.Name()), zap.Error(err))
+			r.log.Error("failed to getr file info for ", zap.String("file", files[i].Name()), zap.Error(err))
+		}
+		info2, err := files[j].Info()
+		if err != nil {
+			r.log.Error("failed to getr file info for ", zap.String("file", files[j].Name()), zap.Error(err))
+		}
+		fmt.Println("info1: ", info1.Name(), " time: ", info1.ModTime(), " | info2: ", info2.Name(), " time: ", info2.ModTime())
+		return info1.ModTime().Before(info2.ModTime())
+	})
+	for _, j := range files {
+		if filepath.Ext(j.Name()) != ".yaml" {
+			continue
+		}
+
+		tcs, err := mock.ReadAll(r.log, testCasePath, strings.TrimSuffix(j.Name(), filepath.Ext(j.Name())), false)
+		if err != nil {
+			r.log.Error("failed to read the testcases from yaml file.", zap.String("path", testCasePath), zap.String("file", j.Name()), zap.Error(err))
 			return nil, err
 		}
-		tests, err := r.toTestCase(tcs, path)
+		tests, err := r.toTestCase(tcs, mockPath)
 		if err != nil {
 			return nil, err
 		}
@@ -154,7 +170,7 @@ func (r *Regression) ReadTCS(ctx context.Context, path string) ([]models.TestCas
 	return res, nil
 }
 
-func (r *Regression) toTestCase(tcs []models.Mock, path string) ([]models.TestCase, error) {
+func (r *Regression) toTestCase(tcs []models.Mock, mockPath string) ([]models.TestCase, error) {
 	res := []models.TestCase{}
 	for _, j := range tcs {
 		spec := models.HttpSpec{}
@@ -162,15 +178,16 @@ func (r *Regression) toTestCase(tcs []models.Mock, path string) ([]models.TestCa
 		if err != nil {
 			r.log.Error("failed to decode the yaml spec field of testcase.", zap.String("name", j.Name), zap.Error(err))
 		}
-		mocks, err := mock.ReadAll(r.log, path+"/mocks", j.Name, false)
-		if err != nil {
-			r.log.Error("failed to get the mocks for testcase", zap.String("name", j.Name), zap.Error(err))
+		mocks, err := mock.ReadAll(r.log, mockPath, j.Name, false)
+		noise, ok := spec.Assertions["noise"]
+		if !ok {
+			noise = []string{}
 		}
 		res = append(res, models.TestCase{
 			ID:       j.Name,
 			HttpReq:  spec.Request,
 			HttpResp: spec.Response,
-			Noise:    spec.Assertions["noise"],
+			Noise:    noise,
 			Mocks:    mock2.Decode(mocks, r.log),
 		})
 	}
@@ -250,9 +267,13 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 	return ids, nil
 }
 
-func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, path string) ([]string, error) {
-	isFileEmpty := r.mock.CreateMockFile(path+"/tests", test[0].Name)
-	file, err := os.OpenFile(filepath.Join(path, "tests", test[0].Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
+	if testCasePath == "" {
+		r.log.Error("")
+		return nil, errors.New("path directory not found. Please provide a path")
+	}
+	isFileEmpty := r.mock.CreateMockFile(testCasePath, test[0].Name)
+	file, err := os.OpenFile(filepath.Join(testCasePath, test[0].Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		r.log.Error("failed to open the file", zap.Any("error", err))
 		return []string{}, err
@@ -277,8 +298,8 @@ func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, path strin
 	defer file.Close()
 
 	if len(test) > 1 {
-		r.mock.CreateMockFile(path+"/mocks", test[0].Name)
-		file, err := os.OpenFile(filepath.Join(path, "mocks", test[0].Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+		r.mock.CreateMockFile(mockPath, test[0].Name)
+		file, err := os.OpenFile(filepath.Join(mockPath, test[0].Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 		if err != nil {
 			r.log.Error("failed to open the file", zap.Any("error", err))
 			return []string{}, err
@@ -310,7 +331,7 @@ func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, path strin
 	return []string{test[0].Name}, nil
 }
 
-func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp, path string) (bool, *run.Result, *models.TestCase, error) {
+func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp, testCasePath, mockPath string) (bool, *run.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
 		err error
@@ -323,14 +344,14 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 			return false, nil, nil, err
 		}
 	case true:
-		tests, err := mock.ReadAll(r.log, path+"/tests", id, false)
+		tests, err := mock.ReadAll(r.log, testCasePath, id, false)
 		if err != nil {
-			r.log.Error("failed to get testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
+			r.log.Error("failed to get testcase from yaml", zap.String("id", id), zap.String("path", testCasePath), zap.Error(err))
 			return false, nil, nil, err
 		}
-		tcs, err := r.toTestCase(tests, path)
+		tcs, err := r.toTestCase(tests, mockPath)
 		if err != nil {
-			r.log.Error("failed to decode into models.TestCase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
+			r.log.Error("failed to decode into models.TestCase from yaml", zap.String("id", id), zap.String("path", testCasePath), zap.Error(err))
 			return false, nil, nil, err
 		}
 		if len(tcs) == 1 {
@@ -404,10 +425,10 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 	return pass, res, &tc, nil
 }
 
-func (r *Regression) Test(ctx context.Context, cid, app, runID, id, path string, resp models.HttpResp) (bool, error) {
+func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
-	ok, res, tc, err := r.test(ctx, cid, id, app, resp, path)
+	ok, res, tc, err := r.test(ctx, cid, id, app, resp, testCasePath, mockPath)
 	if tc != nil {
 		t = &run.Test{
 			ID:         uuid.New().String(),
@@ -460,7 +481,7 @@ func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 }
 
 func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h http.Header) error {
-	tcs, err := mock.ReadAll(r.log, path+"/tests", id, false)
+	tcs, err := mock.ReadAll(r.log, path, id, false)
 	if err != nil {
 		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
 		return err
@@ -513,7 +534,7 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 		r.log.Error("failed to marshal document to yaml", zap.Any("error", err))
 		return err
 	}
-	err = os.WriteFile(filepath.Join(path, "tests", id+".yaml"), d, os.ModePerm)
+	err = os.WriteFile(filepath.Join(path, id+".yaml"), d, os.ModePerm)
 	if err != nil {
 		r.log.Error("failed to write test to yaml file", zap.String("id", id), zap.String("path", path), zap.Error(err))
 	}

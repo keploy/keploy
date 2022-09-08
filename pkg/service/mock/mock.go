@@ -93,7 +93,6 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 func ReadAll(log *zap.Logger, path, name string, libMode bool) ([]models.Mock, error) {
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		log.Error("failed to open the yaml file", zap.Any("error", err))
 		return nil, err
 	}
 	defer file.Close()

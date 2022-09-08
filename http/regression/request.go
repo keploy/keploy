@@ -10,14 +10,15 @@ import (
 
 // TestCaseReq
 type TestCaseReq struct {
-	Captured int64               `json:"captured" bson:"captured"`
-	AppID    string              `json:"app_id" bson:"app_id"`
-	URI      string              `json:"uri" bson:"uri"`
-	HttpReq  models.HttpReq      `json:"http_req" bson:"http_req"`
-	HttpResp models.HttpResp     `json:"http_resp" bson:"http_resp"`
-	Deps     []models.Dependency `json:"deps" bson:"deps"`
-	Path     string              `json:"path" bson:"path"`
-	Mocks    []*proto.Mock       `json:"mocks" bson:"mocks"`
+	Captured     int64               `json:"captured" bson:"captured"`
+	AppID        string              `json:"app_id" bson:"app_id"`
+	URI          string              `json:"uri" bson:"uri"`
+	HttpReq      models.HttpReq      `json:"http_req" bson:"http_req"`
+	HttpResp     models.HttpResp     `json:"http_resp" bson:"http_resp"`
+	Deps         []models.Dependency `json:"deps" bson:"deps"`
+	TestCasePath string              `json:"test_case_path" bson:"test_case_path"`
+	MockPath     string              `json:"mock_path" bson:"mock_path"`
+	Mocks        []*proto.Mock       `json:"mocks" bson:"mocks"`
 }
 
 func (req *TestCaseReq) Bind(r *http.Request) error {
@@ -33,11 +34,12 @@ func (req *TestCaseReq) Bind(r *http.Request) error {
 }
 
 type TestReq struct {
-	ID    string          `json:"id" bson:"_id"`
-	AppID string          `json:"app_id" bson:"app_id"`
-	RunID string          `json:"run_id" bson:"run_id"`
-	Resp  models.HttpResp `json:"resp" bson:"resp"`
-	Path  string          `json:"path" bson:"path"`
+	ID           string          `json:"id" bson:"_id"`
+	AppID        string          `json:"app_id" bson:"app_id"`
+	RunID        string          `json:"run_id" bson:"run_id"`
+	Resp         models.HttpResp `json:"resp" bson:"resp"`
+	TestCasePath string          `json:"test_case_path" bson:"test_case_path"`
+	MockPath     string          `json:"mock_path" bson:"mock_path"`
 }
 
 func (req *TestReq) Bind(r *http.Request) error {

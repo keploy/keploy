@@ -132,7 +132,8 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	if app == "" {
 		return
 	}
-	path := r.URL.Query().Get("path")
+	testCasePath := r.URL.Query().Get("testCasePath")
+	mockPath := r.URL.Query().Get("mockPath")
 	offsetStr := r.URL.Query().Get("offset")
 	limitStr := r.URL.Query().Get("limit")
 	var (
@@ -163,7 +164,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case true:
-		tcs, err = rg.svc.ReadTCS(r.Context(), path)
+		tcs, err = rg.svc.ReadTCS(r.Context(), testCasePath, mockPath)
 		if err != nil {
 			render.Render(w, r, ErrInvalidRequest(err))
 			return
@@ -190,9 +191,10 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		var (
 			id = uuid.New().String()
 			tc = []models.Mock{{
-				Version: string(models.V1_BETA1),
-				Kind:    string(models.HTTP_EXPORT),
-				Name:    id,
+				Version:  string(models.V1_BETA1),
+				Kind:     string(models.HTTP_EXPORT),
+				Name:     id,
+				Captured: data.Captured,
 			}}
 			mocks = []string{}
 		)
@@ -224,10 +226,12 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 			}},
 			Mocks: mocks,
 			Assertions: map[string][]string{
-				"noise": {}, // TODO: it should be popuplated after denoise
+				"noise": {},
 			},
+			Captured: strconv.Itoa(int(data.Captured)),
 		})
-		inserted, err := rg.svc.WriteTC(r.Context(), tc, data.Path)
+		fmt.Println("  captured at === ", data.Captured)
+		inserted, err := rg.svc.WriteTC(r.Context(), tc, data.TestCasePath, data.MockPath)
 		if err != nil {
 			rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			render.Render(w, r, ErrInvalidRequest(err))
@@ -281,7 +285,7 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := rg.svc.DeNoise(r.Context(), graph.DEFAULT_COMPANY, data.ID, data.AppID, data.Resp.Body, data.Resp.Header, data.Path)
+	err := rg.svc.DeNoise(r.Context(), graph.DEFAULT_COMPANY, data.ID, data.AppID, data.Resp.Body, data.Resp.Header, data.TestCasePath)
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -301,7 +305,7 @@ func (rg *regression) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pass, err := rg.svc.Test(r.Context(), graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.Path, data.Resp)
+	pass, err := rg.svc.Test(r.Context(), graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.TestCasePath, data.MockPath, data.Resp)
 
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
