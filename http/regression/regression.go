@@ -227,7 +227,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 			Assertions: map[string][]string{
 				"noise": {},
 			},
-			Captured: data.Captured,
+			Created: data.Captured,
 		})
 		fmt.Println("  captured at === ", data.Captured)
 		inserted, err := rg.svc.WriteTC(r.Context(), tc, data.TestCasePath, data.MockPath)

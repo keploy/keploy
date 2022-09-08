@@ -179,7 +179,7 @@ func (r *Regression) toTestCase(tcs []models.Mock, mockPath string) ([]models.Te
 			HttpResp: spec.Response,
 			Noise:    noise,
 			Mocks:    mock2.Decode(mocks, r.log),
-			Captured: spec.Captured,
+			Captured: spec.Created,
 		})
 	}
 	return res, nil

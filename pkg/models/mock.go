@@ -39,5 +39,5 @@ type HttpSpec struct {
 	Objects    []Object            `json:"objects" yaml:"objects"`
 	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
 	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
-	Captured   int64              `json:"captured" yaml:"captured,omitempty"`
+	Created   int64              `json:"created" yaml:"created,omitempty"`
 }
