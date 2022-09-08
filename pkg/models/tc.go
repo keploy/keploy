@@ -1,6 +1,9 @@
 package models
 
-import "context"
+import (
+	"context"
+	proto "go.keploy.io/server/grpc/regression"
+)
 
 type TestCase struct {
 	ID       string              `json:"id" bson:"_id"`
@@ -16,6 +19,7 @@ type TestCase struct {
 	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys,omitempty"`
 	Anchors  map[string][]string `json:"anchors" bson:"anchors,omitempty"`
 	Noise    []string            `json:"noise" bson:"noise,omitempty"`
+	Mocks    []*proto.Mock       `json:"mocks"`
 }
 
 type TestCaseDB interface {

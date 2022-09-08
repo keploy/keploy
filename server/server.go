@@ -36,16 +36,17 @@ import (
 // const defaultPort = "8080"
 
 type config struct {
-	MongoURI        string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
-	DB              string `envconfig:"DB" default:"keploy"`
-	TestCaseTable   string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
-	TestRunTable    string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
-	TestTable       string `envconfig:"TEST_TABLE" default:"tests"`
-	TelemetryTable  string `envconfig:"TELEMETRY_TABLE" default:"telemetry"`
-	APIKey          string `envconfig:"API_KEY"`
-	EnableDeDup     bool   `envconfig:"ENABLE_DEDUP" default:"false"`
-	EnableTelemetry bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
-	EnableDebugger  bool   `envconfig:"ENABLE_DEBUG" default:"false"`
+	MongoURI         string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
+	DB               string `envconfig:"DB" default:"keploy"`
+	TestCaseTable    string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
+	TestRunTable     string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
+	TestTable        string `envconfig:"TEST_TABLE" default:"tests"`
+	TelemetryTable   string `envconfig:"TELEMETRY_TABLE" default:"telemetry"`
+	APIKey           string `envconfig:"API_KEY"`
+	EnableDeDup      bool   `envconfig:"ENABLE_DEDUP" default:"false"`
+	EnableTelemetry  bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
+	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
+	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 }
 
 func Server() *chi.Mux {
@@ -90,7 +91,7 @@ func Server() *chi.Mux {
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client)
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport)
 	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
 	mockSrv := mock.NewMockService(logger)
 
@@ -137,7 +138,7 @@ func Server() *chi.Mux {
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
-		regression.New(r, logger, regSrv, runSrv)
+		regression.New(r, logger, regSrv, runSrv, conf.EnableTestExport)
 		browserMock.New(r, logger, browserMockSrv)
 
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
@@ -160,7 +161,9 @@ func Server() *chi.Mux {
 	log.Println("👍 connect to http://localhost:8081/ for GraphQL playground\n ")
 
 	g := new(errgroup.Group)
-	g.Go(func() error { return grpcserver.New(logger, regSrv, runSrv, mockSrv, grpcListener) })
+	g.Go(func() error {
+		return grpcserver.New(logger, regSrv, runSrv, mockSrv, grpcListener, conf.EnableTestExport)
+	})
 
 	g.Go(func() error {
 		srv := http.Server{Handler: r}
