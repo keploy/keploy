@@ -191,9 +191,9 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		var (
 			id = uuid.New().String()
 			tc = []models.Mock{{
-				Version:  string(models.V1_BETA1),
-				Kind:     string(models.HTTP_EXPORT),
-				Name:     id,
+				Version: string(models.V1_BETA1),
+				Kind:    string(models.HTTP_EXPORT),
+				Name:    id,
 			}}
 			mocks = []string{}
 		)
@@ -229,7 +229,6 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 			},
 			Created: data.Captured,
 		})
-		fmt.Println("  captured at === ", data.Captured)
 		inserted, err := rg.svc.WriteTC(r.Context(), tc, data.TestCasePath, data.MockPath)
 		if err != nil {
 			rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
