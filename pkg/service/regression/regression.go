@@ -138,18 +138,6 @@ func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string)
 		r.log.Error("failed to read the names of testcases yaml files from path directory", zap.String("path", testCasePath), zap.Error(err))
 		return nil, err
 	}
-	sort.Slice(files, func(i, j int) bool {
-		info1, err := files[i].Info()
-		if err != nil {
-			r.log.Error("failed to getr file info for ", zap.String("file", files[i].Name()), zap.Error(err))
-		}
-		info2, err := files[j].Info()
-		if err != nil {
-			r.log.Error("failed to getr file info for ", zap.String("file", files[j].Name()), zap.Error(err))
-		}
-		fmt.Println("info1: ", info1.Name(), " time: ", info1.ModTime(), " | info2: ", info2.Name(), " time: ", info2.ModTime())
-		return info1.ModTime().Before(info2.ModTime())
-	})
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" {
 			continue
@@ -166,7 +154,9 @@ func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string)
 		}
 		res = append(res, tests...)
 	}
-
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].Captured > res[j].Captured
+	})
 	return res, nil
 }
 
@@ -189,6 +179,7 @@ func (r *Regression) toTestCase(tcs []models.Mock, mockPath string) ([]models.Te
 			HttpResp: spec.Response,
 			Noise:    noise,
 			Mocks:    mock2.Decode(mocks, r.log),
+			Captured: spec.Created,
 		})
 	}
 	return res, nil
@@ -269,7 +260,6 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 
 func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
 	if testCasePath == "" {
-		r.log.Error("")
 		return nil, errors.New("path directory not found. Please provide a path")
 	}
 	isFileEmpty := r.mock.CreateMockFile(testCasePath, test[0].Name)

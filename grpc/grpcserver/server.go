@@ -280,7 +280,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		}
 		tc[0].Spec.Encode(&models.HttpSpec{
 			// Metadata: , TODO: What should be here
-			Captured: strconv.Itoa(int(request.Captured)),
+			Created: request.Captured,
 			Request: models.HttpReq{
 				Method:     models.Method(request.HttpReq.Method),
 				ProtoMajor: int(request.HttpReq.ProtoMajor),
