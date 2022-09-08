@@ -1,15 +1,16 @@
-package grpcserver
+package mock
 
 import (
 	"encoding/base64"
 	"fmt"
 
 	proto "go.keploy.io/server/grpc/regression"
+	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
 
-func (srv *Server) Encode(doc *proto.Mock) models.Mock {
+func Encode(doc *proto.Mock, log *zap.Logger) models.Mock {
 	res := models.Mock{
 		Version: doc.Version,
 		Kind:    doc.Kind,
@@ -17,44 +18,47 @@ func (srv *Server) Encode(doc *proto.Mock) models.Mock {
 	}
 	switch doc.Kind {
 	case string(models.HTTP_EXPORT):
-		err := res.Spec.Encode(&models.HttpSpec{
+		spec := models.HttpSpec{
 			Metadata: doc.Spec.Metadata,
 			Request: models.HttpReq{
 				Method:     models.Method(doc.Spec.Req.Method),
 				ProtoMajor: int(doc.Spec.Req.ProtoMajor),
 				ProtoMinor: int(doc.Spec.Req.ProtoMinor),
 				URL:        doc.Spec.Req.URL,
-				Header:     getHttpHeader(doc.Spec.Req.Header),
+				Header:     utils.GetHttpHeader(doc.Spec.Req.Header),
 				Body:       doc.Spec.Req.Body,
 			},
 			Response: models.HttpResp{
 				StatusCode: int(doc.Spec.Res.StatusCode),
-				Header:     getHttpHeader(doc.Spec.Res.Header),
+				Header:     utils.GetHttpHeader(doc.Spec.Res.Header),
 				Body:       doc.Spec.Res.Body,
 			},
 			Objects: []models.Object{{
 				Type: doc.Spec.Objects[0].Type,
 				Data: string(doc.Spec.Objects[0].Data),
 			}},
-		})
+			Mocks:      doc.Spec.Mocks,
+			Assertions: utils.GetHttpHeader(doc.Spec.Assertions),
+		}
+		err := res.Spec.Encode(&spec)
 		if err != nil {
-			srv.logger.Error(fmt.Sprint("Failed to encode http spec for mock with name: ", doc.Name), zap.Error(err))
+			log.Error(fmt.Sprint("Failed to encode http spec for mock with name: ", doc.Name), zap.Error(err))
 		}
 	case string(models.GENERIC_EXPORT):
 		err := res.Spec.Encode(&models.GenericSpec{
 			Metadata: doc.Spec.Metadata,
-			Objects:  toModelObjects(doc.Spec.Objects),
+			Objects:  ToModelObjects(doc.Spec.Objects),
 		})
 		if err != nil {
-			srv.logger.Error(fmt.Sprint("Failed to encode generic spec for mock with name: ", doc.Name), zap.Error(err))
+			log.Error(fmt.Sprint("Failed to encode generic spec for mock with name: ", doc.Name), zap.Error(err))
 		}
 	default:
-		srv.logger.Error(fmt.Sprint("Mock with name ", doc.Name, " is not of a valid kind"))
+		log.Error(fmt.Sprint("Mock with name ", doc.Name, " is not of a valid kind"))
 	}
 	return res
 }
 
-func toModelObjects(objs []*proto.Mock_Object) []models.Object {
+func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 	res := []models.Object{}
 	for _, j := range objs {
 		res = append(res, models.Object{
@@ -65,12 +69,12 @@ func toModelObjects(objs []*proto.Mock_Object) []models.Object {
 	return res
 }
 
-func (srv *Server) toProtoObjects(objs []models.Object) []*proto.Mock_Object {
+func toProtoObjects(objs []models.Object, log *zap.Logger) []*proto.Mock_Object {
 	res := []*proto.Mock_Object{}
 	for _, j := range objs {
 		bin, err := base64.StdEncoding.DecodeString(j.Data)
 		if err != nil {
-			srv.logger.Error("failed to decode base64 data from yaml file into byte array", zap.Error(err))
+			log.Error("failed to decode base64 data from yaml file into byte array", zap.Error(err))
 			continue
 		}
 		res = append(res, &proto.Mock_Object{
@@ -81,7 +85,7 @@ func (srv *Server) toProtoObjects(objs []models.Object) []*proto.Mock_Object {
 	return res
 }
 
-func (srv *Server) Decode(doc []models.Mock) []*proto.Mock {
+func Decode(doc []models.Mock, log *zap.Logger) []*proto.Mock {
 	res := []*proto.Mock{}
 	for _, j := range doc {
 		mock := &proto.Mock{
@@ -94,7 +98,7 @@ func (srv *Server) Decode(doc []models.Mock) []*proto.Mock {
 			spec := &models.HttpSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
-				srv.logger.Error(fmt.Sprint("Failed to decode the http spec of mock with name: ", j.Name), zap.Error(err))
+				log.Error(fmt.Sprint("Failed to decode the http spec of mock with name: ", j.Name), zap.Error(err))
 			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
@@ -103,7 +107,7 @@ func (srv *Server) Decode(doc []models.Mock) []*proto.Mock {
 					ProtoMajor: int64(spec.Request.ProtoMajor),
 					ProtoMinor: int64(spec.Request.ProtoMinor),
 					URL:        spec.Request.URL,
-					Header:     getProtoMap(spec.Request.Header),
+					Header:     utils.GetProtoMap(spec.Request.Header),
 					Body:       spec.Request.Body,
 				},
 				Objects: []*proto.Mock_Object{{
@@ -112,22 +116,24 @@ func (srv *Server) Decode(doc []models.Mock) []*proto.Mock {
 				}},
 				Res: &proto.HttpResp{
 					StatusCode: int64(spec.Response.StatusCode),
-					Header:     getProtoMap(spec.Response.Header),
+					Header:     utils.GetProtoMap(spec.Response.Header),
 					Body:       spec.Response.Body,
 				},
+				Mocks:      spec.Mocks,
+				Assertions: utils.GetProtoMap(spec.Assertions),
 			}
 		case string(models.GENERIC_EXPORT):
 			spec := &models.GenericSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
-				srv.logger.Error(fmt.Sprint("Failed to decode the generic spec of mock with name: ", j.Name), zap.Error(err))
+				log.Error(fmt.Sprint("Failed to decode the generic spec of mock with name: ", j.Name), zap.Error(err))
 			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
-				Objects:  srv.toProtoObjects(spec.Objects),
+				Objects:  toProtoObjects(spec.Objects, log),
 			}
 		default:
-			srv.logger.Error(fmt.Sprint("Mock with name ", j.Name, " is not of a valid kind"))
+			log.Error(fmt.Sprint("Mock with name ", j.Name, " is not of a valid kind"))
 		}
 		res = append(res, mock)
 	}

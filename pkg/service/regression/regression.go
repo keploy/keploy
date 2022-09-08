@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -16,19 +18,25 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	mock2 "go.keploy.io/server/grpc/mock"
+	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/service/mock"
 	"go.keploy.io/server/pkg/service/run"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool) *Regression {
 	return &Regression{
 		tdb:         tdb,
 		tele:        adb,
 		log:         log,
 		rdb:         rdb,
+		mock:        mock.NewMockService(log),
+		TestExport:  TestExport,
 		client:      client,
 		mu:          sync.Mutex{},
 		anchors:     map[string][]map[string][]string{},
@@ -39,13 +47,15 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, a
 }
 
 type Regression struct {
-	tdb      models.TestCaseDB
-	tele     telemetry.Service
-	rdb      run.DB
-	client   http.Client
-	log      *zap.Logger
-	mu       sync.Mutex
-	appCount int
+	tdb        models.TestCaseDB
+	tele       telemetry.Service
+	rdb        run.DB
+	mock       mock.Service
+	TestExport bool
+	client     http.Client
+	log        *zap.Logger
+	mu         sync.Mutex
+	appCount   int
 	// index is `cid-appID-uri`
 	//
 	// anchors is map[index][]map[key][]value or map[index]combinationOfAnchors
@@ -111,6 +121,60 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 		return models.TestCase{}, errors.New("internal failure")
 	}
 	return tcs, nil
+}
+
+func (r *Regression) ReadTCS(ctx context.Context, path string) ([]models.TestCase, error) {
+	dir, err := os.OpenFile(path+"/tests", os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		r.log.Error("failed to open the dir containing testcases yaml files", zap.String("path", path), zap.Error(err))
+		return nil, err
+	}
+
+	var (
+		res = []models.TestCase{}
+	)
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		r.log.Error("failed to read the names of testcases yaml files from path directory", zap.String("path", path), zap.Error(err))
+		return nil, err
+	}
+	for _, j := range files {
+		tcs, err := mock.ReadAll(r.log, path+"/tests", strings.TrimSuffix(j.Name(), filepath.Ext(j.Name())), false)
+		if err != nil {
+			r.log.Error("failed to read the testcases from yaml file.", zap.String("path", path), zap.String("file", j.Name()), zap.Error(err))
+			return nil, err
+		}
+		tests, err := r.toTestCase(tcs, path)
+		if err != nil {
+			return nil, err
+		}
+		res = append(res, tests...)
+	}
+
+	return res, nil
+}
+
+func (r *Regression) toTestCase(tcs []models.Mock, path string) ([]models.TestCase, error) {
+	res := []models.TestCase{}
+	for _, j := range tcs {
+		spec := models.HttpSpec{}
+		err := j.Spec.Decode(&spec)
+		if err != nil {
+			r.log.Error("failed to decode the yaml spec field of testcase.", zap.String("name", j.Name), zap.Error(err))
+		}
+		mocks, err := mock.ReadAll(r.log, path+"/mocks", j.Name, false)
+		if err != nil {
+			r.log.Error("failed to get the mocks for testcase", zap.String("name", j.Name), zap.Error(err))
+		}
+		res = append(res, models.TestCase{
+			ID:       j.Name,
+			HttpReq:  spec.Request,
+			HttpResp: spec.Response,
+			Noise:    spec.Assertions["noise"],
+			Mocks:    mock2.Decode(mocks, r.log),
+		})
+	}
+	return res, nil
 }
 
 func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
@@ -186,12 +250,92 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 	return ids, nil
 }
 
-func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp) (bool, *run.Result, *models.TestCase, error) {
-
-	tc, err := r.tdb.Get(ctx, cid, id)
+func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, path string) ([]string, error) {
+	isFileEmpty := r.mock.CreateMockFile(path+"/tests", test[0].Name)
+	file, err := os.OpenFile(filepath.Join(path, "tests", test[0].Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-		return false, nil, nil, err
+		r.log.Error("failed to open the file", zap.Any("error", err))
+		return []string{}, err
+	}
+
+	data := []byte("---\n")
+	if isFileEmpty {
+		data = []byte{}
+	}
+	d, err := yaml.Marshal(test[0])
+	if err != nil {
+		r.log.Error("failed to marshal document to yaml", zap.Any("error", err))
+		return []string{}, err
+	}
+	data = append(data, d...)
+
+	_, err = file.Write(data)
+	if err != nil {
+		r.log.Error("failed to embed document into yaml file", zap.Any("error", err))
+		return []string{}, err
+	}
+	defer file.Close()
+
+	if len(test) > 1 {
+		r.mock.CreateMockFile(path+"/mocks", test[0].Name)
+		file, err := os.OpenFile(filepath.Join(path, "mocks", test[0].Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+		if err != nil {
+			r.log.Error("failed to open the file", zap.Any("error", err))
+			return []string{}, err
+		}
+		mocks := test[1:]
+
+		for i, j := range mocks {
+			data := []byte("---\n")
+			if i == 0 {
+				data = []byte{}
+			}
+			d, err := yaml.Marshal(j)
+			if err != nil {
+				r.log.Error("failed to marshal document to yaml", zap.Any("error", err))
+				return []string{}, err
+			}
+			data = append(data, d...)
+
+			_, err = file.Write(data)
+			if err != nil {
+				r.log.Error("failed to embed document into yaml file", zap.Any("error", err))
+				return []string{}, err
+			}
+		}
+
+		defer file.Close()
+
+	}
+	return []string{test[0].Name}, nil
+}
+
+func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp, path string) (bool, *run.Result, *models.TestCase, error) {
+	var (
+		tc  models.TestCase
+		err error
+	)
+	switch r.TestExport {
+	case false:
+		tc, err = r.tdb.Get(ctx, cid, id)
+		if err != nil {
+			r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+			return false, nil, nil, err
+		}
+	case true:
+		tests, err := mock.ReadAll(r.log, path+"/tests", id, false)
+		if err != nil {
+			r.log.Error("failed to get testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
+			return false, nil, nil, err
+		}
+		tcs, err := r.toTestCase(tests, path)
+		if err != nil {
+			r.log.Error("failed to decode into models.TestCase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
+			return false, nil, nil, err
+		}
+		if len(tcs) == 1 {
+			tc = tcs[0]
+		}
 	}
 	bodyType := run.BodyTypePlain
 	if json.Valid([]byte(resp.Body)) {
@@ -260,10 +404,10 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 	return pass, res, &tc, nil
 }
 
-func (r *Regression) Test(ctx context.Context, cid, app, runID, id string, resp models.HttpResp) (bool, error) {
+func (r *Regression) Test(ctx context.Context, cid, app, runID, id, path string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
-	ok, res, tc, err := r.test(ctx, cid, id, app, resp)
+	ok, res, tc, err := r.test(ctx, cid, id, app, resp, path)
 	if tc != nil {
 		t = &run.Test{
 			ID:         uuid.New().String(),
@@ -315,8 +459,73 @@ func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 	return nil
 }
 
-func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h http.Header) error {
+func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h http.Header) error {
+	tcs, err := mock.ReadAll(r.log, path+"/tests", id, false)
+	if err != nil {
+		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
+		return err
+	}
+	if len(tcs) == 0 {
+		r.log.Error("no testcase exists with", zap.String("id", id), zap.String("at path", path), zap.Error(err))
+		return err
+	}
+	tc := mock2.Decode(tcs, r.log)[0]
 
+	a, b := map[string][]string{}, map[string][]string{}
+
+	// add headers
+	for k, v := range utils.GetStringMap(tc.Spec.Res.Header) {
+		a["header."+k] = []string{strings.Join(v, "")}
+	}
+
+	for k, v := range h {
+		b["header."+k] = []string{strings.Join(v, "")}
+	}
+
+	err = addBody(tc.Spec.Res.Body, a)
+	if err != nil {
+		r.log.Error("failed to parse response body", zap.String("id", id), zap.Error(err))
+		return err
+	}
+
+	err = addBody(body, b)
+	if err != nil {
+		r.log.Error("failed to parse response body", zap.String("id", id), zap.Error(err))
+		return err
+	}
+	// r.log.Debug("denoise between",zap.Any("stored object",a),zap.Any("coming object",b))
+	var noise []string
+	for k, v := range a {
+		v2, ok := b[k]
+		if !ok {
+			noise = append(noise, k)
+			continue
+		}
+		if !reflect.DeepEqual(v, v2) {
+			noise = append(noise, k)
+		}
+	}
+	// r.log.Debug("Noise Array : ",zap.Any("",noise))
+	tc.Spec.Assertions["noise"] = utils.ToStrArr(noise)
+	enc := mock2.Encode(tc, r.log)
+	d, err := yaml.Marshal(enc)
+	if err != nil {
+		r.log.Error("failed to marshal document to yaml", zap.Any("error", err))
+		return err
+	}
+	err = os.WriteFile(filepath.Join(path, "tests", id+".yaml"), d, os.ModePerm)
+	if err != nil {
+		r.log.Error("failed to write test to yaml file", zap.String("id", id), zap.String("path", path), zap.Error(err))
+	}
+
+	return nil
+}
+
+func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path string) error {
+
+	if r.TestExport {
+		return r.deNoiseYaml(ctx, id, path, body, h)
+	}
 	tc, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
 		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))

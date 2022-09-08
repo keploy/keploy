@@ -21,6 +21,8 @@ message TestCaseReq {
   HttpReq HttpReq = 4;
   HttpResp HttpResp = 5;
   repeated Dependency Dependency = 6;
+  string Path = 7;
+  repeated Mock Mocks = 8;
 }
 
 
@@ -29,6 +31,7 @@ message TestReq {
   string AppID = 2;
   string RunID = 3;
   HttpResp Resp = 4;
+  string Path = 5;
 }
 
 message TestCase {
@@ -96,9 +99,11 @@ message getTCSRequest{
   string app = 1;
   string  offset = 2;
   string limit = 3;
+  string path = 4;
 }
 message getTCSResponse{
   repeated TestCase tcs = 1;
+  bool eof = 2;
 }
 message postTCResponse{
   map<string, string> tcsId = 1;

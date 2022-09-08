@@ -24,7 +24,7 @@ type Mock struct {
 	log *zap.Logger
 }
 
-func (m *Mock) createMockFile(path string, fileName string) bool {
+func (m *Mock) CreateMockFile(path string, fileName string) bool {
 	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
 		err := os.MkdirAll(filepath.Join(path), os.ModePerm)
 		if err != nil {
@@ -42,7 +42,6 @@ func (m *Mock) createMockFile(path string, fileName string) bool {
 }
 
 func (m *Mock) FileExists(ctx context.Context, path string) bool {
-	fmt.Println(" -- ", filepath.Base(path))
 	if _, err := os.Stat(filepath.Join(path)); err == nil {
 		return true
 	}
@@ -56,7 +55,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 		doc.Name = uuid.New().String()
 		isGenerated = true
 	}
-	isFileEmpty := m.createMockFile(path, doc.Name)
+	isFileEmpty := m.CreateMockFile(path, doc.Name)
 	file, err := os.OpenFile(filepath.Join(path, doc.Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		m.log.Error("failed to open the file", zap.Any("error", err))
@@ -91,11 +90,10 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 	return nil
 }
 
-func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
-
+func ReadAll(log *zap.Logger, path, name string, libMode bool) ([]models.Mock, error) {
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		m.log.Error("failed to open the yaml file", zap.Any("error", err))
+		log.Error("failed to open the yaml file", zap.Any("error", err))
 		return nil, err
 	}
 	defer file.Close()
@@ -108,12 +106,43 @@ func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.M
 			break
 		}
 		if err != nil {
-			m.log.Error("failed to decode the yaml file documents into mock", zap.Any("error", err))
+			log.Error("failed to decode the yaml file documents into mock", zap.Any("error", err))
 			return nil, err
 		}
-		if node.Name == name {
+		if !libMode || node.Name == name {
 			arr = append(arr, node)
 		}
+	}
+	return arr, nil
+}
+
+func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
+
+	// file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
+	// if err != nil {
+	// 	m.log.Error("failed to open the yaml file", zap.Any("error", err))
+	// 	return nil, err
+	// }
+	// defer file.Close()
+	// decoder := yaml.NewDecoder(file)
+	// arr := []models.Mock{}
+	// for {
+	// 	var node models.Mock
+	// 	err := decoder.Decode(&node)
+	// 	if errors.Is(err, io.EOF) {
+	// 		break
+	// 	}
+	// 	if err != nil {
+	// 		m.log.Error("failed to decode the yaml file documents into mock", zap.Any("error", err))
+	// 		return nil, err
+	// 	}
+	// 	if node.Name == name {
+	// 		arr = append(arr, node)
+	// 	}
+	// }
+	arr, err := ReadAll(m.log, path, name, true)
+	if err != nil {
+		return nil, err
 	}
 	MockPathStr := fmt.Sprint("\n✅ Mocks are read successfully from yaml file at path: ", path, "/", name, ".yaml", "\n")
 	m.log.Info(MockPathStr)

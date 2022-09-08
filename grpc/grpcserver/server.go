@@ -13,9 +13,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
+	mock2 "go.keploy.io/server/grpc/mock"
 	proto "go.keploy.io/server/grpc/regression"
+	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
@@ -26,18 +27,19 @@ import (
 )
 
 type Server struct {
-	logger *zap.Logger
-	svc    regression2.Service
-	run    run.Service
-	mock   mock.Service
+	logger     *zap.Logger
+	TestExport bool
+	svc        regression2.Service
+	run        run.Service
+	mock       mock.Service
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, listener net.Listener) error {
+func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, listener net.Listener, testExport bool) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer()
-	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m})
+	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, TestExport: testExport})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
@@ -45,7 +47,7 @@ func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Se
 }
 
 func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq) (*proto.StartMockResp, error) {
-	if request.Mode == string(keploy.MODE_TEST) {
+	if request.Mode == "test" {
 		return &proto.StartMockResp{
 			Exists: false,
 		}, nil
@@ -61,7 +63,7 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
 	// writes to yaml file
-	err := srv.mock.Put(ctx, request.Path, srv.Encode(request.Mock), request.Mock.Spec.Metadata)
+	err := srv.mock.Put(ctx, request.Path, mock2.Encode(request.Mock, srv.logger), request.Mock.Spec.Metadata)
 	if err != nil {
 		return &proto.PutMockResp{}, err
 	}
@@ -75,7 +77,7 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 		return &proto.GetMockResp{}, err
 	}
 	resp := &proto.GetMockResp{
-		Mocks: srv.Decode(mocks),
+		Mocks: mock2.Decode(mocks, srv.logger),
 	}
 	return resp, nil
 }
@@ -124,15 +126,6 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 		return nil, err
 	}
 	return &proto.StartResponse{Id: id}, nil
-}
-
-// map[string]*StrArr --> map[string][]string
-func getStringMap(m map[string]*proto.StrArr) map[string][]string {
-	res := map[string][]string{}
-	for k, v := range m {
-		res[k] = v.Value
-	}
-	return res
 }
 
 func getProtoMap(m map[string][]string) map[string]*proto.StrArr {
@@ -220,6 +213,8 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		offset int
 		limit  int
 		err    error
+		tcs    []models.TestCase
+		eof    bool
 	)
 	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
@@ -233,9 +228,19 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 			srv.logger.Error("request for fetching testcases in converting limit to integer")
 		}
 	}
-	tcs, err := srv.svc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit)
-	if err != nil {
-		return nil, err
+
+	switch srv.TestExport {
+	case false:
+		tcs, err = srv.svc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit)
+		if err != nil {
+			return nil, err
+		}
+	case true:
+		tcs, err = srv.svc.ReadTCS(ctx, request.Path)
+		if err != nil {
+			return nil, err
+		}
+		eof = true
 	}
 	var ptcs []*proto.TestCase
 	for i := 0; i < len(tcs); i++ {
@@ -245,10 +250,10 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		}
 		ptcs = append(ptcs, ptc)
 	}
-	return &proto.GetTCSResponse{Tcs: ptcs}, nil
+	return &proto.GetTCSResponse{Tcs: ptcs, Eof: eof}, nil
 }
 
-func getHttpHeader(m map[string]*proto.StrArr) map[string][]string {
+func GetHttpHeader(m map[string]*proto.StrArr) map[string][]string {
 	res := map[string][]string{}
 	for k, v := range m {
 		res[k] = v.Value
@@ -257,6 +262,57 @@ func getHttpHeader(m map[string]*proto.StrArr) map[string][]string {
 }
 
 func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*proto.PostTCResponse, error) {
+	if srv.TestExport {
+		var (
+			id = uuid.New().String()
+			tc = []models.Mock{{
+				Version: string(models.V1_BETA1),
+				Kind:    string(models.HTTP_EXPORT),
+				Name:    id,
+			}}
+			mocks = []string{}
+		)
+		for i, j := range request.Mocks {
+			tc = append(tc, mock2.Encode(j, srv.logger))
+			m := id + "-" + strconv.Itoa(i)
+			tc[len(tc)-1].Name = m
+			mocks = append(mocks, m)
+		}
+		tc[0].Spec.Encode(&models.HttpSpec{
+			// Metadata: , TODO: What should be here
+			Request: models.HttpReq{
+				Method:     models.Method(request.HttpReq.Method),
+				ProtoMajor: int(request.HttpReq.ProtoMajor),
+				ProtoMinor: int(request.HttpReq.ProtoMinor),
+				URL:        request.HttpReq.URL,
+				URLParams:  request.HttpReq.URLParams,
+				Body:       request.HttpReq.Body,
+				Header:     utils.GetHttpHeader(request.HttpReq.Header),
+			},
+			Response: models.HttpResp{
+				StatusCode: int(request.HttpResp.StatusCode),
+				Body:       request.HttpResp.Body,
+				Header:     utils.GetHttpHeader(request.HttpResp.Header),
+			},
+			Objects: mock2.ToModelObjects([]*proto.Mock_Object{{ // TODO: remove this. after making range check in go-sdk http interceptor logic check cause there 0th index is picked up directly. ELse it will panic
+				Type: "error",
+				Data: []byte{},
+			}}),
+			Mocks: mocks,
+			Assertions: map[string][]string{
+				"noise": {}, // TODO: it should be popuplated after denoise
+			},
+		})
+		inserted, err := srv.svc.WriteTC(ctx, tc, request.Path)
+		if err != nil {
+			srv.logger.Error("error writing testcase to yaml file", zap.Error(err))
+			return nil, err
+		}
+
+		return &proto.PostTCResponse{
+			TcsId: map[string]string{"id": inserted[0]},
+		}, nil
+	}
 	deps := []models.Dependency{}
 	for _, j := range request.Dependency {
 		data := [][]byte{}
@@ -285,12 +341,12 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			URL:        request.HttpReq.URL,
 			URLParams:  request.HttpReq.URLParams,
 			Body:       request.HttpReq.Body,
-			Header:     getHttpHeader(request.HttpReq.Header),
+			Header:     utils.GetHttpHeader(request.HttpReq.Header),
 		},
 		HttpResp: models.HttpResp{
 			StatusCode: int(request.HttpResp.StatusCode),
 			Body:       request.HttpResp.Body,
-			Header:     getHttpHeader(request.HttpResp.Header),
+			Header:     utils.GetHttpHeader(request.HttpResp.Header),
 		},
 		Deps: deps,
 	}})
@@ -308,7 +364,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 }
 
 func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.DeNoiseResponse, error) {
-	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, request.Resp.Body, getStringMap(request.Resp.Header))
+	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, request.Resp.Body, utils.GetStringMap(request.Resp.Header), request.Path)
 	if err != nil {
 		return &proto.DeNoiseResponse{Message: err.Error()}, nil
 	}
@@ -316,9 +372,9 @@ func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.
 }
 
 func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.TestResponse, error) {
-	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, models.HttpResp{
+	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.Path, models.HttpResp{
 		StatusCode: int(request.Resp.StatusCode),
-		Header:     getStringMap(request.Resp.Header),
+		Header:     utils.GetStringMap(request.Resp.Header),
 		Body:       request.Resp.Body,
 	})
 	if err != nil {

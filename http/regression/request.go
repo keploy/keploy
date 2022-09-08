@@ -4,9 +4,9 @@ import (
 	"errors"
 	"net/http"
 
+	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
 )
-
 
 // TestCaseReq
 type TestCaseReq struct {
@@ -16,6 +16,8 @@ type TestCaseReq struct {
 	HttpReq  models.HttpReq      `json:"http_req" bson:"http_req"`
 	HttpResp models.HttpResp     `json:"http_resp" bson:"http_resp"`
 	Deps     []models.Dependency `json:"deps" bson:"deps"`
+	Path     string              `json:"path" bson:"path"`
+	Mocks    []*proto.Mock       `json:"mocks" bson:"mocks"`
 }
 
 func (req *TestCaseReq) Bind(r *http.Request) error {
@@ -35,6 +37,7 @@ type TestReq struct {
 	AppID string          `json:"app_id" bson:"app_id"`
 	RunID string          `json:"run_id" bson:"run_id"`
 	Resp  models.HttpResp `json:"resp" bson:"resp"`
+	Path  string          `json:"path" bson:"path"`
 }
 
 func (req *TestReq) Bind(r *http.Request) error {

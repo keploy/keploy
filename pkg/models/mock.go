@@ -21,21 +21,6 @@ type Mock struct {
 	Name    string    `json:"name" yaml:"name"`
 	Spec    yaml.Node `json:"spec" yaml:"spec"`
 }
-type SpecSchema struct {
-	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
-	Request    HttpReq             `json:"req" yaml:"req,omitempty"`
-	Response   HttpResp            `json:"resp" yaml:"resp,omitempty"`
-	Objects    []Object            `json:"objects" yaml:"objects"`
-	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
-	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
-}
-
-type GenericMock struct {
-	Version string      `json:"version" yaml:"version"`
-	Kind    string      `json:"kind" yaml:"kind"`
-	Name    string      `json:"name" yaml:"name"`
-	Spec    GenericSpec `json:"spec" yaml:"spec"`
-}
 
 type GenericSpec struct {
 	Metadata map[string]string `json:"metadata" yaml:"metadata"`
@@ -45,13 +30,6 @@ type GenericSpec struct {
 type Object struct {
 	Type string `json:"type" yaml:"type"`
 	Data string `json:"data" yaml:"data"`
-}
-
-type HttpMock struct {
-	Version string   `json:"version" yaml:"version"`
-	Kind    string   `json:"kind" yaml:"kind"`
-	Name    string   `json:"name" yaml:"name"`
-	Spec    HttpSpec `json:"spec" yaml:"spec"`
 }
 
 type HttpSpec struct {
