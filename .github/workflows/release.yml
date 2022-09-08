@@ -35,6 +35,8 @@ jobs:
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: true
+          ENABLE_TEST_EXPORT: false
+
 
       - name: Install goveralls
         run: go install github.com/mattn/goveralls@latest
