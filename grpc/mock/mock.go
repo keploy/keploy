@@ -120,7 +120,7 @@ func Decode(doc []models.Mock, log *zap.Logger) []*proto.Mock {
 					Body:       spec.Response.Body,
 				},
 				Mocks:      spec.Mocks,
-				Assertions: utils.GetProtoMap(spec.Assertions),
+				Assertions: utils.GetProtoMap(spec.Assertions),	
 			}
 		case string(models.GENERIC_EXPORT):
 			spec := &models.GenericSpec{}
