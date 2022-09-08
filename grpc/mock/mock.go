@@ -39,6 +39,7 @@ func Encode(doc *proto.Mock, log *zap.Logger) models.Mock {
 			}},
 			Mocks:      doc.Spec.Mocks,
 			Assertions: utils.GetHttpHeader(doc.Spec.Assertions),
+			Created:    doc.Spec.Created,
 		}
 		err := res.Spec.Encode(&spec)
 		if err != nil {
@@ -120,7 +121,8 @@ func Decode(doc []models.Mock, log *zap.Logger) []*proto.Mock {
 					Body:       spec.Response.Body,
 				},
 				Mocks:      spec.Mocks,
-				Assertions: utils.GetProtoMap(spec.Assertions),	
+				Assertions: utils.GetProtoMap(spec.Assertions),
+				Created:    spec.Created,
 			}
 		case string(models.GENERIC_EXPORT):
 			spec := &models.GenericSpec{}

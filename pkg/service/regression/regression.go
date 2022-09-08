@@ -260,7 +260,6 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 
 func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
 	if testCasePath == "" {
-		r.log.Error("")
 		return nil, errors.New("path directory not found. Please provide a path")
 	}
 	isFileEmpty := r.mock.CreateMockFile(testCasePath, test[0].Name)

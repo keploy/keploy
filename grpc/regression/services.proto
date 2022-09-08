@@ -142,6 +142,7 @@ message Mock {
     HttpResp Res = 4;
     repeated string Mocks = 5;
     map<string, StrArr> Assertions = 6;
+    int64 Created = 7;
   }
   SpecSchema Spec = 4;
 }

@@ -55,7 +55,6 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 		doc.Name = uuid.New().String()
 		isGenerated = true
 	}
-
 	isFileEmpty := m.CreateMockFile(path, doc.Name)
 	file, err := os.OpenFile(filepath.Join(path, doc.Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
@@ -144,7 +143,6 @@ func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.M
 	if err != nil {
 		return nil, err
 	}
-
 	MockPathStr := fmt.Sprint("\n✅ Mocks are read successfully from yaml file at path: ", path, "/", name, ".yaml", "\n")
 	m.log.Info(MockPathStr)
 
