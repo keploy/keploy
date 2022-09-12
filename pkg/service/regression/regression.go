@@ -174,9 +174,21 @@ func (r *Regression) toTestCase(tcs []models.Mock, mockPath string) ([]models.Te
 			noise = []string{}
 		}
 		res = append(res, models.TestCase{
-			ID:       j.Name,
-			HttpReq:  spec.Request,
-			HttpResp: spec.Response,
+			ID: j.Name,
+			HttpReq: models.HttpReq{
+				Method:     spec.Request.Method,
+				ProtoMajor: spec.Request.ProtoMajor,
+				ProtoMinor: spec.Request.ProtoMinor,
+				URL:        spec.Request.URL,
+				URLParams:  spec.Request.URLParams,
+				Body:       spec.Request.Body,
+				Header:     mock2.ToHttpHeader(spec.Request.Header),
+			},
+			HttpResp: models.HttpResp{
+				StatusCode: spec.Response.StatusCode,
+				Body:       spec.Response.Body,
+				Header:     mock2.ToHttpHeader(spec.Response.Header),
+			},
 			Noise:    noise,
 			Mocks:    mock2.Decode(mocks, r.log),
 			Captured: spec.Created,
