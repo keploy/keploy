@@ -298,8 +298,6 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 		}
 
 		if !unmatched {
-			//time.Sleep(3 * time.Millisecond)
-
 			logs += "\tExpected Headers: \n"
 			for i, j := range expectedHeader {
 				logs += pp.Sprintf("\t\t%s: %s\n", i, j)
