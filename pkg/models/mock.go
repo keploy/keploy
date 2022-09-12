@@ -34,9 +34,26 @@ type Object struct {
 
 type HttpSpec struct {
 	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
-	Request    HttpReq             `json:"req" yaml:"req"`
-	Response   HttpResp            `json:"resp" yaml:"resp"`
+	Request    MockHttpReq         `json:"req" yaml:"req"`
+	Response   MockHttpResp        `json:"resp" yaml:"resp"`
 	Objects    []Object            `json:"objects" yaml:"objects"`
 	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
 	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
+	Created    int64               `json:"created" yaml:"created,omitempty"`
+}
+
+type MockHttpReq struct {
+	Method     Method            `json:"method" yaml:"method"`
+	ProtoMajor int               `json:"proto_major" yaml:"proto_major"` // e.g. 1
+	ProtoMinor int               `json:"proto_minor" yaml:"proto_minor"` // e.g. 0
+	URL        string            `json:"url" yaml:"url"`
+	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
+	Header     map[string]string `json:"header" yaml:"header"`
+	Body       string            `json:"body" yaml:"body"`
+}
+
+type MockHttpResp struct {
+	StatusCode int               `json:"status_code" yaml:"status_code"` // e.g. 200
+	Header     map[string]string `json:"header" yaml:"header"`
+	Body       string            `json:"body" yaml:"body"`
 }

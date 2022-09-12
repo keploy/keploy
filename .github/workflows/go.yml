@@ -35,6 +35,7 @@ jobs:
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: false
+          ENABLE_TEST_EXPORT: false
 
       - name: Test-withDeDupEnabled
         run: |
@@ -43,6 +44,7 @@ jobs:
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: true
+          ENABLE_TEST_EXPORT: false
 
 
 #       - uses: codecov/codecov-action@v2

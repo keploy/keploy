@@ -2,8 +2,6 @@ module go.keploy.io/server
 
 go 1.17
 
-// replace github.com/keploy/go-sdk => ../go-sdk
-
 require (
 	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
 	github.com/go-chi/chi v1.5.4
@@ -12,7 +10,6 @@ require (
 	github.com/go-test/deep v1.0.8
 	github.com/google/uuid v1.3.0
 	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/keploy/go-sdk v0.5.3
 	github.com/vektah/gqlparser/v2 v2.2.0 // v should b4 less or equal 2.2.0
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.22.0
@@ -22,15 +19,16 @@ require (
 require github.com/k0kubun/pp/v3 v3.1.0
 
 require (
+	github.com/golang/protobuf v1.5.2 // indirect
+	github.com/mattn/go-colorable v0.1.12 // indirect
+	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/tidwall/gjson v1.14.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 )
 
 require (
-	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/mattn/go-colorable v0.1.12 // indirect
-	github.com/mattn/go-isatty v0.0.14 // indirect
+	github.com/keploy/go-sdk v0.5.3
 	github.com/soheilhy/cmux v0.1.5
 	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c

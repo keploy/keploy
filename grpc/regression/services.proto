@@ -21,6 +21,9 @@ message TestCaseReq {
   HttpReq HttpReq = 4;
   HttpResp HttpResp = 5;
   repeated Dependency Dependency = 6;
+  string TestCasePath = 7;
+  string MockPath = 8;
+  repeated Mock Mocks = 9;
 }
 
 
@@ -29,6 +32,8 @@ message TestReq {
   string AppID = 2;
   string RunID = 3;
   HttpResp Resp = 4;
+  string TestCasePath = 5;
+  string MockPath = 6;
 }
 
 message TestCase {
@@ -96,9 +101,12 @@ message getTCSRequest{
   string app = 1;
   string  offset = 2;
   string limit = 3;
+  string TestCasePath = 4;
+  string MockPath = 5;
 }
 message getTCSResponse{
   repeated TestCase tcs = 1;
+  bool eof = 2;
 }
 message postTCResponse{
   map<string, string> tcsId = 1;
@@ -134,6 +142,7 @@ message Mock {
     HttpResp Res = 4;
     repeated string Mocks = 5;
     map<string, StrArr> Assertions = 6;
+    int64 Created = 7;
   }
   SpecSchema Spec = 4;
 }
