@@ -9,6 +9,8 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/go-chi/render"
 	"github.com/google/uuid"
+	"github.com/k0kubun/pp/v3"
+
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/pkg/models"
 	regression2 "go.keploy.io/server/pkg/service/regression"
@@ -58,7 +60,10 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
+
 	}
+	pp.Printf("\nTEST SUMMARY......\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", regression2.Total, regression2.Successed, regression2.Failed)
+
 	render.Status(r, http.StatusOK)
 
 }

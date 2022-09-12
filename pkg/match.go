@@ -33,6 +33,22 @@ func convertJson(s string, log *zap.Logger) (interface{}, error) {
 
 }
 
+//JsonBody return the expected and actual body in JSON
+func JsonBody(exp, act string, noise []string, log *zap.Logger) (interface{}, interface{}) {
+
+	noiseMap := convertToMap(noise)
+	expected, _ := convertJson(exp, log)
+
+	actual, _ := convertJson(act, log)
+	tmp := mapClone(noiseMap)
+	expected = removeNoisy(expected, tmp)
+
+	tmp = mapClone(noiseMap)
+	actual = removeNoisy(actual, tmp)
+	return expected, actual
+
+}
+
 func Match(exp, act string, noise []string, log *zap.Logger) (bool, error) {
 
 	noiseMap := convertToMap(noise)

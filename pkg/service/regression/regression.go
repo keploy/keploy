@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
+	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -187,16 +188,11 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 	return ids, nil
 }
 
-// func PrettyPrint(data interface{}) {
-// 	var p []byte
-// 	//    var err := error
-// 	p, err := json.MarshalIndent(data, "", "\t")
-// 	if err != nil {
-// 		fmt.Println(err)
-// 		return
-// 	}
-// 	fmt.Printf("%s \n", p)
-// }
+var (
+	Total     int
+	Successed int
+	Failed    int
+)
 
 func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp) (bool, *run.Result, *models.TestCase, error) {
 
@@ -273,10 +269,9 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 	}
 
 	if !pass {
+		Total++
+		Failed++
 		var logs = ""
-		//pp.Printf("Testrun failed with test id: %s\n", tc.ID)
-		//pp.Printf("Expected Response: %+v", tc.HttpResp)
-		//pp.Printf("Actual Response: %+v\n", resp)
 
 		logs = logs + pp.Sprintf("Testrun failed with test id: %s\n"+
 			"Test Result:\n"+
@@ -321,12 +316,28 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 		if !res.BodyResult.Normal {
 
-			logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", res.BodyResult.Expected, res.BodyResult.Actual)
+			expected, actual := pkg.JsonBody(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+			//pp.Printf("Expected: %s\n Actual: %s\n", expected, actual)
+
+			patch, _ := jsondiff.Compare(expected, actual)
+			//diff := difference(actual, expected)
+			//logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", expected, actual)
+
+			for _, op := range patch {
+
+				logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", op.OldValue, op.Value)
+			}
 
 		}
-
 		logs += "--------------------------------------------------------------------\n\n"
 		pp.Printf(logs)
+	} else {
+		var log2 = ""
+		Total++
+		Successed++
+		log2 += pp.Sprintf("Test passed with test run id: %s\n", tc.ID)
+		pp.Printf(log2)
+
 	}
 	return pass, res, &tc, nil
 }
