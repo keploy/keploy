@@ -482,7 +482,6 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 		if !res.BodyResult.Normal {
 
 			expected, actual := pkg.JsonBody(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
-			//pp.Printf("Expected: %s\n Actual: %s\n", expected, actual)
 
 			patch, _ := jsondiff.Compare(expected, actual)
 			//diff := difference(actual, expected)
