@@ -205,19 +205,19 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		}
 		tc[0].Spec.Encode(&models.HttpSpec{
 			// Metadata: , TODO: What should be here
-			Request: models.HttpReq{
+			Request: models.MockHttpReq{
 				Method:     models.Method(data.HttpReq.Method),
 				ProtoMajor: int(data.HttpReq.ProtoMajor),
 				ProtoMinor: int(data.HttpReq.ProtoMinor),
 				URL:        data.HttpReq.URL,
 				URLParams:  data.HttpReq.URLParams,
 				Body:       data.HttpReq.Body,
-				Header:     data.HttpReq.Header,
+				Header:     mock.ToMockHeader(data.HttpReq.Header),
 			},
-			Response: models.HttpResp{
+			Response: models.MockHttpResp{
 				StatusCode: int(data.HttpResp.StatusCode),
 				Body:       data.HttpResp.Body,
-				Header:     data.HttpResp.Header,
+				Header:     mock.ToMockHeader(data.HttpResp.Header),
 			},
 			Objects: []models.Object{{
 				Type: "error",

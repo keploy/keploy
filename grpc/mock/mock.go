@@ -3,6 +3,8 @@ package mock
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
+	"strings"
 
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
@@ -20,17 +22,17 @@ func Encode(doc *proto.Mock, log *zap.Logger) models.Mock {
 	case string(models.HTTP_EXPORT):
 		spec := models.HttpSpec{
 			Metadata: doc.Spec.Metadata,
-			Request: models.HttpReq{
+			Request: models.MockHttpReq{
 				Method:     models.Method(doc.Spec.Req.Method),
 				ProtoMajor: int(doc.Spec.Req.ProtoMajor),
 				ProtoMinor: int(doc.Spec.Req.ProtoMinor),
 				URL:        doc.Spec.Req.URL,
-				Header:     utils.GetHttpHeader(doc.Spec.Req.Header),
+				Header:     ToMockHeader(utils.GetHttpHeader(doc.Spec.Req.Header)),
 				Body:       doc.Spec.Req.Body,
 			},
-			Response: models.HttpResp{
+			Response: models.MockHttpResp{
 				StatusCode: int(doc.Spec.Res.StatusCode),
-				Header:     utils.GetHttpHeader(doc.Spec.Res.Header),
+				Header:     ToMockHeader(utils.GetHttpHeader(doc.Spec.Res.Header)),
 				Body:       doc.Spec.Res.Body,
 			},
 			Objects: []models.Object{{
@@ -108,7 +110,7 @@ func Decode(doc []models.Mock, log *zap.Logger) []*proto.Mock {
 					ProtoMajor: int64(spec.Request.ProtoMajor),
 					ProtoMinor: int64(spec.Request.ProtoMinor),
 					URL:        spec.Request.URL,
-					Header:     utils.GetProtoMap(spec.Request.Header),
+					Header:     utils.GetProtoMap(ToHttpHeader(spec.Request.Header)),
 					Body:       spec.Request.Body,
 				},
 				Objects: []*proto.Mock_Object{{
@@ -117,7 +119,7 @@ func Decode(doc []models.Mock, log *zap.Logger) []*proto.Mock {
 				}},
 				Res: &proto.HttpResp{
 					StatusCode: int64(spec.Response.StatusCode),
-					Header:     utils.GetProtoMap(spec.Response.Header),
+					Header:     utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
 					Body:       spec.Response.Body,
 				},
 				Mocks:      spec.Mocks,
@@ -140,4 +142,20 @@ func Decode(doc []models.Mock, log *zap.Logger) []*proto.Mock {
 		res = append(res, mock)
 	}
 	return res
+}
+
+func ToHttpHeader(mockHeader map[string]string) http.Header {
+	header := http.Header{}
+	for i, j := range mockHeader {
+		header[i] = strings.Split(j, ",")
+	}
+	return header
+}
+
+func ToMockHeader(httpHeader http.Header) map[string]string {
+	header := map[string]string{}
+	for i, j := range httpHeader {
+		header[i] = strings.Join(j, ", ")
+	}
+	return header
 }
