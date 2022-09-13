@@ -31,12 +31,13 @@ import (
 
 func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool) *Regression {
 	return &Regression{
+		fileName:    sync.Map{},
 		tdb:         tdb,
 		tele:        adb,
 		log:         log,
 		rdb:         rdb,
 		mock:        mock.NewMockService(log),
-		TestExport:  TestExport,
+		testExport:  TestExport,
 		client:      client,
 		mu:          sync.Mutex{},
 		anchors:     map[string][]map[string][]string{},
@@ -47,11 +48,12 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, a
 }
 
 type Regression struct {
+	fileName   sync.Map
 	tdb        models.TestCaseDB
 	tele       telemetry.Service
 	rdb        run.DB
 	mock       mock.Service
-	TestExport bool
+	testExport bool
 	client     http.Client
 	log        *zap.Logger
 	mu         sync.Mutex
@@ -114,6 +116,9 @@ func sanitiseInput(s string) string {
 }
 
 func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
+	if r.testExport {
+		return models.TestCase{}, nil
+	}
 	tcs, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
 		sanitizedAppID := sanitiseInput(appID)
@@ -121,6 +126,40 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 		return models.TestCase{}, errors.New("internal failure")
 	}
 	return tcs, nil
+}
+
+func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath string) {
+	dir, err := os.OpenFile(testCasePath, os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		r.log.Debug("failed to open the dir containing testcases yaml files", zap.String("path", testCasePath), zap.Error(err))
+		return
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		r.log.Debug("failed to read the names of testcases yaml files from path directory", zap.String("path", testCasePath), zap.Error(err))
+		return
+	}
+	r.fileName.Store(runId, sync.Map{})
+	for _, j := range files {
+		if filepath.Ext(j.Name()) != ".yaml" {
+			continue
+		}
+
+		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
+		tcs, err := mock.ReadAll(r.log, testCasePath, name, false)
+		if err != nil {
+			r.log.Debug("failed to read the testcases from yaml file.", zap.String("path", testCasePath), zap.String("file", j.Name()), zap.Error(err))
+			return
+		}
+		if len(tcs) > 0 && tcs[0].Name != name {
+			if val, ok := r.fileName.Load(runId); ok {
+				fMap := val.(sync.Map)
+				fMap.Store(tcs[0].Name, name)
+				r.fileName.Store(runId, fMap)
+			}
+		}
+	}
 }
 
 func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
@@ -143,12 +182,13 @@ func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string)
 			continue
 		}
 
-		tcs, err := mock.ReadAll(r.log, testCasePath, strings.TrimSuffix(j.Name(), filepath.Ext(j.Name())), false)
+		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
+		tcs, err := mock.ReadAll(r.log, testCasePath, name, false)
 		if err != nil {
 			r.log.Error("failed to read the testcases from yaml file.", zap.String("path", testCasePath), zap.String("file", j.Name()), zap.Error(err))
 			return nil, err
 		}
-		tests, err := r.toTestCase(tcs, mockPath)
+		tests, err := r.toTestCase(tcs, name, mockPath)
 		if err != nil {
 			return nil, err
 		}
@@ -160,15 +200,19 @@ func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string)
 	return res, nil
 }
 
-func (r *Regression) toTestCase(tcs []models.Mock, mockPath string) ([]models.TestCase, error) {
+func (r *Regression) toTestCase(tcs []models.Mock, mockFile, mockPath string) ([]models.TestCase, error) {
 	res := []models.TestCase{}
 	for _, j := range tcs {
 		spec := models.HttpSpec{}
 		err := j.Spec.Decode(&spec)
 		if err != nil {
 			r.log.Error("failed to decode the yaml spec field of testcase.", zap.String("name", j.Name), zap.Error(err))
+			return res, err
 		}
-		mocks, err := mock.ReadAll(r.log, mockPath, j.Name, false)
+		mocks, err := mock.ReadAll(r.log, mockPath, mockFile, false)
+		if err != nil {
+			r.log.Debug("failed to read mocks from mockPath directory", zap.String("mockPath", mockPath), zap.String("name", j.Name), zap.Error(err))
+		}
 		noise, ok := spec.Assertions["noise"]
 		if !ok {
 			noise = []string{}
@@ -183,6 +227,10 @@ func (r *Regression) toTestCase(tcs []models.Mock, mockPath string) ([]models.Te
 		})
 	}
 	return res, nil
+}
+
+func (r *Regression) StopTestRun(ctx context.Context, runId string) {
+	r.fileName.Delete(runId)
 }
 
 func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
@@ -321,12 +369,12 @@ func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePa
 	return []string{test[0].Name}, nil
 }
 
-func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp, testCasePath, mockPath string) (bool, *run.Result, *models.TestCase, error) {
+func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp, testCasePath, mockPath string) (bool, *run.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
 		err error
 	)
-	switch r.TestExport {
+	switch r.testExport {
 	case false:
 		tc, err = r.tdb.Get(ctx, cid, id)
 		if err != nil {
@@ -334,19 +382,26 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 			return false, nil, nil, err
 		}
 	case true:
+		if val, ok := r.fileName.Load(runId); ok {
+			fMap := val.(sync.Map)
+			if nameStr, ok := fMap.Load(id); ok {
+				id = nameStr.(string)
+			}
+		}
 		tests, err := mock.ReadAll(r.log, testCasePath, id, false)
 		if err != nil {
 			r.log.Error("failed to get testcase from yaml", zap.String("id", id), zap.String("path", testCasePath), zap.Error(err))
 			return false, nil, nil, err
 		}
-		tcs, err := r.toTestCase(tests, mockPath)
+		tcs, err := r.toTestCase(tests, id, mockPath)
 		if err != nil {
 			r.log.Error("failed to decode into models.TestCase from yaml", zap.String("id", id), zap.String("path", testCasePath), zap.Error(err))
 			return false, nil, nil, err
 		}
-		if len(tcs) == 1 {
-			tc = tcs[0]
+		if len(tcs) != 1 {
+			return false, nil, nil, errors.New("failed to get testcase from yaml")
 		}
+		tc = tcs[0]
 	}
 	bodyType := run.BodyTypePlain
 	if json.Valid([]byte(resp.Body)) {
@@ -418,7 +473,7 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
-	ok, res, tc, err := r.test(ctx, cid, id, app, resp, testCasePath, mockPath)
+	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp, testCasePath, mockPath)
 	if tc != nil {
 		t = &run.Test{
 			ID:         uuid.New().String(),
@@ -534,7 +589,7 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 
 func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path string) error {
 
-	if r.TestExport {
+	if r.testExport {
 		return r.deNoiseYaml(ctx, id, path, body, h)
 	}
 	tc, err := r.tdb.Get(ctx, cid, id)

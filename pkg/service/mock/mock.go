@@ -116,29 +116,6 @@ func ReadAll(log *zap.Logger, path, name string, libMode bool) ([]models.Mock, e
 }
 
 func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
-
-	// file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
-	// if err != nil {
-	// 	m.log.Error("failed to open the yaml file", zap.Any("error", err))
-	// 	return nil, err
-	// }
-	// defer file.Close()
-	// decoder := yaml.NewDecoder(file)
-	// arr := []models.Mock{}
-	// for {
-	// 	var node models.Mock
-	// 	err := decoder.Decode(&node)
-	// 	if errors.Is(err, io.EOF) {
-	// 		break
-	// 	}
-	// 	if err != nil {
-	// 		m.log.Error("failed to decode the yaml file documents into mock", zap.Any("error", err))
-	// 		return nil, err
-	// 	}
-	// 	if node.Name == name {
-	// 		arr = append(arr, node)
-	// 	}
-	// }
 	arr, err := ReadAll(m.log, path, name, true)
 	if err != nil {
 		return nil, err

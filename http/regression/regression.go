@@ -19,7 +19,7 @@ import (
 )
 
 func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, testExport bool) {
-	s := &regression{logger: logger, svc: svc, run: run, TestExport: testExport}
+	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport}
 
 	r.Route("/regression", func(r chi.Router) {
 		r.Route("/testcase", func(r chi.Router) {
@@ -37,7 +37,7 @@ func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Serv
 }
 
 type regression struct {
-	TestExport bool
+	testExport bool
 	logger     *zap.Logger
 	svc        regression2.Service
 	run        run.Service
@@ -53,6 +53,7 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 
+	rg.svc.StopTestRun(r.Context(), id)
 	err := rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Updated: now,
@@ -68,6 +69,7 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 
 func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	t := r.URL.Query().Get("total")
+	testCasePath := r.URL.Query().Get("testCasePath")
 	total, err := strconv.Atoi(t)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -82,7 +84,7 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 
 	// user := "default"
-
+	rg.svc.StartTestRun(r.Context(), id, testCasePath)
 	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Created: now,
@@ -156,7 +158,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	switch rg.TestExport {
+	switch rg.testExport {
 	case false:
 		tcs, err = rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
 		if err != nil {
@@ -187,7 +189,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Unix()
-	if rg.TestExport {
+	if rg.testExport {
 		var (
 			id = uuid.New().String()
 			tc = []models.Mock{{

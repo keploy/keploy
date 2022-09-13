@@ -28,7 +28,7 @@ import (
 
 type Server struct {
 	logger     *zap.Logger
-	TestExport bool
+	testExport bool
 	svc        regression2.Service
 	run        run.Service
 	mock       mock.Service
@@ -39,7 +39,7 @@ func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Se
 
 	// create an instance for grpc server
 	srv := grpc.NewServer()
-	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, TestExport: testExport})
+	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
@@ -89,6 +89,7 @@ func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.E
 		stat = run.TestRunStatusPassed
 	}
 	now := time.Now().Unix()
+	srv.svc.StopTestRun(ctx, id)
 	err := srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Updated: now,
@@ -112,6 +113,7 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	}
 	id := uuid.New().String()
 	now := time.Now().Unix()
+	srv.svc.StartTestRun(ctx, id, request.TestCasePath)
 	err = srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Created: now,
@@ -229,7 +231,7 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		}
 	}
 
-	switch srv.TestExport {
+	switch srv.testExport {
 	case false:
 		tcs, err = srv.svc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit)
 		if err != nil {
@@ -262,7 +264,7 @@ func GetHttpHeader(m map[string]*proto.StrArr) map[string][]string {
 }
 
 func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*proto.PostTCResponse, error) {
-	if srv.TestExport {
+	if srv.testExport {
 		var (
 			id = uuid.New().String()
 			tc = []models.Mock{{
