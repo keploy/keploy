@@ -53,7 +53,9 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 
-	rg.svc.StopTestRun(r.Context(), id)
+	if rg.testExport {
+		rg.svc.StopTestRun(r.Context(), id)
+	}
 	err := rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Updated: now,
@@ -70,6 +72,7 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	t := r.URL.Query().Get("total")
 	testCasePath := r.URL.Query().Get("testCasePath")
+	mockPath := r.URL.Query().Get("mockPath")
 	total, err := strconv.Atoi(t)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -84,7 +87,9 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 
 	// user := "default"
-	rg.svc.StartTestRun(r.Context(), id, testCasePath)
+	if rg.testExport {
+		rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
+	}
 	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Created: now,
@@ -200,7 +205,11 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 			mocks = []string{}
 		)
 		for i, j := range data.Mocks {
-			tc = append(tc, mock.Encode(j, rg.logger))
+			doc, err := mock.Encode(j)
+			if err != nil {
+				rg.logger.Error(err.Error())
+			}
+			tc = append(tc, doc)
 			m := id + "-" + strconv.Itoa(i)
 			tc[len(tc)-1].Name = m
 			mocks = append(mocks, m)

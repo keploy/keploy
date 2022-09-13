@@ -14,7 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.keploy.io/server/graph"
-	mock2 "go.keploy.io/server/grpc/mock"
+	grpcMock "go.keploy.io/server/grpc/mock"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
@@ -63,7 +63,11 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
 	// writes to yaml file
-	err := srv.mock.Put(ctx, request.Path, mock2.Encode(request.Mock, srv.logger), request.Mock.Spec.Metadata)
+	doc, err := grpcMock.Encode(request.Mock)
+	if err != nil {
+		srv.logger.Error(err.Error())
+	}
+	err = srv.mock.Put(ctx, request.Path, doc, request.Mock.Spec.Metadata)
 	if err != nil {
 		return &proto.PutMockResp{}, err
 	}
@@ -76,10 +80,15 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 	if err != nil {
 		return &proto.GetMockResp{}, err
 	}
-	resp := &proto.GetMockResp{
-		Mocks: mock2.Decode(mocks, srv.logger),
+	res, err := grpcMock.Decode(mocks)
+	if err != nil {
+		srv.logger.Error(err.Error())
+		return &proto.GetMockResp{}, err
 	}
-	return resp, nil
+	response := &proto.GetMockResp{
+		Mocks: res,
+	}
+	return response, nil
 }
 
 func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.EndResponse, error) {
@@ -89,7 +98,9 @@ func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.E
 		stat = run.TestRunStatusPassed
 	}
 	now := time.Now().Unix()
-	srv.svc.StopTestRun(ctx, id)
+	if srv.testExport {
+		srv.svc.StopTestRun(ctx, id)
+	}
 	err := srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Updated: now,
@@ -113,7 +124,9 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	}
 	id := uuid.New().String()
 	now := time.Now().Unix()
-	srv.svc.StartTestRun(ctx, id, request.TestCasePath)
+	if srv.testExport {
+		srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath)
+	}
 	err = srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Created: now,
@@ -275,7 +288,11 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			mocks = []string{}
 		)
 		for i, j := range request.Mocks {
-			tc = append(tc, mock2.Encode(j, srv.logger))
+			doc, err := grpcMock.Encode(j)
+			if err != nil {
+				srv.logger.Error(err.Error())
+			}
+			tc = append(tc, doc)
 			m := id + "-" + strconv.Itoa(i)
 			tc[len(tc)-1].Name = m
 			mocks = append(mocks, m)
@@ -297,7 +314,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 				Body:       request.HttpResp.Body,
 				Header:     utils.GetHttpHeader(request.HttpResp.Header),
 			},
-			Objects: mock2.ToModelObjects([]*proto.Mock_Object{{ // TODO: remove this. after making range check in go-sdk http interceptor logic check cause there 0th index is picked up directly. ELse it will panic
+			Objects: grpcMock.ToModelObjects([]*proto.Mock_Object{{ // TODO: remove this. after making range check in go-sdk http interceptor logic check cause there 0th index is picked up directly. ELse it will panic
 				Type: "error",
 				Data: []byte{},
 			}}),

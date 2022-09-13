@@ -80,7 +80,7 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 		Upsert: &upsert,
 	}
 	filter := bson.M{"_id": t.ID}
-	update := bson.D{{"$set", t}}
+	update := bson.D{{Key: "$set", Value: t}}
 
 	_, err := r.test.UpdateOne(ctx, filter, update, opt)
 	if err != nil {
@@ -156,7 +156,7 @@ func (r *RunDB) Upsert(ctx context.Context, testRun run.TestRun) error {
 		Upsert: &upsert,
 	}
 	filter := bson.M{"_id": testRun.ID}
-	update := bson.D{{"$set", testRun}}
+	update := bson.D{{Key: "$set", Value: testRun}}
 
 	_, err := r.c.UpdateOne(ctx, filter, update, opt)
 	if err != nil {
@@ -170,11 +170,11 @@ func (r *RunDB) Increment(ctx context.Context, success, failure bool, id string)
 
 	update := bson.M{}
 	if success {
-		update["$inc"] = bson.D{{"success", 1}}
+		update["$inc"] = bson.D{{Key: "success", Value: 1}}
 	}
 
 	if failure {
-		update["$inc"] = bson.D{{"failure", 1}}
+		update["$inc"] = bson.D{{Key: "failure", Value: 1}}
 	}
 
 	_, err := r.c.UpdateOne(ctx, bson.M{

@@ -15,7 +15,7 @@ type FetchResponse struct {
 	Status       int               `json:"status" bson:"status,omitempty"`
 	Headers      map[string]string `json:"headers" bson:"headers,omitempty"`
 	Body         interface{}       `json:"body" bson:"body,omitempty"`
-	ResponseType string            `json:"response_type" bson;"response_type"`
+	ResponseType string            `json:"response_type" bson:"response_type"`
 }
 
 type BrowserMockDB interface {
