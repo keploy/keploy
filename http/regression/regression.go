@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi"
@@ -87,7 +88,7 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 
 	// user := "default"
-	if rg.testExport {
+	if rg.testExport && !strings.HasPrefix(testCasePath, "/etc/passwd") && !strings.HasPrefix(mockPath, "/etc/passwd") && !strings.Contains(testCasePath, "../") && !strings.Contains(mockPath, "../") {
 		rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
 	}
 	err = rg.run.Put(r.Context(), run.TestRun{
@@ -171,14 +172,17 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case true:
-		tcs, err = rg.svc.ReadTCS(r.Context(), testCasePath, mockPath)
-		if err != nil {
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
+		if !strings.HasPrefix(testCasePath, "/etc/passwd") && !strings.HasPrefix(mockPath, "/etc/passwd") && !strings.Contains(testCasePath, "../") && !strings.Contains(mockPath, "../") {
+			tcs, err = rg.svc.ReadTCS(r.Context(), testCasePath, mockPath)
+			if err != nil {
+				render.Render(w, r, ErrInvalidRequest(err))
+				return
+			}
 		}
 		eof = true
 	}
 	render.Status(r, http.StatusOK)
+	// In test-export, eof is true to stop the infinite for loop in sdk
 	w.Header().Set("EOF", fmt.Sprintf("%v", eof))
 	render.JSON(w, r, tcs)
 
@@ -216,19 +220,19 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		}
 		tc[0].Spec.Encode(&models.HttpSpec{
 			// Metadata: , TODO: What should be here
-			Request: models.HttpReq{
+			Request: models.MockHttpReq{
 				Method:     models.Method(data.HttpReq.Method),
 				ProtoMajor: int(data.HttpReq.ProtoMajor),
 				ProtoMinor: int(data.HttpReq.ProtoMinor),
 				URL:        data.HttpReq.URL,
 				URLParams:  data.HttpReq.URLParams,
 				Body:       data.HttpReq.Body,
-				Header:     data.HttpReq.Header,
+				Header:     mock.ToMockHeader(data.HttpReq.Header),
 			},
-			Response: models.HttpResp{
+			Response: models.MockHttpResp{
 				StatusCode: int(data.HttpResp.StatusCode),
 				Body:       data.HttpResp.Body,
-				Header:     data.HttpResp.Header,
+				Header:     mock.ToMockHeader(data.HttpResp.Header),
 			},
 			Objects: []models.Object{{
 				Type: "error",

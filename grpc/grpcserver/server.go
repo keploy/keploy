@@ -300,19 +300,19 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		tc[0].Spec.Encode(&models.HttpSpec{
 			// Metadata: , TODO: What should be here
 			Created: request.Captured,
-			Request: models.HttpReq{
+			Request: models.MockHttpReq{
 				Method:     models.Method(request.HttpReq.Method),
 				ProtoMajor: int(request.HttpReq.ProtoMajor),
 				ProtoMinor: int(request.HttpReq.ProtoMinor),
 				URL:        request.HttpReq.URL,
 				URLParams:  request.HttpReq.URLParams,
 				Body:       request.HttpReq.Body,
-				Header:     utils.GetHttpHeader(request.HttpReq.Header),
+				Header:     grpcMock.ToMockHeader(utils.GetHttpHeader(request.HttpReq.Header)),
 			},
-			Response: models.HttpResp{
+			Response: models.MockHttpResp{
 				StatusCode: int(request.HttpResp.StatusCode),
 				Body:       request.HttpResp.Body,
-				Header:     utils.GetHttpHeader(request.HttpResp.Header),
+				Header:     grpcMock.ToMockHeader(utils.GetHttpHeader(request.HttpResp.Header)),
 			},
 			Objects: grpcMock.ToModelObjects([]*proto.Mock_Object{{ // TODO: remove this. after making range check in go-sdk http interceptor logic check cause there 0th index is picked up directly. ELse it will panic
 				Type: "error",

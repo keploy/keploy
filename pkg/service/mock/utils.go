@@ -72,9 +72,21 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			return res, err
 		}
 		res = append(res, models.TestCase{
-			ID:       j.Name,
-			HttpReq:  spec.Request,
-			HttpResp: spec.Response,
+			ID: j.Name,
+			HttpReq: models.HttpReq{
+				Method:     spec.Request.Method,
+				ProtoMajor: spec.Request.ProtoMajor,
+				ProtoMinor: spec.Request.ProtoMinor,
+				URL:        spec.Request.URL,
+				Header:     grpcMock.ToHttpHeader(spec.Request.Header),
+				Body:       spec.Request.Body,
+				URLParams:  spec.Request.URLParams,
+			},
+			HttpResp: models.HttpResp{
+				StatusCode: spec.Response.StatusCode,
+				Header:     grpcMock.ToHttpHeader(spec.Response.Header),
+				Body:       spec.Response.Body,
+			},
 			Noise:    noise,
 			Mocks:    doc,
 			Captured: spec.Created,
