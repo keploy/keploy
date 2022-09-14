@@ -41,7 +41,7 @@ jobs:
       - name: Test
         run: |
           go test -coverpkg=./... -coverprofile=coverage2.tmp.txt -covermode=atomic ./...
-          cat coverage2.tmp.txt | grep -v "mode: set" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage2.txt
+          cat coverage2.tmp.txt | grep -v "mode: atomic" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage2.txt
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: false
@@ -50,7 +50,7 @@ jobs:
       - name: Test-withDeDupEnabled
         run: |
           go test -coverpkg=./... -coverprofile=coverage3.tmp.txt -covermode=atomic ./...
-          cat coverage3.tmp.txt | grep -v "mode: set" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage3.txt
+          cat coverage3.tmp.txt | grep -v "mode: atomic" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage3.txt
           cat coverage3.txt coverage2.txt coverage1.txt > coverage.txt
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
