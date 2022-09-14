@@ -36,6 +36,7 @@ jobs:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: false
           ENABLE_TEST_EXPORT: true
+          KEPLOY_APP_NAME: Keploy-Test-App-2
         
       - name: Test
         run: |

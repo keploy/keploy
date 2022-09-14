@@ -48,6 +48,7 @@ type config struct {
 	EnableTelemetry  bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
+	KeployApp        string `envconfig:"KEPLOY_APP_NAME" default:"Keploy-Test-App"`
 }
 
 func Server() *chi.Mux {
@@ -106,7 +107,7 @@ func Server() *chi.Mux {
 
 	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
-			Name: "Keploy-Test-App",
+			Name: conf.KeployApp,
 			Port: port,
 			Filter: keploy.Filter{
 				UrlRegex: "^/api",
