@@ -1,6 +1,10 @@
 package models
 
-import "gopkg.in/yaml.v3"
+import (
+	"context"
+
+	"gopkg.in/yaml.v3"
+)
 
 type Kind string
 
@@ -56,4 +60,11 @@ type MockHttpResp struct {
 	StatusCode int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header     map[string]string `json:"header" yaml:"header"`
 	Body       string            `json:"body" yaml:"body"`
+}
+
+type MockStore interface {
+	ReadAll(ctx context.Context, testCasePath, mockPath string) ([]TestCase, error)
+	Read(path, name string, libMode bool) ([]Mock, error)
+	Write(ctx context.Context, path string, doc Mock) error
+	WriteAll(ctx context.Context, path, fileName string, docs []Mock) error
 }

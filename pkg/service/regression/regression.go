@@ -21,19 +21,19 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/service/mock"
 	"go.keploy.io/server/pkg/service/run"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool, store models.MockStore) *Regression {
 	return &Regression{
 		yamlTcs:     sync.Map{},
 		tdb:         tdb,
 		tele:        adb,
 		log:         log,
 		rdb:         rdb,
+		store:       store,
 		testExport:  TestExport,
 		client:      client,
 		mu:          sync.Mutex{},
@@ -49,6 +49,7 @@ type Regression struct {
 	tdb        models.TestCaseDB
 	tele       telemetry.Service
 	rdb        run.DB
+	store      models.MockStore
 	testExport bool
 	client     http.Client
 	log        *zap.Logger
@@ -120,7 +121,7 @@ func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mock
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return
 	}
-	tcs, err := mock.ReadAll(ctx, testCasePath, mockPath)
+	tcs, err := r.store.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
 		r.log.Error(err.Error())
 		return
@@ -137,7 +138,7 @@ func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string)
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
-	res, err := mock.ReadAll(ctx, testCasePath, mockPath)
+	res, err := r.store.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
 		r.log.Error(err.Error())
 	}
@@ -225,13 +226,13 @@ func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePa
 	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
-	err := mock.Write(ctx, testCasePath, test[0])
+	err := r.store.Write(ctx, testCasePath, test[0])
 	if err != nil {
 		r.log.Error(err.Error())
 	}
 
 	if len(test) > 1 {
-		err = mock.WriteAll(ctx, mockPath, test[0].Name, test[1:])
+		err = r.store.WriteAll(ctx, mockPath, test[0].Name, test[1:])
 		if err != nil {
 			r.log.Error(err.Error())
 		}
@@ -391,7 +392,7 @@ func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 }
 
 func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h http.Header) error {
-	tcs, err := mock.Read(path, id, false)
+	tcs, err := r.store.Read(path, id, false)
 	if err != nil {
 		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
 		return err

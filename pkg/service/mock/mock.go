@@ -11,14 +11,16 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewMockService(log *zap.Logger) *Mock {
+func NewMockService(store models.MockStore, log *zap.Logger) *Mock {
 	return &Mock{
-		log: log,
+		log:   log,
+		store: store,
 	}
 }
 
 type Mock struct {
-	log *zap.Logger
+	log   *zap.Logger
+	store models.MockStore
 }
 
 func (m *Mock) FileExists(ctx context.Context, path string) bool {
@@ -35,7 +37,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 		doc.Name = uuid.New().String()
 		isGenerated = true
 	}
-	err := Write(ctx, path, doc)
+	err := m.store.Write(ctx, path, doc)
 	if err != nil {
 		m.log.Error(err.Error())
 	}
@@ -78,7 +80,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 }
 
 func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
-	arr, err := Read(path, name, true)
+	arr, err := m.store.Read(path, name, true)
 	if err != nil {
 		m.log.Error("failed to read then yaml file", zap.Any("error", err))
 		return nil, err
