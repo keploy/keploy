@@ -11,14 +11,18 @@ import (
 	"strings"
 
 	grpcMock "go.keploy.io/server/grpc/mock"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"gopkg.in/yaml.v3"
 )
 
 func ReadAll(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
+	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
+		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
+	}
 	dir, err := os.OpenFile(testCasePath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open the directory containing testcases yaml files. path: %s  error: %s", testCasePath, err.Error())
+		return nil, fmt.Errorf("failed to open the directory containing testcases yaml files. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
 	}
 
 	var (
@@ -26,7 +30,7 @@ func ReadAll(ctx context.Context, testCasePath, mockPath string) ([]models.TestC
 	)
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return res, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", testCasePath, err.Error())
+		return res, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
 	}
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" {
@@ -57,7 +61,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		spec := models.HttpSpec{}
 		err := j.Spec.Decode(&spec)
 		if err != nil {
-			return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", fileName, err.Error())
+			return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
 		}
 		mocks, err := Read(mockPath, fileName, false)
 		// if err != nil {
@@ -96,6 +100,9 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 }
 
 func Read(path, name string, libMode bool) ([]models.Mock, error) {
+	if !pkg.IsValidPath(path) {
+		return nil, fmt.Errorf("file path should be absolute. got path: %s", pkg.SanitiseInput(path))
+	}
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
@@ -120,6 +127,9 @@ func Read(path, name string, libMode bool) ([]models.Mock, error) {
 }
 
 func CreateMockFile(path string, fileName string) (bool, error) {
+	if !pkg.IsValidPath(path) {
+		return false, fmt.Errorf("file path should be absolute. got path: %s", pkg.SanitiseInput(path))
+	}
 	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
 		err := os.MkdirAll(filepath.Join(path), os.ModePerm)
 		if err != nil {

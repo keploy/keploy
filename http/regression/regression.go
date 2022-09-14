@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi"
@@ -88,9 +87,7 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 
 	// user := "default"
-	if rg.testExport && !strings.HasPrefix(testCasePath, "/etc/passwd") && !strings.HasPrefix(mockPath, "/etc/passwd") && !strings.Contains(testCasePath, "../") && !strings.Contains(mockPath, "../") {
-		rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
-	}
+	rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
 	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Created: now,
@@ -172,12 +169,10 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case true:
-		if !strings.HasPrefix(testCasePath, "/etc/passwd") && !strings.HasPrefix(mockPath, "/etc/passwd") && !strings.Contains(testCasePath, "../") && !strings.Contains(mockPath, "../") {
-			tcs, err = rg.svc.ReadTCS(r.Context(), testCasePath, mockPath)
-			if err != nil {
-				render.Render(w, r, ErrInvalidRequest(err))
-				return
-			}
+		tcs, err = rg.svc.ReadTCS(r.Context(), testCasePath, mockPath)
+		if err != nil {
+			render.Render(w, r, ErrInvalidRequest(err))
+			return
 		}
 		eof = true
 	}

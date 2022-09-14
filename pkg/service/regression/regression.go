@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,21 +103,13 @@ func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) 
 	return apps, err
 }
 
-// sanitiseInput sanitises user input strings before logging them for safety, removing newlines
-// and escaping HTML tags. This is to prevent log injection, including forgery of log records.
-// Reference: https://www.owasp.org/index.php/Log_Injection
-func sanitiseInput(s string) string {
-	re := regexp.MustCompile(`(\n|\n\r|\r\n|\r)`)
-	return html.EscapeString(string(re.ReplaceAll([]byte(s), []byte(""))))
-}
-
 func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
 	if r.testExport {
 		return models.TestCase{}, nil
 	}
 	tcs, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
-		sanitizedAppID := sanitiseInput(appID)
+		sanitizedAppID := pkg.SanitiseInput(appID)
 		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
 		return models.TestCase{}, errors.New("internal failure")
 	}
@@ -127,6 +117,9 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 }
 
 func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath string) {
+	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
+		return
+	}
 	tcs, err := mock.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
 		r.log.Error(err.Error())
@@ -141,6 +134,9 @@ func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mock
 }
 
 func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
+	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
+		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
+	}
 	res, err := mock.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
 		r.log.Error(err.Error())
@@ -164,7 +160,7 @@ func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int,
 	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
 
 	if err != nil {
-		sanitizedAppID := sanitiseInput(appID)
+		sanitizedAppID := pkg.SanitiseInput(appID)
 		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
 		return nil, errors.New("internal failure")
 	}
@@ -226,8 +222,8 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 }
 
 func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
-	if testCasePath == "" {
-		return nil, errors.New("path directory not found. Please provide a path")
+	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
+		return nil, fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
 	err := mock.Write(ctx, testCasePath, test[0])
 	if err != nil {
@@ -262,12 +258,12 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 				tc = val.(models.TestCase)
 				tcsMap.Delete(id)
 			} else {
-				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", id)
+				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
 				r.log.Error(err.Error())
 				return false, nil, nil, err
 			}
 		} else {
-			err := fmt.Errorf("failed to load testcases coresponding to runId: %s", runId)
+			err := fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId))
 			r.log.Error(err.Error())
 			return false, nil, nil, err
 		}
