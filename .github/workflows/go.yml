@@ -66,7 +66,12 @@ jobs:
       - name: Send coverage
         env:
           COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: goveralls -coverprofile=coverage3.txt -service=github
+        run: |
+          goveralls -coverprofile=coverage3.txt -service=github
+          goveralls -coverprofile=coverage2.txt -service=github
+          goveralls -coverprofile=coverage1.txt -service=github
+
+
 
 #      - name: Install extra dependencies
 #        run: npm install -g @semantic-release/exec
