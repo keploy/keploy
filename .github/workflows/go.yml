@@ -28,7 +28,7 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-       - name: Test-Export
+      - name: Test-Export
         run: |
           go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
           cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
