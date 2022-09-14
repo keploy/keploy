@@ -48,7 +48,8 @@ jobs:
       - name: Test-withDeDupEnabled
         run: |
           go test -coverpkg=./... -coverprofile=coverage3.tmp.txt -covermode=atomic ./...
-          cat coverage1.tmp.txt coverage2.tmp.txt coverage3.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
+          cat coverage1.tmp.txt coverage2.tmp.txt coverage3.tmp.txt > coverage.txt
+          cat coverage.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage1.txt
         env:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: true
@@ -63,7 +64,7 @@ jobs:
       - name: Send coverage
         env:
           COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: goveralls -coverprofile=coverage.txt -service=github
+        run: goveralls -coverprofile=coverage1.txt -service=github
 
 #      - name: Install extra dependencies
 #        run: npm install -g @semantic-release/exec
