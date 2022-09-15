@@ -90,6 +90,17 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 	return nil
 }
 
+func (r *RunDB) GetTestRun(ctx context.Context, id string) (*run.TestRun, error) {
+	filter := bson.M{}
+	if id != "" {
+		filter["_id"] = id
+	}
+	testrun := &run.TestRun{}
+	cur := r.c.FindOne(ctx, filter)
+	err := cur.Decode(testrun)
+	return testrun, err
+}
+
 func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*run.TestRun, error) {
 
 	filter := bson.M{

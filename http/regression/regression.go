@@ -10,7 +10,6 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/go-chi/render"
 	"github.com/google/uuid"
-	"github.com/k0kubun/pp/v3"
 
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/grpc/mock"
@@ -65,7 +64,6 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 		return
 
 	}
-	pp.Printf("\nTEST SUMMARY......\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", regression2.Total, regression2.Successed, regression2.Failed)
 
 	render.Status(r, http.StatusOK)
 

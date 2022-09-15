@@ -335,12 +335,6 @@ func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePa
 	return []string{test[0].Name}, nil
 }
 
-var (
-	Total     int
-	Successed int
-	Failed    int
-)
-
 func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.HttpResp, testCasePath, mockPath string) (bool, *run.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
@@ -434,20 +428,21 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 		pass = false
 	}
-
 	if !pass {
-		Total++
-		Failed++
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
 
-		logs = logs + pp.Sprintf("Testrun failed with test id: %s\n"+
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
 			"Test Result:\n"+
+			"\tInput Http Request: %+v\n\n"+
 			"\tExpected Response: "+
 			"%+v\n\n"+"\tActual Response: "+
-			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpResp, resp)
+			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
 
 		if !res.StatusCode.Normal {
-			logs += pp.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
 
 		}
 		var (
@@ -465,18 +460,11 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 		}
 
 		if !unmatched {
-			logs += "\tExpected Headers: \n"
+			logs += "\t Response Headers: {\n"
 			for i, j := range expectedHeader {
-				logs += pp.Sprintf("\t\t%s: %s\n", i, j)
-
+				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
 			}
-
-			logs += "\tActual Headers: \n"
-
-			for i, j := range actualHeader {
-				logs += pp.Sprintf("\t\t%s: %s\n", i, j)
-			}
-
+			logs += "\t}\n"
 		}
 
 		if !res.BodyResult.Normal {
@@ -484,28 +472,26 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 			expected, actual := pkg.JsonBody(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 
 			patch, _ := jsondiff.Compare(expected, actual)
-			//diff := difference(actual, expected)
-			//logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", expected, actual)
-
+			logs += "\tResponse body: {\n"
 			for _, op := range patch {
-
-				logs += pp.Sprintf("\n\tExpected response body: %s"+"\n\tActual response body: %s\n\n", op.OldValue, op.Value)
+				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", op.Path.String(), op.OldValue, op.Value)
 			}
+			logs += "\t}\n"
 
 		}
 		logs += "--------------------------------------------------------------------\n\n"
-		pp.Printf(logs)
+		logger.Printf(logs)
 	} else {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
-		Total++
-		Successed++
-		log2 += pp.Sprintf("Test passed with test run id: %s\n", tc.ID)
-		pp.Printf(log2)
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		logger.Printf(log2)
 
 	}
 	return pass, res, &tc, nil
 }
-
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
