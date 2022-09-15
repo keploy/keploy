@@ -90,7 +90,7 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 	return nil
 }
 
-func (r *RunDB) GetTestRun(ctx context.Context, id string) (*run.TestRun, error) {
+func (r *RunDB) ReadOne(ctx context.Context, id string) (*run.TestRun, error) {
 	filter := bson.M{}
 	if id != "" {
 		filter["_id"] = id

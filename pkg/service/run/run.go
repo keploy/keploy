@@ -164,7 +164,7 @@ func (r *Run) Put(ctx context.Context, run TestRun) error {
 		pp.SetColorScheme(models.PassingColorScheme)
 		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
 	} else {
-		res, err := r.rdb.GetTestRun(ctx, run.ID)
+		res, err := r.rdb.ReadOne(ctx, run.ID)
 		if err == nil {
 			if run.Status == TestRunStatusFailed {
 				pp.SetColorScheme(models.FailingColorScheme)

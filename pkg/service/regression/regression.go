@@ -469,12 +469,16 @@ func (r *Regression) test(ctx context.Context, cid, id, app string, resp models.
 
 		if !res.BodyResult.Normal {
 
-			expected, actual := pkg.JsonBody(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+			expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 
 			patch, _ := jsondiff.Compare(expected, actual)
 			logs += "\tResponse body: {\n"
 			for _, op := range patch {
-				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", op.Path.String(), op.OldValue, op.Value)
+				keyStr := op.Path.String()
+				if len(keyStr) > 1 && keyStr[0] == '/' {
+					keyStr = keyStr[1:]
+				}
+				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
 			}
 			logs += "\t}\n"
 
