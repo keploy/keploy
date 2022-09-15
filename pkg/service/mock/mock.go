@@ -3,8 +3,6 @@ package mock
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/google/uuid"
 	"go.keploy.io/server/pkg/models"
@@ -24,10 +22,7 @@ type Mock struct {
 }
 
 func (m *Mock) FileExists(ctx context.Context, path string) bool {
-	if _, err := os.Stat(filepath.Join(path)); err == nil {
-		return true
-	}
-	return false
+	return m.store.Exists(ctx, path)
 }
 
 func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta interface{}) error {
@@ -41,33 +36,6 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 	if err != nil {
 		m.log.Error(err.Error())
 	}
-	// isFileEmpty, err := CreateMockFile(path, doc.Name)
-	// if err != nil {
-	// 	m.log.Error(err.Error())
-	// }
-	// file, err := os.OpenFile(filepath.Join(path, doc.Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
-	// if err != nil {
-	// 	m.log.Error("failed to open the file", zap.Any("error", err))
-	// 	return err
-	// }
-
-	// data := []byte("---\n")
-	// if isFileEmpty {
-	// 	data = []byte{}
-	// }
-	// d, err := yaml.Marshal(&doc)
-	// if err != nil {
-	// 	m.log.Error("failed to marshal document to yaml", zap.Any("error", err))
-	// 	return err
-	// }
-	// data = append(data, d...)
-
-	// _, err = file.Write(data)
-	// if err != nil {
-	// 	m.log.Error("failed to embed document into yaml file", zap.Any("error", err))
-	// 	return err
-	// }
-	// defer file.Close()
 	MockPathStr := fmt.Sprint("\n✅ Mocks are successfully written in yaml file at path: ", path, "/", doc.Name, ".yaml", "\n")
 	if isGenerated {
 		MockConfigStr := fmt.Sprint("\n\n🚨 Note: Please set the mock.Config.Name to auto generated name in your unit test. Ex: \n    mock.Config{\n      Name: ", doc.Name, "\n    }\n")
@@ -80,7 +48,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 }
 
 func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
-	arr, err := m.store.Read(path, name, true)
+	arr, err := m.store.Read(ctx, path, name, true)
 	if err != nil {
 		m.log.Error("failed to read then yaml file", zap.Any("error", err))
 		return nil, err

@@ -392,7 +392,7 @@ func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 }
 
 func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h http.Header) error {
-	tcs, err := r.store.Read(path, id, false)
+	tcs, err := r.store.Read(ctx, path, id, false)
 	if err != nil {
 		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
 		return err

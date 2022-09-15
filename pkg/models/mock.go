@@ -64,7 +64,8 @@ type MockHttpResp struct {
 
 type MockStore interface {
 	ReadAll(ctx context.Context, testCasePath, mockPath string) ([]TestCase, error)
-	Read(path, name string, libMode bool) ([]Mock, error)
+	Read(ctx context.Context, path, name string, libMode bool) ([]Mock, error)
 	Write(ctx context.Context, path string, doc Mock) error
 	WriteAll(ctx context.Context, path, fileName string, docs []Mock) error
+	Exists(ctx context.Context, path string) bool
 }
