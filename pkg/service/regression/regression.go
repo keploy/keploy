@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/k0kubun/pp/v3"
+	"github.com/wI2L/jsondiff"
 	grpcMock "go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
@@ -275,6 +277,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	pass := true
 	hRes := &[]run.HeaderResult{}
+
 	res := &run.Result{
 		StatusCode: run.IntResult{
 			Normal:   false,
@@ -301,8 +304,8 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			bodyNoise = append(bodyNoise, x)
 		} else if a[0] == "header" {
 			// if len(a) == 2 {
-			// 	headerNoise[a[1]] = a[1]
-			// 	continue
+			//  headerNoise[a[1]] = a[1]
+			//  continue
 			// }
 			headerNoise[a[len(a)-1]] = a[len(a)-1]
 			// headerNoise[a[0]] = a[0]
@@ -323,19 +326,85 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	res.BodyResult.Normal = pass
 
 	if !pkg.CompareHeaders(tc.HttpResp.Header, resp.Header, hRes, headerNoise) {
+
 		pass = false
 	}
-	res.HeadersResult = *hRes
 
+	res.HeadersResult = *hRes
 	if tc.HttpResp.StatusCode == resp.StatusCode {
 		res.StatusCode.Normal = true
 	} else {
+
 		pass = false
 	}
+	if !pass {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
+		var logs = ""
 
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
+			"Test Result:\n"+
+			"\tInput Http Request: %+v\n\n"+
+			"\tExpected Response: "+
+			"%+v\n\n"+"\tActual Response: "+
+			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
+
+		if !res.StatusCode.Normal {
+			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+
+		}
+		var (
+			actualHeader   = map[string][]string{}
+			expectedHeader = map[string][]string{}
+			unmatched      = true
+		)
+
+		for _, j := range res.HeadersResult {
+			if !j.Normal {
+				unmatched = false
+				actualHeader[j.Actual.Key] = j.Actual.Value
+				expectedHeader[j.Expected.Key] = j.Expected.Value
+			}
+		}
+
+		if !unmatched {
+			logs += "\t Response Headers: {\n"
+			for i, j := range expectedHeader {
+				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
+			}
+			logs += "\t}\n"
+		}
+
+		if !res.BodyResult.Normal {
+
+			expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+
+			patch, _ := jsondiff.Compare(expected, actual)
+			logs += "\tResponse body: {\n"
+			for _, op := range patch {
+				keyStr := op.Path.String()
+				if len(keyStr) > 1 && keyStr[0] == '/' {
+					keyStr = keyStr[1:]
+				}
+				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+			}
+			logs += "\t}\n"
+
+		}
+		logs += "--------------------------------------------------------------------\n\n"
+		logger.Printf(logs)
+	} else {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		var log2 = ""
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		logger.Printf(log2)
+
+	}
 	return pass, res, &tc, nil
 }
-
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()

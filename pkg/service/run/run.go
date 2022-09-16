@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
@@ -159,5 +160,19 @@ func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error 
 }
 
 func (r *Run) Put(ctx context.Context, run TestRun) error {
+	if run.Status == TestRunStatusRunning {
+		pp.SetColorScheme(models.PassingColorScheme)
+		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
+	} else {
+		res, err := r.rdb.ReadOne(ctx, run.ID)
+		if err == nil {
+			if run.Status == TestRunStatusFailed {
+				pp.SetColorScheme(models.FailingColorScheme)
+			} else {
+				pp.SetColorScheme(models.PassingColorScheme)
+			}
+			pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, res.Total, res.Success, res.Failure)
+		}
+	}
 	return r.rdb.Upsert(ctx, run)
 }

@@ -16,6 +16,7 @@ type Service interface {
 type DB interface {
 	Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*TestRun, error)
 	Upsert(ctx context.Context, run TestRun) error
+	ReadOne(ctx context.Context, id string) (*TestRun, error)
 	ReadTest(ctx context.Context, id string) (Test, error)
 	ReadTests(ctx context.Context, runID string) ([]Test, error)
 	PutTest(ctx context.Context, t Test) error

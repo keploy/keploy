@@ -22,6 +22,9 @@ func SanitiseInput(s string) string {
 }
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noise map[string]string) bool {
+	if res == nil {
+		return false
+	}
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
