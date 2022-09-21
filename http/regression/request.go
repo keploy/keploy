@@ -3,6 +3,7 @@ package regression
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
@@ -30,6 +31,9 @@ func (req *TestCaseReq) Bind(r *http.Request) error {
 		return errors.New("app id needs to be declared")
 	}
 
+	if strings.Contains(req.TestCasePath, "../") || strings.Contains(req.MockPath, "../") || strings.HasPrefix(req.TestCasePath, "/etc/passwd") || strings.HasPrefix(req.MockPath, "/etc/passwd") {
+		return errors.New("file path should be absolute")
+	}
 	return nil
 }
 
@@ -51,5 +55,8 @@ func (req *TestReq) Bind(r *http.Request) error {
 		return errors.New("app id is required")
 	}
 
+	if strings.Contains(req.TestCasePath, "../") || strings.Contains(req.MockPath, "../") || strings.HasPrefix(req.TestCasePath, "/etc/passwd") || strings.HasPrefix(req.MockPath, "/etc/passwd") {
+		return errors.New("file path should be absolute")
+	}
 	return nil
 }

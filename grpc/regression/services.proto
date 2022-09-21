@@ -87,6 +87,8 @@ message endResponse {
 message startRequest {
   string total = 1;
   string app = 2;
+  string TestCasePath = 3;
+  string MockPath = 4;
 }
 
 message startResponse {

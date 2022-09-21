@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
 	"go.keploy.io/server/pkg/platform/mgo"
+	mockPlatform "go.keploy.io/server/pkg/platform/mock"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	mock2 "go.keploy.io/server/pkg/service/browserMock"
 	"go.keploy.io/server/pkg/service/mock"
@@ -47,6 +48,7 @@ type config struct {
 	EnableTelemetry  bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
+	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
 }
 
 func Server() *chi.Mux {
@@ -82,6 +84,7 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
+	fileStore := mockPlatform.NewMockExport(keploy.GetMode() == keploy.MODE_TEST)
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
 	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
@@ -91,9 +94,9 @@ func Server() *chi.Mux {
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport)
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, fileStore)
 	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
-	mockSrv := mock.NewMockService(logger)
+	mockSrv := mock.NewMockService(fileStore, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
@@ -104,7 +107,7 @@ func Server() *chi.Mux {
 
 	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
-			Name: "Keploy-Test-App",
+			Name: conf.KeployApp,
 			Port: port,
 			Filter: keploy.Filter{
 				UrlRegex: "^/api",

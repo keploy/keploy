@@ -25,7 +25,7 @@ func (tele *telemetryDB) Insert(id string) (*mongo.InsertOneResult, error) {
 	if tele.c == nil {
 		return nil, nil
 	}
-	return tele.c.InsertOne(context.TODO(), bson.D{{"InstallationID", id}})
+	return tele.c.InsertOne(context.TODO(), bson.D{{Key: "InstallationID", Value: id}})
 }
 
 func (tele *telemetryDB) Find() string {
