@@ -33,6 +33,22 @@ func convertJson(s string, log *zap.Logger) (interface{}, error) {
 
 }
 
+//RemoveNoise return the expected and actual body in JSON
+func RemoveNoise(exp, act string, noise []string, log *zap.Logger) (interface{}, interface{}) {
+
+	noiseMap := convertToMap(noise)
+	expected, _ := convertJson(exp, log)
+
+	actual, _ := convertJson(act, log)
+	tmp := mapClone(noiseMap)
+	expected = removeNoise(expected, tmp)
+
+	tmp = mapClone(noiseMap)
+	actual = removeNoise(actual, tmp)
+	return expected, actual
+
+}
+
 func Match(exp, act string, noise []string, log *zap.Logger) (bool, error) {
 
 	noiseMap := convertToMap(noise)
@@ -48,16 +64,16 @@ func Match(exp, act string, noise []string, log *zap.Logger) (bool, error) {
 		return false, nil
 	}
 	tmp := mapClone(noiseMap)
-	expected = removeNoisy(expected, tmp)
+	expected = removeNoise(expected, tmp)
 
 	tmp = mapClone(noiseMap)
-	actual = removeNoisy(actual, tmp)
+	actual = removeNoise(actual, tmp)
 	return jsonMatch(expected, actual)
 
 }
 
-// removeNoisy removes the noisy key-value fields(storend in noise map) from given element JSON. It is a recursive function.
-func removeNoisy(element interface{}, noise map[string][]string) interface{} {
+// removeNoise removes the noisy key-value fields(storend in noise map) from given element JSON. It is a recursive function.
+func removeNoise(element interface{}, noise map[string][]string) interface{} {
 
 	y := reflect.ValueOf(element)
 	switch y.Kind() {
@@ -86,7 +102,7 @@ func removeNoisy(element interface{}, noise map[string][]string) interface{} {
 				if seperatorIndx != -1 {
 					noise[k[seperatorIndx+1:]] = strArr
 				}
-				el[key] = removeNoisy(val, noise)
+				el[key] = removeNoise(val, noise)
 			}
 		}
 		return el
@@ -97,7 +113,7 @@ func removeNoisy(element interface{}, noise map[string][]string) interface{} {
 		// remove noisy fields from every array element.
 		for i := 0; i < x.Len(); i++ {
 			tmp := mapClone(noise)
-			res = append(res, removeNoisy(x.Index(i).Interface(), tmp))
+			res = append(res, removeNoise(x.Index(i).Interface(), tmp))
 		}
 		return res
 	default:

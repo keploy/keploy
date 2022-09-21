@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/go-chi/render"
 	"github.com/google/uuid"
+
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/pkg/models"
@@ -61,7 +62,9 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
+
 	}
+
 	render.Status(r, http.StatusOK)
 
 }
