@@ -60,6 +60,9 @@ type MockHttpResp struct {
 	StatusCode int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header     map[string]string `json:"header" yaml:"header"`
 	Body       string            `json:"body" yaml:"body"`
+	StatusMessage string  		`json:"status_message" yaml:"status_message"`
+	ProtoMajor int 				`json:"proto_major" yaml:"proto_major"`
+	ProtoMinor int 				`json:"proto_minor" yaml:"proto_minor"`
 }
 
 type MockStore interface {

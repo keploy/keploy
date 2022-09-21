@@ -50,6 +50,7 @@ message TestCase {
   map<string, StrArr> allKeys = 11;
   map<string, StrArr> anchors = 12;
   repeated string noise = 13;
+  repeated Mock Mocks = 14;
 }
 
 message Method {
@@ -73,6 +74,9 @@ message HttpResp {
   int64 StatusCode = 1;
   map<string, StrArr> Header = 2;
   string Body = 3;
+  string StatusMessage = 4;
+  int64 ProtoMajor = 5;
+  int64 ProtoMinor = 6;
 }
 
 message endRequest {
@@ -101,7 +105,7 @@ message getTCRequest {
 }
 message getTCSRequest{
   string app = 1;
-  string  offset = 2;
+  string offset = 2;
   string limit = 3;
   string TestCasePath = 4;
   string MockPath = 5;
