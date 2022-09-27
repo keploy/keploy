@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql/handler"
@@ -49,6 +50,15 @@ type config struct {
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
+}
+
+//returns the env value if any else default fallback
+func getenv(key, fallback string) string {
+	value := os.Getenv(key)
+	if len(value) == 0 {
+		return fallback
+	}
+	return value
 }
 
 func Server() *chi.Mux {
@@ -103,7 +113,7 @@ func Server() *chi.Mux {
 	// initialize the client serveri
 	r := chi.NewRouter()
 
-	port := "8081"
+	port := getenv("PORT", "6789")
 
 	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
@@ -150,7 +160,7 @@ func Server() *chi.Mux {
 
 	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
 
-	listener, err := net.Listen("tcp", ":8081")
+	listener, err := net.Listen("tcp", ":"+port)
 
 	if err != nil {
 		panic(err)
@@ -161,7 +171,7 @@ func Server() *chi.Mux {
 
 	httpListener := m.Match(cmux.HTTP1Fast())
 
-	log.Println("👍 connect to http://localhost:8081/ for GraphQL playground\n ")
+	log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
