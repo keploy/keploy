@@ -5,7 +5,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql/handler"
@@ -50,15 +49,7 @@ type config struct {
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
-}
-
-//returns the env value if any else default fallback
-func getenv(key, fallback string) string {
-	value := os.Getenv(key)
-	if len(value) == 0 {
-		return fallback
-	}
-	return value
+	PORT             string `envconfig:"PORT" default:"6789"`
 }
 
 func Server() *chi.Mux {
@@ -113,7 +104,7 @@ func Server() *chi.Mux {
 	// initialize the client serveri
 	r := chi.NewRouter()
 
-	port := getenv("PORT", "6789")
+	port := conf.PORT
 
 	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
