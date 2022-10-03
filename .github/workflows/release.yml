@@ -78,7 +78,7 @@ jobs:
           # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
           p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
           # The password used to import the PKCS12 file.
-          p12-password: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}  
+          p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}  
       - name: Install gon via HomeBrew for code signing and app notarization
         run: |
           brew tap mitchellh/gon
