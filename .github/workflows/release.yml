@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-ui:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -20,57 +20,75 @@ jobs:
         with:
           go-version: 1.17
 
-      - name: Test
-        run: |
-          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
-          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
-        env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-          ENABLE_DEDUP: false
-          ENABLE_TEST_EXPORT: false
-
-      - name: Test-withDeDupEnabled
-        run: |
-          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
-          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
-        env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-          ENABLE_DEDUP: true
-          ENABLE_TEST_EXPORT: false
-
-
-      - name: Install goveralls
-        run: go install github.com/mattn/goveralls@latest
-
-      - name: Send coverage
-        env:
-          COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: goveralls -coverprofile=coverage.txt -service=github
-
       - name: Checkout UI
         uses: actions/checkout@v2
         with:
           repository: keploy/ui
           path: ui
+      
+      - name: Cache UI
+        id: cache-ui
+        uses: actions/cache@v3
+        with:
+          path: web
+          key: ${{ hashFiles('ui/src') }}
 
       - name: Set up Node
+        if: steps.cache-ui.outputs.cache-hit != 'true'
         uses: actions/setup-node@v3
         with:
           node-version: '14'
 
       - name: Build web app
+        if: steps.cache-ui.outputs.cache-hit != 'true'
         run: |
           cd $GITHUB_WORKSPACE/ui
           npm install
           npm run build
           cp -r public $GITHUB_WORKSPACE/web
           rm -rf $GITHUB_WORKSPACE/ui
-      -
-        name: Run GoReleaser
+
+  build-go:
+    runs-on: macos-latest
+    needs: build-ui
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.17
+
+      - name: Checkout UI
+        uses: actions/checkout@v2
+        with:
+          repository: keploy/ui
+          path: ui
+      
+      - name: Cache UI
+        id: cache-ui
+        uses: actions/cache@v3
+        with:
+          path: web
+          key: ${{ hashFiles('ui/src') }}
+      - name: Import Code-Signing Certificates
+        uses: Apple-Actions/import-codesign-certs@v1
+        with:
+          # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
+          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
+          # The password used to import the PKCS12 file.
+          p12-password: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}  
+      - name: Install gon via HomeBrew for code signing and app notarization
+        run: |
+          brew tap mitchellh/gon
+          brew install mitchellh/gon/gon
+      - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v2
         with:
           distribution: goreleaser
           version: latest
           args: release --rm-dist
         env:
+          APPLE_ACCOUNT_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

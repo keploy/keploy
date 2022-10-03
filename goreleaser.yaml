@@ -1,17 +1,36 @@
 # GoReleaser configuration
 
 builds:
-  -
-    id: "keploy"
+  - binary: keploy
+    id: keploy
     main: ./cmd/server/main.go
-    binary: keploy
     env:
       - CGO_ENABLED=0
     goos:
-      - darwin
       - linux
       - windows
     goarch:
       - amd64
       - 386
       - arm64
+  - binary: keploy
+    id: keploy-macos
+    main: ./cmd/server/main.go
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+signs:
+  - ids:
+    - keploy-macos # here we filter the macos only build id
+    # you'll need to have gon on PATH
+    cmd: gon
+    # you can follow the gon docs to properly create the gon.hcl config file:
+    # https://github.com/mitchellh/gon
+    args:
+    - gon.json
+    artifacts: all

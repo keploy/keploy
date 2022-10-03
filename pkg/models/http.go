@@ -16,6 +16,9 @@ type HttpResp struct {
 	StatusCode int         `json:"status_code" bson:"status_code,omitempty" yaml:"status_code"` // e.g. 200
 	Header     http.Header `json:"header" bson:"header,omitempty" yaml:"headers"`
 	Body       string      `json:"body" bson:"body,omitempty" yaml:"body"`
+	StatusMessage string  		`json:"status_message" yaml:"status_message"`
+	ProtoMajor int 				`json:"proto_major" yaml:"proto_major"`
+	ProtoMinor int 				`json:"proto_minor" yaml:"proto_minor"`
 }
 
 type Method string

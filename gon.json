@@ -1,0 +1,14 @@
+{
+    "source" : ["./dist/keploy-macos_darwin_amd64_v1/keploy", "./dist/keploy-macos_darwin_arm64/keploy"],
+    "bundle_id" : "io.keploy.server",
+    "apple_id": {
+        "username" : "shubhamkjain@outlook.com",
+        "password":  "@env:APPLE_ACCOUNT_PASSWORD"
+    },
+    "sign" :{
+        "application_identity" : "Developer ID Application: Shubham Jain"
+    },
+    "zip" :{
+        "output_path" : "keploy.zip"
+    }
+}
