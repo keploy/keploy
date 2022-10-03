@@ -119,7 +119,7 @@ func Server() *chi.Mux {
 
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
-			// URL: "http://localhost:8081/api",
+			// URL: "http://localhost:6789/api",
 		},
 	})
 
