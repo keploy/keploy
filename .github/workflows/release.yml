@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: web
-          key: ${{ hashFiles('ui/src' }}
+          key: ${{ hashFiles('ui/src') }}
 
       - name: Set up Node
         if: steps.cache-ui.outputs.cache-hit != 'true'
