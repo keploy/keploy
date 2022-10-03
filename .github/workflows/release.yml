@@ -73,4 +73,5 @@ jobs:
           version: latest
           args: release --rm-dist
         env:
+          APPLE_ACCOUNT_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
