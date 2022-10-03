@@ -50,7 +50,25 @@ jobs:
 
   build-go:
     runs-on: macos-latest
+    needs: build-ui
     steps:
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.17
+
+      - name: Checkout UI
+        uses: actions/checkout@v2
+        with:
+          repository: keploy/ui
+          path: ui
+      
+      - name: Cache UI
+        id: cache-ui
+        uses: actions/cache@v3
+        with:
+          path: web
+          key: ${{ hashFiles('ui/src') }}
       - name: Import Code-Signing Certificates
         uses: Apple-Actions/import-codesign-certs@v1
         with:
