@@ -198,6 +198,7 @@ func getProtoTC(tcs models.TestCase) (*proto.TestCase, error) {
 			ProtoMinor:    int64(tcs.HttpResp.ProtoMinor),
 		},
 		Deps:    deps,
+		Mocks: tcs.Mocks,
 		AllKeys: allKeys,
 		Anchors: anchors,
 		Noise:   tcs.Noise,
