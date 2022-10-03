@@ -1,4 +1,8 @@
 # GoReleaser configuration
+archives:
+ - 
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    
 builds:
   - binary: keploy
     id: keploy
