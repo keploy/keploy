@@ -190,11 +190,15 @@ func getProtoTC(tcs models.TestCase) (*proto.TestCase, error) {
 			Body:       tcs.HttpReq.Body,
 		},
 		HttpResp: &proto.HttpResp{
-			StatusCode: int64(tcs.HttpResp.StatusCode),
-			Header:     respHeader,
-			Body:       tcs.HttpResp.Body,
+			StatusCode:    int64(tcs.HttpResp.StatusCode),
+			Header:        respHeader,
+			Body:          tcs.HttpResp.Body,
+			StatusMessage: tcs.HttpResp.StatusMessage,
+			ProtoMajor:    int64(tcs.HttpResp.ProtoMajor),
+			ProtoMinor:    int64(tcs.HttpResp.ProtoMinor),
 		},
 		Deps:    deps,
+		Mocks: tcs.Mocks,
 		AllKeys: allKeys,
 		Anchors: anchors,
 		Noise:   tcs.Noise,
@@ -310,9 +314,12 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 				Header:     grpcMock.ToMockHeader(utils.GetHttpHeader(request.HttpReq.Header)),
 			},
 			Response: models.MockHttpResp{
-				StatusCode: int(request.HttpResp.StatusCode),
-				Body:       request.HttpResp.Body,
-				Header:     grpcMock.ToMockHeader(utils.GetHttpHeader(request.HttpResp.Header)),
+				StatusCode:    int(request.HttpResp.StatusCode),
+				Body:          request.HttpResp.Body,
+				Header:        grpcMock.ToMockHeader(utils.GetHttpHeader(request.HttpResp.Header)),
+				StatusMessage: request.HttpResp.StatusMessage,
+				ProtoMajor:    int(request.HttpResp.ProtoMajor),
+				ProtoMinor:    int(request.HttpResp.ProtoMinor),
 			},
 			Objects: grpcMock.ToModelObjects([]*proto.Mock_Object{{ // TODO: remove this. after making range check in go-sdk http interceptor logic check cause there 0th index is picked up directly. ELse it will panic
 				Type: "error",
@@ -364,9 +371,12 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			Header:     utils.GetHttpHeader(request.HttpReq.Header),
 		},
 		HttpResp: models.HttpResp{
-			StatusCode: int(request.HttpResp.StatusCode),
-			Body:       request.HttpResp.Body,
-			Header:     utils.GetHttpHeader(request.HttpResp.Header),
+			StatusCode:    int(request.HttpResp.StatusCode),
+			Body:          request.HttpResp.Body,
+			Header:        utils.GetHttpHeader(request.HttpResp.Header),
+			StatusMessage: request.HttpResp.StatusMessage,
+			ProtoMajor:    int(request.HttpResp.ProtoMajor),
+			ProtoMinor:    int(request.HttpResp.ProtoMinor),
 		},
 		Deps: deps,
 	}})
@@ -393,9 +403,12 @@ func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.
 
 func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.TestResponse, error) {
 	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath, models.HttpResp{
-		StatusCode: int(request.Resp.StatusCode),
-		Header:     utils.GetStringMap(request.Resp.Header),
-		Body:       request.Resp.Body,
+		StatusCode:    int(request.Resp.StatusCode),
+		Header:        utils.GetStringMap(request.Resp.Header),
+		Body:          request.Resp.Body,
+		StatusMessage: request.Resp.StatusMessage,
+		ProtoMajor:    int(request.Resp.ProtoMajor),
+		ProtoMinor:    int(request.Resp.ProtoMinor),
 	})
 	if err != nil {
 		return nil, err

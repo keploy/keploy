@@ -231,6 +231,9 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 				StatusCode: int(data.HttpResp.StatusCode),
 				Body:       data.HttpResp.Body,
 				Header:     mock.ToMockHeader(data.HttpResp.Header),
+				StatusMessage: data.HttpResp.StatusMessage,
+				ProtoMajor: int(data.HttpReq.ProtoMajor),
+				ProtoMinor: int(data.HttpReq.ProtoMinor),
 			},
 			Objects: []models.Object{{
 				Type: "error",
