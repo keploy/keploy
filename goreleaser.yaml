@@ -23,13 +23,13 @@ builds:
       - amd64
       - arm64
 
-    signs:
-      - ids:
-        - foo-macos # here we filter the macos only build id
-        # you'll need to have gon on PATH
-        cmd: gon
-        # you can follow the gon docs to properly create the gon.hcl config file:
-        # https://github.com/mitchellh/gon
-        args:
-        - gon.json
-        artifacts: all
+signs:
+  - ids:
+    - foo-macos # here we filter the macos only build id
+    # you'll need to have gon on PATH
+    cmd: gon
+    # you can follow the gon docs to properly create the gon.hcl config file:
+    # https://github.com/mitchellh/gon
+    args:
+    - gon.json
+    artifacts: all
