@@ -49,7 +49,7 @@ type config struct {
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
-	PORT             string `envconfig:"PORT" default:"6789"`
+	Port             string `envconfig:"PORT" default:"6789"`
 }
 
 func Server() *chi.Mux {
@@ -104,7 +104,7 @@ func Server() *chi.Mux {
 	// initialize the client serveri
 	r := chi.NewRouter()
 
-	port := conf.PORT
+	port := conf.Port
 
 	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{

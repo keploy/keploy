@@ -3,7 +3,7 @@ services:
   keploy:
     build: .
     ports:
-      - "8081:8081"
+      - "6789:6789"
     environment:
       KEPLOY_MODE: "off"
       KEPLOY_MONGO_URI: "mongodb://mongo:27017"

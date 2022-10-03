@@ -10,7 +10,7 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: "latest"
 
-httpPort: 8081
+httpPort: 6789
 
 # imagePullSecrets: 
 #   - name: "shubham-docker-secret-2"
