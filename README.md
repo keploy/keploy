@@ -45,6 +45,7 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 * **Accurate Noise Detection** in responses like (timestamps, random values) to ensure high quality tests.
 * **Statistical deduplication** ensures that redundant testcases are not generated. WIP (ref [#27](https://github.com/keploy/keploy/issues/27)).
 * **Web Console** to visually understand the results, update behaviour and share findings across your team.
+* **Test Export** generates and stores testcases(and their mocks) in the project directory or mongoDB cluster. By default, they are stored in project directory.
 
 ## How it works?
 

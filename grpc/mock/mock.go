@@ -37,17 +37,17 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				ProtoMajor: int(doc.Spec.Res.ProtoMajor),
 				ProtoMinor: int(doc.Spec.Res.ProtoMinor),
 			},
-			Objects: []models.Object{{
-				Type: doc.Spec.Objects[0].Type,
-				Data: string(doc.Spec.Objects[0].Data),
-			}},
+			Objects:    []models.Object{},
 			Mocks:      doc.Spec.Mocks,
 			Assertions: utils.GetHttpHeader(doc.Spec.Assertions),
 			Created:    doc.Spec.Created,
 		}
+		for _, j := range doc.Spec.Objects {
+			spec.Objects = append(spec.Objects, models.Object{Type: j.Type, Data: string(j.Data)})
+		}
 		err := res.Spec.Encode(&spec)
 		if err != nil {
-			return res, fmt.Errorf("Failed to encode http spec for mock with name: %s.  error: %s", doc.Name, err.Error())
+			return res, fmt.Errorf("failed to encode http spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
 	case string(models.GENERIC_EXPORT):
 		err := res.Spec.Encode(&models.GenericSpec{
@@ -55,10 +55,10 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 			Objects:  ToModelObjects(doc.Spec.Objects),
 		})
 		if err != nil {
-			return res, fmt.Errorf("Failed to encode generic spec for mock with name: %s.  error: %s", doc.Name, err.Error())
+			return res, fmt.Errorf("failed to encode generic spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
 	default:
-		return res, fmt.Errorf("Mock with name %s is not of a valid kind", doc.Name)
+		return res, fmt.Errorf("mock with name %s is not of a valid kind", doc.Name)
 	}
 	return res, nil
 }
@@ -102,7 +102,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 			spec := &models.HttpSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
-				return res, fmt.Errorf("Failed to decode the http spec of mock with name: %s.  error: %s", j.Name, err.Error())
+				return res, fmt.Errorf("failed to decode the http spec of mock with name: %s.  error: %s", j.Name, err.Error())
 			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
@@ -114,10 +114,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					Header:     utils.GetProtoMap(ToHttpHeader(spec.Request.Header)),
 					Body:       spec.Request.Body,
 				},
-				Objects: []*proto.Mock_Object{{
-					Type: spec.Objects[0].Type,
-					Data: []byte(spec.Objects[0].Data),
-				}},
+				Objects: []*proto.Mock_Object{},
 				Res: &proto.HttpResp{
 					StatusCode: int64(spec.Response.StatusCode),
 					Header:     utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
@@ -130,11 +127,17 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				Assertions: utils.GetProtoMap(spec.Assertions),
 				Created:    spec.Created,
 			}
+			for _, j := range spec.Objects {
+				mock.Spec.Objects = append(mock.Spec.Objects, &proto.Mock_Object{
+					Type: j.Type,
+					Data: []byte(j.Data),
+				})
+			}
 		case string(models.GENERIC_EXPORT):
 			spec := &models.GenericSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
-				return res, fmt.Errorf("Failed to decode the generic spec of mock with name: %s.  error: %s", j.Name, err.Error())
+				return res, fmt.Errorf("failed to decode the generic spec of mock with name: %s.  error: %s", j.Name, err.Error())
 			}
 			obj, err := toProtoObjects(spec.Objects)
 			if err != nil {
@@ -145,7 +148,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				Objects:  obj,
 			}
 		default:
-			return res, fmt.Errorf("Mock with name %s is not of a valid kind", j.Name)
+			return res, fmt.Errorf("mock with name %s is not of a valid kind", j.Name)
 		}
 		res = append(res, mock)
 	}
