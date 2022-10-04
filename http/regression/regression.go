@@ -90,7 +90,9 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 
 	// user := "default"
-	rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
+	if rg.testExport {
+		rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
+	}
 	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Created: now,
