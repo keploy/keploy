@@ -3,7 +3,7 @@ services:
   keploy:
     build: .
     ports:
-      - "8081:8081"
+      - "6789:6789"
       - "40000:40000"
     environment:
       KEPLOY_MODE: "off"

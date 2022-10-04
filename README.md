@@ -61,7 +61,7 @@ Keploy is added as a middleware to your application that captures and replays al
 git clone https://github.com/keploy/keploy.git && cd keploy
 docker-compose up
 ```
-The UI can be accessed at http://localhost:8081
+The UI can be accessed at http://localhost:6789 (default)
 
 ### Helm chart
 Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
@@ -133,7 +133,7 @@ this should show you have 74.4% coverage without writing any code!
 ok      echo-psql-url-shortener 5.820s  coverage: 74.4% of statements in ./...
 ```
 
-All of these can be visualised here - http://localhost:8081/testlist
+All of these can be visualised here - http://localhost:6789/testlist
 
 ## Language Support
 - [x] [Go SDK](https://github.com/keploy/go-sdk)

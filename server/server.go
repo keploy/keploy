@@ -49,6 +49,7 @@ type config struct {
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
+	Port             string `envconfig:"PORT" default:"6789"`
 }
 
 func Server() *chi.Mux {
@@ -103,7 +104,7 @@ func Server() *chi.Mux {
 	// initialize the client serveri
 	r := chi.NewRouter()
 
-	port := "8081"
+	port := conf.Port
 
 	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
@@ -118,7 +119,7 @@ func Server() *chi.Mux {
 
 		Server: keploy.ServerConfig{
 			LicenseKey: conf.APIKey,
-			// URL: "http://localhost:8081/api",
+			// URL: "http://localhost:6789/api",
 		},
 	})
 
@@ -150,7 +151,7 @@ func Server() *chi.Mux {
 
 	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
 
-	listener, err := net.Listen("tcp", ":8081")
+	listener, err := net.Listen("tcp", ":"+port)
 
 	if err != nil {
 		panic(err)
@@ -161,7 +162,7 @@ func Server() *chi.Mux {
 
 	httpListener := m.Match(cmux.HTTP1Fast())
 
-	log.Println("👍 connect to http://localhost:8081/ for GraphQL playground\n ")
+	log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
