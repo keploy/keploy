@@ -102,7 +102,7 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 		Total:   total,
 	})
 	if err != nil {
-		render.Render(w, r, ErrInvalidRequest(err))
+		render.Status(r, http.StatusInternalServerError)
 		return
 	}
 	render.Status(r, http.StatusOK)
@@ -228,12 +228,12 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 				Header:     mock.ToMockHeader(data.HttpReq.Header),
 			},
 			Response: models.MockHttpResp{
-				StatusCode: int(data.HttpResp.StatusCode),
-				Body:       data.HttpResp.Body,
-				Header:     mock.ToMockHeader(data.HttpResp.Header),
+				StatusCode:    int(data.HttpResp.StatusCode),
+				Body:          data.HttpResp.Body,
+				Header:        mock.ToMockHeader(data.HttpResp.Header),
 				StatusMessage: data.HttpResp.StatusMessage,
-				ProtoMajor: int(data.HttpReq.ProtoMajor),
-				ProtoMinor: int(data.HttpReq.ProtoMinor),
+				ProtoMajor:    int(data.HttpReq.ProtoMajor),
+				ProtoMinor:    int(data.HttpReq.ProtoMinor),
 			},
 			Objects: []models.Object{{
 				Type: "error",
