@@ -47,7 +47,7 @@ type config struct {
 	EnableDeDup      bool   `envconfig:"ENABLE_DEDUP" default:"false"`
 	EnableTelemetry  bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
-	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
+	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"false"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
 	Port             string `envconfig:"PORT" default:"6789"`
 }
