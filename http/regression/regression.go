@@ -202,8 +202,8 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		var (
 			id = uuid.New().String()
 			tc = []models.Mock{{
-				Version: string(models.V1_BETA1),
-				Kind:    string(models.HTTP_EXPORT),
+				Version: models.V1Beta1,
+				Kind:    models.HTTP,
 				Name:    id,
 			}}
 			mocks = []string{}

@@ -13,12 +13,12 @@ import (
 
 func Encode(doc *proto.Mock) (models.Mock, error) {
 	res := models.Mock{
-		Version: doc.Version,
-		Kind:    doc.Kind,
+		Version: models.Version(doc.Version),
+		Kind:    models.Kind(doc.Kind),
 		Name:    doc.Name,
 	}
 	switch doc.Kind {
-	case string(models.HTTP_EXPORT):
+	case string(models.HTTP):
 		spec := models.HttpSpec{
 			Metadata: doc.Spec.Metadata,
 			Request: models.MockHttpReq{
@@ -30,12 +30,12 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				Body:       doc.Spec.Req.Body,
 			},
 			Response: models.MockHttpResp{
-				StatusCode: int(doc.Spec.Res.StatusCode),
-				Header:     ToMockHeader(utils.GetHttpHeader(doc.Spec.Res.Header)),
-				Body:       doc.Spec.Res.Body,
+				StatusCode:    int(doc.Spec.Res.StatusCode),
+				Header:        ToMockHeader(utils.GetHttpHeader(doc.Spec.Res.Header)),
+				Body:          doc.Spec.Res.Body,
 				StatusMessage: doc.Spec.Res.StatusMessage,
-				ProtoMajor: int(doc.Spec.Res.ProtoMajor),
-				ProtoMinor: int(doc.Spec.Res.ProtoMinor),
+				ProtoMajor:    int(doc.Spec.Res.ProtoMajor),
+				ProtoMinor:    int(doc.Spec.Res.ProtoMinor),
 			},
 			Objects:    []models.Object{},
 			Mocks:      doc.Spec.Mocks,
@@ -49,7 +49,7 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 		if err != nil {
 			return res, fmt.Errorf("failed to encode http spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
-	case string(models.GENERIC_EXPORT):
+	case string(models.GENERIC):
 		err := res.Spec.Encode(&models.GenericSpec{
 			Metadata: doc.Spec.Metadata,
 			Objects:  ToModelObjects(doc.Spec.Objects),
@@ -93,12 +93,12 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 	res := []*proto.Mock{}
 	for _, j := range doc {
 		mock := &proto.Mock{
-			Version: j.Version,
+			Version: string(j.Version),
 			Name:    j.Name,
-			Kind:    j.Kind,
+			Kind:    string(j.Kind),
 		}
 		switch j.Kind {
-		case string(models.HTTP_EXPORT):
+		case models.HTTP:
 			spec := &models.HttpSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
@@ -116,12 +116,12 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				},
 				Objects: []*proto.Mock_Object{},
 				Res: &proto.HttpResp{
-					StatusCode: int64(spec.Response.StatusCode),
-					Header:     utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
-					Body:       spec.Response.Body,
+					StatusCode:    int64(spec.Response.StatusCode),
+					Header:        utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
+					Body:          spec.Response.Body,
 					StatusMessage: spec.Response.StatusMessage,
-					ProtoMajor: int64(spec.Response.ProtoMajor),
-					ProtoMinor: int64(spec.Request.ProtoMinor),
+					ProtoMajor:    int64(spec.Response.ProtoMajor),
+					ProtoMinor:    int64(spec.Request.ProtoMinor),
 				},
 				Mocks:      spec.Mocks,
 				Assertions: utils.GetProtoMap(spec.Assertions),
@@ -133,7 +133,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					Data: []byte(j.Data),
 				})
 			}
-		case string(models.GENERIC_EXPORT):
+		case models.GENERIC:
 			spec := &models.GenericSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {

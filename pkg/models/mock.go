@@ -6,22 +6,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Kind string
-
-const (
-	V1_BETA1 Version = Version("api.keploy.io/v1beta1")
-)
-
 type Version string
 
 const (
-	HTTP_EXPORT    Kind = "Http"
-	GENERIC_EXPORT Kind = "Generic"
+	V1Beta1 Version = Version("api.keploy.io/v1beta1")
+)
+
+type Kind string
+
+const (
+	HTTP    Kind = "Http"
+	GENERIC Kind = "Generic"
+	SQL     Kind = "SQL"
 )
 
 type Mock struct {
-	Version string    `json:"version" yaml:"version"`
-	Kind    string    `json:"kind" yaml:"kind"`
+	Version Version   `json:"version" yaml:"version"`
+	Kind    Kind      `json:"kind" yaml:"kind"`
 	Name    string    `json:"name" yaml:"name"`
 	Spec    yaml.Node `json:"spec" yaml:"spec"`
 }
@@ -57,13 +58,39 @@ type MockHttpReq struct {
 }
 
 type MockHttpResp struct {
-	StatusCode int               `json:"status_code" yaml:"status_code"` // e.g. 200
-	Header     map[string]string `json:"header" yaml:"header"`
-	Body       string            `json:"body" yaml:"body"`
-	StatusMessage string  		`json:"status_message" yaml:"status_message"`
-	ProtoMajor int 				`json:"proto_major" yaml:"proto_major"`
-	ProtoMinor int 				`json:"proto_minor" yaml:"proto_minor"`
+	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
+	Header        map[string]string `json:"header" yaml:"header"`
+	Body          string            `json:"body" yaml:"body"`
+	StatusMessage string            `json:"status_message" yaml:"status_message"`
+	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
+	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
 }
+
+type MockSQL struct {
+	Type  SqlOutputType `json:"type" yaml:"type"`
+	Table Table         `json:"table" yaml:"table"`
+	Int   int           `json:"int" yaml:"int"`
+}
+
+type Table struct {
+	Cols []SqlCol `json:"cols" yaml:"cols"`
+	Rows []string `json:"rows" yaml:"rows"`
+}
+
+type SqlCol struct {
+	Name string `json:"name" yaml:"name"`
+	Type string `json:"type" yaml:"type"`
+	// optional fields
+	Precision int `json:"precision" yaml:"precision"`
+	Scale     int `json:"scale" yaml:"scale"`
+}
+
+type SqlOutputType string
+
+const (
+	TableType SqlOutputType = "table"
+	IntType   SqlOutputType = "int"
+)
 
 type MockStore interface {
 	ReadAll(ctx context.Context, testCasePath, mockPath string) ([]TestCase, error)
