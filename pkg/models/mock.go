@@ -66,7 +66,7 @@ type MockHttpResp struct {
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
 }
 
-type MockSQL struct {
+type SQlSpec struct {
 	Type  SqlOutputType `json:"type" yaml:"type"`
 	Table Table         `json:"table" yaml:"table"`
 	Int   int           `json:"int" yaml:"int"`
