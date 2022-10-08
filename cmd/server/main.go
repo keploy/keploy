@@ -9,5 +9,5 @@ import (
 
 func main() {
 	// main method to start Keploy server
-	server.Server()
+	server.Server("")
 }
