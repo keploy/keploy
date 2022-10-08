@@ -35,7 +35,7 @@ COPY . .
 COPY --from=ui-builder /ui/public /app/web/public
 
 #RUN CGO_ENABLED=0 GOOS=linux go build -o health cmd/health/main.go
-RUN CGO_ENABLED=0 GOOS=linux go build -o keploy cmd/keploy-cli/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o keploy cmd/server/main.go
 
 # final stage
 FROM --platform=${BUILDPLATFORM} alpine

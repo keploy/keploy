@@ -1,13 +1,19 @@
 package main
 
 import (
+	"fmt"
+	"os"
 
-	// "log"
-	// "net/http"
-	"go.keploy.io/server/server"
+	"go.keploy.io/server/cmd/server/cmd"
 )
+
+// "log"
+// "net/http"
 
 func main() {
 	// main method to start Keploy server
-	server.Server("")
+	if err := cmd.RootCommand().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 }
