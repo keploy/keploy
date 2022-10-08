@@ -52,8 +52,7 @@ type config struct {
 	Port             string `envconfig:"PORT" default:"6789"`
 }
 
-func Server() *chi.Mux {
-
+func Server(overridePort string) *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
 
 	logConf := zap.NewDevelopmentConfig()
@@ -68,6 +67,10 @@ func Server() *chi.Mux {
 	err = envconfig.Process("keploy", &conf)
 	if err != nil {
 		logger.Error("failed to read/process configuration", zap.Error(err))
+	}
+
+	if overridePort != "" {
+		conf.Port = overridePort
 	}
 
 	if conf.EnableDebugger {
@@ -104,12 +107,10 @@ func Server() *chi.Mux {
 	// initialize the client serveri
 	r := chi.NewRouter()
 
-	port := conf.Port
-
 	k := keploy.New(keploy.Config{
 		App: keploy.AppConfig{
 			Name: conf.KeployApp,
-			Port: port,
+			Port: conf.Port,
 			Filter: keploy.Filter{
 				UrlRegex: "^/api",
 			},
@@ -152,7 +153,7 @@ func Server() *chi.Mux {
 
 	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
 
-	listener, err := net.Listen("tcp", ":"+port)
+	listener, err := net.Listen("tcp", ":"+conf.Port)
 
 	if err != nil {
 		panic(err)
@@ -163,7 +164,7 @@ func Server() *chi.Mux {
 
 	httpListener := m.Match(cmux.HTTP1Fast())
 
-	log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
+	log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", conf.Port)
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
