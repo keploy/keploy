@@ -149,8 +149,25 @@ message Mock {
     repeated string Mocks = 5;
     map<string, StrArr> Assertions = 6;
     int64 Created = 7;
+    // for sql
+    string Type = 8;
+    Table Table = 9;
+    int64 Int = 10;
   }
   SpecSchema Spec = 4;
+}
+
+message Table{
+  repeated SqlCol Cols = 1;
+  repeated string Rows = 2;
+}
+
+message SqlCol  {
+  string Name = 1;
+  string Type = 2;
+  //optional fields
+  int64 Precision = 3;
+  int64 Scale = 4;
 }
 
 message PutMockReq {

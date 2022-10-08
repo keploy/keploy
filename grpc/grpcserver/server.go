@@ -301,7 +301,8 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			tc[len(tc)-1].Name = m
 			mocks = append(mocks, m)
 		}
-		tc[0].Spec.Encode(&models.HttpSpec{
+
+		x:=&models.HttpSpec{
 			// Metadata: , TODO: What should be here
 			Created: request.Captured,
 			Request: models.MockHttpReq{
@@ -329,7 +330,10 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			Assertions: map[string][]string{
 				"noise": {}, // TODO: it should be popuplated after denoise
 			},
-		})
+		}
+		
+		tc[0].Spec.Encode(x)
+
 		inserted, err := srv.svc.WriteTC(ctx, tc, request.TestCasePath, request.MockPath)
 		if err != nil {
 			srv.logger.Error("error writing testcase to yaml file", zap.Error(err))

@@ -49,6 +49,25 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 		if err != nil {
 			return res, fmt.Errorf("failed to encode http spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
+
+	case string(models.SQL):
+		spec := models.SQlSpec{
+			Type: models.SqlOutputType(doc.Spec.Type),
+			Table: models.Table{
+				Cols: ToModelCols(doc.Spec.Table.Cols), //conversion to do
+				Rows: doc.Spec.Table.Rows,
+			},
+			Int: int(doc.Spec.Int),
+		}
+
+		for _, j := range doc.Spec.Table.Cols {
+			spec.Table.Cols = append(spec.Table.Cols, models.SqlCol{Name: j.Name,Type: j.Type,Precision: int(j.Precision),Scale: int(j.Scale)})
+		}
+		err := res.Spec.Encode(&spec)
+		if err != nil {
+			return res, fmt.Errorf("failed to encode sql spec for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+
 	case string(models.GENERIC):
 		err := res.Spec.Encode(&models.GenericSpec{
 			Metadata: doc.Spec.Metadata,
@@ -63,6 +82,32 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 	return res, nil
 }
 
+func ToModelCols(cols []*proto.SqlCol) []models.SqlCol {
+	res := []models.SqlCol{}
+	for _, j := range cols {
+		res = append(res, models.SqlCol{
+			Name:      j.Name,
+			Type:      j.Type,
+			Precision: int(j.Precision),
+			Scale:     int(j.Scale),
+		})
+	}
+	return res
+}
+
+func toProtoCols(cols []models.SqlCol) ([]*proto.SqlCol, error) {
+	res := []*proto.SqlCol{}
+	for _, j := range cols {
+
+		res = append(res, &proto.SqlCol{
+			Name:      j.Name,
+			Type:      j.Type,
+			Precision: int64(j.Precision),
+			Scale:     int64(j.Scale),
+		})
+	}
+	return res, nil
+}
 func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 	res := []models.Object{}
 	for _, j := range objs {
@@ -133,6 +178,31 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					Data: []byte(j.Data),
 				})
 			}
+
+		case models.SQL:
+			spec := &models.SQlSpec{}
+			err := j.Spec.Decode(spec)
+			if err != nil {
+				return res, fmt.Errorf("failed to decode the sql spec of mock with name: %s.  error: %s", j.Name, err.Error())
+			}
+			cols, err := toProtoCols(spec.Table.Cols)
+			mock.Spec = &proto.Mock_SpecSchema{
+				Type: string(spec.Type),
+				Table: &proto.Table{
+					Cols: cols, //mock.Spec.Table.Cols, //verify this
+					Rows: spec.Table.Rows,
+				},
+				Int: int64(spec.Int),
+			}
+			for _, j := range spec.Table.Cols {
+				mock.Spec.Table.Cols = append(mock.Spec.Table.Cols, &proto.SqlCol{
+					Name: j.Name,
+					Type: j.Type,
+					Precision: int64(j.Precision),
+					Scale: int64(j.Scale),
+				})
+			}
+
 		case models.GENERIC:
 			spec := &models.GenericSpec{}
 			err := j.Spec.Decode(spec)
