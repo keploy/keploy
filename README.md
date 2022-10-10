@@ -84,6 +84,9 @@ curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/d
 
 sudo mv /tmp/keploy /usr/local/bin
 ```
+Note: Alternatively, You may try
+`docker-compose pull`
+`docker-compose up --build`
 
 The UI can be accessed at http://localhost:6789
 
