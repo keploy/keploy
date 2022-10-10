@@ -74,15 +74,23 @@ docker container run -it -p27017:27017 mongo
 ```shell
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
 
-sudo mv /tmp/keploy /usr/local/bin
+sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 
-### Linux 
+### Linux
 ```shell
-curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/keploy_linux_$(uname -m).tar.gz" | tar xz -C /tmp
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
 
-sudo mv /tmp/keploy /usr/local/bin
+sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+
+### Linux ARM
+```shell
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+
+
+sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 
 The UI can be accessed at http://localhost:6789
