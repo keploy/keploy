@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewMockService(store models.MockStore, log *zap.Logger) *Mock {
+func NewMockService(store models.FileStore, log *zap.Logger) *Mock {
 	return &Mock{
 		log:   log,
 		store: store,
@@ -18,7 +18,7 @@ func NewMockService(store models.MockStore, log *zap.Logger) *Mock {
 
 type Mock struct {
 	log   *zap.Logger
-	store models.MockStore
+	store models.FileStore
 }
 
 func (m *Mock) FileExists(ctx context.Context, path string) bool {

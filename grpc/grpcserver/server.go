@@ -27,19 +27,20 @@ import (
 )
 
 type Server struct {
-	logger     *zap.Logger
-	testExport bool
-	svc        regression2.Service
-	run        run.Service
-	mock       mock.Service
+	logger         *zap.Logger
+	testExport     bool
+	testReportPath string
+	svc            regression2.Service
+	run            run.Service
+	mock           mock.Service
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, listener net.Listener, testExport bool) error {
+func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, listener net.Listener, testExport bool, testReportPath string) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer()
-	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport})
+	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
@@ -92,20 +93,23 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 }
 
 func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.EndResponse, error) {
-	stat := run.TestRunStatusFailed
+	stat := models.TestRunStatusFailed
 	id := request.Id
 	if request.Status == "true" {
-		stat = run.TestRunStatusPassed
+		stat = models.TestRunStatusPassed
 	}
 	now := time.Now().Unix()
 	if srv.testExport {
-		srv.svc.StopTestRun(ctx, id)
+		err := srv.svc.StopTestRun(ctx, id, srv.testReportPath)
+		if err != nil {
+			return &proto.EndResponse{Message: err.Error()}, nil
+		}
 	}
 	err := srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
-	})
+	}, srv.testExport, srv.testReportPath)
 	if err != nil {
 		return &proto.EndResponse{Message: err.Error()}, nil
 	}
@@ -125,18 +129,21 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	id := uuid.New().String()
 	now := time.Now().Unix()
 	if srv.testExport {
-		srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath)
+		err = srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath, srv.testReportPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	err = srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,
-		Status:  run.TestRunStatusRunning,
+		Status:  models.TestRunStatusRunning,
 		CID:     graph.DEFAULT_COMPANY,
 		App:     app,
 		User:    graph.DEFAULT_USER,
 		Total:   total,
-	})
+	}, srv.testExport, srv.testReportPath)
 	if err != nil {
 		return nil, err
 	}

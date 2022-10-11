@@ -28,7 +28,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool, store models.MockStore) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool, store models.FileStore) *Regression {
 	return &Regression{
 		yamlTcs:     sync.Map{},
 		tdb:         tdb,
@@ -51,7 +51,7 @@ type Regression struct {
 	tdb        models.TestCaseDB
 	tele       telemetry.Service
 	rdb        run.DB
-	store      models.MockStore
+	store      models.FileStore
 	testExport bool
 	client     http.Client
 	log        *zap.Logger
@@ -119,14 +119,15 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 	return tcs, nil
 }
 
-func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath string) {
+func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		return
+		r.log.Error("file path should be absolute to read and write testcases and their mocks", zap.String("testcase path", testCasePath), zap.String("mock path", mockPath))
+		return fmt.Errorf("file path should be absolute")
 	}
 	tcs, err := r.store.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
-		r.log.Error(err.Error())
-		return
+		r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", testCasePath), zap.String("mock path", mockPath), zap.Error(err))
+		return err
 	}
 
 	tcsMap := sync.Map{}
@@ -134,6 +135,12 @@ func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mock
 		tcsMap.Store(j.ID, j)
 	}
 	r.yamlTcs.Store(runId, tcsMap)
+	err = r.store.WriteTestReport(ctx, testReportPath, models.TestReport{Name: runId, Total: len(tcs), Status: string(models.TestRunStatusRunning)})
+	if err != nil {
+		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
@@ -147,8 +154,31 @@ func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string)
 	return res, err
 }
 
-func (r *Regression) StopTestRun(ctx context.Context, runId string) {
+func (r *Regression) StopTestRun(ctx context.Context, runId, testReportPath string) error {
 	r.yamlTcs.Delete(runId)
+	testResults, err := r.store.GetTestResults(runId)
+	if err != nil {
+		r.log.Error(err.Error())
+	}
+	var (
+		success = 0
+		failure = 0
+		status  = models.TestRunStatusPassed
+	)
+	for _, j := range testResults {
+		if j.Status == models.TestStatusPassed {
+			success++
+		} else if j.Status == models.TestStatusFailed {
+			failure++
+			status = models.TestRunStatusFailed
+		}
+	}
+	err = r.store.WriteTestReport(ctx, testReportPath, models.TestReport{Name: runId, Total: len(testResults), Status: string(status), Tests: testResults, Success: success, Failure: failure})
+	if err != nil {
+		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
@@ -242,7 +272,7 @@ func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePa
 	return []string{test[0].Name}, nil
 }
 
-func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp, testCasePath, mockPath string) (bool, *run.Result, *models.TestCase, error) {
+func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
 		err error
@@ -271,20 +301,20 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			return false, nil, nil, err
 		}
 	}
-	bodyType := run.BodyTypePlain
+	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(resp.Body)) {
-		bodyType = run.BodyTypeJSON
+		bodyType = models.BodyTypeJSON
 	}
 	pass := true
-	hRes := &[]run.HeaderResult{}
+	hRes := &[]models.HeaderResult{}
 
-	res := &run.Result{
-		StatusCode: run.IntResult{
+	res := &models.Result{
+		StatusCode: models.IntResult{
 			Normal:   false,
 			Expected: tc.HttpResp.StatusCode,
 			Actual:   resp.StatusCode,
 		},
-		BodyResult: run.BodyResult{
+		BodyResult: models.BodyResult{
 			Normal:   false,
 			Type:     bodyType,
 			Expected: tc.HttpResp.Body,
@@ -312,7 +342,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 	}
 
-	if !pkg.Contains(tc.Noise, "body") && bodyType == run.BodyTypeJSON {
+	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
 		pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 		if err != nil {
 			return false, res, &tc, err
@@ -408,7 +438,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
-	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp, testCasePath, mockPath)
+	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp)
 	if tc != nil {
 		t = &run.Test{
 			ID:         uuid.New().String(),
@@ -425,21 +455,58 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 	}
 	t.Completed = time.Now().UTC().Unix()
 	defer func() {
-		err2 := r.saveResult(ctx, t)
-		if err2 != nil {
-			r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+		if r.testExport {
+			mockIds := []string{}
+			for i := 0; i < len(tc.Mocks); i++ {
+				mockIds = append(mockIds, tc.Mocks[i].Name)
+			}
+			// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
+			r.store.SetTestResult(runID, models.TestResult{
+				Name:       runID,
+				Status:     t.Status,
+				Started:    t.Started,
+				Completed:  t.Completed,
+				TestCaseID: id,
+				Req: models.MockHttpReq{
+					Method:     t.Req.Method,
+					ProtoMajor: t.Req.ProtoMajor,
+					ProtoMinor: t.Req.ProtoMinor,
+					URL:        t.Req.URL,
+					URLParams:  t.Req.URLParams,
+					Header:     grpcMock.ToMockHeader(t.Req.Header),
+					Body:       t.Req.Body,
+				},
+				Res: models.MockHttpResp{
+					StatusCode:    t.Resp.StatusCode,
+					Header:        grpcMock.ToMockHeader(t.Resp.Header),
+					Body:          t.Resp.Body,
+					StatusMessage: t.Resp.StatusMessage,
+					ProtoMajor:    t.Resp.ProtoMajor,
+					ProtoMinor:    t.Resp.ProtoMinor,
+				},
+				Mocks:        mockIds,
+				TestCasePath: testCasePath,
+				MockPath:     mockPath,
+				Noise:        tc.Noise,
+				Result:       *res,
+			})
+		} else {
+			err2 := r.saveResult(ctx, t)
+			if err2 != nil {
+				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+			}
 		}
 	}()
 
 	if err != nil {
 		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
-		t.Status = run.TestStatusFailed
+		t.Status = models.TestStatusFailed
 	}
 	if ok {
-		t.Status = run.TestStatusPassed
+		t.Status = models.TestStatusPassed
 		return ok, nil
 	}
-	t.Status = run.TestStatusFailed
+	t.Status = models.TestStatusFailed
 	return false, nil
 }
 
@@ -448,7 +515,7 @@ func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 	if err != nil {
 		return err
 	}
-	if t.Status == run.TestStatusFailed {
+	if t.Status == models.TestStatusFailed {
 		err = r.rdb.Increment(ctx, false, true, t.RunID)
 	} else {
 		err = r.rdb.Increment(ctx, true, false, t.RunID)

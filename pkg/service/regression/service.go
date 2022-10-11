@@ -18,6 +18,6 @@ type Service interface {
 	DeleteTC(ctx context.Context, cid, id string) error
 	WriteTC(ctx context.Context, t []models.Mock, testCasePath, mockPath string) ([]string, error)
 	ReadTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error)
-	StartTestRun(ctx context.Context, runId, testCasePath, mockPath string)
-	StopTestRun(ctx context.Context, runId string)
+	StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error
+	StopTestRun(ctx context.Context, runId, testReportPath string) error
 }

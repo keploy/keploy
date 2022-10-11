@@ -19,8 +19,8 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, testExport bool) {
-	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport}
+func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, testExport bool, testReportPath string) {
+	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport, testReportPath: testReportPath}
 
 	r.Route("/regression", func(r chi.Router) {
 		r.Route("/testcase", func(r chi.Router) {
@@ -38,30 +38,39 @@ func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Serv
 }
 
 type regression struct {
-	testExport bool
-	logger     *zap.Logger
-	svc        regression2.Service
-	run        run.Service
+	testExport     bool
+	testReportPath string
+	logger         *zap.Logger
+	svc            regression2.Service
+	run            run.Service
 }
 
 func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
-	status := run.TestRunStatus(r.URL.Query().Get("status"))
-	stat := run.TestRunStatusFailed
+	status := models.TestRunStatus(r.URL.Query().Get("status"))
+	stat := models.TestRunStatusFailed
 	if status == "true" {
-		stat = run.TestRunStatusPassed
+		stat = models.TestRunStatusPassed
 	}
 
-	now := time.Now().Unix()
+	var (
+		err error
+		now = time.Now().Unix()
+	)
 
 	if rg.testExport {
-		rg.svc.StopTestRun(r.Context(), id)
+		err := rg.svc.StopTestRun(r.Context(), id, rg.testReportPath)
+		if err != nil {
+			render.Render(w, r, ErrInvalidRequest(err))
+			return
+		}
 	}
-	err := rg.run.Put(r.Context(), run.TestRun{
+	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
-	})
+	}, rg.testExport, rg.testReportPath)
+
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -91,20 +100,24 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 
 	// user := "default"
 	if rg.testExport {
-		rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
+		err = rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath, rg.testReportPath)
+		if err != nil {
+			render.Render(w, r, ErrInvalidRequest(err))
+			return
+		}
 	}
 	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,
-		Status:  run.TestRunStatusRunning,
+		Status:  models.TestRunStatusRunning,
 		CID:     graph.DEFAULT_COMPANY,
 		App:     app,
 		User:    graph.DEFAULT_USER,
 		Total:   total,
-	})
+	}, rg.testExport, rg.testReportPath)
 	if err != nil {
-		render.Status(r, http.StatusInternalServerError)
+		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
 	render.Status(r, http.StatusOK)
