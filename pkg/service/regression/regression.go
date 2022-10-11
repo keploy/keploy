@@ -121,12 +121,12 @@ func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.Tes
 
 func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		r.log.Error("file path should be absolute to read and write testcases and their mocks", zap.String("testcase path", testCasePath), zap.String("mock path", mockPath))
+		r.log.Error("file path should be absolute to read and write testcases and their mocks", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)))
 		return fmt.Errorf("file path should be absolute")
 	}
 	tcs, err := r.store.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
-		r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", testCasePath), zap.String("mock path", mockPath), zap.Error(err))
+		r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)), zap.Error(err))
 		return err
 	}
 
