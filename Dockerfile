@@ -11,7 +11,7 @@ WORKDIR /ui
 
 RUN npm install
 
-RUN gatsby build
+RUN PATH_PREFIX='/' gatsby build --prefix-paths
 
 # build stage
 FROM --platform=${BUILDPLATFORM} golang:alpine as go-builder
