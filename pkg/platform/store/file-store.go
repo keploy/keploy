@@ -107,6 +107,9 @@ func (fe *mockExport) ReadTestReport(ctx context.Context, path, name string) (mo
 	if !pkg.IsValidPath(path) {
 		return models.TestReport{}, fmt.Errorf("file path should be absolute. got test report path: %s and its name: %s", pkg.SanitiseInput(path), pkg.SanitiseInput(name))
 	}
+	if strings.Contains(name, "/") {
+		return models.TestReport{}, errors.New("invalid name for test-report. It should not include any slashes")
+	}
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return models.TestReport{}, err
@@ -129,6 +132,9 @@ func (fe *mockExport) WriteTestReport(ctx context.Context, path string, doc mode
 	_, err := createMockFile(path, doc.Name)
 	if err != nil {
 		return err
+	}
+	if strings.Contains(doc.Name, "/") {
+		return errors.New("invalid name for test-report. It should not include any slashes")
 	}
 
 	data := []byte{}
