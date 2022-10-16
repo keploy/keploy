@@ -7,6 +7,7 @@ import (
 	"go.keploy.io/server/server"
 )
 
+// Version will be injected during go build with ldflag
 var Version = ""
 
 func main() {
