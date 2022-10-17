@@ -60,9 +60,9 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 			Int: int(doc.Spec.Int),
 		}
 
-		for _, j := range doc.Spec.Table.Cols {
-			spec.Table.Cols = append(spec.Table.Cols, models.SqlCol{Name: j.Name,Type: j.Type,Precision: int(j.Precision),Scale: int(j.Scale)})
-		}
+		// for _, j := range doc.Spec.Table.Cols {
+		// 	spec.Table.Cols = append(spec.Table.Cols, models.SqlCol{Name: j.Name,Type: j.Type,Precision: int(j.Precision),Scale: int(j.Scale)})
+		// }
 		err := res.Spec.Encode(&spec)
 		if err != nil {
 			return res, fmt.Errorf("failed to encode sql spec for mock with name: %s.  error: %s", doc.Name, err.Error())

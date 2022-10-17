@@ -101,7 +101,7 @@ func Server() *chi.Mux {
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
 
-	// initialize the client serveri
+	// initialize the client server
 	r := chi.NewRouter()
 
 	port := conf.Port
