@@ -49,7 +49,7 @@ type Regression struct {
 
 func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		r.log.Error("file path should be absolute to read and write testcases and their mocks", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)))
+		r.log.Error("file path should be absolute to read and write testcases and their mocks")
 		return fmt.Errorf("file path should be absolute")
 	}
 	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)

@@ -49,7 +49,7 @@ func (fe *testReport) Read(ctx context.Context, path, name string) (models.TestR
 	if !pkg.IsValidPath(path) {
 		return models.TestReport{}, fmt.Errorf("file path should be absolute. got test report path: %s and its name: %s", pkg.SanitiseInput(path), pkg.SanitiseInput(name))
 	}
-	if strings.Contains(name, "/") {
+	if strings.Contains(name, "/") || !pkg.IsValidPath(name) {
 		return models.TestReport{}, errors.New("invalid name for test-report. It should not include any slashes")
 	}
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
@@ -70,13 +70,13 @@ func (fe *testReport) Write(ctx context.Context, path string, doc models.TestRep
 	if fe.isTestMode {
 		return nil
 	}
+	if strings.Contains(doc.Name, "/") || !pkg.IsValidPath(doc.Name) {
+		return errors.New("invalid name for test-report. It should not include any slashes")
+	}
 
 	_, err := createMockFile(path, doc.Name)
 	if err != nil {
 		return err
-	}
-	if strings.Contains(doc.Name, "/") {
-		return errors.New("invalid name for test-report. It should not include any slashes")
 	}
 
 	data := []byte{}
