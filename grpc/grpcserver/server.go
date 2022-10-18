@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	tcSvc "go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -31,16 +32,17 @@ type Server struct {
 	testExport     bool
 	testReportPath string
 	svc            regression2.Service
+	tcSvc          tcSvc.Service
 	run            run.Service
 	mock           mock.Service
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, listener net.Listener, testExport bool, testReportPath string) error {
+func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer()
-	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath})
+	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath, tcSvc: tc})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
@@ -217,7 +219,7 @@ func (srv *Server) GetTC(ctx context.Context, request *proto.GetTCRequest) (*pro
 	id := request.Id
 	app := request.App
 	// print(tcs)
-	tcs, err := srv.svc.Get(ctx, graph.DEFAULT_COMPANY, app, id)
+	tcs, err := srv.tcSvc.Get(ctx, graph.DEFAULT_COMPANY, app, id)
 	if err != nil {
 		return nil, err
 	}
@@ -257,12 +259,12 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 
 	switch srv.testExport {
 	case false:
-		tcs, err = srv.svc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit)
+		tcs, err = srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit)
 		if err != nil {
 			return nil, err
 		}
 	case true:
-		tcs, err = srv.svc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
+		tcs, err = srv.tcSvc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
 		if err != nil {
 			return nil, err
 		}
@@ -337,7 +339,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 				"noise": {}, // TODO: it should be popuplated after denoise
 			},
 		})
-		inserted, err := srv.svc.WriteTC(ctx, tc, request.TestCasePath, request.MockPath)
+		inserted, err := srv.tcSvc.WriteTC(ctx, tc, request.TestCasePath, request.MockPath)
 		if err != nil {
 			srv.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			return nil, err
@@ -361,7 +363,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		})
 	}
 	now := time.Now().UTC().Unix()
-	inserted, err := srv.svc.Put(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
+	inserted, err := srv.tcSvc.Put(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,

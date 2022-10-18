@@ -1,5 +1,14 @@
 package models
 
+import "context"
+
+type TestReportFS interface {
+	Write(ctx context.Context, path string, doc TestReport) error
+	Read(ctx context.Context, path, name string) (TestReport, error)
+	SetResult(runId string, test TestResult)
+	GetResults(runId string) ([]TestResult, error)
+}
+
 type TestReport struct {
 	Name    string       `json:"name" yaml:"name"`
 	Status  string       `json:"status" yaml:"status"`

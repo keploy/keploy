@@ -12,25 +12,25 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service, cl http.Client, store models.FileStore) *Run {
+func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service, cl http.Client, testReportFS models.TestReportFS) *Run {
 	return &Run{
-		tele:   adb,
-		rdb:    rdb,
-		tdb:    tdb,
-		client: cl,
-		log:    log,
-		store:  store,
+		tele:         adb,
+		rdb:          rdb,
+		tdb:          tdb,
+		client:       cl,
+		log:          log,
+		testReportFS: testReportFS,
 	}
 }
 
 type Run struct {
-	tele     telemetry.Service
-	runCount int
-	store    models.FileStore
-	rdb      DB
-	tdb      models.TestCaseDB
-	client   http.Client
-	log      *zap.Logger
+	tele         telemetry.Service
+	runCount     int
+	testReportFS models.TestReportFS
+	rdb          DB
+	tdb          models.TestCaseDB
+	client       http.Client
+	log          *zap.Logger
 }
 
 func (r *Run) Normalize(ctx context.Context, cid, id string) error {
@@ -174,12 +174,12 @@ func (r *Run) Put(ctx context.Context, run TestRun, testExport bool, testReportP
 		)
 		if testExport {
 			res := models.TestReport{}
-			res, err = r.store.ReadTestReport(ctx, testReportPath, run.ID)
+			res, err = r.testReportFS.Read(ctx, testReportPath, run.ID)
 			total = res.Total
 			success = res.Success
 			failure = res.Failure
 		} else {
-			res := &TestRun{}
+			var res *TestRun
 			res, err = r.rdb.ReadOne(ctx, run.ID)
 			total = res.Total
 			success = res.Success

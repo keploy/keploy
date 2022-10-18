@@ -24,13 +24,14 @@ import (
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
+	mockPlatform "go.keploy.io/server/pkg/platform/fileStore"
 	"go.keploy.io/server/pkg/platform/mgo"
-	mockPlatform "go.keploy.io/server/pkg/platform/store"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	mock2 "go.keploy.io/server/pkg/service/browserMock"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/pkg/service/testCase"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -103,21 +104,24 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	fileStore := mockPlatform.NewMockExport(keploy.GetMode() == keploy.MODE_TEST)
+	mockFS := mockPlatform.NewMockExport(keploy.GetMode() == keploy.MODE_TEST)
+	testReportFS := mockPlatform.NewTestReportFS(keploy.GetMode() == keploy.MODE_TEST)
+	teleFS := mockPlatform.NewTeleFS()
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
 	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, fileStore, logger)
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger)
 
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, fileStore)
-	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, fileStore)
-	mockSrv := mock.NewMockService(fileStore, logger)
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableTestExport, mockFS, testReportFS)
+	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
+	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
+	mockSrv := mock.NewMockService(mockFS, logger)
 
-	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
+	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv, tcSvc)}))
 
 	// initialize the client serveri
 	r := chi.NewRouter()
@@ -161,7 +165,7 @@ func Server() *chi.Mux {
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
-		regression.New(r, logger, regSrv, runSrv, conf.EnableTestExport, conf.ReportPath)
+		regression.New(r, logger, regSrv, runSrv, tcSvc, conf.EnableTestExport, conf.ReportPath)
 		browserMock.New(r, logger, browserMockSrv)
 
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
@@ -185,7 +189,7 @@ func Server() *chi.Mux {
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(logger, regSrv, runSrv, mockSrv, grpcListener, conf.EnableTestExport, conf.ReportPath)
+		return grpcserver.New(logger, regSrv, runSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
 	})
 
 	g.Go(func() error {

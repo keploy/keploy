@@ -65,16 +65,16 @@ type MockHttpResp struct {
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
 }
 
-type FileStore interface {
+type MockFS interface {
 	ReadAll(ctx context.Context, testCasePath, mockPath string) ([]TestCase, error)
 	Read(ctx context.Context, path, name string, libMode bool) ([]Mock, error)
 	Write(ctx context.Context, path string, doc Mock) error
 	WriteAll(ctx context.Context, path, fileName string, docs []Mock) error
 	Exists(ctx context.Context, path string) bool
-	WriteTestReport(ctx context.Context, path string, doc TestReport) error
-	SetTestResult(runId string, test TestResult)
-	GetTestResults(runId string) ([]TestResult, error)
-	ReadTestReport(ctx context.Context, path, name string) (TestReport, error)
-	GetInstallationID() (string, error)
-	SetInstallationID(string) error
+	// WriteTestReport(ctx context.Context, path string, doc TestReport) error
+	// SetTestResult(runId string, test TestResult)
+	// GetTestResults(runId string) ([]TestResult, error)
+	// ReadTestReport(ctx context.Context, path, name string) (TestReport, error)
+	// GetInstallationID() (string, error)
+	// SetInstallationID(string) error
 }

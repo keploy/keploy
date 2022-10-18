@@ -3,13 +3,11 @@ package regression
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,101 +20,31 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/run"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool, store models.FileStore) *Regression {
+func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, TestExport bool, mFS models.MockFS, tFS models.TestReportFS) *Regression {
 	return &Regression{
-		yamlTcs:     sync.Map{},
-		tdb:         tdb,
-		tele:        adb,
-		log:         log,
-		rdb:         rdb,
-		store:       store,
-		testExport:  TestExport,
-		client:      client,
-		mu:          sync.Mutex{},
-		anchors:     map[string][]map[string][]string{},
-		noisyFields: map[string]map[string]bool{},
-		fieldCounts: map[string]map[string]map[string]int{},
-		EnableDeDup: EnableDeDup,
+		yamlTcs:      sync.Map{},
+		tdb:          tdb,
+		log:          log,
+		rdb:          rdb,
+		mockFS:       mFS,
+		testReportFS: tFS,
+		testExport:   TestExport,
 	}
 }
 
 type Regression struct {
-	yamlTcs    sync.Map
-	tdb        models.TestCaseDB
-	tele       telemetry.Service
-	rdb        run.DB
-	store      models.FileStore
-	testExport bool
-	client     http.Client
-	log        *zap.Logger
-	mu         sync.Mutex
-	appCount   int
-	// index is `cid-appID-uri`
-	//
-	// anchors is map[index][]map[key][]value or map[index]combinationOfAnchors
-	// anchors stores all the combinations of anchor fields for a particular index
-	// anchor field is a low variance field which is used in the deduplication algorithm.
-	// example: user-type or blood-group could be good anchor fields whereas timestamps
-	// and usernames are bad anchor fields.
-	// during deduplication only anchor fields are compared for new requests to determine whether its a duplicate or not.
-	// other fields are ignored.
-	anchors map[string][]map[string][]string
-	// noisyFields is map[index][key]bool
-	noisyFields map[string]map[string]bool
-	// fieldCounts is map[index][key][value]count
-	// fieldCounts stores the count of all values of a particular field in an index.
-	// eg: lets say field is bloodGroup then the value would be {A+: 20, B+: 10,...}
-	fieldCounts map[string]map[string]map[string]int
-	EnableDeDup bool
-}
-
-func (r *Regression) DeleteTC(ctx context.Context, cid, id string) error {
-	// reset cache
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, err := r.tdb.Get(ctx, cid, id)
-	if err != nil {
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.Error(err))
-		return errors.New("internal failure")
-	}
-	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
-	delete(r.anchors, index)
-	err = r.tdb.Delete(ctx, id)
-	if err != nil {
-		r.log.Error("failed to delete testcase from the DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-		return errors.New("internal failure")
-	}
-
-	r.tele.DeleteTc(r.client, ctx)
-	return nil
-}
-
-func (r *Regression) GetApps(ctx context.Context, cid string) ([]string, error) {
-	apps, err := r.tdb.GetApps(ctx, cid)
-	if apps != nil && len(apps) != r.appCount {
-		r.tele.GetApps(len(apps), r.client, ctx)
-		r.appCount = len(apps)
-	}
-	return apps, err
-}
-
-func (r *Regression) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
-	if r.testExport {
-		return models.TestCase{}, nil
-	}
-	tcs, err := r.tdb.Get(ctx, cid, id)
-	if err != nil {
-		sanitizedAppID := pkg.SanitiseInput(appID)
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
-		return models.TestCase{}, errors.New("internal failure")
-	}
-	return tcs, nil
+	yamlTcs      sync.Map
+	tdb          models.TestCaseDB
+	rdb          run.DB
+	mockFS       models.MockFS
+	testReportFS models.TestReportFS
+	testExport   bool
+	log          *zap.Logger
 }
 
 func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error {
@@ -124,7 +52,7 @@ func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mock
 		r.log.Error("file path should be absolute to read and write testcases and their mocks", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)))
 		return fmt.Errorf("file path should be absolute")
 	}
-	tcs, err := r.store.ReadAll(ctx, testCasePath, mockPath)
+	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
 		r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)), zap.Error(err))
 		return err
@@ -135,7 +63,7 @@ func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mock
 		tcsMap.Store(j.ID, j)
 	}
 	r.yamlTcs.Store(runId, tcsMap)
-	err = r.store.WriteTestReport(ctx, testReportPath, models.TestReport{Name: runId, Total: len(tcs), Status: string(models.TestRunStatusRunning)})
+	err = r.testReportFS.Write(ctx, testReportPath, models.TestReport{Name: runId, Total: len(tcs), Status: string(models.TestRunStatusRunning)})
 	if err != nil {
 		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
 		return err
@@ -143,20 +71,9 @@ func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mock
 	return nil
 }
 
-func (r *Regression) ReadTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
-	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
-	}
-	res, err := r.store.ReadAll(ctx, testCasePath, mockPath)
-	if err != nil {
-		r.log.Error(err.Error())
-	}
-	return res, err
-}
-
 func (r *Regression) StopTestRun(ctx context.Context, runId, testReportPath string) error {
 	r.yamlTcs.Delete(runId)
-	testResults, err := r.store.GetTestResults(runId)
+	testResults, err := r.testReportFS.GetResults(runId)
 	if err != nil {
 		r.log.Error(err.Error())
 	}
@@ -173,103 +90,12 @@ func (r *Regression) StopTestRun(ctx context.Context, runId, testReportPath stri
 			status = models.TestRunStatusFailed
 		}
 	}
-	err = r.store.WriteTestReport(ctx, testReportPath, models.TestReport{Name: runId, Total: len(testResults), Status: string(status), Tests: testResults, Success: success, Failure: failure})
+	err = r.testReportFS.Write(ctx, testReportPath, models.TestReport{Name: runId, Total: len(testResults), Status: string(status), Tests: testResults, Success: success, Failure: failure})
 	if err != nil {
 		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
 		return err
 	}
 	return nil
-}
-
-func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
-	off, lim := 0, 25
-	if offset != nil {
-		off = *offset
-	}
-	if limit != nil {
-		lim = *limit
-	}
-
-	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
-
-	if err != nil {
-		sanitizedAppID := pkg.SanitiseInput(appID)
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
-		return nil, errors.New("internal failure")
-	}
-	return tcs, nil
-}
-
-func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
-	for _, v := range t {
-		err := r.tdb.UpdateTC(ctx, v)
-		if err != nil {
-			r.log.Error("failed to insert testcase into DB", zap.String("appID", v.AppID), zap.Error(err))
-			return errors.New("internal failure")
-		}
-	}
-	r.tele.EditTc(r.client, ctx)
-	return nil
-}
-
-func (r *Regression) putTC(ctx context.Context, cid string, t models.TestCase) (string, error) {
-	t.CID = cid
-
-	var err error
-	if r.EnableDeDup {
-		// check if already exists
-		dup, err := r.isDup(ctx, &t)
-		if err != nil {
-			r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-			return "", errors.New("internal failure")
-		}
-		if dup {
-			r.log.Info("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.URI))
-			return "", nil
-		}
-	}
-	err = r.tdb.Upsert(ctx, t)
-	if err != nil {
-		r.log.Error("failed to insert testcase into DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-		return "", errors.New("internal failure")
-	}
-
-	return t.ID, nil
-}
-
-func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
-	var ids []string
-	if len(tcs) == 0 {
-		return ids, errors.New("no testcase to update")
-	}
-	for _, t := range tcs {
-		id, err := r.putTC(ctx, cid, t)
-		if err != nil {
-			msg := "failed saving testcase"
-			r.log.Error(msg, zap.Error(err), zap.String("cid", cid), zap.String("id", t.ID), zap.String("app", t.AppID))
-			return ids, errors.New(msg)
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
-
-func (r *Regression) WriteTC(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
-	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		return nil, fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
-	}
-	err := r.store.Write(ctx, testCasePath, test[0])
-	if err != nil {
-		r.log.Error(err.Error())
-	}
-
-	if len(test) > 1 {
-		err = r.store.WriteAll(ctx, mockPath, test[0].Name, test[1:])
-		if err != nil {
-			r.log.Error(err.Error())
-		}
-	}
-	return []string{test[0].Name}, nil
 }
 
 func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp) (bool, *models.Result, *models.TestCase, error) {
@@ -461,7 +287,7 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 				mockIds = append(mockIds, tc.Mocks[i].Name)
 			}
 			// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
-			r.store.SetTestResult(runID, models.TestResult{
+			r.testReportFS.SetResult(runID, models.TestResult{
 				Name:       runID,
 				Status:     t.Status,
 				Started:    t.Started,
@@ -528,7 +354,7 @@ func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 }
 
 func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h http.Header) error {
-	tcs, err := r.store.Read(ctx, path, id, false)
+	tcs, err := r.mockFS.Read(ctx, path, id, false)
 	if err != nil {
 		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
 		return err
@@ -728,165 +554,4 @@ func flatten(j interface{}) map[string][]string {
 		fmt.Println("found invalid value in json", j, x.Kind())
 	}
 	return o
-}
-
-func (r *Regression) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
-
-	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
-	_, ok1 := r.noisyFields[index]
-	_, ok2 := r.fieldCounts[index]
-	if ok1 && ok2 {
-		return index, nil
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// check again after the lock
-	_, ok1 = r.noisyFields[index]
-	_, ok2 = r.fieldCounts[index]
-
-	if !ok1 || !ok2 {
-		var anchors []map[string][]string
-		fieldCounts, noisyFields := map[string]map[string]int{}, map[string]bool{}
-		tcs, err := r.tdb.GetKeys(ctx, t.CID, t.AppID, t.URI)
-		if err != nil {
-			return "", err
-		}
-		for _, v := range tcs {
-			//var appAnchors map[string][]string
-			//for _, a := range v.Anchors {
-			//	appAnchors[a] = v.AllKeys[a]
-			//}
-			anchors = append(anchors, v.Anchors)
-			for k, v1 := range v.AllKeys {
-				if fieldCounts[k] == nil {
-					fieldCounts[k] = map[string]int{}
-				}
-				for _, v2 := range v1 {
-					fieldCounts[k][v2] = fieldCounts[k][v2] + 1
-				}
-				if !isAnchor(fieldCounts[k]) {
-					noisyFields[k] = true
-				}
-			}
-		}
-		r.fieldCounts[index], r.noisyFields[index], r.anchors[index] = fieldCounts, noisyFields, anchors
-	}
-	return index, nil
-}
-
-func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error) {
-
-	reqKeys := map[string][]string{}
-	filterKeys := map[string][]string{}
-
-	index, err := r.fillCache(ctx, t)
-	if err != nil {
-		return false, err
-	}
-
-	// add headers
-	for k, v := range t.HttpReq.Header {
-		reqKeys["header."+k] = []string{strings.Join(v, "")}
-	}
-
-	// add url params
-	for k, v := range t.HttpReq.URLParams {
-		reqKeys["url_params."+k] = []string{v}
-	}
-
-	// add body if it is a valid json
-	if json.Valid([]byte(t.HttpReq.Body)) {
-		var result interface{}
-
-		err = json.Unmarshal([]byte(t.HttpReq.Body), &result)
-		if err != nil {
-			return false, err
-		}
-		body := flatten(result)
-		for k, v := range body {
-			nk := "body"
-			if k != "" {
-				nk = nk + "." + k
-			}
-			reqKeys[nk] = v
-		}
-	}
-
-	isAnchorChange := true
-	for k, v := range reqKeys {
-		if !r.noisyFields[index][k] {
-			// update field count
-			for _, s := range v {
-				if _, ok := r.fieldCounts[index][k]; !ok {
-					r.fieldCounts[index][k] = map[string]int{}
-				}
-				r.fieldCounts[index][k][s] = r.fieldCounts[index][k][s] + 1
-			}
-			if !isAnchor(r.fieldCounts[index][k]) {
-				r.noisyFields[index][k] = true
-				isAnchorChange = true
-				continue
-			}
-			filterKeys[k] = v
-		}
-	}
-
-	if len(filterKeys) == 0 {
-		return true, nil
-	}
-	if isAnchorChange {
-		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, t.URI, filterKeys)
-		if err != nil {
-			return false, err
-		}
-	}
-
-	// check if testcase based on anchor keys already exists
-	dup, err := r.exists(ctx, filterKeys, index)
-	if err != nil {
-		return false, err
-	}
-
-	t.AllKeys = reqKeys
-	//var keys []string
-	//for k := range filterKeys {
-	//	keys = append(keys, k)
-	//}
-	t.Anchors = filterKeys
-	r.anchors[index] = append(r.anchors[index], filterKeys)
-
-	return dup, nil
-}
-
-func (r *Regression) exists(_ context.Context, anchors map[string][]string, index string) (bool, error) {
-	for _, v := range anchors {
-		sort.Strings(v)
-	}
-	for _, v := range r.anchors[index] {
-		if reflect.DeepEqual(v, anchors) {
-			return true, nil
-		}
-	}
-	return false, nil
-
-}
-
-func isAnchor(m map[string]int) bool {
-	totalCount := 0
-	for _, v := range m {
-		totalCount = totalCount + v
-	}
-	// if total values for that field is less than 20 then,
-	// the sample size is too small to know if its high variance.
-	if totalCount < 20 {
-		return true
-	}
-	// if the unique values are less than 40% of the total value count them,
-	// the field is low variant.
-	if float64(totalCount)*0.40 > float64(len(m)) {
-		return true
-	}
-	return false
 }

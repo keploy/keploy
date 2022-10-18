@@ -16,11 +16,12 @@ import (
 	"go.keploy.io/server/pkg/models"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	tcSvc "go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, testExport bool, testReportPath string) {
-	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport, testReportPath: testReportPath}
+func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, tc tcSvc.Service, testExport bool, testReportPath string) {
+	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport, testReportPath: testReportPath, tcSvc: tc}
 
 	r.Route("/regression", func(r chi.Router) {
 		r.Route("/testcase", func(r chi.Router) {
@@ -42,6 +43,7 @@ type regression struct {
 	testReportPath string
 	logger         *zap.Logger
 	svc            regression2.Service
+	tcSvc          tcSvc.Service
 	run            run.Service
 }
 
@@ -130,7 +132,7 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 func (rg *regression) GetTC(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	app := rg.getMeta(w, r, false)
-	tcs, err := rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
+	tcs, err := rg.tcSvc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -181,13 +183,13 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 
 	switch rg.testExport {
 	case false:
-		tcs, err = rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
+		tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
 		if err != nil {
 			render.Render(w, r, ErrInvalidRequest(err))
 			return
 		}
 	case true:
-		tcs, err = rg.svc.ReadTCS(r.Context(), testCasePath, mockPath)
+		tcs, err = rg.tcSvc.ReadTCS(r.Context(), testCasePath, mockPath)
 		if err != nil {
 			render.Render(w, r, ErrInvalidRequest(err))
 			return
@@ -260,7 +262,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 			},
 			Created: data.Captured,
 		})
-		inserted, err := rg.svc.WriteTC(r.Context(), tc, data.TestCasePath, data.MockPath)
+		inserted, err := rg.tcSvc.WriteTC(r.Context(), tc, data.TestCasePath, data.MockPath)
 		if err != nil {
 			rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			render.Render(w, r, ErrInvalidRequest(err))
@@ -270,7 +272,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, map[string]string{"id": inserted[0]})
 		return
 	}
-	inserted, err := rg.svc.Put(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
+	inserted, err := rg.tcSvc.Put(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,

@@ -17,11 +17,11 @@ type Telemetry struct {
 	OffMode        bool
 	logger         *zap.Logger
 	InstallationID string
-	store          models.FileStore
+	store          FS
 	testExport     bool
 }
 
-func NewTelemetry(col DB, enabled, offMode, testExport bool, store models.FileStore, logger *zap.Logger) *Telemetry {
+func NewTelemetry(col DB, enabled, offMode, testExport bool, store FS, logger *zap.Logger) *Telemetry {
 
 	tele := Telemetry{
 		Enabled:    enabled,
@@ -36,7 +36,6 @@ func NewTelemetry(col DB, enabled, offMode, testExport bool, store models.FileSt
 }
 
 func (ac *Telemetry) Ping(isTestMode bool) {
-
 	check := false
 	if !ac.Enabled {
 		return
@@ -52,7 +51,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 
 			if ac.Enabled && !isTestMode {
 				if ac.testExport {
-					id, _ := ac.store.GetInstallationID()
+					id, _ := ac.store.Get()
 					count = int64(len(id))
 				} else {
 					count, err = ac.db.Count()
@@ -85,7 +84,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 				}
 				ac.InstallationID = id
 				if ac.testExport {
-					ac.store.SetInstallationID(id)
+					ac.store.Set(id)
 				} else {
 					ac.db.Insert(id)
 				}
@@ -131,11 +130,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 		if ac.InstallationID == "" {
 			id := ""
 			if ac.testExport {
-				var err error
-				id, err = ac.store.GetInstallationID()
-				if err != nil {
-					ac.logger.Debug("")
-				}
+				id, _ = ac.store.Get()
 			} else {
 				id = ac.db.Find()
 			}
