@@ -20,6 +20,7 @@ fullnameOverride: ""
 env:
   KEPLOY_MODE: "off"
   KEPLOY_MONGO_URI: "mongodb://keploy-mongodb:27017"
+  KEPLOY_PATH_PREFIX: "/"
 #  CLUSTER_TABLE: "hybridk8s-cluster-regression"
 
 serviceAccount:
