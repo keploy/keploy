@@ -202,12 +202,14 @@ func (r *TestCase) WriteTC(ctx context.Context, test []models.Mock, testCasePath
 	if err != nil {
 		r.log.Error(err.Error())
 	}
+	r.log.Info(fmt.Sprint("\n💾 Recorded testcase with name: ", test[0].Name, " in yaml file at path: ", testCasePath, "\n"))
 
 	if len(test) > 1 {
 		err = r.mockFS.WriteAll(ctx, mockPath, test[0].Name, test[1:])
 		if err != nil {
 			r.log.Error(err.Error())
 		}
+		r.log.Info(fmt.Sprint("\n💾 Recorded mocks for testcase with name: ", test[0].Name, " at path: ", mockPath, "\n"))
 	}
 	return []string{test[0].Name}, nil
 }

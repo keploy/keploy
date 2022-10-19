@@ -71,10 +71,4 @@ type MockFS interface {
 	Write(ctx context.Context, path string, doc Mock) error
 	WriteAll(ctx context.Context, path, fileName string, docs []Mock) error
 	Exists(ctx context.Context, path string) bool
-	// WriteTestReport(ctx context.Context, path string, doc TestReport) error
-	// SetTestResult(runId string, test TestResult)
-	// GetTestResults(runId string) ([]TestResult, error)
-	// ReadTestReport(ctx context.Context, path, name string) (TestReport, error)
-	// GetInstallationID() (string, error)
-	// SetInstallationID(string) error
 }

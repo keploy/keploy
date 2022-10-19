@@ -54,7 +54,6 @@ func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.M
 		m.log.Error("failed to read then yaml file", zap.Any("error", err))
 		return nil, err
 	}
-	fmt.Println(" \n ", arr, "\n ' ")
 	MockPathStr := fmt.Sprint("\n✅ Mocks are read successfully from yaml file at path: ", path, "/", name, ".yaml", "\n")
 	m.log.Info(MockPathStr)
 
