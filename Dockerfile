@@ -11,7 +11,9 @@ WORKDIR /ui
 
 RUN npm install
 
-RUN PATH_PREFIX='/' gatsby build --prefix-paths
+ARG KEPLOY_PATH_PREFIX='/'
+
+RUN PATH_PREFIX="$KEPLOY_PATH_PREFIX" gatsby build --prefix-paths
 
 # build stage
 FROM --platform=${BUILDPLATFORM} golang:alpine as go-builder
