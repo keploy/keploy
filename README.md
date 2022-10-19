@@ -14,9 +14,9 @@
 
 
 # Keploy
-Keploy is a no-code API testing platform that generates tests-cases and data-mocks from API calls.
-
-Dependency-mocks are automatically generated with the recorded request/responses. 
+Keploy is a functional testing toolkit for developers. Currently, it can generate: 
+1. E2E tests for APIs (along with mocks) by recording real API calls. These test files can be imported as mocks for consumers and vice-versa. 
+2. Realistic mocks by capturing real calls and be imported and used anywhere (including any testing framework). These mocks can also be used as tests for the server.   
 
 > Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main)](https://coveralls.io/github/keploy/keploy?branch=main) &nbsp;  without writing any test-cases and data-mocks. 😎
 <a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
@@ -29,16 +29,19 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 [![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/keploy/samples-go)
 
 ## Features
-**Convert API calls from any source to Test-Case** : Keploy captures all the API calls and subsequent network traffic served by the application. You can use any existing API management tools like Postman, Hoppscotch, Curl to generate test-case.
+**Convert API calls from any source to Test-Cases**: Keploy captures all the API calls and subsequent network traffic served by the application. You can use any existing API management tools like Postman, Hoppscotch, Curl to generate test-case.
 
 * **Automatically Mocks Dependencies**
-* **Safely Replays all CRUD operations**
+* **Safely replays non-idempotent CRUD operations**
+* **Export tests and mocks and maintain alongside existing tests**
 
 <img src="https://github.com/keploy/docs/blob/main/static/gif/record-testcase.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
 
+**Common file for tests and mocks**: Server tests can be shared with client applications and be imported as mocks and vice versa. 
+
 **Native interoperability** with popular testing libraries like `go-test`. Code coverage will be reported with existing and Keploy recorded test cases and can also be integrated in CI pipelines/infrastructure.
 
-<img src="https://github.com/keploy/docs/blob/main/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
+[//]: # (<img src="https://github.com/keploy/docs/blob/main/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>)
 
 ## Other Features
 
@@ -56,13 +59,41 @@ Keploy is added as a middleware to your application that captures and replays al
 [Read more in detail](https://docs.keploy.io/docs/keploy-explained/how-keploy-works)
 
 
-## Installation
-### Start keploy server
+## Quickstart
+### Start MongoDB
+Spin up MongoDB to store the test-runs results
+
 ```shell
-git clone https://github.com/keploy/keploy.git && cd keploy
-docker-compose up
+docker container run -it -p27017:27017 mongo
 ```
-The UI can be accessed at http://localhost:8081
+
+> Note that Testcases are exported as files in the repo by default
+
+
+### MacOS 
+```shell
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
+
+sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+
+### Linux
+```shell
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+
+
+sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+
+### Linux ARM
+```shell
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+
+
+sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+
+The UI can be accessed at http://localhost:6789
 
 ### Helm chart
 Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
@@ -91,7 +122,7 @@ To genereate testcases we just need to make some API calls. You can use [Postman
 #### 1. Generate shortned url
 ```shell
 curl --request POST \
-  --url http://localhost:8080/url \
+  --url http://localhost:8082/url \
   --header 'content-type: application/json' \
   --data '{
   "url": "https://github.com"
@@ -101,18 +132,22 @@ this will return the shortened url. The ts would automatically be ignored during
 ```json
 {
 	"ts": 1647802058801841100,
-	"url": "http://localhost:8080/GuwHCgoQ"
+	"url": "http://localhost:8082/GuwHCgoQ"
 }
 ```
 #### 2. Redirect to original url from shortened url
 ```bash
 curl --request GET \
-  --url http://localhost:8080/GuwHCgoQ
+  --url http://localhost:8082/GuwHCgoQ
 ```
 
 ### Integration with native Go test framework
 You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
+
+Contents of `main_test.go`:
 ```go
+package main
+
 import (
 	"github.com/keploy/go-sdk/keploy"
 	"testing"
@@ -134,7 +169,37 @@ this should show you have 74.4% coverage without writing any code!
 ok      echo-psql-url-shortener 5.820s  coverage: 74.4% of statements in ./...
 ```
 
-All of these can be visualised here - http://localhost:8081/testlist
+All of these can be visualised here - http://localhost:6789/testlist
+
+## Keploy SDK Modes
+### SDK Modes
+**The Keploy SDKs modes can operated by setting `KEPLOY_MODE` environment variable**
+
+**Note: KEPLOY_MODE value is case sensitive**
+
+There are 3 Keploy SDK modes:
+
+1. **Off** : In the off mode the Keploy SDK will turn off all the functionality provided by the Keploy platform.
+
+```
+export KEPLOY_MODE="off"
+```
+2. **Record mode** :
+	* Record requests, response and all external calls and sends to Keploy server.
+	* After keploy server removes duplicates, it then runs the request on the API again to identify noisy fields.
+	* Sends the noisy fields to the keploy server to be saved along with the testcase.
+
+```
+export KEPLOY_MODE="record"
+```
+3. **Test mode** :
+	* Fetches testcases for the app from keploy server.
+	* Calls the API with same request payload in testcase.
+	* Mocks external calls based on data stored in the testcase.
+	* Validates the responses and uploads results to the keploy server
+```
+export KEPLOY_MODE="test"
+```
 
 ## Language Support
 - [x] [Go SDK](https://github.com/keploy/go-sdk)
@@ -143,6 +208,13 @@ All of these can be visualised here - http://localhost:8081/testlist
 - [ ] Python SDK - WIP [#58](https://github.com/keploy/keploy/issues/58)
 
 Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
+
+##  Current Limitations
+* **Async operations**: Currently Keploy stores dependencies in an array and expects them to be executed in the same order (FIFO). This means if the order of dependency execution changes (typical in async), keploy would likely throw an error. This is generally fine for E2E tests since the responses are generally unaffected. We plan to fix this by using a map instead in the future. 
+* **Unit Testing**: While Keploy is designed to run alongside unit testing frameworks (Go test, JUnit..) and can add to the overall code coverage, it still generates E2E tests. So it might be easier to write unit tests for some methods instead of E2E tests. 
+* **K8S CRDs** Keploy generates yamls for test and mocks which share a similar structure to K8s CRDs. However, they cannot be installed on kubernetes.
+* **Production usage** Keploy is currently focused on generating tests for developers. These tests can be captured from any environment, but we have not tested it on high volume production environments. This would need robust deduplication to avoid too many redundant tests being captured. We do have ideas on building a robust deduplication system [#27](https://github.com/keploy/keploy/issues/27) 
+* **De-noise requires mocking** Keploy issues a duplicate request and compares the responses with the previous responses to find "noisy" or non-deterministic fields. We have to ensure all non-idempotent dependencies are mocked/wrapped by Keploy to avoid unnecessary side effects in downstream services.  
 
 ## Resources
 🤔 [FAQs](https://docs.keploy.io/docs/keploy-explained/faq)

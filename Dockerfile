@@ -44,5 +44,5 @@ COPY --from=alpine /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=go-builder /app/keploy /app/
 COPY --from=go-builder /go/bin/dlv /
 
-EXPOSE 8081
+EXPOSE 6789
 ENTRYPOINT ["/app/keploy"]
