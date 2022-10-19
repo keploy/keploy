@@ -143,7 +143,11 @@ curl --request GET \
 
 ### Integration with native Go test framework
 You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
+
+Contents of `main_test.go`:
 ```go
+package main
+
 import (
 	"github.com/keploy/go-sdk/keploy"
 	"testing"
