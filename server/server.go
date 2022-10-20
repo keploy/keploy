@@ -50,6 +50,7 @@ type config struct {
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
 	Port             string `envconfig:"PORT" default:"6789"`
+	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
 }
 
 func Server(version string) *chi.Mux {
@@ -139,7 +140,7 @@ func Server(version string) *chi.Mux {
 		w.Write([]byte("ok"))
 	})
 
-	r.Handle("/*", web.Handler())
+	r.Handle("/*",  http.StripPrefix(conf.PathPrefix,web.Handler()))
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
