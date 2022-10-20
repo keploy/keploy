@@ -24,7 +24,7 @@ import (
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
-	mockPlatform "go.keploy.io/server/pkg/platform/fileStore"
+	mockPlatform "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	mock2 "go.keploy.io/server/pkg/service/browserMock"
@@ -104,7 +104,7 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	mockFS := mockPlatform.NewMockExport(keploy.GetMode() == keploy.MODE_TEST)
+	mockFS := mockPlatform.NewMockExportFS(keploy.GetMode() == keploy.MODE_TEST)
 	testReportFS := mockPlatform.NewTestReportFS(keploy.GetMode() == keploy.MODE_TEST)
 	teleFS := mockPlatform.NewTeleFS()
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)

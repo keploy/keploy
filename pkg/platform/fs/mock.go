@@ -1,4 +1,4 @@
-package fileStore
+package fs
 
 import (
 	"context"
@@ -23,7 +23,7 @@ type mockExport struct {
 	tests      sync.Map
 }
 
-func NewMockExport(isTestMode bool) *mockExport {
+func NewMockExportFS(isTestMode bool) *mockExport {
 	return &mockExport{
 		isTestMode: isTestMode,
 		tests:      sync.Map{},

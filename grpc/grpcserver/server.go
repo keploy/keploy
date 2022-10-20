@@ -257,19 +257,19 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		}
 	}
 
-	switch srv.testExport {
-	case false:
-		tcs, err = srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit)
-		if err != nil {
-			return nil, err
-		}
-	case true:
-		tcs, err = srv.tcSvc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
-		if err != nil {
-			return nil, err
-		}
-		eof = true
+	// switch srv.testExport {
+	// case false:
+	tcs, err = srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, request.TestCasePath, request.MockPath)
+	if err != nil {
+		return nil, err
 	}
+	// case true:
+	// 	tcs, err = srv.tcSvc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	eof = true
+	// }
 	var ptcs []*proto.TestCase
 	for i := 0; i < len(tcs); i++ {
 		ptc, err := getProtoTC(tcs[i])
@@ -339,7 +339,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 				"noise": {}, // TODO: it should be popuplated after denoise
 			},
 		})
-		inserted, err := srv.tcSvc.WriteTC(ctx, tc, request.TestCasePath, request.MockPath)
+		inserted, err := srv.tcSvc.WriteToYaml(ctx, tc, request.TestCasePath, request.MockPath)
 		if err != nil {
 			srv.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			return nil, err
@@ -363,7 +363,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		})
 	}
 	now := time.Now().UTC().Unix()
-	inserted, err := srv.tcSvc.Put(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
+	inserted, err := srv.tcSvc.InsertToDB(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,

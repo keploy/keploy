@@ -1,4 +1,4 @@
-package fileStore
+package fs
 
 import (
 	"context"

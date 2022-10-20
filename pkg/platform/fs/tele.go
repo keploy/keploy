@@ -1,4 +1,4 @@
-package fileStore
+package fs
 
 import (
 	"errors"
@@ -11,8 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// telemetryFS provides interface for create-read installationID for self-hosted keploy
-type telemetryFS struct{}
+// telemetry provides interface for create-read installationID for self-hosted keploy
+type telemetry struct{}
 
 func UserHomeDir() string {
 	if runtime.GOOS == "windows" {
@@ -25,11 +25,11 @@ func UserHomeDir() string {
 	return os.Getenv("HOME") + "/keploy-config"
 }
 
-func NewTeleFS() *telemetryFS {
-	return &telemetryFS{}
+func NewTeleFS() *telemetry {
+	return &telemetry{}
 }
 
-func (fs *telemetryFS) Get() (string, error) {
+func (fs *telemetry) Get() (string, error) {
 	var (
 		path = UserHomeDir()
 		id   = ""
@@ -52,7 +52,7 @@ func (fs *telemetryFS) Get() (string, error) {
 	return id, nil
 }
 
-func (fs *telemetryFS) Set(id string) error {
+func (fs *telemetry) Set(id string) error {
 	path := UserHomeDir()
 	createMockFile(path, "installation-id")
 

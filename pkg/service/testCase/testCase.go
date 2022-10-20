@@ -62,7 +62,7 @@ type TestCase struct {
 	EnableDeDup bool
 }
 
-func (r *TestCase) DeleteTC(ctx context.Context, cid, id string) error {
+func (r *TestCase) Delete(ctx context.Context, cid, id string) error {
 	// reset cache
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -120,13 +120,17 @@ func (r *TestCase) ReadTCS(ctx context.Context, testCasePath, mockPath string) (
 	return res, err
 }
 
-func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.TestCase, error) {
+func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int, testCasePath, mockPath string) ([]models.TestCase, error) {
 	off, lim := 0, 25
 	if offset != nil {
 		off = *offset
 	}
 	if limit != nil {
 		lim = *limit
+	}
+
+	if r.testExport && testCasePath != "" && mockPath != "" {
+		return r.ReadTCS(ctx, testCasePath, mockPath)
 	}
 
 	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
@@ -139,7 +143,7 @@ func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, l
 	return tcs, nil
 }
 
-func (r *TestCase) UpdateTC(ctx context.Context, t []models.TestCase) error {
+func (r *TestCase) Update(ctx context.Context, t []models.TestCase) error {
 	for _, v := range t {
 		err := r.tdb.UpdateTC(ctx, v)
 		if err != nil {
@@ -176,7 +180,7 @@ func (r *TestCase) putTC(ctx context.Context, cid string, t models.TestCase) (st
 	return t.ID, nil
 }
 
-func (r *TestCase) Put(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
+func (r *TestCase) InsertToDB(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
 	var ids []string
 	if len(tcs) == 0 {
 		return ids, errors.New("no testcase to update")
@@ -193,8 +197,8 @@ func (r *TestCase) Put(ctx context.Context, cid string, tcs []models.TestCase) (
 	return ids, nil
 }
 
-// WriteTC writes testcases into the path directory as yaml files. Note: dedup algo is not executed during testcase-export currently.
-func (r *TestCase) WriteTC(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
+// Write will write testcases into the path directory as yaml files. Note: dedup algo is not executed during testcase-export currently.
+func (r *TestCase) WriteToYaml(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
 	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}

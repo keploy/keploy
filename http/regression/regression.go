@@ -181,21 +181,21 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	switch rg.testExport {
-	case false:
-		tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
-		if err != nil {
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
-		}
-	case true:
-		tcs, err = rg.tcSvc.ReadTCS(r.Context(), testCasePath, mockPath)
-		if err != nil {
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
-		}
-		eof = true
+	// switch rg.testExport {
+	// case false:
+	tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
+	if err != nil {
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
 	}
+	// case true:
+	// 	tcs, err = rg.tcSvc.ReadTCS(r.Context(), testCasePath, mockPath)
+	// 	if err != nil {
+	// 		render.Render(w, r, ErrInvalidRequest(err))
+	// 		return
+	// 	}
+	// 	eof = true
+	// }
 	render.Status(r, http.StatusOK)
 	// In test-export, eof is true to stop the infinite for loop in sdk
 	w.Header().Set("EOF", fmt.Sprintf("%v", eof))
@@ -262,7 +262,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 			},
 			Created: data.Captured,
 		})
-		inserted, err := rg.tcSvc.WriteTC(r.Context(), tc, data.TestCasePath, data.MockPath)
+		inserted, err := rg.tcSvc.WriteToYaml(r.Context(), tc, data.TestCasePath, data.MockPath)
 		if err != nil {
 			rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			render.Render(w, r, ErrInvalidRequest(err))
@@ -272,7 +272,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, map[string]string{"id": inserted[0]})
 		return
 	}
-	inserted, err := rg.tcSvc.Put(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
+	inserted, err := rg.tcSvc.InsertToDB(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,
