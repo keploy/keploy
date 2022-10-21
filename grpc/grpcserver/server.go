@@ -21,25 +21,28 @@ import (
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	tcSvc "go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
 
 type Server struct {
-	logger     *zap.Logger
-	testExport bool
-	svc        regression2.Service
-	run        run.Service
-	mock       mock.Service
+	logger         *zap.Logger
+	testExport     bool
+	testReportPath string
+	svc            regression2.Service
+	tcSvc          tcSvc.Service
+	run            run.Service
+	mock           mock.Service
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, listener net.Listener, testExport bool) error {
+func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer()
-	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport})
+	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath, tcSvc: tc})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
@@ -92,20 +95,23 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 }
 
 func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.EndResponse, error) {
-	stat := run.TestRunStatusFailed
+	stat := models.TestRunStatusFailed
 	id := request.Id
 	if request.Status == "true" {
-		stat = run.TestRunStatusPassed
+		stat = models.TestRunStatusPassed
 	}
 	now := time.Now().Unix()
 	if srv.testExport {
-		srv.svc.StopTestRun(ctx, id)
+		err := srv.svc.StopTestRun(ctx, id, srv.testReportPath)
+		if err != nil {
+			return &proto.EndResponse{Message: err.Error()}, nil
+		}
 	}
 	err := srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
-	})
+	}, srv.testExport, srv.testReportPath)
 	if err != nil {
 		return &proto.EndResponse{Message: err.Error()}, nil
 	}
@@ -125,18 +131,21 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	id := uuid.New().String()
 	now := time.Now().Unix()
 	if srv.testExport {
-		srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath)
+		err = srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath, srv.testReportPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	err = srv.run.Put(ctx, run.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,
-		Status:  run.TestRunStatusRunning,
+		Status:  models.TestRunStatusRunning,
 		CID:     graph.DEFAULT_COMPANY,
 		App:     app,
 		User:    graph.DEFAULT_USER,
 		Total:   total,
-	})
+	}, srv.testExport, srv.testReportPath)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +219,7 @@ func (srv *Server) GetTC(ctx context.Context, request *proto.GetTCRequest) (*pro
 	id := request.Id
 	app := request.App
 	// print(tcs)
-	tcs, err := srv.svc.Get(ctx, graph.DEFAULT_COMPANY, app, id)
+	tcs, err := srv.tcSvc.Get(ctx, graph.DEFAULT_COMPANY, app, id)
 	if err != nil {
 		return nil, err
 	}
@@ -248,19 +257,19 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		}
 	}
 
-	switch srv.testExport {
-	case false:
-		tcs, err = srv.svc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit)
-		if err != nil {
-			return nil, err
-		}
-	case true:
-		tcs, err = srv.svc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
-		if err != nil {
-			return nil, err
-		}
-		eof = true
+	// switch srv.testExport {
+	// case false:
+	tcs, err = srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, request.TestCasePath, request.MockPath)
+	if err != nil {
+		return nil, err
 	}
+	// case true:
+	// 	tcs, err = srv.tcSvc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	eof = true
+	// }
 	var ptcs []*proto.TestCase
 	for i := 0; i < len(tcs); i++ {
 		ptc, err := getProtoTC(tcs[i])
@@ -330,7 +339,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 				"noise": {}, // TODO: it should be popuplated after denoise
 			},
 		})
-		inserted, err := srv.svc.WriteTC(ctx, tc, request.TestCasePath, request.MockPath)
+		inserted, err := srv.tcSvc.WriteToYaml(ctx, tc, request.TestCasePath, request.MockPath)
 		if err != nil {
 			srv.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			return nil, err
@@ -354,7 +363,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		})
 	}
 	now := time.Now().UTC().Unix()
-	inserted, err := srv.svc.Put(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
+	inserted, err := srv.tcSvc.InsertToDB(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,

@@ -12,23 +12,25 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service, cl http.Client) *Run {
+func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service, cl http.Client, testReportFS models.TestReportFS) *Run {
 	return &Run{
-		tele:   adb,
-		rdb:    rdb,
-		tdb:    tdb,
-		client: cl,
-		log:    log,
+		tele:         adb,
+		rdb:          rdb,
+		tdb:          tdb,
+		client:       cl,
+		log:          log,
+		testReportFS: testReportFS,
 	}
 }
 
 type Run struct {
-	tele     telemetry.Service
-	runCount int
-	rdb      DB
-	tdb      models.TestCaseDB
-	client   http.Client
-	log      *zap.Logger
+	tele         telemetry.Service
+	runCount     int
+	testReportFS models.TestReportFS
+	rdb          DB
+	tdb          models.TestCaseDB
+	client       http.Client
+	log          *zap.Logger
 }
 
 func (r *Run) Normalize(ctx context.Context, cid, id string) error {
@@ -94,7 +96,7 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 
 	for _, tr := range trs {
 
-		if tr.Status != TestRunStatusRunning {
+		if tr.Status != models.TestRunStatusRunning {
 			// r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
 			tests++
 			continue
@@ -133,7 +135,7 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 
 		for _, tr := range trs {
 
-			if tr.Status != TestRunStatusRunning {
+			if tr.Status != models.TestRunStatusRunning {
 
 				r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
 			}
@@ -148,7 +150,7 @@ func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error 
 	if diff < 5*time.Minute {
 		return nil
 	}
-	tr.Status = TestRunStatusFailed
+	tr.Status = models.TestRunStatusFailed
 	err2 := r.rdb.Upsert(ctx, *tr)
 	if err2 != nil {
 		msg := "failed validating and updating test run status"
@@ -159,20 +161,41 @@ func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error 
 
 }
 
-func (r *Run) Put(ctx context.Context, run TestRun) error {
-	if run.Status == TestRunStatusRunning {
+func (r *Run) Put(ctx context.Context, run TestRun, testExport bool, testReportPath string) error {
+	if run.Status == models.TestRunStatusRunning {
 		pp.SetColorScheme(models.PassingColorScheme)
 		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
 	} else {
-		res, err := r.rdb.ReadOne(ctx, run.ID)
+		var (
+			total   int
+			success int
+			failure int
+			err     error
+		)
+		if testExport {
+			res := models.TestReport{}
+			res, err = r.testReportFS.Read(ctx, testReportPath, run.ID)
+			total = res.Total
+			success = res.Success
+			failure = res.Failure
+		} else {
+			var res *TestRun
+			res, err = r.rdb.ReadOne(ctx, run.ID)
+			total = res.Total
+			success = res.Success
+			failure = res.Failure
+		}
 		if err == nil {
-			if run.Status == TestRunStatusFailed {
+			if run.Status == models.TestRunStatusFailed {
 				pp.SetColorScheme(models.FailingColorScheme)
 			} else {
 				pp.SetColorScheme(models.PassingColorScheme)
 			}
-			pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, res.Total, res.Success, res.Failure)
+			pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
 		}
+	}
+	if testExport {
+		return nil
 	}
 	return r.rdb.Upsert(ctx, run)
 }
