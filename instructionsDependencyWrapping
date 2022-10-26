@@ -1,0 +1,37 @@
+ \\Interacting with an API that just has static functions, and cannot be opened up and changed.
+
+    public class WindowsNativeGraphAPI
+    {
+        public static IEnumerable<IGraphData> GetGraphData();
+        public static bool DeleteGraphData(IGraphData data);
+    }
+    
+\\ would like to be able to pass the API into a function or constructor and comply with dependency injection (just in case we were to swap out the API later).
+
+public void GatherGraphData(IGraphAPI api)
+{...}
+
+\\To allow this API to be passed in as a parameter, I'd need to at least abstract to use an interface to pass into the function.
+
+    public interface IGraphAPI
+    {
+        IEnumerable<IGraphData> GetGraphData();
+        bool DeleteGraphData(IGraphData data);
+    }
+\\However,  would then need to implement the interface in another class as we  cannot change the original API. This class would be a lightweight wrapper around the API that just invokes the corresponding function on the API and returns the same result.
+
+    public class WindowsGraphAPI : IGraphAPI
+    {
+        public IEnumerable<IGraphData> GetGraphData()
+        {
+            return WindowsNativeGraphAPI.GetGraphData();
+        }
+
+        public bool DeleteGraphData(IGraphData data)
+        {
+            return WindowsNativeGraphAPI.DeleteGraphData(data)
+        }
+    }
+\\I don't like the idea of creating another class to wrap the API. I understand that this wrapper would be very lightweight and would just return the results of the API, but how do I test the wrapper? The wrapper should probably also contain some exception handling to cope with errors in the API. If we were to change to another API, that suffered the same problem, we'd have to create these extra classes and interfaces again.
+
+Ideally, the end result would be a mockable API that can be used when writing the unit tests for the new component that consumes it.
