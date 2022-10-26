@@ -34,4 +34,4 @@ public void GatherGraphData(IGraphAPI api)
     }
 \\I don't like the idea of creating another class to wrap the API. I understand that this wrapper would be very lightweight and would just return the results of the API, but how do I test the wrapper? The wrapper should probably also contain some exception handling to cope with errors in the API. If we were to change to another API, that suffered the same problem, we'd have to create these extra classes and interfaces again.
 
-Ideally, the end result would be a mockable API that can be used when writing the unit tests for the new component that consumes it.
+\\Ideally, the end result would be a mockable API that can be used when writing the unit tests for the new component that consumes it.
