@@ -242,7 +242,7 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		limit  int
 		err    error
 		tcs    []models.TestCase
-		eof    bool
+		eof    bool = srv.testExport
 	)
 	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
