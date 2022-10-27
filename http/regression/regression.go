@@ -166,7 +166,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		limit  int
 		err    error
 		tcs    []models.TestCase
-		eof    bool
+		eof    bool = rg.testExport
 	)
 	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
