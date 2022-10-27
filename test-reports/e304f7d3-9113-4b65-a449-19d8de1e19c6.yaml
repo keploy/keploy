@@ -1,0 +1,71 @@
+name: e304f7d3-9113-4b65-a449-19d8de1e19c6
+status: PASSED
+success: 1
+failure: 0
+total: 1
+tests:
+    - name: e304f7d3-9113-4b65-a449-19d8de1e19c6
+      status: PASSED
+      started: 1666871631
+      completed: 1666871631
+      test_case_path: /Users/sarthak_1/Documents/Keploy/samples-go/echo-sql/keploy-tests
+      mock_path: /Users/sarthak_1/Documents/Keploy/samples-go/echo-sql/keploy-tests/mocks
+      test_case_id: a10f3351-40d5-437d-974c-8af72817960f
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /url
+        header:
+            Accept: '*/*'
+            Accept-Encoding: v2
+            Authorization: v1
+            Connection: close
+            Content-Length: "33"
+            Content-Type: application/json
+            User-Agent: Thunder Client (https://www.thunderclient.com)
+        body: |-
+            {
+                "url":"http://google.com"
+            }
+      mocks:
+        - a10f3351-40d5-437d-974c-8af72817960f-0
+        - a10f3351-40d5-437d-974c-8af72817960f-1
+        - a10f3351-40d5-437d-974c-8af72817960f-2
+        - a10f3351-40d5-437d-974c-8af72817960f-3
+        - a10f3351-40d5-437d-974c-8af72817960f-4
+        - a10f3351-40d5-437d-974c-8af72817960f-5
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json; charset=UTF-8
+        body: |
+            {"ts":1666871631742069000,"url":"http://localhost:8082/Fy9z6aGAkeploy"}
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - body.ts
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=UTF-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=UTF-8
+        body_result:
+            normal: true
+            type: JSON
+            expected: |
+                {"ts":1666871528049889000,"url":"http://localhost:8082/Fy9z6aGAkeploy"}
+            actual: |
+                {"ts":1666871631742069000,"url":"http://localhost:8082/Fy9z6aGAkeploy"}
+        dep_result: []
