@@ -74,6 +74,7 @@ func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 		if _, err := gz.Write(j.Data); err != nil {
 			return nil
 		}
+		gz.Close()
 		data := base64.StdEncoding.EncodeToString(b.Bytes())
 		res = append(res, models.Object{
 			Type: j.Type,
