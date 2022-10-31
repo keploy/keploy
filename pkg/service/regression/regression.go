@@ -233,20 +233,24 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 
 		if !res.BodyResult.Normal {
-
-			expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
-
-			patch, _ := jsondiff.Compare(expected, actual)
 			logs += "\tResponse body: {\n"
-			for _, op := range patch {
-				keyStr := op.Path.String()
-				if len(keyStr) > 1 && keyStr[0] == '/' {
-					keyStr = keyStr[1:]
+			if json.Valid([]byte(resp.Body)) {
+				// compute and log body's json diff
+				expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+				patch, _ := jsondiff.Compare(expected, actual)
+				for _, op := range patch {
+					keyStr := op.Path.String()
+					if len(keyStr) > 1 && keyStr[0] == '/' {
+						keyStr = keyStr[1:]
+					}
+					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
 				}
-				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
-			}
-			logs += "\t}\n"
+				logs += "\t}\n"
+			} else {
+				// just log both the bodies as plain text without really computing the diff
+				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
 
+			}
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 		logger.Printf(logs)
