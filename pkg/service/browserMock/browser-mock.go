@@ -14,6 +14,7 @@ func NewBrMockService(c models.BrowserMockDB, log *zap.Logger) *BrowserMock {
 	}
 }
 
+// BrowserMock is a service to read-write mocks during record and replay in Selenium-IDE only.
 type BrowserMock struct {
 	sdb models.BrowserMockDB
 	log *zap.Logger

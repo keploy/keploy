@@ -37,6 +37,7 @@ jobs:
           ENABLE_DEDUP: false
           ENABLE_TEST_EXPORT: true
           KEPLOY_APP_NAME: Keploy-Test-App-2
+          KEPLOY_REPORT_PATH: ./
         
       - name: Test
         run: |

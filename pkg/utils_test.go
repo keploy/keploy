@@ -9,7 +9,7 @@ import (
 
 	// "time"
 	"github.com/go-test/deep"
-	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -17,7 +17,7 @@ func TestCompareHeader(t *testing.T) {
 	for _, tt := range []struct {
 		exp       http.Header
 		actual    http.Header
-		hdrResult []run.HeaderResult
+		hdrResult []models.HeaderResult
 		noise     map[string]string
 		result    bool
 	}{
@@ -31,25 +31,25 @@ func TestCompareHeader(t *testing.T) {
 				"id":  {"1234"},
 				"app": {"sports", "study"},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
 				},
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "study"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "study"},
 					},
@@ -69,36 +69,36 @@ func TestCompareHeader(t *testing.T) {
 				"id":             {"1234"},
 				"app":            {"sports", "study"},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
 				},
 				{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "app",
 						Value: nil,
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "study"},
 					},
 				},
 				{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "Content-Length",
 						Value: []string{"gg"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "Content-Length",
 						Value: []string{"sj"},
 					},
@@ -116,25 +116,25 @@ func TestCompareHeader(t *testing.T) {
 			actual: http.Header{
 				"app": {"sports", "study"},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "id",
 						Value: nil,
 					},
 				},
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "study"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "study"},
 					},
@@ -153,25 +153,25 @@ func TestCompareHeader(t *testing.T) {
 				"id":  {"1234"},
 				"app": {"sports", "eat", "code"},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
 				},
 				{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "study", "code"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "eat", "code"},
 					},
@@ -190,25 +190,25 @@ func TestCompareHeader(t *testing.T) {
 				"id":  {"1234"},
 				"app": {"sports", "eat", "code"},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "id",
 						Value: []string{"1234"},
 					},
 				},
 				{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "code"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "app",
 						Value: []string{"sports", "eat", "code"},
 					},
@@ -225,14 +225,14 @@ func TestCompareHeader(t *testing.T) {
 			actual: http.Header{
 				"app": {},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "app",
 						Value: []string{},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "app",
 						Value: []string{},
 					},
@@ -243,7 +243,7 @@ func TestCompareHeader(t *testing.T) {
 		{
 			exp:       http.Header{},
 			actual:    http.Header{},
-			hdrResult: []run.HeaderResult{},
+			hdrResult: []models.HeaderResult{},
 			noise:     map[string]string{},
 			result:    true,
 		},
@@ -256,25 +256,25 @@ func TestCompareHeader(t *testing.T) {
 				"etag":           {"2/fdvtgt"},
 				"content-length": {"22"},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "etag",
 						Value: []string{"0/dfjnrgs"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "etag",
 						Value: []string{"2/fdvtgt"},
 					},
 				},
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "content-length",
 						Value: []string{"26"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "content-length",
 						Value: []string{"22"},
 					},
@@ -293,36 +293,36 @@ func TestCompareHeader(t *testing.T) {
 				"content-length": {"22"},
 				"host":           {"express"},
 			},
-			hdrResult: []run.HeaderResult{
+			hdrResult: []models.HeaderResult{
 				{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "etag",
 						Value: []string{"0/dfjnrgs"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "etag",
 						Value: []string{"2/fdvtgt"},
 					},
 				},
 				{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "content-length",
 						Value: []string{"26"},
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "content-length",
 						Value: []string{"22"},
 					},
 				},
 				{
 					Normal: true,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   "host",
 						Value: nil,
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   "host",
 						Value: []string{"express"},
 					},
@@ -334,7 +334,7 @@ func TestCompareHeader(t *testing.T) {
 	} {
 		logger, _ := zap.NewProduction()
 		defer logger.Sync()
-		hdrResult := []run.HeaderResult{}
+		hdrResult := []models.HeaderResult{}
 		res := CompareHeaders(tt.exp, tt.actual, &hdrResult, tt.noise)
 		if res != tt.result {
 			t.Fatal(tt.exp, tt.actual, "THIS IS EXP", tt.hdrResult, " \n THIS IS ACT", hdrResult)
@@ -347,10 +347,10 @@ func TestCompareHeader(t *testing.T) {
 	}
 }
 
-func isEqual(x, y []run.HeaderResult) []string {
+func isEqual(x, y []models.HeaderResult) []string {
 
-	expected := make(map[string]run.HeaderResult)
-	actual := make(map[string]run.HeaderResult)
+	expected := make(map[string]models.HeaderResult)
+	actual := make(map[string]models.HeaderResult)
 	for _, i := range x {
 		expected[i.Expected.Key] = i
 	}

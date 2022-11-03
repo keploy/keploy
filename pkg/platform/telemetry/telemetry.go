@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"go.keploy.io/server/pkg/models"
 	// "go.mongodb.org/mongo-driver/bson"
+	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -17,22 +17,25 @@ type Telemetry struct {
 	OffMode        bool
 	logger         *zap.Logger
 	InstallationID string
+	store          FS
+	testExport     bool
 }
 
-func NewTelemetry(col DB, enabled, offMode bool, logger *zap.Logger) *Telemetry {
+func NewTelemetry(col DB, enabled, offMode, testExport bool, store FS, logger *zap.Logger) *Telemetry {
 
 	tele := Telemetry{
-		Enabled: enabled,
-		OffMode: offMode,
-		logger:  logger,
-		db:      col,
+		Enabled:    enabled,
+		OffMode:    offMode,
+		logger:     logger,
+		db:         col,
+		store:      store,
+		testExport: testExport,
 	}
 	return &tele
 
 }
 
 func (ac *Telemetry) Ping(isTestMode bool) {
-
 	check := false
 	if !ac.Enabled {
 		return
@@ -47,7 +50,12 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			var err error
 
 			if ac.Enabled && !isTestMode {
-				count, err = ac.db.Count()
+				if ac.testExport {
+					id, _ := ac.store.Get()
+					count = int64(len(id))
+				} else {
+					count, err = ac.db.Count()
+				}
 			}
 
 			if err != nil {
@@ -75,7 +83,11 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 					break
 				}
 				ac.InstallationID = id
-				ac.db.Insert(id)
+				if ac.testExport {
+					ac.store.Set(id)
+				} else {
+					ac.db.Insert(id)
+				}
 			} else {
 				ac.SendTelemetry("Ping", http.Client{}, context.TODO())
 			}
@@ -116,14 +128,19 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 			event.Meta = output[0]
 		}
 		if ac.InstallationID == "" {
-			sr := ac.db.Find()
-			ac.InstallationID = sr
+			id := ""
+			if ac.testExport {
+				id, _ = ac.store.Get()
+			} else {
+				id = ac.db.Find()
+			}
+			ac.InstallationID = id
 		}
 		event.InstallationID = ac.InstallationID
 
 		bin, err := marshalEvent(event, ac.logger)
 		if err != nil {
-			ac.logger.Error("failed to marshal event", zap.Error(err))
+			ac.logger.Debug("failed to marshal event", zap.Error(err))
 			return
 		}
 
