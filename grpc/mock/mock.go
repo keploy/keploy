@@ -1,8 +1,11 @@
 package mock
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"strings"
 
@@ -30,12 +33,12 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				Body:       doc.Spec.Req.Body,
 			},
 			Response: models.MockHttpResp{
-				StatusCode: int(doc.Spec.Res.StatusCode),
-				Header:     ToMockHeader(utils.GetHttpHeader(doc.Spec.Res.Header)),
-				Body:       doc.Spec.Res.Body,
+				StatusCode:    int(doc.Spec.Res.StatusCode),
+				Header:        ToMockHeader(utils.GetHttpHeader(doc.Spec.Res.Header)),
+				Body:          doc.Spec.Res.Body,
 				StatusMessage: doc.Spec.Res.StatusMessage,
-				ProtoMajor: int(doc.Spec.Res.ProtoMajor),
-				ProtoMinor: int(doc.Spec.Res.ProtoMinor),
+				ProtoMajor:    int(doc.Spec.Res.ProtoMajor),
+				ProtoMinor:    int(doc.Spec.Res.ProtoMinor),
 			},
 			Objects:    []models.Object{},
 			Mocks:      doc.Spec.Mocks,
@@ -66,9 +69,16 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 	res := []models.Object{}
 	for _, j := range objs {
+		var b bytes.Buffer
+		gz := gzip.NewWriter(&b)
+		if _, err := gz.Write(j.Data); err != nil {
+			return nil
+		}
+		gz.Close()
+		data := base64.StdEncoding.EncodeToString(b.Bytes())
 		res = append(res, models.Object{
 			Type: j.Type,
-			Data: base64.StdEncoding.EncodeToString(j.Data),
+			Data: data,
 		})
 	}
 	return res
@@ -78,12 +88,21 @@ func toProtoObjects(objs []models.Object) ([]*proto.Mock_Object, error) {
 	res := []*proto.Mock_Object{}
 	for _, j := range objs {
 		bin, err := base64.StdEncoding.DecodeString(j.Data)
+		r := bytes.NewReader(bin)
+		gzr, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+		data, err := ioutil.ReadAll(gzr)
+		if err != nil {
+			return nil, err
+		}
 		if err != nil {
 			return res, fmt.Errorf("failed to decode base64 data from yaml file into byte array. error: %s", err.Error())
 		}
 		res = append(res, &proto.Mock_Object{
 			Type: j.Type,
-			Data: bin,
+			Data: data,
 		})
 	}
 	return res, nil
@@ -116,12 +135,12 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				},
 				Objects: []*proto.Mock_Object{},
 				Res: &proto.HttpResp{
-					StatusCode: int64(spec.Response.StatusCode),
-					Header:     utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
-					Body:       spec.Response.Body,
+					StatusCode:    int64(spec.Response.StatusCode),
+					Header:        utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
+					Body:          spec.Response.Body,
 					StatusMessage: spec.Response.StatusMessage,
-					ProtoMajor: int64(spec.Response.ProtoMajor),
-					ProtoMinor: int64(spec.Request.ProtoMinor),
+					ProtoMajor:    int64(spec.Response.ProtoMajor),
+					ProtoMinor:    int64(spec.Request.ProtoMinor),
 				},
 				Mocks:      spec.Mocks,
 				Assertions: utils.GetProtoMap(spec.Assertions),
