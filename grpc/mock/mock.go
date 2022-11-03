@@ -185,7 +185,7 @@ func ToHttpHeader(mockHeader map[string]string) http.Header {
 func ToMockHeader(httpHeader http.Header) map[string]string {
 	header := map[string]string{}
 	for i, j := range httpHeader {
-		header[i] = strings.Join(j, ", ")
+		header[i] = strings.Join(j, ",")
 	}
 	return header
 }
