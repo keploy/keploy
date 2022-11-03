@@ -1,7 +1,7 @@
 package server
 
 import (
-	"log"
+	"fmt"
 	"math/rand"
 	"net"
 	"net/http"
@@ -39,6 +39,18 @@ import (
 
 // const defaultPort = "8080"
 
+const logo string = `
+       ▓██▓▄
+    ▓▓▓▓██▓█▓▄
+     ████████▓▒
+          ▀▓▓███▄      ▄▄   ▄               ▌
+         ▄▌▌▓▓████▄    ██ ▓█▀  ▄▌▀▄  ▓▓▌▄   ▓█  ▄▌▓▓▌▄ ▌▌   ▓
+       ▓█████████▌▓▓   ██▓█▄  ▓█▄▓▓ ▐█▌  ██ ▓█  █▌  ██  █▌ █▓
+      ▓▓▓▓▀▀▀▀▓▓▓▓▓▓▌  ██  █▓  ▓▌▄▄ ▐█▓▄▓█▀ █▓█ ▀█▄▄█▀   █▓█
+       ▓▌                           ▐█▌                   █▌
+        ▓
+`
+
 type config struct {
 	MongoURI         string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
 	DB               string `envconfig:"DB" default:"keploy"`
@@ -57,8 +69,7 @@ type config struct {
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
 }
 
-func Server(version string) *chi.Mux {
-
+func Server(ver string) *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
 
 	logConf := zap.NewDevelopmentConfig()
@@ -162,7 +173,7 @@ func Server(version string) *chi.Mux {
 		w.Write([]byte("ok"))
 	})
 
-	r.Handle("/*",  http.StripPrefix(conf.PathPrefix,web.Handler()))
+	r.Handle("/*", http.StripPrefix(conf.PathPrefix, web.Handler()))
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
@@ -186,8 +197,7 @@ func Server(version string) *chi.Mux {
 
 	httpListener := m.Match(cmux.HTTP1Fast())
 
-	log.Printf("Keploy version: %s\n", version)
-	log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
+	//log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
@@ -200,6 +210,9 @@ func Server(version string) *chi.Mux {
 		return err
 	})
 	g.Go(func() error { return m.Serve() })
+	fmt.Println(logo)
+	fmt.Printf("keploy %v\n\n.", ver)
+	logger.Info("keploy started at port " + port)
 	g.Wait()
 
 	return r
