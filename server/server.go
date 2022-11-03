@@ -57,7 +57,7 @@ type config struct {
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
 }
 
-func Server() *chi.Mux {
+func Server(version string) *chi.Mux {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
@@ -186,6 +186,7 @@ func Server() *chi.Mux {
 
 	httpListener := m.Match(cmux.HTTP1Fast())
 
+	log.Printf("Keploy version: %s\n", version)
 	log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
 
 	g := new(errgroup.Group)

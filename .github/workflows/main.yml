@@ -22,7 +22,9 @@ jobs:
           go-version: 1.17
 
       - name: Build
-        run: go build -v ./...
+        run: |
+          git_hash=$(git rev-parse --short "$GITHUB_SHA")
+          go build -v ./... -ldflags="-X 'main.Version=$git_hash'"
 
       - name: Test
         run: |
