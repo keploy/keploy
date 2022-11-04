@@ -28,8 +28,14 @@ func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Serv
 			r.Get("/", s.GetTCS)
 			r.Post("/", s.PostTC)
 		})
+		r.Route("/testcaseGrpc", func(r chi.Router) {
+			r.Get("/", s.GetTCSGrpc)
+			r.Post("/", s.PostTCGrpc)
+		})
 		r.Post("/test", s.Test)
+		r.Post("/testGrpc", s.TestGrpc)
 		r.Post("/denoise", s.DeNoise)
+		r.Post("/denoiseGrpc", s.DeNoiseGrpc)
 		r.Get("/start", s.Start)
 		r.Get("/end", s.End)
 
@@ -188,9 +194,84 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
+func (rg *regression) GetTCSGrpc(w http.ResponseWriter, r *http.Request) {
+	app := rg.getMeta(w, r, true)
+	if app == "" {
+		return
+	}
+	offsetStr := r.URL.Query().Get("offset")
+	limitStr := r.URL.Query().Get("limit")
+	var (
+		offset int
+		limit  int
+		err    error
+		tcs    []models.GrpcTestCase
+		eof    bool
+	)
+	if offsetStr != "" {
+		offset, err = strconv.Atoi(offsetStr)
+		if err != nil {
+			rg.logger.Error("request for fetching testcases in converting offset to integer")
+		}
+	}
+	if limitStr != "" {
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil {
+			rg.logger.Error("request for fetching testcases in converting limit to integer")
+		}
+	}
+	tcs, err = rg.svc.GetAllGrpc(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
+	if err != nil {
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
+	}
+	render.Status(r, http.StatusOK)
+	// In test-export, eof is true to stop the infinite for loop in sdk
+	w.Header().Set("EOF", fmt.Sprintf("%v", eof))
+	render.JSON(w, r, tcs)
 
+}
+
+func (rg *regression) PostTCGrpc(w http.ResponseWriter, r *http.Request) {
+	data := &GrpcTestCaseReq{}
+	if err := render.Bind(r, data); err != nil {
+		panic(err)
+	}
+	now := time.Now().UTC().Unix()
+	inserted, err := rg.svc.PutGrpc(r.Context(), graph.DEFAULT_COMPANY, []models.GrpcTestCase{{
+		ID:       uuid.New().String(),
+		Created:  now,
+		Updated:  now,
+		Captured: data.Captured,
+		Method:   data.Method,
+		AppID:    data.AppID,
+		GrpcReq:  data.GrpcRequest,
+		Resp:     data.Response,
+		Deps:     data.Deps,
+		Type:     data.Type,
+	}})
+	if err != nil {
+		rg.logger.Error("error putting testcase", zap.Error(err))
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
+
+	}
+
+	if len(inserted) == 0 {
+		rg.logger.Error("unknown failure while inserting testcase")
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
+	}
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]string{"id": inserted[0]})
+}
+
+func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	data := &TestCaseReq{}
+	if err := render.Bind(r, data); err != nil {
+		panic(err)
+	}
 	if err := render.Bind(r, data); err != nil {
 		rg.logger.Error("error parsing request", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -267,6 +348,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		HttpReq:  data.HttpReq,
 		HttpResp: data.HttpResp,
 		Deps:     data.Deps,
+		Type:     data.Type,
 	}})
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
@@ -312,6 +394,23 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func (rg *regression) DeNoiseGrpc(w http.ResponseWriter, r *http.Request) {
+	data := &GrpcTestReq{}
+	if err := render.Bind(r, data); err != nil {
+		rg.logger.Error("error parsing request", zap.Error(err))
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
+	}
+	err := rg.svc.DeNoiseGrpc(r.Context(), graph.DEFAULT_COMPANY, data.ID, data.AppID, data.Resp)
+	if err != nil {
+		rg.logger.Error("error putting testcase", zap.Error(err))
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
+	}
+
+	render.Status(r, http.StatusOK)
+}
+
 func (rg *regression) Test(w http.ResponseWriter, r *http.Request) {
 
 	data := &TestReq{}
@@ -322,6 +421,28 @@ func (rg *regression) Test(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pass, err := rg.svc.Test(r.Context(), graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.TestCasePath, data.MockPath, data.Resp)
+
+	if err != nil {
+		rg.logger.Error("error putting testcase", zap.Error(err))
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
+	}
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]bool{"pass": pass})
+
+}
+
+func (rg *regression) TestGrpc(w http.ResponseWriter, r *http.Request) {
+
+	data := &GrpcTestReq{}
+	if err := render.Bind(r, data); err != nil {
+		rg.logger.Error("error parsing request", zap.Error(err))
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
+	}
+
+	pass, err := rg.svc.TestGrpc(r.Context(), graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.Resp)
 
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))

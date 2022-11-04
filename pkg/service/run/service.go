@@ -21,6 +21,8 @@ type DB interface {
 	ReadTests(ctx context.Context, runID string) ([]Test, error)
 	PutTest(ctx context.Context, t Test) error
 	Increment(ctx context.Context, success, failure bool, id string) error
+	//Grpc
+	PutTestGrpc(ctx context.Context, t TestGrpc) error
 }
 
 type TestRun struct {
@@ -60,11 +62,31 @@ type Test struct {
 	Result     Result              `json:"result" bson:"result"`
 }
 
+type TestGrpc struct {
+	ID         string              `json:"id" bson:"_id"`
+	Status     TestStatus          `json:"status" bson:"status"`
+	Started    int64               `json:"started" bson:"started"`
+	Completed  int64               `json:"completed" bson:"completed"`
+	RunID      string              `json:"run_id" bson:"run_id"`
+	TestCaseID string              `json:"testCaseID" bson:"test_case_id"`
+	Method     string              `json:"method" bson:"method"`
+	Req        string              `json:"req" bson:"req"`
+	Dep        []models.Dependency `json:"dep" bson:"dep"`
+	Resp       string              `json:"http_resp" bson:"http_resp,omitempty"`
+	Noise      []string            `json:"noise" bson:"noise"`
+	Result     ResultGrpc          `json:"result" bson:"result"`
+}
+
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code"`
 	HeadersResult []HeaderResult `json:"headers_result" bson:"headers_result"`
 	BodyResult    BodyResult     `json:"body_result" bson:"body_result"`
 	DepResult     []DepResult    `json:"dep_result" bson:"dep_result"`
+}
+
+type ResultGrpc struct {
+	BodyResult BodyResult  `json:"body_result" bson:"body_result"`
+	DepResult  []DepResult `json:"dep_result" bson:"dep_result"`
 }
 
 type DepResult struct {

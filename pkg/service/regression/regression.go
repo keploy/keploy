@@ -170,6 +170,25 @@ func (r *Regression) GetAll(ctx context.Context, cid, appID string, offset *int,
 	return tcs, nil
 }
 
+func (r *Regression) GetAllGrpc(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.GrpcTestCase, error) {
+	off, lim := 0, 25
+	if offset != nil {
+		off = *offset
+	}
+	if limit != nil {
+		lim = *limit
+	}
+
+	tcs, err := r.tdb.GetAllGrpc(ctx, cid, appID, false, off, lim)
+
+	if err != nil {
+		sanitizedAppID := pkg.SanitiseInput(appID)
+		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
+		return nil, errors.New("internal failure")
+	}
+	return tcs, nil
+}
+
 func (r *Regression) UpdateTC(ctx context.Context, t []models.TestCase) error {
 	for _, v := range t {
 		err := r.tdb.UpdateTC(ctx, v)
@@ -207,6 +226,31 @@ func (r *Regression) putTC(ctx context.Context, cid string, t models.TestCase) (
 	return t.ID, nil
 }
 
+func (r *Regression) putTCGrpc(ctx context.Context, cid string, t models.GrpcTestCase) (string, error) {
+	t.CID = cid
+
+	var err error
+	if r.EnableDeDup {
+		// check if already exists
+		dup, err := r.isDupGrpc(ctx, &t)
+		if err != nil {
+			r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
+			return "", errors.New("internal failure")
+		}
+		if dup {
+			r.log.Info("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.Method))
+			return "", nil
+		}
+	}
+	err = r.tdb.UpsertGrpc(ctx, t)
+	if err != nil {
+		r.log.Error("failed to insert testcase into DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
+		return "", errors.New("internal failure")
+	}
+
+	return t.ID, nil
+}
+
 func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
 	var ids []string
 	if len(tcs) == 0 {
@@ -214,6 +258,23 @@ func (r *Regression) Put(ctx context.Context, cid string, tcs []models.TestCase)
 	}
 	for _, t := range tcs {
 		id, err := r.putTC(ctx, cid, t)
+		if err != nil {
+			msg := "failed saving testcase"
+			r.log.Error(msg, zap.Error(err), zap.String("cid", cid), zap.String("id", t.ID), zap.String("app", t.AppID))
+			return ids, errors.New(msg)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (r *Regression) PutGrpc(ctx context.Context, cid string, tcs []models.GrpcTestCase) ([]string, error) {
+	var ids []string
+	if len(tcs) == 0 {
+		return ids, errors.New("no testcase to update")
+	}
+	for _, t := range tcs {
+		id, err := r.putTCGrpc(ctx, cid, t)
 		if err != nil {
 			msg := "failed saving testcase"
 			r.log.Error(msg, zap.Error(err), zap.String("cid", cid), zap.String("id", t.ID), zap.String("app", t.AppID))
@@ -405,6 +466,102 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	return pass, res, &tc, nil
 }
+
+func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp string) (bool, *run.ResultGrpc, *models.GrpcTestCase, error) {
+	var (
+		tc  models.GrpcTestCase
+		err error
+	)
+	tc, err = r.tdb.GetGrpc(ctx, cid, id)
+	if err != nil {
+		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return false, nil, nil, err
+	}
+	bodyType := run.BodyTypePlain
+	if json.Valid([]byte(resp)) {
+		bodyType = run.BodyTypeJSON
+	}
+	pass := true
+
+	res := &run.ResultGrpc{
+		BodyResult: run.BodyResult{
+			Normal:   false,
+			Type:     bodyType,
+			Expected: tc.Resp,
+			Actual:   resp,
+		},
+	}
+
+	var (
+		bodyNoise   []string
+		headerNoise = map[string]string{}
+	)
+
+	for _, n := range tc.Noise {
+		a := strings.Split(n, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise = append(bodyNoise, x)
+		} else if a[0] == "header" {
+			headerNoise[a[len(a)-1]] = a[len(a)-1]
+		}
+	}
+
+	if !pkg.Contains(tc.Noise, "body") && bodyType == run.BodyTypeJSON {
+		pass, err = pkg.Match(tc.Resp, resp, bodyNoise, r.log)
+		if err != nil {
+			return false, res, &tc, err
+		}
+	} else {
+		if !pkg.Contains(tc.Noise, "body") && tc.Resp != resp {
+			pass = false
+		}
+	}
+
+	res.BodyResult.Normal = pass
+	if !pass {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
+		var logs = ""
+
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
+			"Test Result:\n"+
+			"\tInput Grpc Request: %+v\n\n"+
+			"\tExpected Response: "+
+			"%+v\n\n"+"\tActual Response: "+
+			"%+v\n\n"+"DIFF: \n", tc.ID, tc.GrpcReq, tc.Resp, resp)
+
+		if !res.BodyResult.Normal {
+
+			expected, actual := pkg.RemoveNoise(tc.Resp, resp, bodyNoise, r.log)
+
+			patch, _ := jsondiff.Compare(expected, actual)
+			logs += "\tResponse body: {\n"
+			for _, op := range patch {
+				keyStr := op.Path.String()
+				if len(keyStr) > 1 && keyStr[0] == '/' {
+					keyStr = keyStr[1:]
+				}
+				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+			}
+			logs += "\t}\n"
+
+		}
+		logs += "--------------------------------------------------------------------\n\n"
+		logger.Printf(logs)
+	} else {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		var log2 = ""
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		logger.Printf(log2)
+
+	}
+	return pass, res, &tc, nil
+}
+
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
@@ -443,8 +600,63 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 	return false, nil
 }
 
+func (r *Regression) TestGrpc(ctx context.Context, cid, app, runID, id, resp string) (bool, error) {
+	var t *run.TestGrpc
+	started := time.Now().UTC()
+	ok, res, tc, err := r.testGrpc(ctx, cid, runID, id, app, resp)
+	if tc != nil {
+		t = &run.TestGrpc{
+			ID:         uuid.New().String(),
+			Started:    started.Unix(),
+			RunID:      runID,
+			TestCaseID: id,
+			Method:     tc.Method,
+			Req:        tc.GrpcReq,
+			Dep:        tc.Deps,
+			Resp:       resp,
+			Result:     *res,
+			Noise:      tc.Noise,
+		}
+	}
+	t.Completed = time.Now().UTC().Unix()
+	defer func() {
+		err2 := r.saveResultGrpc(ctx, t)
+		if err2 != nil {
+			r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+		}
+	}()
+
+	if err != nil {
+		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		t.Status = run.TestStatusFailed
+	}
+	if ok {
+		t.Status = run.TestStatusPassed
+		return ok, nil
+	}
+	t.Status = run.TestStatusFailed
+	return false, nil
+}
+
 func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 	err := r.rdb.PutTest(ctx, *t)
+	if err != nil {
+		return err
+	}
+	if t.Status == run.TestStatusFailed {
+		err = r.rdb.Increment(ctx, false, true, t.RunID)
+	} else {
+		err = r.rdb.Increment(ctx, true, false, t.RunID)
+	}
+
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Regression) saveResultGrpc(ctx context.Context, t *run.TestGrpc) error {
+	err := r.rdb.PutTestGrpc(ctx, *t)
 	if err != nil {
 		return err
 	}
@@ -587,6 +799,49 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 	return nil
 }
 
+func (r *Regression) DeNoiseGrpc(ctx context.Context, cid, id, app, body string) error {
+	tc, err := r.tdb.GetGrpc(ctx, cid, id)
+	if err != nil {
+		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+
+	a, b := map[string][]string{}, map[string][]string{}
+
+	err = addBody(tc.Resp, a)
+	if err != nil {
+		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+
+	err = addBody(body, b)
+	if err != nil {
+		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+	r.log.Debug("denoise between", zap.Any("stored object", a), zap.Any("coming object", b))
+	var noise []string
+	for k, v := range a {
+		v2, ok := b[k]
+		fmt.Println("v2 , ok ", v2, ok)
+		if !ok {
+			noise = append(noise, k)
+			continue
+		}
+		if !reflect.DeepEqual(v, v2) {
+			noise = append(noise, k)
+		}
+	}
+	r.log.Debug("Noise Array : ", zap.Any("", noise))
+	tc.Noise = noise
+	err = r.tdb.UpsertGrpc(ctx, tc)
+	if err != nil {
+		r.log.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+	return nil
+}
+
 func addBody(body string, m map[string][]string) error {
 	// add body
 	if json.Valid([]byte(body)) {
@@ -709,6 +964,52 @@ func (r *Regression) fillCache(ctx context.Context, t *models.TestCase) (string,
 	return index, nil
 }
 
+func (r *Regression) fillCacheGrpc(ctx context.Context, t *models.GrpcTestCase) (string, error) {
+
+	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.Method)
+	_, ok1 := r.noisyFields[index]
+	_, ok2 := r.fieldCounts[index]
+	if ok1 && ok2 {
+		return index, nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// check again after the lock
+	_, ok1 = r.noisyFields[index]
+	_, ok2 = r.fieldCounts[index]
+
+	if !ok1 || !ok2 {
+		var anchors []map[string][]string
+		fieldCounts, noisyFields := map[string]map[string]int{}, map[string]bool{}
+		tcs, err := r.tdb.GetKeys(ctx, t.CID, t.AppID, t.Method)
+		if err != nil {
+			return "", err
+		}
+		for _, v := range tcs {
+			//var appAnchors map[string][]string
+			//for _, a := range v.Anchors {
+			//	appAnchors[a] = v.AllKeys[a]
+			//}
+			anchors = append(anchors, v.Anchors)
+			for k, v1 := range v.AllKeys {
+				if fieldCounts[k] == nil {
+					fieldCounts[k] = map[string]int{}
+				}
+				for _, v2 := range v1 {
+					fieldCounts[k][v2] = fieldCounts[k][v2] + 1
+				}
+				if !isAnchor(fieldCounts[k]) {
+					noisyFields[k] = true
+				}
+			}
+		}
+		r.fieldCounts[index], r.noisyFields[index], r.anchors[index] = fieldCounts, noisyFields, anchors
+	}
+	return index, nil
+}
+
 func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error) {
 
 	reqKeys := map[string][]string{}
@@ -771,6 +1072,62 @@ func (r *Regression) isDup(ctx context.Context, t *models.TestCase) (bool, error
 	}
 	if isAnchorChange {
 		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, t.URI, filterKeys)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	// check if testcase based on anchor keys already exists
+	dup, err := r.exists(ctx, filterKeys, index)
+	if err != nil {
+		return false, err
+	}
+
+	t.AllKeys = reqKeys
+	//var keys []string
+	//for k := range filterKeys {
+	//	keys = append(keys, k)
+	//}
+	t.Anchors = filterKeys
+	r.anchors[index] = append(r.anchors[index], filterKeys)
+
+	return dup, nil
+}
+
+func (r *Regression) isDupGrpc(ctx context.Context, t *models.GrpcTestCase) (bool, error) {
+
+	reqKeys := map[string][]string{}
+	filterKeys := map[string][]string{}
+
+	index, err := r.fillCacheGrpc(ctx, t)
+	if err != nil {
+		return false, err
+	}
+
+	isAnchorChange := true
+	for k, v := range reqKeys {
+		if !r.noisyFields[index][k] {
+			// update field count
+			for _, s := range v {
+				if _, ok := r.fieldCounts[index][k]; !ok {
+					r.fieldCounts[index][k] = map[string]int{}
+				}
+				r.fieldCounts[index][k][s] = r.fieldCounts[index][k][s] + 1
+			}
+			if !isAnchor(r.fieldCounts[index][k]) {
+				r.noisyFields[index][k] = true
+				isAnchorChange = true
+				continue
+			}
+			filterKeys[k] = v
+		}
+	}
+
+	if len(filterKeys) == 0 {
+		return true, nil
+	}
+	if isAnchorChange {
+		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, t.Method, filterKeys)
 		if err != nil {
 			return false, err
 		}
