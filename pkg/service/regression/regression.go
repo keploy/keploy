@@ -265,6 +265,102 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	return pass, res, &tc, nil
 }
+
+func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp string) (bool, *models.ResultGrpc, *models.GrpcTestCase, error) {
+	var (
+		tc  models.GrpcTestCase
+		err error
+	)
+	tc, err = r.tdb.GetGrpc(ctx, cid, id)
+	if err != nil {
+		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return false, nil, nil, err
+	}
+	bodyType := models.BodyTypePlain
+	if json.Valid([]byte(resp)) {
+		bodyType = models.BodyTypeJSON
+	}
+	pass := true
+
+	res := &models.ResultGrpc{
+		BodyResult: models.BodyResult{
+			Normal:   false,
+			Type:     bodyType,
+			Expected: tc.Resp,
+			Actual:   resp,
+		},
+	}
+
+	var (
+		bodyNoise   []string
+		headerNoise = map[string]string{}
+	)
+
+	for _, n := range tc.Noise {
+		a := strings.Split(n, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise = append(bodyNoise, x)
+		} else if a[0] == "header" {
+			headerNoise[a[len(a)-1]] = a[len(a)-1]
+		}
+	}
+
+	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
+		pass, err = pkg.Match(tc.Resp, resp, bodyNoise, r.log)
+		if err != nil {
+			return false, res, &tc, err
+		}
+	} else {
+		if !pkg.Contains(tc.Noise, "body") && tc.Resp != resp {
+			pass = false
+		}
+	}
+
+	res.BodyResult.Normal = pass
+	if !pass {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
+		var logs = ""
+
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
+			"Test Result:\n"+
+			"\tInput Grpc Request: %+v\n\n"+
+			"\tExpected Response: "+
+			"%+v\n\n"+"\tActual Response: "+
+			"%+v\n\n"+"DIFF: \n", tc.ID, tc.GrpcReq, tc.Resp, resp)
+
+		if !res.BodyResult.Normal {
+
+			expected, actual := pkg.RemoveNoise(tc.Resp, resp, bodyNoise, r.log)
+
+			patch, _ := jsondiff.Compare(expected, actual)
+			logs += "\tResponse body: {\n"
+			for _, op := range patch {
+				keyStr := op.Path.String()
+				if len(keyStr) > 1 && keyStr[0] == '/' {
+					keyStr = keyStr[1:]
+				}
+				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+			}
+			logs += "\t}\n"
+
+		}
+		logs += "--------------------------------------------------------------------\n\n"
+		logger.Printf(logs)
+	} else {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		var log2 = ""
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		logger.Printf(log2)
+
+	}
+	return pass, res, &tc, nil
+}
+
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
@@ -340,8 +436,63 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 	return false, nil
 }
 
+func (r *Regression) TestGrpc(ctx context.Context, cid, app, runID, id, resp string) (bool, error) {
+	var t *run.TestGrpc
+	started := time.Now().UTC()
+	ok, res, tc, err := r.testGrpc(ctx, cid, runID, id, app, resp)
+	if tc != nil {
+		t = &run.TestGrpc{
+			ID:         uuid.New().String(),
+			Started:    started.Unix(),
+			RunID:      runID,
+			TestCaseID: id,
+			Method:     tc.Method,
+			Req:        tc.GrpcReq,
+			Dep:        tc.Deps,
+			Resp:       resp,
+			Result:     *res,
+			Noise:      tc.Noise,
+		}
+	}
+	t.Completed = time.Now().UTC().Unix()
+	defer func() {
+		err2 := r.saveResultGrpc(ctx, t)
+		if err2 != nil {
+			r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+		}
+	}()
+
+	if err != nil {
+		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		t.Status = models.TestStatusFailed
+	}
+	if ok {
+		t.Status = models.TestStatusPassed
+		return ok, nil
+	}
+	t.Status = models.TestStatusFailed
+	return false, nil
+}
+
 func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
 	err := r.rdb.PutTest(ctx, *t)
+	if err != nil {
+		return err
+	}
+	if t.Status == models.TestStatusFailed {
+		err = r.rdb.Increment(ctx, false, true, t.RunID)
+	} else {
+		err = r.rdb.Increment(ctx, true, false, t.RunID)
+	}
+
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Regression) saveResultGrpc(ctx context.Context, t *run.TestGrpc) error {
+	err := r.rdb.PutTestGrpc(ctx, *t)
 	if err != nil {
 		return err
 	}
@@ -477,6 +628,49 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 	// r.log.Debug("Noise Array : ",zap.Any("",noise))
 	tc.Noise = noise
 	err = r.tdb.Upsert(ctx, tc)
+	if err != nil {
+		r.log.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+	return nil
+}
+
+func (r *Regression) DeNoiseGrpc(ctx context.Context, cid, id, app, body string) error {
+	tc, err := r.tdb.GetGrpc(ctx, cid, id)
+	if err != nil {
+		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+
+	a, b := map[string][]string{}, map[string][]string{}
+
+	err = addBody(tc.Resp, a)
+	if err != nil {
+		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+
+	err = addBody(body, b)
+	if err != nil {
+		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return err
+	}
+	r.log.Debug("denoise between", zap.Any("stored object", a), zap.Any("coming object", b))
+	var noise []string
+	for k, v := range a {
+		v2, ok := b[k]
+		fmt.Println("v2 , ok ", v2, ok)
+		if !ok {
+			noise = append(noise, k)
+			continue
+		}
+		if !reflect.DeepEqual(v, v2) {
+			noise = append(noise, k)
+		}
+	}
+	r.log.Debug("Noise Array : ", zap.Any("", noise))
+	tc.Noise = noise
+	err = r.tdb.UpsertGrpc(ctx, tc)
 	if err != nil {
 		r.log.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err

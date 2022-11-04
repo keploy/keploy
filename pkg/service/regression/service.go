@@ -12,4 +12,7 @@ type Service interface {
 	Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error)
 	StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error
 	StopTestRun(ctx context.Context, runId, testReportPath string) error
+	//
+	DeNoiseGrpc(ctx context.Context, cid, id, app, body string) error
+	TestGrpc(ctx context.Context, cid, app, runID, id, resp string) (bool, error)
 }

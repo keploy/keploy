@@ -21,6 +21,8 @@ type DB interface {
 	ReadTests(ctx context.Context, runID string) ([]Test, error)
 	PutTest(ctx context.Context, t Test) error
 	Increment(ctx context.Context, success, failure bool, id string) error
+	//Grpc
+	PutTestGrpc(ctx context.Context, t TestGrpc) error
 }
 
 type TestRun struct {
@@ -50,4 +52,19 @@ type Test struct {
 	Resp       models.HttpResp     `json:"http_resp" bson:"http_resp,omitempty"`
 	Noise      []string            `json:"noise" bson:"noise"`
 	Result     models.Result       `json:"result" bson:"result"`
+}
+
+type TestGrpc struct {
+	ID         string              `json:"id" bson:"_id"`
+	Status     models.TestStatus   `json:"status" bson:"status"`
+	Started    int64               `json:"started" bson:"started"`
+	Completed  int64               `json:"completed" bson:"completed"`
+	RunID      string              `json:"run_id" bson:"run_id"`
+	TestCaseID string              `json:"testCaseID" bson:"test_case_id"`
+	Method     string              `json:"method" bson:"method"`
+	Req        string              `json:"req" bson:"req"`
+	Dep        []models.Dependency `json:"dep" bson:"dep"`
+	Resp       string              `json:"http_resp" bson:"http_resp,omitempty"`
+	Noise      []string            `json:"noise" bson:"noise"`
+	Result     models.ResultGrpc          `json:"result" bson:"result"`
 }

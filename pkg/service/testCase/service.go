@@ -14,4 +14,7 @@ type Service interface {
 	Delete(ctx context.Context, cid, id string) error
 	InsertToDB(ctx context.Context, cid string, t []models.TestCase) ([]string, error)
 	WriteToYaml(ctx context.Context, t []models.Mock, testCasePath, mockPath string) ([]string, error)
+	//
+	PutGrpc(ctx context.Context, cid string, t []models.GrpcTestCase) ([]string, error)
+	GetAllGrpc(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.GrpcTestCase, error)
 }

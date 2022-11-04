@@ -90,6 +90,23 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 	return nil
 }
 
+func (r *RunDB) PutTestGrpc(ctx context.Context, t run.TestGrpc) error {
+
+	upsert := true
+	opt := &options.UpdateOptions{
+		Upsert: &upsert,
+	}
+	filter := bson.M{"_id": t.ID}
+	update := bson.D{{Key: "$set", Value: t}}
+
+	_, err := r.test.UpdateOne(ctx, filter, update, opt)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+
 func (r *RunDB) ReadOne(ctx context.Context, id string) (*run.TestRun, error) {
 	filter := bson.M{}
 	if id != "" {

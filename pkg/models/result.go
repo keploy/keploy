@@ -48,6 +48,11 @@ type Result struct {
 	DepResult     []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
 }
 
+type ResultGrpc struct {
+	BodyResult BodyResult  `json:"body_result" bson:"body_result"`
+	DepResult  []DepResult `json:"dep_result" bson:"dep_result"`
+}
+
 type DepResult struct {
 	Name string          `json:"name" bson:"name" yaml:"name"`
 	Type DependencyType  `json:"type" bson:"type" yaml:"type"`
