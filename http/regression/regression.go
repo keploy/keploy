@@ -16,11 +16,12 @@ import (
 	"go.keploy.io/server/pkg/models"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	tcSvc "go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, testExport bool) {
-	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport}
+func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, tc tcSvc.Service, testExport bool, testReportPath string) {
+	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport, testReportPath: testReportPath, tcSvc: tc}
 
 	r.Route("/regression", func(r chi.Router) {
 		r.Route("/testcase", func(r chi.Router) {
@@ -44,30 +45,40 @@ func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Serv
 }
 
 type regression struct {
-	testExport bool
-	logger     *zap.Logger
-	svc        regression2.Service
-	run        run.Service
+	testExport     bool
+	testReportPath string
+	logger         *zap.Logger
+	svc            regression2.Service
+	tcSvc          tcSvc.Service
+	run            run.Service
 }
 
 func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
-	status := run.TestRunStatus(r.URL.Query().Get("status"))
-	stat := run.TestRunStatusFailed
+	status := models.TestRunStatus(r.URL.Query().Get("status"))
+	stat := models.TestRunStatusFailed
 	if status == "true" {
-		stat = run.TestRunStatusPassed
+		stat = models.TestRunStatusPassed
 	}
 
-	now := time.Now().Unix()
+	var (
+		err error
+		now = time.Now().Unix()
+	)
 
 	if rg.testExport {
-		rg.svc.StopTestRun(r.Context(), id)
+		err := rg.svc.StopTestRun(r.Context(), id, rg.testReportPath)
+		if err != nil {
+			render.Render(w, r, ErrInvalidRequest(err))
+			return
+		}
 	}
-	err := rg.run.Put(r.Context(), run.TestRun{
+	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
-	})
+	}, rg.testExport, rg.testReportPath)
+
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -97,20 +108,24 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 
 	// user := "default"
 	if rg.testExport {
-		rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath)
+		err = rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath, rg.testReportPath)
+		if err != nil {
+			render.Render(w, r, ErrInvalidRequest(err))
+			return
+		}
 	}
 	err = rg.run.Put(r.Context(), run.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,
-		Status:  run.TestRunStatusRunning,
+		Status:  models.TestRunStatusRunning,
 		CID:     graph.DEFAULT_COMPANY,
 		App:     app,
 		User:    graph.DEFAULT_USER,
 		Total:   total,
-	})
+	}, rg.testExport, rg.testReportPath)
 	if err != nil {
-		render.Status(r, http.StatusInternalServerError)
+		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
 	render.Status(r, http.StatusOK)
@@ -123,7 +138,7 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 func (rg *regression) GetTC(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	app := rg.getMeta(w, r, false)
-	tcs, err := rg.svc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
+	tcs, err := rg.tcSvc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -157,7 +172,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		limit  int
 		err    error
 		tcs    []models.TestCase
-		eof    bool
+		eof    bool = rg.testExport
 	)
 	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
@@ -172,21 +187,21 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	switch rg.testExport {
-	case false:
-		tcs, err = rg.svc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit)
-		if err != nil {
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
-		}
-	case true:
-		tcs, err = rg.svc.ReadTCS(r.Context(), testCasePath, mockPath)
-		if err != nil {
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
-		}
-		eof = true
+	// switch rg.testExport {
+	// case false:
+	tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
+	if err != nil {
+		render.Render(w, r, ErrInvalidRequest(err))
+		return
 	}
+	// case true:
+	// 	tcs, err = rg.tcSvc.ReadTCS(r.Context(), testCasePath, mockPath)
+	// 	if err != nil {
+	// 		render.Render(w, r, ErrInvalidRequest(err))
+	// 		return
+	// 	}
+	// 	eof = true
+	// }
 	render.Status(r, http.StatusOK)
 	// In test-export, eof is true to stop the infinite for loop in sdk
 	w.Header().Set("EOF", fmt.Sprintf("%v", eof))
@@ -328,7 +343,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 			},
 			Created: data.Captured,
 		})
-		inserted, err := rg.svc.WriteTC(r.Context(), tc, data.TestCasePath, data.MockPath)
+		inserted, err := rg.tcSvc.WriteToYaml(r.Context(), tc, data.TestCasePath, data.MockPath)
 		if err != nil {
 			rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
 			render.Render(w, r, ErrInvalidRequest(err))
@@ -338,7 +353,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, map[string]string{"id": inserted[0]})
 		return
 	}
-	inserted, err := rg.svc.Put(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
+	inserted, err := rg.tcSvc.InsertToDB(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,

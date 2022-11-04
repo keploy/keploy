@@ -8,30 +8,29 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"go.keploy.io/server/graph/model"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/service/run"
 )
 
 const DEFAULT_COMPANY = "default_company"
 const DEFAULT_USER = "default_user"
 
-func ConvertTestRunStatus(s run.TestRunStatus) model.TestRunStatus {
+func ConvertTestRunStatus(s models.TestRunStatus) model.TestRunStatus {
 	switch s {
-	case run.TestRunStatusFailed:
+	case models.TestRunStatusFailed:
 		return model.TestRunStatusFailed
-	case run.TestRunStatusRunning:
+	case models.TestRunStatusRunning:
 		return model.TestRunStatusRunning
 	default:
 		return model.TestRunStatusPassed
 	}
 }
 
-func ConvertTestStatus(s run.TestStatus) model.TestStatus {
+func ConvertTestStatus(s models.TestStatus) model.TestStatus {
 	switch s {
-	case run.TestStatusFailed:
+	case models.TestStatusFailed:
 		return model.TestStatusFailed
-	case run.TestStatusPassed:
+	case models.TestStatusPassed:
 		return model.TestStatusPassed
-	case run.TestStatusPending:
+	case models.TestStatusPending:
 		return model.TestStatusPending
 	default:
 		return model.TestStatusRunning
@@ -91,7 +90,7 @@ func ConvertHttpReq(r models.HttpReq) *model.HTTPReq {
 	}
 }
 
-func ConvertIntResult(i run.IntResult) *model.IntResult {
+func ConvertIntResult(i models.IntResult) *model.IntResult {
 	return &model.IntResult{
 		Normal:   &i.Normal,
 		Expected: i.Expected,
@@ -99,14 +98,14 @@ func ConvertIntResult(i run.IntResult) *model.IntResult {
 	}
 }
 
-func ConvertHeader(h run.Header) *model.Header {
+func ConvertHeader(h models.Header) *model.Header {
 	return &model.Header{
 		Key:   h.Key,
 		Value: h.Value,
 	}
 }
 
-func ConvertHeaderResult(h run.HeaderResult) *model.HeaderResult {
+func ConvertHeaderResult(h models.HeaderResult) *model.HeaderResult {
 	return &model.HeaderResult{
 		Normal:   &h.Normal,
 		Expected: ConvertHeader(h.Expected),
@@ -114,16 +113,16 @@ func ConvertHeaderResult(h run.HeaderResult) *model.HeaderResult {
 	}
 }
 
-func ConvertBodyType(b run.BodyType) model.BodyType {
+func ConvertBodyType(b models.BodyType) model.BodyType {
 	switch b {
-	case run.BodyTypeJSON:
+	case models.BodyTypeJSON:
 		return model.BodyTypeJSON
 	default:
 		return model.BodyTypePlain
 	}
 }
 
-func ConvertResult(r run.Result) *model.Result {
+func ConvertResult(r models.Result) *model.Result {
 	var headers []*model.HeaderResult
 	for _, h := range r.HeadersResult {
 		headers = append(headers, ConvertHeaderResult(h))

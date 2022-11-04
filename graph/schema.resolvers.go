@@ -20,7 +20,7 @@ func (r *mutationResolver) UpdateTestCase(ctx context.Context, tc []*model.TestC
 	for _, t := range tc {
 		tcs = append(tcs, ConvertTestCaseInput(t))
 	}
-	err := r.reg.UpdateTC(ctx, tcs)
+	err := r.tcSvc.Update(ctx, tcs)
 	if err != nil {
 		return false, err
 	}
@@ -28,7 +28,7 @@ func (r *mutationResolver) UpdateTestCase(ctx context.Context, tc []*model.TestC
 }
 
 func (r *mutationResolver) DeleteTestCase(ctx context.Context, id string) (bool, error) {
-	err := r.reg.DeleteTC(ctx, DEFAULT_COMPANY, id)
+	err := r.tcSvc.Delete(ctx, DEFAULT_COMPANY, id)
 	if err != nil {
 		return false, err
 	}
@@ -50,7 +50,7 @@ func (r *mutationResolver) NormalizeTests(ctx context.Context, ids []string) (bo
 }
 
 func (r *queryResolver) Apps(ctx context.Context) ([]*model.App, error) {
-	apps, err := r.reg.GetApps(ctx, DEFAULT_COMPANY)
+	apps, err := r.tcSvc.GetApps(ctx, DEFAULT_COMPANY)
 	if err != nil {
 		return nil, err
 	}
@@ -146,14 +146,14 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, o
 	}
 
 	if id != nil {
-		tc, err := r.reg.Get(ctx, DEFAULT_COMPANY, a, *id)
+		tc, err := r.tcSvc.Get(ctx, DEFAULT_COMPANY, a, *id)
 		if err != nil {
 			return nil, err
 		}
 		return []*model.TestCase{ConvertTestCase(tc)}, nil
 	}
 
-	tcs, err := r.reg.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit)
+	tcs, err := r.tcSvc.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit, "", "")
 	if err != nil {
 		return nil, err
 	}

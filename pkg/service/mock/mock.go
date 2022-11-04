@@ -9,20 +9,21 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewMockService(store models.MockStore, log *zap.Logger) *Mock {
+func NewMockService(mockFS models.MockFS, log *zap.Logger) *Mock {
 	return &Mock{
-		log:   log,
-		store: store,
+		log:    log,
+		mockFS: mockFS,
 	}
 }
 
+// Mock is a service to read-write mocks during record and replay in unit-tests only.
 type Mock struct {
-	log   *zap.Logger
-	store models.MockStore
+	log    *zap.Logger
+	mockFS models.MockFS
 }
 
 func (m *Mock) FileExists(ctx context.Context, path string) bool {
-	return m.store.Exists(ctx, path)
+	return m.mockFS.Exists(ctx, path)
 }
 
 func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta interface{}) error {
@@ -32,7 +33,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 		doc.Name = uuid.New().String()
 		isGenerated = true
 	}
-	err := m.store.Write(ctx, path, doc)
+	err := m.mockFS.Write(ctx, path, doc)
 	if err != nil {
 		m.log.Error(err.Error())
 	}
@@ -48,7 +49,7 @@ func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta inter
 }
 
 func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.Mock, error) {
-	arr, err := m.store.Read(ctx, path, name, true)
+	arr, err := m.mockFS.Read(ctx, path, name, true)
 	if err != nil {
 		m.log.Error("failed to read then yaml file", zap.Any("error", err))
 		return nil, err

@@ -57,15 +57,15 @@ type MockHttpReq struct {
 }
 
 type MockHttpResp struct {
-	StatusCode int               `json:"status_code" yaml:"status_code"` // e.g. 200
-	Header     map[string]string `json:"header" yaml:"header"`
-	Body       string            `json:"body" yaml:"body"`
-	StatusMessage string  		`json:"status_message" yaml:"status_message"`
-	ProtoMajor int 				`json:"proto_major" yaml:"proto_major"`
-	ProtoMinor int 				`json:"proto_minor" yaml:"proto_minor"`
+	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
+	Header        map[string]string `json:"header" yaml:"header"`
+	Body          string            `json:"body" yaml:"body"`
+	StatusMessage string            `json:"status_message" yaml:"status_message"`
+	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
+	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
 }
 
-type MockStore interface {
+type MockFS interface {
 	ReadAll(ctx context.Context, testCasePath, mockPath string) ([]TestCase, error)
 	Read(ctx context.Context, path, name string, libMode bool) ([]Mock, error)
 	Write(ctx context.Context, path string, doc Mock) error

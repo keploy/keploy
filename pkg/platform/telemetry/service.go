@@ -17,6 +17,11 @@ type DB interface {
 	Find() string
 }
 
+type FS interface {
+	Get() (string, error)
+	Set(string) error
+}
+
 type Service interface {
 	Ping(bool)
 	Normalize(http.Client, context.Context)

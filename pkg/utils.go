@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/pkg/models"
 )
 
 func IsValidPath(s string) bool {
@@ -21,7 +21,7 @@ func SanitiseInput(s string) string {
 	return html.EscapeString(string(re.ReplaceAll([]byte(s), []byte(""))))
 }
 
-func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noise map[string]string) bool {
+func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
 	if res == nil {
 		return false
 	}
@@ -39,13 +39,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noi
 			if !ok {
 				//fmt.Println("header not present", k)
 				if checkKey(res, k) {
-					*res = append(*res, run.HeaderResult{
+					*res = append(*res, models.HeaderResult{
 						Normal: false,
-						Expected: run.Header{
+						Expected: models.Header{
 							Key:   k,
 							Value: v,
 						},
-						Actual: run.Header{
+						Actual: models.Header{
 							Key:   k,
 							Value: nil,
 						},
@@ -58,13 +58,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noi
 			if len(v) != len(val) {
 				//fmt.Println("value not same", k, v, val)
 				if checkKey(res, k) {
-					*res = append(*res, run.HeaderResult{
+					*res = append(*res, models.HeaderResult{
 						Normal: false,
-						Expected: run.Header{
+						Expected: models.Header{
 							Key:   k,
 							Value: v,
 						},
-						Actual: run.Header{
+						Actual: models.Header{
 							Key:   k,
 							Value: val,
 						},
@@ -77,13 +77,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noi
 				if val[i] != e {
 					//fmt.Println("value not same", k, v, val)
 					if checkKey(res, k) {
-						*res = append(*res, run.HeaderResult{
+						*res = append(*res, models.HeaderResult{
 							Normal: false,
-							Expected: run.Header{
+							Expected: models.Header{
 								Key:   k,
 								Value: v,
 							},
-							Actual: run.Header{
+							Actual: models.Header{
 								Key:   k,
 								Value: val,
 							},
@@ -95,13 +95,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noi
 			}
 		}
 		if checkKey(res, k) {
-			*res = append(*res, run.HeaderResult{
+			*res = append(*res, models.HeaderResult{
 				Normal: true,
-				Expected: run.Header{
+				Expected: models.Header{
 					Key:   k,
 					Value: v,
 				},
-				Actual: run.Header{
+				Actual: models.Header{
 					Key:   k,
 					Value: val,
 				},
@@ -117,13 +117,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noi
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h1[k]
 		if isNoisy && checkKey(res, k) {
-			*res = append(*res, run.HeaderResult{
+			*res = append(*res, models.HeaderResult{
 				Normal: true,
-				Expected: run.Header{
+				Expected: models.Header{
 					Key:   k,
 					Value: val,
 				},
-				Actual: run.Header{
+				Actual: models.Header{
 					Key:   k,
 					Value: v,
 				},
@@ -133,13 +133,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noi
 		if !ok {
 			//fmt.Println("header not present", k)
 			if checkKey(res, k) {
-				*res = append(*res, run.HeaderResult{
+				*res = append(*res, models.HeaderResult{
 					Normal: false,
-					Expected: run.Header{
+					Expected: models.Header{
 						Key:   k,
 						Value: nil,
 					},
-					Actual: run.Header{
+					Actual: models.Header{
 						Key:   k,
 						Value: v,
 					},
@@ -152,7 +152,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]run.HeaderResult, noi
 	return match
 }
 
-func checkKey(res *[]run.HeaderResult, key string) bool {
+func checkKey(res *[]models.HeaderResult, key string) bool {
 	for _, v := range *res {
 		if key == v.Expected.Key {
 			return false

@@ -1,4 +1,4 @@
-package mock
+package fs
 
 import (
 	"context"
@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	// "runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	grpcMock "go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/pkg"
@@ -18,11 +20,13 @@ import (
 
 type mockExport struct {
 	isTestMode bool
+	tests      sync.Map
 }
 
-func NewMockExport(isTestMode bool) *mockExport {
+func NewMockExportFS(isTestMode bool) *mockExport {
 	return &mockExport{
 		isTestMode: isTestMode,
+		tests:      sync.Map{},
 	}
 }
 

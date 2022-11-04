@@ -1,10 +1,12 @@
 package server
 
 import (
-	"log"
+	"fmt"
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql/handler"
@@ -22,19 +24,32 @@ import (
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
+	mockPlatform "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/mgo"
-	mockPlatform "go.keploy.io/server/pkg/platform/mock"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	mock2 "go.keploy.io/server/pkg/service/browserMock"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/pkg/service/testCase"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
 // const defaultPort = "8080"
+
+const logo string = `
+       ▓██▓▄
+    ▓▓▓▓██▓█▓▄
+     ████████▓▒
+          ▀▓▓███▄      ▄▄   ▄               ▌
+         ▄▌▌▓▓████▄    ██ ▓█▀  ▄▌▀▄  ▓▓▌▄   ▓█  ▄▌▓▓▌▄ ▌▌   ▓
+       ▓█████████▌▓▓   ██▓█▄  ▓█▄▓▓ ▐█▌  ██ ▓█  █▌  ██  █▌ █▓
+      ▓▓▓▓▀▀▀▀▓▓▓▓▓▓▌  ██  █▓  ▓▌▄▄ ▐█▓▄▓█▀ █▓█ ▀█▄▄█▀   █▓█
+       ▓▌                           ▐█▌                   █▌
+        ▓
+`
 
 type config struct {
 	MongoURI         string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
@@ -50,10 +65,11 @@ type config struct {
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
 	Port             string `envconfig:"PORT" default:"6789"`
+	ReportPath       string `envconfig:"REPORT_PATH" default:""`
+	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
 }
 
-func Server() *chi.Mux {
-
+func Server(ver string) *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
 
 	logConf := zap.NewDevelopmentConfig()
@@ -69,6 +85,21 @@ func Server() *chi.Mux {
 	if err != nil {
 		logger.Error("failed to read/process configuration", zap.Error(err))
 	}
+	// default resultPath is current directory from which keploy binary is running
+	if conf.ReportPath == "" {
+		curr, err := os.Getwd()
+		if err != nil {
+			logger.Error("failed to get path of current directory from which keploy binary is running", zap.Error(err))
+		}
+		conf.ReportPath = curr
+	} else if conf.ReportPath[0] != '/' {
+		path, err := filepath.Abs(conf.ReportPath)
+		if err != nil {
+			logger.Error("Failed to get the absolute path from relative conf.path", zap.Error(err))
+		}
+		conf.ReportPath = path
+	}
+	conf.ReportPath += "/test-reports"
 
 	if conf.EnableDebugger {
 		logConf.Level.SetLevel(zap.DebugLevel)
@@ -85,21 +116,24 @@ func Server() *chi.Mux {
 
 	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
-	fileStore := mockPlatform.NewMockExport(keploy.GetMode() == keploy.MODE_TEST)
+	mockFS := mockPlatform.NewMockExportFS(keploy.GetMode() == keploy.MODE_TEST)
+	testReportFS := mockPlatform.NewTestReportFS(keploy.GetMode() == keploy.MODE_TEST)
+	teleFS := mockPlatform.NewTeleFS()
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
 	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, logger)
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger)
 
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, fileStore)
-	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client)
-	mockSrv := mock.NewMockService(fileStore, logger)
+	regSrv := regression2.New(tdb, rdb, logger, conf.EnableTestExport, mockFS, testReportFS)
+	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
+	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
+	mockSrv := mock.NewMockService(mockFS, logger)
 
-	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv)}))
+	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv, tcSvc)}))
 
 	// initialize the client serveri
 	r := chi.NewRouter()
@@ -139,11 +173,11 @@ func Server() *chi.Mux {
 		w.Write([]byte("ok"))
 	})
 
-	r.Handle("/*", web.Handler())
+	r.Handle("/*", http.StripPrefix(conf.PathPrefix, web.Handler()))
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
-		regression.New(r, logger, regSrv, runSrv, conf.EnableTestExport)
+		regression.New(r, logger, regSrv, runSrv, tcSvc, conf.EnableTestExport, conf.ReportPath)
 		browserMock.New(r, logger, browserMockSrv)
 
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
@@ -163,11 +197,11 @@ func Server() *chi.Mux {
 
 	httpListener := m.Match(cmux.HTTP1Fast())
 
-	log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
+	//log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(logger, regSrv, runSrv, mockSrv, grpcListener, conf.EnableTestExport)
+		return grpcserver.New(logger, regSrv, runSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
 	})
 
 	g.Go(func() error {
@@ -176,6 +210,9 @@ func Server() *chi.Mux {
 		return err
 	})
 	g.Go(func() error { return m.Serve() })
+	fmt.Println(logo)
+	fmt.Printf("keploy %v\n\n.", ver)
+	logger.Info("keploy started at port " + port)
 	g.Wait()
 
 	return r
