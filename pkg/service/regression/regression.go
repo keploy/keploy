@@ -181,7 +181,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 	res.BodyResult.Normal = pass
 
-	if !pkg.CompareHeaders(tc.HttpResp.Header, resp.Header, hRes, headerNoise) {
+	if !pkg.CompareHeaders(tc.HttpResp.Header, grpcMock.ToHttpHeader(grpcMock.ToMockHeader(resp.Header)), hRes, headerNoise) {
 
 		pass = false
 	}
