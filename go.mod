@@ -18,7 +18,10 @@ require (
 	google.golang.org/protobuf v1.28.0
 )
 
-require github.com/k0kubun/pp/v3 v3.1.0
+require (
+	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
+	github.com/k0kubun/pp/v3 v3.1.0
+)
 
 require (
 	github.com/golang/protobuf v1.5.2 // indirect

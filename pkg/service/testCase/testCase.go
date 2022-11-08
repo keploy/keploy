@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -50,7 +49,7 @@ type TestCase struct {
 	// anchor field is a low variance field which is used in the deduplication algorithm.
 	// example: user-type or blood-group could be good anchor fields whereas timestamps
 	// and usernames are bad anchor fields.
-	// during deduplication only anchor fields are compared for new requests to determine whether its a duplicate or not.
+	// during deduplication only anchor fields are compared for new requests to determine whether it is a duplicate or not.
 	// other fields are ignored.
 	anchors map[string][]map[string][]string
 	// noisyFields is map[index][key]bool
@@ -197,11 +196,14 @@ func (r *TestCase) InsertToDB(ctx context.Context, cid string, tcs []models.Test
 	return ids, nil
 }
 
-// Write will write testcases into the path directory as yaml files. Note: dedup algo is not executed during testcase-export currently.
+// WriteToYaml Write will write testcases into the path directory as yaml files.
+// Note: dedup algo is not executed during testcase-export currently.
 func (r *TestCase) WriteToYaml(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
 	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
+	// test[0] will always be a testcase. test[1:] will be the mocks.
+	// check for known noisy fields like dates
 	err := r.mockFS.Write(ctx, testCasePath, test[0])
 	if err != nil {
 		r.log.Error(err.Error())
@@ -216,58 +218,6 @@ func (r *TestCase) WriteToYaml(ctx context.Context, test []models.Mock, testCase
 		r.log.Info(fmt.Sprint("\n💾 Recorded mocks for testcase with name: ", test[0].Name, " at path: ", mockPath, "\n"))
 	}
 	return []string{test[0].Name}, nil
-}
-
-// Flatten takes a map and returns a new one where nested maps are replaced
-// by dot-delimited keys.
-// examples of valid jsons - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse#examples
-func flatten(j interface{}) map[string][]string {
-	if j == nil {
-		return map[string][]string{"": {""}}
-	}
-	o := make(map[string][]string)
-	x := reflect.ValueOf(j)
-	switch x.Kind() {
-	case reflect.Map:
-		m, ok := j.(map[string]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for k, v := range m {
-			nm := flatten(v)
-			for nk, nv := range nm {
-				fk := k
-				if nk != "" {
-					fk = fk + "." + nk
-				}
-				o[fk] = nv
-			}
-		}
-	case reflect.Bool:
-		o[""] = []string{strconv.FormatBool(x.Bool())}
-	case reflect.Float64:
-		o[""] = []string{strconv.FormatFloat(x.Float(), 'E', -1, 64)}
-	case reflect.String:
-		o[""] = []string{x.String()}
-	case reflect.Slice:
-		child, ok := j.([]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for _, av := range child {
-			nm := flatten(av)
-			for nk, nv := range nm {
-				if ov, exists := o[nk]; exists {
-					o[nk] = append(ov, nv...)
-				} else {
-					o[nk] = nv
-				}
-			}
-		}
-	default:
-		fmt.Println("found invalid value in json", j, x.Kind())
-	}
-	return o
 }
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
@@ -344,7 +294,7 @@ func (r *TestCase) isDup(ctx context.Context, t *models.TestCase) (bool, error) 
 		if err != nil {
 			return false, err
 		}
-		body := flatten(result)
+		body := pkg.Flatten(result)
 		for k, v := range body {
 			nk := "body"
 			if k != "" {
