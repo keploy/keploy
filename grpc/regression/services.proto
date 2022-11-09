@@ -151,8 +151,8 @@ message Mock {
     int64 Created = 7;
     // for sql
     string Type = 8;
-    Table Table = 9;
-    int64 Int = 10;
+    optional Table Table = 9;
+    int64 Int = 10; // change it to rows commited 
   }
   SpecSchema Spec = 4;
 }

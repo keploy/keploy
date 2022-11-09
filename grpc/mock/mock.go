@@ -1,8 +1,11 @@
 package mock
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"strings"
 
@@ -51,14 +54,24 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 		}
 
 	case string(models.SQL):
-		spec := models.SQlSpec{
-			Type: models.SqlOutputType(doc.Spec.Type),
-			Table: models.Table{
-				Cols: ToModelCols(doc.Spec.Table.Cols), //conversion to do
-				Rows: doc.Spec.Table.Rows,
-			},
-			Int: int(doc.Spec.Int),
+		commit:=doc.Spec.Int
+		var spec models.SQlSpec
+		if commit!=0 {
+			spec = models.SQlSpec{
+				Type: models.SqlOutputType(doc.Spec.Type),
+				Int: int(doc.Spec.Int),
+			}
+		}else{
+			spec = models.SQlSpec{
+				Type: models.SqlOutputType(doc.Spec.Type),
+				Table: models.Table{
+					Cols: ToModelCols(doc.Spec.Table.Cols), //conversion to do
+					Rows: doc.Spec.Table.Rows,
+				},
+				Int: int(doc.Spec.Int),
+			}
 		}
+		
 
 		// for _, j := range doc.Spec.Table.Cols {
 		// 	spec.Table.Cols = append(spec.Table.Cols, models.SqlCol{Name: j.Name,Type: j.Type,Precision: int(j.Precision),Scale: int(j.Scale)})
@@ -111,9 +124,16 @@ func toProtoCols(cols []models.SqlCol) ([]*proto.SqlCol, error) {
 func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 	res := []models.Object{}
 	for _, j := range objs {
+		var b bytes.Buffer
+		gz := gzip.NewWriter(&b)
+		if _, err := gz.Write(j.Data); err != nil {
+			return nil
+		}
+		gz.Close()
+		data := base64.StdEncoding.EncodeToString(b.Bytes())
 		res = append(res, models.Object{
 			Type: j.Type,
-			Data: base64.StdEncoding.EncodeToString(j.Data),
+			Data: data,
 		})
 	}
 	return res
@@ -123,12 +143,21 @@ func toProtoObjects(objs []models.Object) ([]*proto.Mock_Object, error) {
 	res := []*proto.Mock_Object{}
 	for _, j := range objs {
 		bin, err := base64.StdEncoding.DecodeString(j.Data)
+		r := bytes.NewReader(bin)
+		gzr, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+		data, err := ioutil.ReadAll(gzr)
+		if err != nil {
+			return nil, err
+		}
 		if err != nil {
 			return res, fmt.Errorf("failed to decode base64 data from yaml file into byte array. error: %s", err.Error())
 		}
 		res = append(res, &proto.Mock_Object{
 			Type: j.Type,
-			Data: bin,
+			Data: data,
 		})
 	}
 	return res, nil
@@ -194,14 +223,14 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				},
 				Int: int64(spec.Int),
 			}
-			for _, j := range spec.Table.Cols {
-				mock.Spec.Table.Cols = append(mock.Spec.Table.Cols, &proto.SqlCol{
-					Name: j.Name,
-					Type: j.Type,
-					Precision: int64(j.Precision),
-					Scale: int64(j.Scale),
-				})
-			}
+			// for _, j := range spec.Table.Cols {
+			// 	mock.Spec.Table.Cols = append(mock.Spec.Table.Cols, &proto.SqlCol{
+			// 		Name: j.Name,
+			// 		Type: j.Type,
+			// 		Precision: int64(j.Precision),
+			// 		Scale: int64(j.Scale),
+			// 	})
+			// }
 
 		case models.GENERIC:
 			spec := &models.GenericSpec{}
