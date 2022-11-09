@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/pkg"
 	"net"
 	"path/filepath"
+	"strings"
 
 	"strconv"
 	"time"
@@ -290,9 +292,34 @@ func GetHttpHeader(m map[string]*proto.StrArr) map[string][]string {
 }
 
 func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*proto.PostTCResponse, error) {
+	// find noisy fields
+	m, err := pkg.FlattenHttpResponse(utils.GetHttpHeader(request.HttpResp.Header), request.HttpResp.Body)
+	if err != nil {
+		msg := "error in flattening http response"
+		srv.logger.Error(msg, zap.Error(err))
+		return nil, errors.New(msg)
+	}
+	noise := pkg.FindNoisyFields(m, func(k string, vals []string) bool {
+		// check if k is date
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+
+		// maybe we need to concatenate the values
+		if pkg.IsTime(strings.Join(vals, ", ")) {
+			return true
+		}
+		return false
+	})
+
+	// find number of files in the test folder
+	tcs, _ := srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, request.AppID, nil, nil, request.TestCasePath, request.MockPath)
+
 	if srv.testExport {
 		var (
-			id = uuid.New().String()
+			id = fmt.Sprintf("test-%v", len(tcs)+1)
 			tc = []models.Mock{{
 				Version: string(models.V1_BETA1),
 				Kind:    string(models.HTTP_EXPORT),
@@ -336,7 +363,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			}}),
 			Mocks: mocks,
 			Assertions: map[string][]string{
-				"noise": {}, // TODO: it should be popuplated after denoise
+				"noise": noise, // TODO: it should be popuplated after denoise
 			},
 		})
 		inserted, err := srv.tcSvc.WriteToYaml(ctx, tc, request.TestCasePath, request.MockPath)

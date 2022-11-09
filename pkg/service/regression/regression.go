@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -181,7 +180,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 	res.BodyResult.Normal = pass
 
-	if !pkg.CompareHeaders(tc.HttpResp.Header, resp.Header, hRes, headerNoise) {
+	if !pkg.CompareHeaders(tc.HttpResp.Header, grpcMock.ToHttpHeader(grpcMock.ToMockHeader(resp.Header)), hRes, headerNoise) {
 
 		pass = false
 	}
@@ -374,41 +373,30 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 	}
 	tc := docs[0]
 
-	a, b := map[string][]string{}, map[string][]string{}
-
-	// add headers
-	for k, v := range utils.GetStringMap(tc.Spec.Res.Header) {
-		a["header."+k] = []string{strings.Join(v, "")}
-	}
-
-	for k, v := range h {
-		b["header."+k] = []string{strings.Join(v, "")}
-	}
-
-	err = addBody(tc.Spec.Res.Body, a)
+	oldResp, err := pkg.FlattenHttpResponse(utils.GetStringMap(tc.Spec.Res.Header), tc.Spec.Res.Body)
 	if err != nil {
-		r.log.Error("failed to parse response body", zap.String("id", id), zap.Error(err))
+		r.log.Error("failed to flatten response", zap.Error(err))
 		return err
 	}
 
-	err = addBody(body, b)
-	if err != nil {
-		r.log.Error("failed to parse response body", zap.String("id", id), zap.Error(err))
-		return err
-	}
-	// r.log.Debug("denoise between",zap.Any("stored object",a),zap.Any("coming object",b))
-	var noise []string
-	for k, v := range a {
-		v2, ok := b[k]
+	noise := pkg.FindNoisyFields(oldResp, func(k string, v []string) bool {
+		newResp, err := pkg.FlattenHttpResponse(h, body)
+		if err != nil {
+			r.log.Error("failed to flatten response", zap.Error(err))
+			return false
+		}
+		// TODO : can we simplify this by checking and return false first?
+		v2, ok := newResp[k]
 		if !ok {
-			noise = append(noise, k)
-			continue
+			return true
 		}
 		if !reflect.DeepEqual(v, v2) {
-			noise = append(noise, k)
+			return true
 		}
-	}
-	// r.log.Debug("Noise Array : ",zap.Any("",noise))
+		return false
+
+	})
+	r.log.Debug("Noise Array : ", zap.Any("", noise))
 	tc.Spec.Assertions["noise"] = utils.ToStrArr(noise)
 	doc, err := grpcMock.Encode(tc)
 	if err != nil {
@@ -451,13 +439,13 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 		b["header."+k] = []string{strings.Join(v, "")}
 	}
 
-	err = addBody(tc.HttpResp.Body, a)
+	err = pkg.AddHttpBodyToMap(tc.HttpResp.Body, a)
 	if err != nil {
 		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
 	}
 
-	err = addBody(body, b)
+	err = pkg.AddHttpBodyToMap(body, b)
 	if err != nil {
 		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
@@ -482,80 +470,4 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 		return err
 	}
 	return nil
-}
-
-func addBody(body string, m map[string][]string) error {
-	// add body
-	if json.Valid([]byte(body)) {
-		var result interface{}
-
-		err := json.Unmarshal([]byte(body), &result)
-		if err != nil {
-			return err
-		}
-		j := flatten(result)
-		for k, v := range j {
-			nk := "body"
-			if k != "" {
-				nk = nk + "." + k
-			}
-			m[nk] = v
-		}
-	} else {
-		// add it as raw text
-		m["body"] = []string{body}
-	}
-	return nil
-}
-
-// Flatten takes a map and returns a new one where nested maps are replaced
-// by dot-delimited keys.
-// examples of valid jsons - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse#examples
-func flatten(j interface{}) map[string][]string {
-	if j == nil {
-		return map[string][]string{"": {""}}
-	}
-	o := make(map[string][]string)
-	x := reflect.ValueOf(j)
-	switch x.Kind() {
-	case reflect.Map:
-		m, ok := j.(map[string]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for k, v := range m {
-			nm := flatten(v)
-			for nk, nv := range nm {
-				fk := k
-				if nk != "" {
-					fk = fk + "." + nk
-				}
-				o[fk] = nv
-			}
-		}
-	case reflect.Bool:
-		o[""] = []string{strconv.FormatBool(x.Bool())}
-	case reflect.Float64:
-		o[""] = []string{strconv.FormatFloat(x.Float(), 'E', -1, 64)}
-	case reflect.String:
-		o[""] = []string{x.String()}
-	case reflect.Slice:
-		child, ok := j.([]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for _, av := range child {
-			nm := flatten(av)
-			for nk, nv := range nm {
-				if ov, exists := o[nk]; exists {
-					o[nk] = append(ov, nv...)
-				} else {
-					o[nk] = nv
-				}
-			}
-		}
-	default:
-		fmt.Println("found invalid value in json", j, x.Kind())
-	}
-	return o
 }
