@@ -19,6 +19,7 @@ require (
 )
 
 require (
+	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/k0kubun/pp/v3 v3.1.0
 	github.com/wI2L/jsondiff v0.2.0
 )
