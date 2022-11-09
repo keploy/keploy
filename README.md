@@ -1,17 +1,31 @@
-# Welcome to Keploy 👋
+<h1 align="center"> Welcome to Keploy 👋 </h1>
 
 <p style="text-align:center;" align="center">
   <img align="center" src="https://avatars.githubusercontent.com/u/92252339?s=200&v=4" height="20%" width="20%" />
 </p>
 
+<p align="center">
 
-[![contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen?logo=github)](CODE_OF_CONDUCT.md) 
-[![Tests](https://github.com/keploy/keploy/actions/workflows/go.yml/badge.svg)](https://github.com/keploy/keploy/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/keploy/keploy)](https://goreportcard.com/report/github.com/keploy/keploy)
-[![Slack](.github/slack.svg)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
-[![Docs](.github/docs.svg)](https://docs.keploy.io)
-[![Gitpod](https://img.shields.io/badge/Gitpod-ready--to--code-FFB45B?logo=gitpod)](https://gitpod.io/#https://github.com/keploy/samples-go) 
 
+  <a href="CODE_OF_CONDUCT.md" alt="Contributions welcome">
+    <img src="https://img.shields.io/badge/Contributions-Welcome-brightgreen?logo=github" /></a>
+    
+  <a href="https://github.com/keploy/keploy/actions" alt="Tests">
+    <img src="https://github.com/keploy/keploy/actions/workflows/go.yml/badge.svg" /></a>
+    
+  <a href="https://goreportcard.com/report/github.com/keploy/keploy" alt="Go Report Card">
+    <img src="https://goreportcard.com/badge/github.com/keploy/keploy" /></a>
+    
+  <a href="https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA" alt="Slack">
+    <img src=".github/slack.svg" /></a>
+  
+  <a href="https://docs.keploy.io" alt="Docs">
+    <img src=".github/docs.svg" /></a>
+    
+  <a href="https://gitpod.io/#https://github.com/keploy/samples-go" alt="Gitpod">
+    <img src="https://img.shields.io/badge/Gitpod-ready--to--code-FFB45B?logo=gitpod" /></a>
+
+</p>
 
 # Keploy
 Keploy is a functional testing toolkit for developers. Currently, it can generate: 
@@ -19,7 +33,7 @@ Keploy is a functional testing toolkit for developers. Currently, it can generat
 2. Realistic mocks by capturing real calls and be imported and used anywhere (including any testing framework). These mocks can also be used as tests for the server.   
 
 > Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main)](https://coveralls.io/github/keploy/keploy?branch=main) &nbsp;  without writing any test-cases and data-mocks. 😎
-<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%"/></a>
+<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%" heigth="50%"/></a>
 
 ## Quick Start
 The fastest way to start with Keploy is the Gitpod-hosted version. When you're ready, you can install locally or host yourself.
@@ -29,7 +43,7 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 [![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/keploy/samples-go)
 
 ## Features
-**Convert API calls from any source to Test-Cases**: Keploy captures all the API calls and subsequent network traffic served by the application. You can use any existing API management tools like Postman, Hoppscotch, Curl to generate test-case.
+* **Convert API calls from any source to Test-Cases**: Keploy captures all the API calls and subsequent network traffic served by the application. You can use any existing API management tools like Postman, Hoppscotch, Curl to generate test-case.
 
 * **Automatically Mocks Dependencies**
 * **Safely replays non-idempotent CRUD operations**
@@ -37,13 +51,11 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 
 <img src="https://github.com/keploy/docs/blob/main/static/gif/record-testcase.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
 
-**Common file for tests and mocks**: Server tests can be shared with client applications and be imported as mocks and vice versa. 
+* **Common file for tests and mocks**: Server tests can be shared with client applications and be imported as mocks and vice versa. 
 
-**Native interoperability** with popular testing libraries like `go-test`. Code coverage will be reported with existing and Keploy recorded test cases and can also be integrated in CI pipelines/infrastructure.
+* **Native interoperability** with popular testing libraries like `go-test`. Code coverage will be reported with existing and Keploy recorded test cases and can also be integrated in CI pipelines/infrastructure.
 
 [//]: # (<img src="https://github.com/keploy/docs/blob/main/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>)
-
-## Other Features
 
 * **Accurate Noise Detection** in responses like (timestamps, random values) to ensure high quality tests.
 * **Statistical deduplication** ensures that redundant testcases are not generated. WIP (ref [#27](https://github.com/keploy/keploy/issues/27)).
@@ -56,13 +68,14 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 
 Keploy is added as a middleware to your application that captures and replays all network interaction served to application from any source. 
 
-[Read more in detail](https://docs.keploy.io/docs/keploy-explained/how-keploy-works)
+Visit [https://docs.keploy.io](https://docs.keploy.io/docs/keploy-explained/how-keploy-works) to read more in detail
 
 
-## Quickstart
+## Quick Installation
 > Note that Testcases are exported as files in the repo by default
 
 ### MacOS 
+
 ```shell
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
 
@@ -70,28 +83,37 @@ sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 
 ### Linux
+
+<details>
+<summary>Linux</summary>
+
 ```shell
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
-
 sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
+</details>
 
-### Linux ARM
+<details>
+<summary>Linux ARM</summary>
+
 ```shell
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
-
 
 sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 
 The UI can be accessed at http://localhost:6789
+</details>
+
 
 ### Helm chart
 Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
 
-### Run Sample application
-Demos using Echo/PostgreSQL and Gin/MongoDB are available [here](https://github.com/keploy/samples-go). For this example, we will use the Echo/PostgreSQL sample.
+
+## Run Sample application
+
+Demos using *Echo/PostgreSQL* and *Gin/MongoDB* are available [here](https://github.com/keploy/samples-go). For this example, we will use the **Echo/PostgreSQL** sample.
 
 ```bash
 git clone https://github.com/keploy/samples-go && cd samples-go/echo-sql
@@ -165,9 +187,9 @@ All of these can be visualised here - http://localhost:6789/testlist
 
 ## Keploy SDK Modes
 ### SDK Modes
-**The Keploy SDKs modes can operated by setting `KEPLOY_MODE` environment variable**
+The Keploy SDKs modes can operated by setting `KEPLOY_MODE` environment variable
 
-**Note: KEPLOY_MODE value is case sensitive**
+> *Note: KEPLOY_MODE value is case sensitive*
 
 There are 3 Keploy SDK modes:
 
@@ -218,7 +240,8 @@ Need another language support? Please raise an [issue](https://github.com/keploy
 📖 [Contribution Guide](https://docs.keploy.io/docs/devtools/server-contrib-guide/)
 
 
-## Community Channels
+## Community Support  ❤️
+
 We'd love to collaborate with you to make Keploy great. To get started:
 * [Slack](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA) - Discussions with the community and the team.
 * [GitHub](https://github.com/keploy/keploy/issues) - For bug reports and feature requests.
