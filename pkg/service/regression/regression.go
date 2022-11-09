@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/wI2L/jsondiff"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
-	"github.com/wI2L/jsondiff"
 	grpcMock "go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
@@ -167,8 +167,11 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 	}
 
+	// stores the json body after removing the noise
+	cleanExp, cleanAct := "", ""
+
 	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
-		pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+		cleanExp, cleanAct, pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 		if err != nil {
 			return false, res, &tc, err
 		}
@@ -230,13 +233,19 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 			logs += "\t}\n"
 		}
-
+		// TODO: cleanup the logging related code. this is a mess
 		if !res.BodyResult.Normal {
 			logs += "\tResponse body: {\n"
 			if json.Valid([]byte(resp.Body)) {
 				// compute and log body's json diff
-				expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
-				patch, _ := jsondiff.Compare(expected, actual)
+				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
+				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
+				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+
+				patch, err := jsondiff.Compare(cleanExp, cleanAct)
+				if err != nil {
+					r.log.Warn("failed to compute json diff", zap.Error(err))
+				}
 				for _, op := range patch {
 					keyStr := op.Path.String()
 					if len(keyStr) > 1 && keyStr[0] == '/' {
