@@ -176,7 +176,7 @@ func TestJsonDiff(t *testing.T) {
 		// 		"set": true,
 		// 		"contact": ["1234567890", "0987654321"]}
 		// 	`,
-		// 	actual: `{ 
+		// 	actual: `{
 		// 		"name": "Ken Thompson",
 		// 		"set": false,
 		// 		"contact": ["2454665654", "3449834321"]}
@@ -321,7 +321,7 @@ func TestJsonDiff(t *testing.T) {
 		// 				"City": "Jaipur",
 		// 				"Pin": 121212
 		// 			}
-		// 		} 
+		// 		}
 		// 	]
 		// 	`,
 		// 	actual: `[
@@ -354,7 +354,7 @@ func TestJsonDiff(t *testing.T) {
 		// 					"Address": {
 		// 						"City": "Pennsylvania",
 		// 						"Pin": 19003
-		// 					}	
+		// 					}
 		// 				},
 		// 				{
 		// 					"Name": "Ford",
@@ -380,7 +380,7 @@ func TestJsonDiff(t *testing.T) {
 		// 				},
 		// 				{
 		// 					"Name": "Ford",
-		// 					"Contact": ["123", "456"], 
+		// 					"Contact": ["123", "456"],
 		// 					"Address": {
 		// 						"City": "Chicago",
 		// 						"Pin": 110081
@@ -402,7 +402,7 @@ func TestJsonDiff(t *testing.T) {
 		// 					"Address": {
 		// 						"City": "Pennsylvania",
 		// 						"Pin": 19003
-		// 					}	
+		// 					}
 		// 				},
 		// 				{
 		// 					"Name": "Ford",
@@ -436,7 +436,7 @@ func TestJsonDiff(t *testing.T) {
 		// 				},
 		// 				{
 		// 					"Name": "Ford",
-		// 					"Contact": ["123", "456"], 
+		// 					"Contact": ["123", "456"],
 		// 					"Address": {
 		// 						"City": "Chicago",
 		// 						"Pin": 110081
@@ -458,7 +458,7 @@ func TestJsonDiff(t *testing.T) {
 		// 					"Address": {
 		// 						"City": "Pennsylvania",
 		// 						"Pin": 19003
-		// 					}	
+		// 					}
 		// 				},
 		// 				{
 		// 					"Name": "Ford",
@@ -492,7 +492,7 @@ func TestJsonDiff(t *testing.T) {
 		// 				},
 		// 				{
 		// 					"Name": "Ford",
-		// 					"Contact": ["123", "456"], 
+		// 					"Contact": ["123", "456"],
 		// 					"Address": {
 		// 						"City": "Chicago",
 		// 						"Pin": 110081
@@ -562,7 +562,7 @@ func TestJsonDiff(t *testing.T) {
 		// 			"Age": 60.0,
 		// 			"Address": {
 		// 				"City" : "Atlantic City",
-		// 				"PIN" : "110192"	
+		// 				"PIN" : "110192"
 		// 			}
 		// 		}
 		// 	}
@@ -580,7 +580,7 @@ func TestJsonDiff(t *testing.T) {
 		// 			"Age": 70.0,
 		// 			"Address": {
 		// 				"City" : "Atlantic City",
-		// 				"PIN" : "321109"	
+		// 				"PIN" : "321109"
 		// 			}
 		// 		}
 		// 	}
@@ -601,7 +601,7 @@ func TestJsonDiff(t *testing.T) {
 			result: true,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP",
 					"body": "paorum "
@@ -619,7 +619,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP",
 					"body": "lorem ipsum jibrish"
@@ -659,7 +659,7 @@ func TestJsonDiff(t *testing.T) {
 			result: false,
 		},
 		{
-			exp:    `{
+			exp: `{
 				"data": {
 					"url":"http://localhost:8080/GMWJGSAP",
 					"body": "lorem ipsum jibrish"
@@ -734,7 +734,7 @@ func TestJsonDiff(t *testing.T) {
 			exp:    `{"name": "Rob Pike", "set": 21}`,
 			actual: `{"name": "Rob Pike", "set": false}`,
 			noise:  []string{"set"},
-			result: true,
+			result: false,
 		},
 		{
 			exp: `{
@@ -1045,7 +1045,7 @@ func TestJsonDiff(t *testing.T) {
 						]
 					}
 					`,
-					actual: `
+			actual: `
 					{
 					"Profiles": [
 						{
@@ -1181,17 +1181,23 @@ func TestJsonDiff(t *testing.T) {
 			noise:  []string{"body.url"},
 			result: true,
 		},
+		{
+			exp:    `[{"url": "www.google.com/sasdde" , "deadline": 123}]`,
+			actual: `[{"deadline": 123}]`,
+			noise:  []string{"body.url"},
+			result: false,
+		},
 	} {
 		logger, _ := zap.NewProduction()
 		defer logger.Sync()
-		res, err := Match(tt.exp, tt.actual, tt.noise, logger)
+		_, _, res, err := Match(tt.exp, tt.actual, tt.noise, logger)
 		if err != nil {
 			logger.Error("%v", zap.Error(err))
 		}
 		diff := deep.Equal(res, tt.result)
 		if diff != nil {
 			fmt.Println("This is diff", diff)
-			t.Fatal(tt.exp, tt.actual, "THIS IS EXP", tt.result, " \n THIS IS ACT", res)
+			t.Fatal(tt.exp, tt.actual, "THIS IS EXP", tt.result, " \n THIS IS ACT", res, "noise is: ", tt.noise)
 		}
 	}
 

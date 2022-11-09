@@ -1,5 +1,5 @@
 # build ui
-FROM --platform=${BUILDPLATFORM} node:14-bullseye as ui-builder
+FROM --platform=${BUILDPLATFORM} node:18-bullseye as ui-builder
 
 #RUN apt-get update && apt-get install libvips-dev -y
 
