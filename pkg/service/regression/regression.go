@@ -585,13 +585,15 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 
 	a, b := map[string][]string{}, map[string][]string{}
 
-	// add headers
-	for k, v := range tc.HttpResp.Header {
-		a["header."+k] = []string{strings.Join(v, "")}
-	}
+	if reqType == "http" {
+		// add headers
+		for k, v := range tc.HttpResp.Header {
+			a["header."+k] = []string{strings.Join(v, "")}
+		}
 
-	for k, v := range h {
-		b["header."+k] = []string{strings.Join(v, "")}
+		for k, v := range h {
+			b["header."+k] = []string{strings.Join(v, "")}
+		}
 	}
 
 	err = addBody(tcRespBody, a)
