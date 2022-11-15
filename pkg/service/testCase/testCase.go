@@ -120,23 +120,6 @@ func (r *TestCase) ReadTCS(ctx context.Context, testCasePath, mockPath string) (
 	return res, err
 }
 
-func (r *TestCase) PutGrpc(ctx context.Context, cid string, tcs []models.GrpcTestCase) ([]string, error) {
-	var ids []string
-	if len(tcs) == 0 {
-		return ids, errors.New("no testcase to update")
-	}
-	for _, t := range tcs {
-		id, err := r.putTCGrpc(ctx, cid, t)
-		if err != nil {
-			msg := "failed saving testcase"
-			r.log.Error(msg, zap.Error(err), zap.String("cid", cid), zap.String("id", t.ID), zap.String("app", t.AppID))
-			return ids, errors.New(msg)
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
-
 func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, limit *int, testCasePath, mockPath string) ([]models.TestCase, error) {
 	off, lim := 0, 25
 	if offset != nil {
@@ -151,25 +134,6 @@ func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, l
 	}
 
 	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
-
-	if err != nil {
-		sanitizedAppID := pkg.SanitiseInput(appID)
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
-		return nil, errors.New("internal failure")
-	}
-	return tcs, nil
-}
-
-func (r *TestCase) GetAllGrpc(ctx context.Context, cid, appID string, offset *int, limit *int) ([]models.GrpcTestCase, error) {
-	off, lim := 0, 25
-	if offset != nil {
-		off = *offset
-	}
-	if limit != nil {
-		lim = *limit
-	}
-
-	tcs, err := r.tdb.GetAllGrpc(ctx, cid, appID, false, off, lim)
 
 	if err != nil {
 		sanitizedAppID := pkg.SanitiseInput(appID)
@@ -208,31 +172,6 @@ func (r *TestCase) putTC(ctx context.Context, cid string, t models.TestCase) (st
 		}
 	}
 	err = r.tdb.Upsert(ctx, t)
-	if err != nil {
-		r.log.Error("failed to insert testcase into DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-		return "", errors.New("internal failure")
-	}
-
-	return t.ID, nil
-}
-
-func (r *TestCase) putTCGrpc(ctx context.Context, cid string, t models.GrpcTestCase) (string, error) {
-	t.CID = cid
-
-	var err error
-	if r.EnableDeDup {
-		// check if already exists
-		dup, err := r.isDupGrpc(ctx, &t)
-		if err != nil {
-			r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-			return "", errors.New("internal failure")
-		}
-		if dup {
-			r.log.Info("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.Method))
-			return "", nil
-		}
-	}
-	err = r.tdb.UpsertGrpc(ctx, t)
 	if err != nil {
 		r.log.Error("failed to insert testcase into DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
 		return "", errors.New("internal failure")

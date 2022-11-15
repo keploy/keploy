@@ -195,26 +195,6 @@ func (t *testCaseDB) Upsert(ctx context.Context, tc models.TestCase) error {
 	return nil
 }
 
-func (t *testCaseDB) UpsertGrpc(ctx context.Context, tc models.GrpcTestCase) error {
-	// sort arrays before insert
-	for _, v := range tc.Anchors {
-		sort.Strings(v)
-	}
-	upsert := true
-	opt := &options.UpdateOptions{
-		Upsert: &upsert,
-	}
-	filter := bson.M{"_id": tc.ID}
-	update := bson.D{{Key: "$set", Value: tc}}
-
-	_, err := t.c.UpdateOne(ctx, filter, update, opt)
-	if err != nil {
-		//t.log.Error("failed to insert testcase into DB", zap.String("cid", tc.CID), zap.String("appid", tc.AppID), zap.String("id", tc.ID), zap.Error())
-		return err
-	}
-	return nil
-}
-
 func (t *testCaseDB) Get(ctx context.Context, cid, id string) (models.TestCase, error) {
 	// too repetitive
 	// TODO write a generic FindOne for all get calls
@@ -224,22 +204,6 @@ func (t *testCaseDB) Get(ctx context.Context, cid, id string) (models.TestCase, 
 	}
 
 	var tc models.TestCase
-	err := t.c.FindOne(ctx, filter).Decode(&tc)
-	if err != nil {
-		return tc, err
-	}
-	return tc, nil
-}
-
-func (t *testCaseDB) GetGrpc(ctx context.Context, cid, id string) (models.GrpcTestCase, error) {
-	// too repetitive
-	// TODO write a generic FindOne for all get calls
-	filter := bson.M{"_id": id}
-	if cid != "" {
-		filter["cid"] = cid
-	}
-
-	var tc models.GrpcTestCase
 	err := t.c.FindOne(ctx, filter).Decode(&tc)
 	if err != nil {
 		return tc, err
@@ -277,39 +241,9 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 	return tcs, nil
 }
 
-func (t *testCaseDB) getAllGrpc(ctx context.Context, filter bson.M, findOptions *options.FindOptions) ([]models.GrpcTestCase, error) {
-	var tcs []models.GrpcTestCase
-	cur, err := t.c.Find(ctx, filter, findOptions)
-	if err != nil {
-		return nil, err
-	}
-
-	// Loop through the cursor
-	for cur.Next(ctx) {
-		var tc models.GrpcTestCase
-		err = cur.Decode(&tc)
-		if err != nil {
-			return nil, err
-
-		}
-		tcs = append(tcs, tc)
-	}
-
-	if err = cur.Err(); err != nil {
-		return nil, err
-
-	}
-
-	err = cur.Close(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return tcs, nil
-}
-
 func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
-
-	filter := bson.M{"cid": cid, "app_id": app, "type": "http"}
+	reqType := ctx.Value("reqType")
+	filter := bson.M{"cid": cid, "app_id": app, "type": reqType}
 	findOptions := options.Find()
 	if !anchors {
 		findOptions.SetProjection(bson.M{"anchors": 0, "all_keys": 0})
@@ -323,28 +257,6 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, 
 	findOptions.SetSort(bson.M{"created": -1}) //reverse sort
 
 	tcs, err := t.getAll(ctx, filter, findOptions)
-	if err != nil {
-		fmt.Println("After getAll ", err)
-	}
-	return tcs, nil
-}
-
-func (t *testCaseDB) GetAllGrpc(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.GrpcTestCase, error) {
-
-	filter := bson.M{"cid": cid, "app_id": app, "type": "grpc"}
-	findOptions := options.Find()
-	if !anchors {
-		findOptions.SetProjection(bson.M{"anchors": 0, "all_keys": 0})
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	findOptions.SetSkip(int64(offset))
-	findOptions.SetLimit(int64(limit))
-	findOptions.SetSort(bson.M{"created": -1}) //reverse sort
-
-	tcs, err := t.getAllGrpc(ctx, filter, findOptions)
 	if err != nil {
 		fmt.Println("After getAll ", err)
 	}
