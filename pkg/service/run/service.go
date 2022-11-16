@@ -48,6 +48,9 @@ type Test struct {
 	Req        models.HttpReq      `json:"req" bson:"req"`
 	Dep        []models.Dependency `json:"dep" bson:"dep"`
 	Resp       models.HttpResp     `json:"http_resp" bson:"http_resp,omitempty"`
+	GrpcMethod string              `json:"grpc_method" bson:"grpc_method"`
+	GrpcReq    string              `json:"grpc_req" bson:"grpc_req"`
+	GrpcResp   string              `json:"grpc_resp" bson:"grpc_resp,omitempty"`
 	Noise      []string            `json:"noise" bson:"noise"`
 	Result     models.Result       `json:"result" bson:"result"`
 }

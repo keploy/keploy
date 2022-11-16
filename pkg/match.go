@@ -3,8 +3,9 @@ package pkg
 import (
 	"encoding/json"
 	"errors"
-	"go.uber.org/zap"
 	"reflect"
+
+	"go.uber.org/zap"
 )
 
 // mapClone returns a copy of given src map.

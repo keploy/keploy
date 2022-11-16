@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/wI2L/jsondiff"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wI2L/jsondiff"
 
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
@@ -273,6 +274,117 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	return pass, res, &tc, nil
 }
+
+func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp string) (bool, *models.Result, *models.TestCase, error) {
+	var (
+		tc  models.TestCase
+		err error
+	)
+	tc, err = r.tdb.Get(ctx, cid, id)
+	if err != nil {
+		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		return false, nil, nil, err
+	}
+	bodyType := models.BodyTypePlain
+	if json.Valid([]byte(resp)) {
+		bodyType = models.BodyTypeJSON
+	}
+	pass := true
+
+	res := &models.Result{
+		BodyResult: models.BodyResult{
+			Normal:   false,
+			Type:     bodyType,
+			Expected: tc.GrpcResp,
+			Actual:   resp,
+		},
+	}
+
+	var (
+		bodyNoise   []string
+		headerNoise = map[string]string{}
+	)
+
+	for _, n := range tc.Noise {
+		a := strings.Split(n, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise = append(bodyNoise, x)
+		} else if a[0] == "header" {
+			headerNoise[a[len(a)-1]] = a[len(a)-1]
+		}
+	}
+
+	// stores the json body after removing the noise
+	cleanExp, cleanAct := "", ""
+
+	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
+		cleanExp, cleanAct, pass, err = pkg.Match(tc.GrpcResp, resp, bodyNoise, r.log)
+		if err != nil {
+			return false, res, &tc, err
+		}
+	} else {
+		if !pkg.Contains(tc.Noise, "body") && tc.GrpcResp != resp {
+			pass = false
+		}
+	}
+
+	res.BodyResult.Normal = pass
+	if !pass {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
+		var logs = ""
+
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
+			"Test Result:\n"+
+			"\tInput Grpc Request: %+v\n\n"+
+			"\tExpected Response: "+
+			"%+v\n\n"+"\tActual Response: "+
+			"%+v\n\n"+"DIFF: \n", tc.ID, tc.GrpcReq, tc.GrpcResp, resp)
+
+
+		// TODO: cleanup the logging related code. this is a mess
+		if !res.BodyResult.Normal {
+			logs += "\tResponse body: {\n"
+			if json.Valid([]byte(resp)) {
+				// compute and log body's json diff
+				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
+				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
+				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+
+				patch, err := jsondiff.Compare(cleanExp, cleanAct)
+				if err != nil {
+					r.log.Warn("failed to compute json diff", zap.Error(err))
+				}
+				for _, op := range patch {
+					keyStr := op.Path.String()
+					if len(keyStr) > 1 && keyStr[0] == '/' {
+						keyStr = keyStr[1:]
+					}
+					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+				}
+				logs += "\t}\n"
+			} else {
+				// just log both the bodies as plain text without really computing the diff
+				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.GrpcResp, resp)
+
+			}
+		}
+		logs += "--------------------------------------------------------------------\n\n"
+		logger.Printf(logs)
+	} else {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		var log2 = ""
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		logger.Printf(log2)
+
+	}
+	return pass, res, &tc, nil
+}
+
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *run.Test
 	started := time.Now().UTC()
@@ -333,6 +445,44 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 			if err2 != nil {
 				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
+		}
+	}()
+
+	if err != nil {
+		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		t.Status = models.TestStatusFailed
+	}
+	if ok {
+		t.Status = models.TestStatusPassed
+		return ok, nil
+	}
+	t.Status = models.TestStatusFailed
+	return false, nil
+}
+
+func (r *Regression) TestGrpc(ctx context.Context, cid, app, runID, id, resp string) (bool, error) {
+	var t *run.Test
+	started := time.Now().UTC()
+	ok, res, tc, err := r.testGrpc(ctx, cid, runID, id, app, resp)
+	if tc != nil {
+		t = &run.Test{
+			ID:         uuid.New().String(),
+			Started:    started.Unix(),
+			RunID:      runID,
+			TestCaseID: id,
+			GrpcMethod: tc.GrpcMethod,
+			GrpcReq:    tc.GrpcReq,
+			Dep:        tc.Deps,
+			GrpcResp:   resp,
+			Result:     *res,
+			Noise:      tc.Noise,
+		}
+	}
+	t.Completed = time.Now().UTC().Unix()
+	defer func() {
+		err2 := r.saveResult(ctx, t)
+		if err2 != nil {
+			r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 		}
 	}()
 
@@ -432,6 +582,15 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 		return r.deNoiseYaml(ctx, id, path, body, h)
 	}
 	tc, err := r.tdb.Get(ctx, cid, id)
+	reqType := ctx.Value("reqType")
+	var tcRespBody string
+	switch reqType {
+	case "http":
+		tcRespBody = tc.HttpResp.Body
+
+	case "grpc":
+		tcRespBody = tc.GrpcResp
+	}
 	if err != nil {
 		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
@@ -439,16 +598,18 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 
 	a, b := map[string][]string{}, map[string][]string{}
 
-	// add headers
-	for k, v := range tc.HttpResp.Header {
-		a["header."+k] = []string{strings.Join(v, "")}
+	if reqType == "http" {
+		// add headers
+		for k, v := range tc.HttpResp.Header {
+			a["header."+k] = []string{strings.Join(v, "")}
+		}
+
+		for k, v := range h {
+			b["header."+k] = []string{strings.Join(v, "")}
+		}
 	}
 
-	for k, v := range h {
-		b["header."+k] = []string{strings.Join(v, "")}
-	}
-
-	err = pkg.AddHttpBodyToMap(tc.HttpResp.Body, a)
+	err = pkg.AddHttpBodyToMap(tcRespBody, a)
 	if err != nil {
 		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
