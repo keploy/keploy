@@ -54,11 +54,15 @@ type MockHttpReq struct {
 	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
 	Header     map[string]string `json:"header" yaml:"header"`
 	Body       string            `json:"body" yaml:"body"`
+	GrpcReq    string            `json:"grpc_req" bson:"grpc_req,omitempty"`
+	GrpcMethod string            `json:"grpc_method" bson:"grpc_method,omitempty"`
+	Type       string            `json:"type" bson:"type,omitempty"`
 }
 
 type MockHttpResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
+	GrpcResp      string            `json:"grpc_resp" bson:"response,omitempty"`
 	Body          string            `json:"body" yaml:"body"`
 	StatusMessage string            `json:"status_message" yaml:"status_message"`
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`

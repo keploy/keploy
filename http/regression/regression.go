@@ -189,6 +189,11 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	ctx = r.Context()
 	ctx = context.WithValue(ctx, "reqType", reqType)
 	tcs, err = rg.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
+	if rg.testExport && testCasePath != "" && mockPath != "" {
+		filteredTcs := ReqTypeFilter(tcs, reqType)
+		tcs = filteredTcs
+	}
+
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
