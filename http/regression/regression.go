@@ -226,28 +226,29 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Unix()
+	var (
+		id = uuid.New().String()
+		tc = []models.Mock{{
+			Version: string(models.V1_BETA1),
+			Kind:    string(models.HTTP_EXPORT),
+			Name:    id,
+		}}
+		mocks = []string{}
+	)
+	for i, j := range data.Mocks {
+		doc, err := mock.Encode(j)
+		if err != nil {
+			rg.logger.Error(err.Error())
+		}
+		tc = append(tc, doc)
+		m := id + "-" + strconv.Itoa(i)
+		tc[len(tc)-1].Name = m
+		mocks = append(mocks, m)
+	}
+
 	switch data.Type {
 	case "http":
 		if rg.testExport {
-			var (
-				id = uuid.New().String()
-				tc = []models.Mock{{
-					Version: string(models.V1_BETA1),
-					Kind:    string(models.HTTP_EXPORT),
-					Name:    id,
-				}}
-				mocks = []string{}
-			)
-			for i, j := range data.Mocks {
-				doc, err := mock.Encode(j)
-				if err != nil {
-					rg.logger.Error(err.Error())
-				}
-				tc = append(tc, doc)
-				m := id + "-" + strconv.Itoa(i)
-				tc[len(tc)-1].Name = m
-				mocks = append(mocks, m)
-			}
 			tc[0].Spec.Encode(&models.HttpSpec{
 				// Metadata: , TODO: What should be here
 				Request: models.MockHttpReq{
@@ -277,41 +278,65 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 				},
 				Created: data.Captured,
 			})
-			inserted, err := rg.tcSvc.WriteToYaml(r.Context(), tc, data.TestCasePath, data.MockPath)
-			if err != nil {
-				rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
-				render.Render(w, r, ErrInvalidRequest(err))
-				return
-			}
-			render.Status(r, http.StatusOK)
-			render.JSON(w, r, map[string]string{"id": inserted[0]})
+		} else {
+			inserted, err = rg.tcSvc.InsertToDB(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
+				ID:       uuid.New().String(),
+				Created:  now,
+				Updated:  now,
+				Captured: data.Captured,
+				URI:      data.URI,
+				AppID:    data.AppID,
+				HttpReq:  data.HttpReq,
+				HttpResp: data.HttpResp,
+				Deps:     data.Deps,
+				Type:     data.Type,
+			}})
+		}
+	case "grpc":
+		if rg.testExport {
+			tc[0].Spec.Encode(&models.GrpcSpec{
+				// Metadata: , TODO: What should be here
+				Request: models.MockGrpcReq{
+					Method: data.GrpcMethod,
+					Body:   data.GrpcReq,
+				},
+				Response: data.GrpcResp,
+				Objects: []models.Object{{
+					Type: "error",
+					Data: "",
+				}},
+				Mocks: mocks,
+				Assertions: map[string][]string{
+					"noise": {},
+				},
+				Created: data.Captured,
+			})
+		} else {
+			inserted, err = rg.tcSvc.InsertToDB(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
+				ID:         uuid.New().String(),
+				Created:    now,
+				Updated:    now,
+				Captured:   data.Captured,
+				GrpcMethod: data.GrpcMethod,
+				AppID:      data.AppID,
+				GrpcReq:    data.GrpcReq,
+				GrpcResp:   data.GrpcResp,
+				Deps:       data.Deps,
+				Type:       data.Type,
+			}})
+		}
+	}
+
+	if rg.testExport {
+		inserted, err := rg.tcSvc.WriteToYaml(r.Context(), tc, data.TestCasePath, data.MockPath)
+		if err != nil {
+			rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
+			render.Render(w, r, ErrInvalidRequest(err))
 			return
 		}
-		inserted, err = rg.tcSvc.InsertToDB(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
-			ID:       uuid.New().String(),
-			Created:  now,
-			Updated:  now,
-			Captured: data.Captured,
-			URI:      data.URI,
-			AppID:    data.AppID,
-			HttpReq:  data.HttpReq,
-			HttpResp: data.HttpResp,
-			Deps:     data.Deps,
-			Type:     data.Type,
-		}})
-	case "grpc":
-		inserted, err = rg.tcSvc.InsertToDB(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
-			ID:         uuid.New().String(),
-			Created:    now,
-			Updated:    now,
-			Captured:   data.Captured,
-			GrpcMethod: data.GrpcMethod,
-			AppID:      data.AppID,
-			GrpcReq:    data.GrpcReq,
-			GrpcResp:   data.GrpcResp,
-			Deps:       data.Deps,
-			Type:       data.Type,
-		}})
+		render.Status(r, http.StatusOK)
+		render.JSON(w, r, map[string]string{"id": inserted[0]})
+		return
 	}
 
 	if err != nil {

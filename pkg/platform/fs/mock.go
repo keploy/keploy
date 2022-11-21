@@ -148,43 +148,82 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
 	res := []models.TestCase{}
 	for _, j := range tcs {
-		spec := models.HttpSpec{}
-		err := j.Spec.Decode(&spec)
-		if err != nil {
-			return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
-		}
-
 		mocks, _ := read(mockPath, fileName, false)
 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
-
-		noise, ok := spec.Assertions["noise"]
-		if !ok {
-			noise = []string{}
-		}
 		doc, err := grpcMock.Decode(mocks)
 		if err != nil {
 			return res, err
 		}
-		res = append(res, models.TestCase{
-			ID: j.Name,
-			HttpReq: models.HttpReq{
-				Method:     spec.Request.Method,
-				ProtoMajor: spec.Request.ProtoMajor,
-				ProtoMinor: spec.Request.ProtoMinor,
-				URL:        spec.Request.URL,
-				Header:     grpcMock.ToHttpHeader(spec.Request.Header),
-				Body:       spec.Request.Body,
-				URLParams:  spec.Request.URLParams,
-			},
-			HttpResp: models.HttpResp{
-				StatusCode: spec.Response.StatusCode,
-				Header:     grpcMock.ToHttpHeader(spec.Response.Header),
-				Body:       spec.Response.Body,
-			},
-			Noise:    noise,
-			Mocks:    doc,
-			Captured: spec.Created,
-		})
+		switch j.Kind {
+		case string(models.HTTP_EXPORT):
+			spec := models.HttpSpec{}
+			err := j.Spec.Decode(&spec)
+			if err != nil {
+				return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
+			}
+
+			noise, ok := spec.Assertions["noise"]
+			if !ok {
+				noise = []string{}
+			}
+			res = append(res, models.TestCase{
+				ID: j.Name,
+				HttpReq: models.HttpReq{
+					Method:     spec.Request.Method,
+					ProtoMajor: spec.Request.ProtoMajor,
+					ProtoMinor: spec.Request.ProtoMinor,
+					URL:        spec.Request.URL,
+					Header:     grpcMock.ToHttpHeader(spec.Request.Header),
+					Body:       spec.Request.Body,
+					URLParams:  spec.Request.URLParams,
+				},
+				HttpResp: models.HttpResp{
+					StatusCode: spec.Response.StatusCode,
+					Header:     grpcMock.ToHttpHeader(spec.Response.Header),
+					Body:       spec.Response.Body,
+				},
+				Noise:    noise,
+				Mocks:    doc,
+				Captured: spec.Created,
+			})
+		case string(models.GRPC_EXPORT):
+			spec := models.GrpcSpec{}
+			err := j.Spec.Decode(&spec)
+			if err != nil {
+				return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
+			}
+
+			noise, ok := spec.Assertions["noise"]
+			if !ok {
+				noise = []string{}
+			}
+			res = append(res, models.TestCase{
+				ID:         j.Name,
+				GrpcReq:    spec.Request.Body,
+				GrpcMethod: spec.Request.Method,
+				GrpcResp:   spec.Response,
+				// HttpReq: models.HttpReq{
+				// 	Method:     spec.Request.Method,
+				// 	ProtoMajor: spec.Request.ProtoMajor,
+				// 	ProtoMinor: spec.Request.ProtoMinor,
+				// 	URL:        spec.Request.URL,
+				// 	Header:     grpcMock.ToHttpHeader(spec.Request.Header),
+				// 	Body:       spec.Request.Body,
+				// 	URLParams:  spec.Request.URLParams,
+				// },
+				// HttpResp: models.HttpResp{
+				// 	StatusCode: spec.Response.StatusCode,
+				// 	Header:     grpcMock.ToHttpHeader(spec.Response.Header),
+				// 	Body:       spec.Response.Body,
+				// },
+				Noise:    noise,
+				Mocks:    doc,
+				Captured: spec.Created,
+			})
+		default:
+			return res, fmt.Errorf("failed to decode the yaml. file: %s  error: Invalid kind of yaml", pkg.SanitiseInput(fileName))
+		}
+
 	}
 	return res, nil
 }

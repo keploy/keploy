@@ -137,6 +137,10 @@ message Mock {
     string Type = 1;
     bytes Data = 2;
   }
+  message GrpcReq {
+    string Body = 1;
+    string Method = 2;
+  }
 
   string Version = 1;
   string Name = 2;
@@ -149,6 +153,9 @@ message Mock {
     repeated string Mocks = 5;
     map<string, StrArr> Assertions = 6;
     int64 Created = 7;
+    string Type = 8;
+    GrpcReq GrpcRequest = 9;
+    string GrpcResp = 10;
   }
   SpecSchema Spec = 4;
 }
