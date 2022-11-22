@@ -29,8 +29,8 @@ type Mock struct {
 
 type GrpcSpec struct {
 	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
-	Request    MockGrpcReq         `json:"req" yaml:"req"`
-	Response   string              `json:"resp" yaml:"resp"`
+	Request    MockGrpcReq         `json:"grpc_req" yaml:"grpc_req"`
+	Response   string              `json:"grpc_resp" yaml:"grpc_resp"`
 	Objects    []Object            `json:"objects" yaml:"objects"`
 	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
 	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`

@@ -294,6 +294,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		}
 	case "grpc":
 		if rg.testExport {
+			tc[0].Kind = string(models.GRPC_EXPORT)
 			tc[0].Spec.Encode(&models.GrpcSpec{
 				// Metadata: , TODO: What should be here
 				Request: models.MockGrpcReq{
