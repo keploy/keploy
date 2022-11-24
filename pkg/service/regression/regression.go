@@ -426,60 +426,62 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 		}
 	}
 	t.Completed = time.Now().UTC().Unix()
-	defer func() {
-		if r.testExport {
-			mockIds := []string{}
-			for i := 0; i < len(tc.Mocks); i++ {
-				mockIds = append(mockIds, tc.Mocks[i].Name)
-			}
-			// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
-			r.testReportFS.SetResult(runID, models.TestResult{
-				Name:       runID,
-				Status:     t.Status,
-				Started:    t.Started,
-				Completed:  t.Completed,
-				TestCaseID: id,
-				Req: models.MockHttpReq{
-					Method:     t.Req.Method,
-					ProtoMajor: t.Req.ProtoMajor,
-					ProtoMinor: t.Req.ProtoMinor,
-					URL:        t.Req.URL,
-					URLParams:  t.Req.URLParams,
-					Header:     grpcMock.ToMockHeader(t.Req.Header),
-					Body:       t.Req.Body,
-				},
-				Res: models.MockHttpResp{
-					StatusCode:    t.Resp.StatusCode,
-					Header:        grpcMock.ToMockHeader(t.Resp.Header),
-					Body:          t.Resp.Body,
-					StatusMessage: t.Resp.StatusMessage,
-					ProtoMajor:    t.Resp.ProtoMajor,
-					ProtoMinor:    t.Resp.ProtoMinor,
-				},
-				Mocks:        mockIds,
-				TestCasePath: testCasePath,
-				MockPath:     mockPath,
-				Noise:        tc.Noise,
-				Result:       *res,
-			})
-		} else {
-			err2 := r.saveResult(ctx, t)
-			if err2 != nil {
-				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
-			}
-		}
-	}()
 
 	if err != nil {
 		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
 		t.Status = models.TestStatusFailed
-	}
-	if ok {
-		t.Status = models.TestStatusPassed
-		return ok, nil
+		ok = false
 	}
 	t.Status = models.TestStatusFailed
-	return false, nil
+	if ok {
+		t.Status = models.TestStatusPassed
+		// return ok, nil
+	}
+	// defer func() {
+	if r.testExport {
+		mockIds := []string{}
+		for i := 0; i < len(tc.Mocks); i++ {
+			mockIds = append(mockIds, tc.Mocks[i].Name)
+		}
+		// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
+		r.testReportFS.SetResult(runID, models.TestResult{
+			Name:       runID,
+			Status:     t.Status,
+			Started:    t.Started,
+			Completed:  t.Completed,
+			TestCaseID: id,
+			Req: models.MockHttpReq{
+				Method:     t.Req.Method,
+				ProtoMajor: t.Req.ProtoMajor,
+				ProtoMinor: t.Req.ProtoMinor,
+				URL:        t.Req.URL,
+				URLParams:  t.Req.URLParams,
+				Header:     grpcMock.ToMockHeader(t.Req.Header),
+				Body:       t.Req.Body,
+			},
+			Res: models.MockHttpResp{
+				StatusCode:    t.Resp.StatusCode,
+				Header:        grpcMock.ToMockHeader(t.Resp.Header),
+				Body:          t.Resp.Body,
+				StatusMessage: t.Resp.StatusMessage,
+				ProtoMajor:    t.Resp.ProtoMajor,
+				ProtoMinor:    t.Resp.ProtoMinor,
+			},
+			Mocks:        mockIds,
+			TestCasePath: testCasePath,
+			MockPath:     mockPath,
+			Noise:        tc.Noise,
+			Result:       *res,
+		})
+	} else {
+		err2 := r.saveResult(ctx, t)
+		if err2 != nil {
+			r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+		}
+	}
+	// }()
+
+	return ok, nil
 }
 
 func (r *Regression) TestGrpc(ctx context.Context, cid, app, runID, id, resp, testCasePath, mockPath string) (bool, error) {

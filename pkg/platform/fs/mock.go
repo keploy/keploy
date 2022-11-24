@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
 	// "runtime"
 	"sort"
 	"strings"
@@ -185,6 +186,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				Noise:    noise,
 				Mocks:    doc,
 				Captured: spec.Created,
+				Type:     "http",
 			})
 		case string(models.GRPC_EXPORT):
 			spec := models.GrpcSpec{}
@@ -219,6 +221,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				Noise:    noise,
 				Mocks:    doc,
 				Captured: spec.Created,
+				Type:     "grpc",
 			})
 		default:
 			return res, fmt.Errorf("failed to decode the yaml. file: %s  error: Invalid kind of yaml", pkg.SanitiseInput(fileName))
