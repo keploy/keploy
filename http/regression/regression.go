@@ -418,7 +418,7 @@ func (rg *regression) Test(w http.ResponseWriter, r *http.Request) {
 		pass, err = rg.svc.Test(ctx, graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.TestCasePath, data.MockPath, data.Resp)
 
 	case "grpc":
-		pass, err = rg.svc.TestGrpc(ctx, graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.GrpcResp)
+		pass, err = rg.svc.TestGrpc(ctx, graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.GrpcResp, data.TestCasePath, data.MockPath)
 	}
 
 	if err != nil {

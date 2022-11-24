@@ -13,5 +13,5 @@ type Service interface {
 	StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error
 	StopTestRun(ctx context.Context, runId, testReportPath string) error
 	// For Grpc
-	TestGrpc(ctx context.Context, cid, app, runID, id, resp string) (bool, error)
+	TestGrpc(ctx context.Context, cid, app, runID, id, resp, testCasePath, mockPath string) (bool, error)
 }
