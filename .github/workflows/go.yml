@@ -37,6 +37,7 @@ jobs:
           KEPLOY_APP_NAME: Keploy-Test-App
           KEPLOY_REPORT_PATH: ./
           ENABLE_TELEMETRY: false
+        run: go run cmd/server/main.go
 
       - name: Test-Export
         run: |
