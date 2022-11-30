@@ -2,7 +2,7 @@ module go.keploy.io/server
 
 go 1.17
 
-// replace github.com/keploy/go-sdk => ../go-sdk
+replace github.com/keploy/go-sdk => github.com/iamskp99/go-sdk v0.0.3-alpha
 
 require (
 	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
@@ -15,7 +15,7 @@ require (
 	github.com/vektah/gqlparser/v2 v2.2.0 // v should b4 less or equal 2.2.0
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.22.0
-	google.golang.org/protobuf v1.28.0
+	google.golang.org/protobuf v1.28.1
 )
 
 require (
@@ -36,7 +36,7 @@ require (
 	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
-	google.golang.org/grpc v1.45.0
+	google.golang.org/grpc v1.48.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -44,6 +44,7 @@ require (
 	github.com/agnivade/levenshtein v1.1.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.1 // indirect
 	github.com/creasty/defaults v1.5.2 // indirect
+	github.com/fullstorydev/grpcurl v1.8.7 // indirect
 	github.com/go-playground/locales v0.14.0 // indirect
 	github.com/go-playground/universal-translator v0.18.0 // indirect
 	github.com/go-playground/validator/v10 v10.10.1 // indirect
@@ -52,6 +53,7 @@ require (
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
+	github.com/jhump/protoreflect v1.14.0 // indirect
 	github.com/klauspost/compress v1.15.1 // indirect
 	github.com/leodido/go-urn v1.2.1 // indirect
 	github.com/matryer/moq v0.2.5 // indirect

@@ -152,9 +152,9 @@ func Server(ver string) *chi.Mux {
 		},
 
 		Server: keploy.ServerConfig{
-			LicenseKey: conf.APIKey,
-			URL:        "https://api.keploy.io",
-			// URL: "http://localhost:6789/api",
+			// LicenseKey: conf.APIKey,
+			// URL:        "https://api.keploy.io",
+			URL: "http://localhost:6790/api",
 		},
 	})
 
@@ -201,7 +201,7 @@ func Server(ver string) *chi.Mux {
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(logger, regSrv, runSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
+		return grpcserver.New(logger, regSrv, runSrv, mockSrv, tcSvc, grpcListener, k, conf.EnableTestExport, conf.ReportPath)
 	})
 
 	g.Go(func() error {

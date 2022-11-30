@@ -1,0 +1,71 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 5cd9e62c-2818-4e91-8480-e6fa68d917ef-0
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400045c4c0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400045c4b8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAEBAAA//8KlHJHBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 5cd9e62c-2818-4e91-8480-e6fa68d917ef-1
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400045c4c0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400045c4b8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: H4sIAAAAAAAA/6xUzXIbRRCeb3dlORslgeRAcYByVDlQqUiWI8eWfKAwdhVJOYpd/slFpXJNdtvyOvsz7IwOqlTOhL8QIEAIAQKEYMLPM3DjPXgBXoDyULNr2RKh4AAXbfd0T/fXX38j/Zt+wwbG10mqBS4J+hbDSViXFlFiKC6kxBX5cBiKG8If2OMLXKhemjv2Qp5cmBcit+yN1Uvm676WCq9Fajvxs2oXlRKr9Dr0WwzjuSMF9AcMRZNpQiWG8dyWwjjOIgkJfY+hOB+GS9SX0PeNE3vbSZo7hStJYJDfZii0Eu+6hP6ZwVnvC0KJMbaj37Qx2r2IsUNc7kqaqKTFd5LUzLPvBnHu2hurl03WkY3Vyys85ZGEfodh7CJxn1LoOwzOq4nfz1qd1m87wLMRF22p0iDudvJPdqVkUp7T7zkYuV0yyFlJv2vBMjOUDOL3zVJGKBqDu6a46smFxCcD7O8Q4Fie0yIpeZf+dTrGyvoTCzjV7kSJT6GsLpKg2KfY62es67uMvaw/tAF3OHKXwYFzhUdZiwHVcFqkeDars8iN9TEzE39kAUfanXanF8SqYU7hMnZGf+oAp4a4ah+wdX9Ay2n9kwWcbHfOptRNScogiatmydmO9QPGpvVnNiz9wCAqXqXUZGRYDtAtBXG2Z2dNkAf9BWNM39Of28AJU2nTHK952xRxE4SLcTOGz/dHKS5f2yFPSeivGexMQY8yQ0I/OZTcbQZ3XkpKVZDEEnp39PkccHR0X+o9kgr6x1G9M/aS/soCnn964M0cRoZCP2TsRf2lmfshgzW0gIx2NxP9NyOif/S/in53WPRV/Z0DvDC0yGHsayqdT/MrJejHRg/fGuCPGYDCVR72sqdrEH8/Kvon/yT63f8i+qr+wQZKGa2Dfx6zCuuw5iFVjO3hF30LZ7bIm7pGzZlKo948X5mmaao06nVeaTb8C/V6fWprtnEef/x67Pe9kd8TPm3xXqg2vSQSPO6jEPXnhcDxSS6CSYpEmPSJpAVnZXltHRasp0KF414SK4pVJaS4q7ZhT9VqznYiFY6HicdDY841ao1aaZCojCKe4UKEgceNJCd3ZBK7PUlphXcpVjjq9dJwcrbamK7WxrjnkVCwz06ehX/DnZiYmChvBalU5hWV5ybKrf51Kp/LAyE/PF/vyyQeBCjiQWhOI/VK19hVL4kGQRVEJBWPRHluyr3JgD3csTo3yoFfnpuqnRtut99tqNGgz6DFXzqMFJ+Zac42mjPNCzdhLS8ZQhn7MwAA//+te7X66AYAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 5cd9e62c-2818-4e91-8480-e6fa68d917ef-2
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400045c4c0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400045c4b8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAABAAA//+cpHUwBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 5cd9e62c-2818-4e91-8480-e6fa68d917ef-3
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400045c4c0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400045c4b8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Err
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 5cd9e62c-2818-4e91-8480-e6fa68d917ef-4
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400045c4c0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400045c4b8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Close
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=

@@ -1,0 +1,18 @@
+version: api.keploy.io/v1beta1
+kind: gRPC
+name: ad7252a6-1040-44aa-bba6-7eae17e9059b
+spec:
+    metadata: {}
+    grpc_req:
+        body: '{"status":"false","id":"361c98ff-8d95-4e61-b43a-4895673ea1e9"}'
+        method: services.RegressionService.End
+    grpc_resp: '{"message":"OK"}'
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - ad7252a6-1040-44aa-bba6-7eae17e9059b-0
+        - ad7252a6-1040-44aa-bba6-7eae17e9059b-1
+    assertions:
+        noise: []
+    created: 1669789788

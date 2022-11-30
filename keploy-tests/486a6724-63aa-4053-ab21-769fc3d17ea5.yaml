@@ -1,0 +1,55 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: 486a6724-63aa-4053-ab21-769fc3d17ea5
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-GB,en
+            Authorization: BEARER
+            Connection: keep-alive
+            Content-Length: "363"
+            Content-Type: application/json
+            Cookie: connect.sid=s%3AdxWsE0jhYYsXQwFQKZJhtK_5Jli7MPB1.Wjbj0YQ3J7yJE1Zx21NQAWPtrz1f8i73j9FAnlvbrSg
+            Origin: http://localhost:6789
+            Referer: http://localhost:6789/testlist/
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36
+        body: '{"operationName":"getTc","variables":{"app":"demo-WebGo-V6-App"},"query":"query getTc($app: String!) {\n  testCase(app: $app) {\n    id\n    created\n    updated\n    captured\n    uri\n    httpReq {\n      protoMajor\n      protoMinor\n      method\n      url\n    }\n    httpResp {\n      statusCode\n    }\n    deps {\n      name\n      type\n    }\n  }\n}\n"}'
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Credentials: "true"
+            Access-Control-Allow-Origin: '*'
+            Access-Control-Expose-Headers: Link
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"testCase":[{"id":"49370b62-8877-43b0-ba6e-ae7ff8531e30","created":"2022-10-28T09:25:51Z","updated":"2022-10-28T09:25:51Z","captured":"2022-10-28T09:25:51Z","uri":"/url/:pokemon","httpReq":{"protoMajor":1,"protoMinor":1,"method":"GET","url":"/url/pika"},"httpResp":{"statusCode":200},"deps":[{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"http-client","type":"HTTP_CLIENT"},{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"c4cc85df-d627-4c9d-8138-fa427c0c79c7","created":"2022-10-26T07:54:39Z","updated":"2022-10-26T07:54:39Z","captured":"2022-10-26T07:54:39Z","uri":"/url/:pokemon","httpReq":{"protoMajor":1,"protoMinor":1,"method":"GET","url":"/url/pika"},"httpResp":{"statusCode":200},"deps":[{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"http-client","type":"HTTP_CLIENT"},{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"ce78f32f-2021-4ef0-98af-4e46ae692a6e","created":"2022-10-26T07:36:28Z","updated":"2022-10-26T07:36:28Z","captured":"2022-10-26T07:36:28Z","uri":"/url/:pokemon","httpReq":{"protoMajor":1,"protoMinor":1,"method":"GET","url":"/url/pika"},"httpResp":{"statusCode":200},"deps":[{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"SQL","type":"SQL_DB"},{"name":"http-client","type":"HTTP_CLIENT"},{"name":"mongodb","type":"NO_SQL_DB"}]}]}}'
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-0
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-1
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-2
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-3
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-4
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-5
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-6
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-7
+        - 486a6724-63aa-4053-ab21-769fc3d17ea5-8
+    assertions:
+        noise: []
+    created: 1669790738

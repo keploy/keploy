@@ -1,0 +1,64 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: b9f2e0ef-473c-483e-aeb1-7a04864dd88f-0
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140003cfa30 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140003cfa08 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAABAAA//+cpHUwBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: b9f2e0ef-473c-483e-aeb1-7a04864dd88f-1
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140003cfa30 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140003cfa08 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Err
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: b9f2e0ef-473c-483e-aeb1-7a04864dd88f-2
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140003cfa30 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140003cfa08 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Close
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: b9f2e0ef-473c-483e-aeb1-7a04864dd88f-3
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x1400059c6a0}]'
+        filter: map[_id:fec1be96-8392-4e4e-833a-98d53331f782]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: |-
+            [{$set {fec1be96-8392-4e4e-833a-98d53331f782 1669789695 1669789695 1669789695 default_company myApp /api/employees  {POST 1 1 /api/employees map[] map[accept:[*/*] content-length:[100] content-type:[application/json] host:[localhost:8080] user-agent:[curl/7.84.0]] {
+                "firstName": "Myke",
+                "lastName": "Tyson",
+                "email": "mt@gmail.com",
+                "timestamp":1
+            }} {200 map[] {"id":10,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1669789695} OK 1 1}   [] map[] map[] [] [] }}]
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738rMyMgTWpCSWJIalFpcmlPC+L+NgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMBg+r+NmYmRrbikKDMvnUeNQSUtNdkwKdXSTNfC2NJI1yTVJFXXwtg4UdfSIsXU2NjYMM3cwogBEAAA//+/nq8+lQAAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=

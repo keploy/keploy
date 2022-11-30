@@ -1,0 +1,131 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-0
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAEBAAA//8KlHJHBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-1
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: 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
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-2
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAEBAAA//8KlHJHBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-3
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: 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
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-4
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAEBAAA//8KlHJHBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-5
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: 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
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-6
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAABAAA//+cpHUwBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-7
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Err
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 0ab2744b-972e-4fe6-ab74-1dac2bd1ac75-8
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x140001c8418 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x140001c8410 <nil> map[created:-1]}]'
+        filter: map[app_id:demo-WebGo-V6-App cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Close
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=

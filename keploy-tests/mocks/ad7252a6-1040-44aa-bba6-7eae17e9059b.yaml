@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: ad7252a6-1040-44aa-bba6-7eae17e9059b-0
+spec:
+    metadata:
+        FindOneOptions: '[]'
+        filter: map[_id:361c98ff-8d95-4e61-b43a-4895673ea1e9]
+        name: mongodb
+        operation: FindOne.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*run.TestRun'
+          data: H4sIAAAAAAAA/4RU224bVRTda2Zsx2aiChAgHkFFPKVSlDQkPICKTduIxqomcV8sCx08O60rz4U5ZyT8ATxwv5XLX1AKlBBupRTK5/ABSBudGU89iYj64rNv56y1195jeVu+doHWHmsT5DHkJuERONs9+IRWN2NlOIRHaA3SsLKbu0aZXNsSt1uWuufS1J7eQHNW3N3Nx2PWurh7Xk2mecbWbuwlRk1Li7XRkL+J6Gm57wCd4SjL4zM2bsOQW0RyKN+4gFcGbxFOVexqLFq7RmVzcu1uEqVTnnuNII/L8o59oas0zwkPgu3iDPhNyLsEt8cp5CuCF7BOIZ8SOheydLzD5loSFijWteU+Yam0ddF0o59MNEM+JDQD1vnUQL4jouvyjtX2ojFphdJCc/Fg53KWmGRHXU8yy3XuTuLSdQfBJVvVHgSXLqtMRRryPqF5kVXIGeRjgvdKEs7gE9Ez8p4HPBqpdKhNNomvjsqjuOLbkqfkIw9HbvuWMfnygQPHcveJnpUvHeDx4ShKQp7qMz1OOQ45Hs8KaeQG0UvymQt06pkbBA9eX0VcrMDeLC2NHTaqIOD1lLW+IEvjcwdoD0fDUT6JzaaNomO1+sQFlkqt5vo30Sln3E3CYnn+r3cslzU7rLW6yg/VleiKfOuiPil4R4DkNmG5RNJV0c+EjgWs/F8J7R6nlfsXEb0o37tAezs2VfQ2wUWzn2SRmsIhLL36Vsrj6iM6NzZ58SUQnZafHOCJB7KX4DVsOSB6WX5wAf9o7uBECDlcYMghET0vP7q1BTgkOHBf40LDxhU1zYsNJurJL3bAx7r16igPRryA8xdo5T7+6QCP1RdpoRXkDtGa/GblqiXu2F5OXKN7RPSc/OEAT9ZftcnqgXsEuUt0Xn53geVjybvHeqhaP7GFa3ITp9c2Vsdbm/v7K5vh1tmVdd5YXXljfU2trG9und14YY3VKm/h3/vL/xzMf1vBoN/f7l/AqZD3VT41r4+TKFXxDI1oVvxJVvFcc+Y4cOi/AAAA//9U6VK6hAUAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: ad7252a6-1040-44aa-bba6-7eae17e9059b-1
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x14000615fda}]'
+        filter: map[_id:361c98ff-8d95-4e61-b43a-4895673ea1e9]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: '[{$set {361c98ff-8d95-4e61-b43a-4895673ea1e9 0 1669789788 FAILED    0 0 0 []}}]'
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738rMyMgTWpCSWJIalFpcmlPC+L+NgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMDA/r+NkYmRiQEQAAD//zVzaY5nAAAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=

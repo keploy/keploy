@@ -1,0 +1,21 @@
+version: api.keploy.io/v1beta1
+kind: gRPC
+name: b9f2e0ef-473c-483e-aeb1-7a04864dd88f
+spec:
+    metadata: {}
+    grpc_req:
+        body: '{"Captured":1669789695,"AppID":"myApp","URI":"/api/employees","HttpReq":{"Method":"POST","ProtoMajor":1,"ProtoMinor":1,"URL":"/api/employees","Header":{"accept":{"Value":["*/*"]},"content-length":{"Value":["100"]},"content-type":{"Value":["application/json"]},"host":{"Value":["localhost:8080"]},"user-agent":{"Value":["curl/7.84.0"]}},"Body":"{\n    \"firstName\": \"Myke\",\n    \"lastName\": \"Tyson\",\n    \"email\": \"mt@gmail.com\",\n    \"timestamp\":1\n}"},"HttpResp":{"StatusCode":200,"Body":"{\"id\":10,\"firstName\":\"Myke\",\"lastName\":\"Tyson\",\"email\":\"mt@gmail.com\",\"timestamp\":1669789695}","StatusMessage":"OK","ProtoMajor":1,"ProtoMinor":1},"TestCasePath":"/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-java/src/test/e2e/keploy-tests","MockPath":"/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-java/src/test/e2e/mocks"}'
+        method: services.RegressionService.PostTC
+    grpc_resp: '{"tcsId":{"id":"fec1be96-8392-4e4e-833a-98d53331f782"}}'
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - b9f2e0ef-473c-483e-aeb1-7a04864dd88f-0
+        - b9f2e0ef-473c-483e-aeb1-7a04864dd88f-1
+        - b9f2e0ef-473c-483e-aeb1-7a04864dd88f-2
+        - b9f2e0ef-473c-483e-aeb1-7a04864dd88f-3
+    assertions:
+        noise:
+            - body.tcsId.id
+    created: 1669789695

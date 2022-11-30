@@ -1,0 +1,18 @@
+version: api.keploy.io/v1beta1
+kind: gRPC
+name: b8ed6648-20f6-47c9-8aca-086ce93686b8
+spec:
+    metadata: {}
+    grpc_req:
+        body: '{"total":"1","app":"myApp","TestCasePath":"/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-java/src/test/e2e/keploy-tests","MockPath":"/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-java/src/test/e2e/mocks"}'
+        method: services.RegressionService.Start
+    grpc_resp: '{"id":"361c98ff-8d95-4e61-b43a-4895673ea1e9"}'
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - b8ed6648-20f6-47c9-8aca-086ce93686b8-0
+    assertions:
+        noise:
+            - body.id
+    created: 1669789788

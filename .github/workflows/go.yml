@@ -28,6 +28,16 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      - name: Run keploy binary
+        env:
+          ENABLE_DEDUP: false
+          PORT: "6790"
+          KEPLOY_MODE: "off"
+          ENABLE_TEST_EXPORT: true
+          KEPLOY_APP_NAME: Keploy-Test-App
+          KEPLOY_REPORT_PATH: ./
+          ENABLE_TELEMETRY: false
+
       - name: Test-Export
         run: |
           go test -coverpkg=./... -coverprofile=coverage1.tmp.txt -covermode=atomic ./...
@@ -38,6 +48,7 @@ jobs:
           ENABLE_TEST_EXPORT: true
           KEPLOY_APP_NAME: Keploy-Test-App-2
           KEPLOY_REPORT_PATH: ./
+          ENABLE_TELEMETRY: false
         
       - name: Test
         run: |
@@ -47,6 +58,7 @@ jobs:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: false
           ENABLE_TEST_EXPORT: false
+          ENABLE_TELEMETRY: false
 
       - name: Test-withDeDupEnabled
         run: |
@@ -57,6 +69,7 @@ jobs:
           KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: true
           ENABLE_TEST_EXPORT: false
+          ENABLE_TELEMETRY: false
 
 
 #       - uses: codecov/codecov-action@v2

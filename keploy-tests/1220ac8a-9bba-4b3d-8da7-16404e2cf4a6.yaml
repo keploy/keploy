@@ -1,0 +1,99 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-GB,en
+            Authorization: BEARER
+            Connection: keep-alive
+            Content-Length: "213"
+            Content-Type: application/json
+            Cookie: connect.sid=s%3AdxWsE0jhYYsXQwFQKZJhtK_5Jli7MPB1.Wjbj0YQ3J7yJE1Zx21NQAWPtrz1f8i73j9FAnlvbrSg
+            Origin: http://localhost:6789
+            Referer: http://localhost:6789/testruns/
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36
+        body: '{"operationName":"getRecentTestRuns","variables":{},"query":"query getRecentTestRuns {\n  testRun {\n    id\n    created\n    updated\n    status\n    app\n    user\n    success\n    failure\n    total\n  }\n}\n"}'
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Credentials: "true"
+            Access-Control-Allow-Origin: '*'
+            Access-Control-Expose-Headers: Link
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"testRun":[{"id":"361c98ff-8d95-4e61-b43a-4895673ea1e9","created":"2022-11-30T06:29:48Z","updated":"2022-11-30T06:29:48Z","status":"FAILED","app":"myApp","user":"default_user","success":0,"failure":1,"total":1},{"id":"d099720e-280f-4187-98a9-461d290d7685","created":"2022-11-30T06:22:22Z","updated":"2022-11-30T06:22:23Z","status":"FAILED","app":"myApp","user":"default_user","success":0,"failure":3,"total":3},{"id":"7bcb7458-3e00-46bc-9a07-0dfbf03c3f28","created":"2022-11-29T16:42:13Z","updated":"2022-11-29T16:42:14Z","status":"FAILED","app":"myApp","user":"default_user","success":0,"failure":2,"total":2},{"id":"d1ee2d75-77e9-45b4-9be8-2a193d38744b","created":"2022-11-29T12:54:31Z","updated":"2022-11-29T12:54:31Z","status":"FAILED","app":"myApp","user":"default_user","success":0,"failure":1,"total":1},{"id":"c4445a64-5eb6-4778-85d1-a0cc1272a8c9","created":"2022-11-29T12:52:58Z","updated":"2022-11-29T12:52:58Z","status":"PASSED","app":"myApp","user":"default_user","success":0,"failure":0,"total":0},{"id":"c6813354-a398-4ac0-b99f-56cdfed9d316","created":"2022-11-29T12:50:36Z","updated":"2022-11-29T12:50:36Z","status":"PASSED","app":"myApp","user":"default_user","success":0,"failure":0,"total":0},{"id":"be1e6358-9def-4400-bad0-b426da057a71","created":"2022-11-09T07:39:03Z","updated":"2022-11-09T07:39:03Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":23,"failure":0,"total":23},{"id":"e0548c3e-df52-4f26-b368-5c5713c064ed","created":"2022-11-09T06:58:44Z","updated":"2022-11-09T06:58:44Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":23,"failure":0,"total":23},{"id":"2851bf5a-844d-4e5e-aa8b-d2b4ad4d4c29","created":"2022-11-09T06:53:04Z","updated":"2022-11-09T06:53:04Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":23,"failure":0,"total":23},{"id":"c0228af4-4486-4e73-9f0e-044896036fc7","created":"2022-11-09T06:44:45Z","updated":"2022-11-09T06:44:45Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":35,"failure":0,"total":36},{"id":"c15f799c-b135-49eb-96c7-e54339c2b03c","created":"2022-11-09T06:42:54Z","updated":"2022-11-09T06:42:55Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":32,"failure":4,"total":36},{"id":"69f8077c-2662-4f62-8152-401676c16689","created":"2022-11-09T06:38:18Z","updated":"2022-11-09T06:38:18Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":25,"failure":3,"total":28},{"id":"4ef0845b-78c8-48d4-a1e8-23be98a60da8","created":"2022-11-09T06:23:35Z","updated":"2022-11-09T06:23:35Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":45,"failure":16,"total":277},{"id":"b0b641fd-adde-421e-8900-51cd21c7503d","created":"2022-11-09T06:18:05Z","updated":"2022-11-09T06:18:06Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":236,"failure":41,"total":277},{"id":"03802868-f6ce-44a6-a098-3ff6de8b6d6c","created":"2022-11-08T13:38:10Z","updated":"2022-11-08T13:38:11Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":203,"failure":1,"total":204},{"id":"7c688374-c5b4-4642-910c-1a6f8db0621b","created":"2022-11-08T13:31:17Z","updated":"2022-11-08T13:31:17Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":203,"failure":0,"total":203},{"id":"82fe53b3-963c-4b83-9cb0-e1db7c499fcc","created":"2022-11-08T13:30:54Z","updated":"2022-11-08T13:30:55Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":203,"failure":0,"total":203},{"id":"b59440f8-4794-43b5-b6a9-74cec6774a4d","created":"2022-11-08T13:30:41Z","updated":"2022-11-08T13:30:42Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":203,"failure":0,"total":203},{"id":"407b20a1-7d00-4281-8827-824ffdc4501b","created":"2022-11-08T13:30:16Z","updated":"2022-11-08T13:30:17Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":203,"failure":0,"total":203},{"id":"66b58331-f920-4ea0-8751-a3c0aed497ca","created":"2022-11-08T13:29:36Z","updated":"2022-11-08T13:29:36Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":202,"failure":1,"total":203},{"id":"27bd04b2-f599-41ad-9565-cfa2d9af2ddf","created":"2022-11-08T13:29:25Z","updated":"2022-11-08T13:29:26Z","status":"FAILED","app":"listmonk-app","user":"default_user","success":202,"failure":1,"total":203},{"id":"2a9ac71b-f7cb-4796-8049-7ce7ea17b87d","created":"2022-11-08T13:29:12Z","updated":"2022-11-08T13:29:13Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":203,"failure":0,"total":203},{"id":"9fba9778-e864-4604-91aa-7537f2936eb5","created":"2022-11-08T13:20:58Z","updated":"2022-11-08T13:20:59Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":151,"failure":0,"total":151},{"id":"09c53b83-d1ff-47d6-8068-c4ce96640870","created":"2022-11-08T13:20:45Z","updated":"2022-11-08T13:20:46Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":151,"failure":0,"total":151},{"id":"1f06626e-a688-4540-bc6d-010b9abc01f0","created":"2022-11-08T13:15:30Z","updated":"2022-11-08T13:15:30Z","status":"PASSED","app":"listmonk-app","user":"default_user","success":95,"failure":0,"total":95}]}}'
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-0
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-1
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-2
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-3
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-4
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-5
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-6
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-7
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-8
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-9
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-10
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-11
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-12
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-13
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-14
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-15
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-16
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-17
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-18
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-19
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-20
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-21
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-22
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-23
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-24
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-25
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-26
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-27
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-28
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-29
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-30
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-31
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-32
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-33
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-34
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-35
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-36
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-37
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-38
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-39
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-40
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-41
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-42
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-43
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-44
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-45
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-46
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-47
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-48
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-49
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-50
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-51
+        - 1220ac8a-9bba-4b3d-8da7-16404e2cf4a6-52
+    assertions:
+        noise: []
+    created: 1669793390

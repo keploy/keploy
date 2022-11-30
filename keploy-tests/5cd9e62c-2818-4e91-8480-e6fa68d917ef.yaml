@@ -1,0 +1,21 @@
+version: api.keploy.io/v1beta1
+kind: gRPC
+name: 5cd9e62c-2818-4e91-8480-e6fa68d917ef
+spec:
+    metadata: {}
+    grpc_req:
+        body: '{"app":"myApp","offset":"0","limit":"25","TestCasePath":"/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-java/src/test/e2e/keploy-tests","MockPath":"/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-java/src/test/e2e/mocks"}'
+        method: services.RegressionService.GetTCS
+    grpc_resp: '{"tcs":[{"id":"fec1be96-8392-4e4e-833a-98d53331f782","created":1669789695,"updated":1669789695,"captured":1669789695,"CID":"default_company","appID":"myApp","URI":"/api/employees","HttpReq":{"Method":"POST","ProtoMajor":1,"ProtoMinor":1,"URL":"/api/employees","Header":{"accept":{"Value":["*/*"]},"content-length":{"Value":["100"]},"content-type":{"Value":["application/json"]},"host":{"Value":["localhost:8080"]},"user-agent":{"Value":["curl/7.84.0"]}},"Body":"{\n    \"firstName\": \"Myke\",\n    \"lastName\": \"Tyson\",\n    \"email\": \"mt@gmail.com\",\n    \"timestamp\":1\n}"},"HttpResp":{"StatusCode":200,"Body":"{\"id\":10,\"firstName\":\"Myke\",\"lastName\":\"Tyson\",\"email\":\"mt@gmail.com\",\"timestamp\":1669789695}","StatusMessage":"OK","ProtoMajor":1,"ProtoMinor":1}}]}'
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - 5cd9e62c-2818-4e91-8480-e6fa68d917ef-0
+        - 5cd9e62c-2818-4e91-8480-e6fa68d917ef-1
+        - 5cd9e62c-2818-4e91-8480-e6fa68d917ef-2
+        - 5cd9e62c-2818-4e91-8480-e6fa68d917ef-3
+        - 5cd9e62c-2818-4e91-8480-e6fa68d917ef-4
+    assertions:
+        noise: []
+    created: 1669789788

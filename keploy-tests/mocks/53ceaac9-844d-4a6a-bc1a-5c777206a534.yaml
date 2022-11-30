@@ -1,0 +1,15 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 53ceaac9-844d-4a6a-bc1a-5c777206a534-0
+spec:
+    metadata:
+        FindOneOptions: '[]'
+        filter: map[_id:fec1be96-8392-4e4e-833a-98d53331f782 cid:default_company]
+        name: mongodb
+        operation: FindOne.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: H4sIAAAAAAAA/6xUTXMbRROeZ3dlORsled/kQHGAclQ5UK5IliPHlnygMHYVSTmKXf7IRaVyTXbb8jr7MeyMDqpUjnwFCOHjwL8ghAABQjDh63/wB/gDlIeaXcuWCAUHuGi7p3u6n376Gelf9Sc2ML5BUi1ySdD3GE7DuryEEkNxMSWuyIfDUNwU/sAeX+RC9dLcsRfz5MKCELllb65dNl/3lVR4LVI7iZ9Vu6SUWKNXoV9nGM8dKaA/YiiaTBMqMYznthTGcZZISOgPGIoLYbhMfQl93zixt5OkuVO4mgQG+W2GQivxbkjonxmcjb4glBhju/o1G6Pdixg7wuWupolKWnw3Sc08B24Q5669uXbFZB3bXLuyylMeSeg3GcYuEfcphX6HwXk58ftZq7P6DQf4f8RFW6o0iLud/JNdKZmUZ/TbDkZulwxyVtJvWbDMDCWD+EOzlBGKxuCuK656cjHxyQD7KwQ4kee0SErepX+cjrGyft8CzrQ7UeJTKKtLJCj2Kfb6Gev6DmMv6ndtwB2O3GFw4FzlUdZiQDWcFimezeoscWPdZWbi9yzgWLvT7vSCWDXMKVzGzulPHeDMEFftQ7buD2g5q3+ygNPtzmRK3ZSkDJK4apac7Vg/YGxGf2bD0g8MouI1Sk1GhuUQ3XIQZ3t21gV50F8wxvTH+nMbOGUqbZnjdW+HIm6CcDFuxvD5wSjFleu75CkJ/TWDnSnoUWZI6CdHkrvN4C5ISakKklhC740+n0OOjh9IvUdSQf84qnfGXtBfWcCzTw+8lcPIUOiHjD2vvzRzP2SwhhaQ0e5mov9mRPSP/lPR7w2Lvqq/c4DnhhY5jH1dpQtpfqUE/djo4VsD/DEDULjGw172dA3i70dF/+TvRL/3b0Rf1T/YQCmjdfDPY1ZhHdU8ooqxfezpezi3Td70dWrOVhr15oXKDM1QpVGv80qz4V+s1+vT23ONC/j9lxO/7Y/8nvJpm/dCteUlkeBxH4WovyAETk5xEUxRJMKkTyQtOKsr6xuwYD0VKoxxzyOhYE9OTZ70klhRrCohxV21A3u6VnN2EqlwMkw8HhpzvlFr1EqDRGXU8T8uRBh43MhzalcmsduTlFZ4l2KF414vDafmqo2Zag3+TXdiYmKivB2kUplXVJ6fKLf6N6h8Pg+E/Oh8oy+TeBCgiAehOY3US11jV70kGgRVEJFUPBLl+Wn3FgP2cdfq3CwHfnl+unZ+uN1Bt6FGgz6DFn/qMFJ8drY512jONi/egrWybAhl7I8AAAD//6HctI3oBgAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L6v5qVken/OgYGBtb/axgYGQEBAAD//wIOqAURAAAA

@@ -1,0 +1,41 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 1cf4cdc2-abc5-4975-af03-4d77c986a8ee-0
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400059c0b0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400059c0a8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Next
+        type: NO_SQL_DB
+    objects:
+        - type: '*bool'
+          data: H4sIAAAAAAAA/2JmYmAABAAA//+cpHUwBAAAAA==
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 1cf4cdc2-abc5-4975-af03-4d77c986a8ee-1
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400059c0b0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400059c0a8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Err
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 1cf4cdc2-abc5-4975-af03-4d77c986a8ee-2
+spec:
+    metadata:
+        FindOptions: '[{<nil> <nil> <nil> <nil> <nil> <nil> <nil> 0x1400059c0b0 <nil> <nil> <nil> <nil> <nil> <nil> map[all_keys:0 anchors:0] <nil> <nil> 0x1400059c0a8 <nil> map[created:-1]}]'
+        filter: map[app_id:myApp cid:default_company type:<nil>]
+        name: mongodb
+        operation: Find.Close
+        type: NO_SQL_DB
+    objects:
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=

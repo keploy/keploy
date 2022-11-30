@@ -1,0 +1,16 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: b8ed6648-20f6-47c9-8aca-086ce93686b8-0
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x1400045db75}]'
+        filter: map[_id:361c98ff-8d95-4e61-b43a-4895673ea1e9]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: '[{$set {361c98ff-8d95-4e61-b43a-4895673ea1e9 1669789788 1669789788 RUNNING default_company myApp default_user 0 0 1 []}}]'
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738rMyMgTWpCSWJIalFpcmlPC+L+NgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMBg+r+NmYmRrbikKDMvnUeNQcXYzDDZ0iItTdcixdJU1yTVzFA3ycQ4UdfEwtLUzNw4NdEw1ZIBEAAA//9QeJwklQAAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=

@@ -1,0 +1,47 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: ef5d8de9-5f6b-48bb-93b2-ac59912d8b5a
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-GB,en
+            Authorization: BEARER
+            Connection: keep-alive
+            Content-Length: "96"
+            Content-Type: application/json
+            Cookie: connect.sid=s%3AdxWsE0jhYYsXQwFQKZJhtK_5Jli7MPB1.Wjbj0YQ3J7yJE1Zx21NQAWPtrz1f8i73j9FAnlvbrSg
+            Origin: http://localhost:6789
+            Referer: http://localhost:6789/testlist/
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36
+        body: '{"operationName":"getApps","variables":{},"query":"query getApps {\n  apps {\n    id\n  }\n}\n"}'
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Credentials: "true"
+            Access-Control-Allow-Origin: '*'
+            Access-Control-Expose-Headers: Link
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"apps":[{"id":"demo-WebGo-V6-App"},{"id":"listmonk-app"},{"id":"my-app"},{"id":"myApp"},{"id":"sample-url-shortener"},{"id":"typescript-sdk"}]}}'
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - ef5d8de9-5f6b-48bb-93b2-ac59912d8b5a-0
+    assertions:
+        noise: []
+    created: 1669790740

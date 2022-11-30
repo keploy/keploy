@@ -1,0 +1,58 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: 0ce331a7-6f23-410d-ba89-8791e12df212
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-GB,en
+            Authorization: BEARER
+            Connection: keep-alive
+            Content-Length: "1432"
+            Content-Type: application/json
+            Cookie: connect.sid=s%3AdxWsE0jhYYsXQwFQKZJhtK_5Jli7MPB1.Wjbj0YQ3J7yJE1Zx21NQAWPtrz1f8i73j9FAnlvbrSg
+            Origin: http://localhost:6789
+            Referer: http://localhost:6789/testruns/detail?id=361c98ff-8d95-4e61-b43a-4895673ea1e9
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36
+        body: '{"operationName":"getRecentTestRuns","variables":{"id":"361c98ff-8d95-4e61-b43a-4895673ea1e9"},"query":"query getRecentTestRuns($id: String) {\n  testRun(id: $id) {\n    id\n    created\n    updated\n    status\n    app\n    user\n    success\n    failure\n    total\n    tests {\n      id\n      status\n      started\n      completed\n      testCaseID\n      deps {\n        name\n        type\n        meta {\n          key\n          value\n        }\n      }\n      uri\n      noise\n      req {\n        protoMajor\n        protoMinor\n        url\n        urlParam {\n          key\n          value\n        }\n        header {\n          key\n          value\n        }\n        method\n        body\n      }\n      result {\n        statusCode {\n          normal\n          expected\n          actual\n        }\n        headersResult {\n          normal\n          expected {\n            key\n            value\n          }\n          actual {\n            key\n            value\n          }\n        }\n        bodyResult {\n          normal\n          type\n          expected\n          actual\n          errors {\n            key\n            missingInExpected\n            missingInActual\n          }\n        }\n        depResult {\n          name\n          type\n          meta {\n            normal\n            key\n            expected\n            actual\n          }\n        }\n      }\n    }\n  }\n}\n"}'
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Credentials: "true"
+            Access-Control-Allow-Origin: '*'
+            Access-Control-Expose-Headers: Link
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"testRun":[{"id":"361c98ff-8d95-4e61-b43a-4895673ea1e9","created":"2022-11-30T06:29:48Z","updated":"2022-11-30T06:29:48Z","status":"FAILED","app":"myApp","user":"default_user","success":0,"failure":1,"total":1,"tests":[{"id":"6503654f-c57d-431a-ab32-1e7f6374b603","status":"FAILED","started":"2022-11-30T06:29:48Z","completed":"2022-11-30T06:29:48Z","testCaseID":"fec1be96-8392-4e4e-833a-98d53331f782","deps":null,"uri":"/api/employees","noise":null,"req":{"protoMajor":1,"protoMinor":1,"url":"/api/employees","urlParam":null,"header":[{"key":"content-length","value":["100"]},{"key":"host","value":["localhost:8080"]},{"key":"content-type","value":["application/json"]},{"key":"user-agent","value":["curl/7.84.0"]},{"key":"accept","value":["*/*"]}],"method":"POST","body":"{\n    \"firstName\": \"Myke\",\n    \"lastName\": \"Tyson\",\n    \"email\": \"mt@gmail.com\",\n    \"timestamp\":1\n}"},"result":{"statusCode":{"normal":true,"expected":200,"actual":200},"headersResult":null,"bodyResult":{"normal":false,"type":"JSON","expected":"{\"id\":10,\"firstName\":\"Myke\",\"lastName\":\"Tyson\",\"email\":\"mt@gmail.com\",\"timestamp\":1669789695}","actual":"{\"id\":6,\"firstName\":\"Myke\",\"lastName\":\"Tyson\",\"email\":\"mt@gmail.com\",\"timestamp\":1669789788}","errors":null},"depResult":null}}]}]}}'
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: ""
+    mocks:
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-0
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-1
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-2
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-3
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-4
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-5
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-6
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-7
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-8
+        - 0ce331a7-6f23-410d-ba89-8791e12df212-9
+    assertions:
+        noise:
+            - body.data.testRun.tests.req.header.value
+            - body.data.testRun.tests.req.header.key
+    created: 1669793393

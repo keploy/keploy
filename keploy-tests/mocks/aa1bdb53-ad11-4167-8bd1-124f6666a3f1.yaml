@@ -1,0 +1,55 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: aa1bdb53-ad11-4167-8bd1-124f6666a3f1-0
+spec:
+    metadata:
+        FindOneOptions: '[]'
+        filter: map[_id:fec1be96-8392-4e4e-833a-98d53331f782 cid:default_company]
+        name: mongodb
+        operation: FindOne.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: H4sIAAAAAAAA/6xUzXIbRRCeb3dlORslgeRAcYByVDlQqUiWI8eWfKAwdhVJOYpd/slFpXJNdtvyOvsz7IwOqlTOhL8QIEAIAQKEYMLPM3DjPXgBXoDyULNr2RKh4AAXbfd0T/fXX38j/Zt+wwbG10mqBS4J+hbDSViXFlFiKC6kxBX5cBiKG8If2OMLXKhemjv2Qp5cmBcit+yN1Uvm676WCq9Fajvxs2oXlRKr9Dr0WwzjuSMF9AcMRZNpQiWG8dyWwjjOIgkJfY+hOB+GS9SX0PeNE3vbSZo7hStJYJDfZii0Eu+6hP6ZwVnvC0KJMbaj37Qx2r2IsUNc7kqaqKTFd5LUzLPvBnHu2hurl03WkY3Vyys85ZGEfodh7CJxn1LoOwzOq4nfz1qd1m87wLMRF22p0iDudvJPdqVkUp7T7zkYuV0yyFlJv2vBMjOUDOL3zVJGKBqDu6a46smFxCcD7O8Q4Fie0yIpeZf+dTrGyvoTCzjV7kSJT6GsLpKg2KfY62es67uMvaw/tAF3OHKXwYFzhUdZiwHVcFqkeDars8iN9TEzE39kAUfanXanF8SqYU7hMnZGf+oAp4a4ah+wdX9Ay2n9kwWcbHfOptRNScogiatmydmO9QPGpvVnNiz9wCAqXqXUZGRYDtAtBXG2Z2dNkAf9BWNM39Of28AJU2nTHK952xRxE4SLcTOGz/dHKS5f2yFPSeivGexMQY8yQ0I/OZTcbQZ3XkpKVZDEEnp39PkccHR0X+o9kgr6x1G9M/aS/soCnn964M0cRoZCP2TsRf2lmfshgzW0gIx2NxP9NyOif/S/in53WPRV/Z0DvDC0yGHsayqdT/MrJejHRg/fGuCPGYDCVR72sqdrEH8/Kvon/yT63f8i+qr+wQZKGa2Dfx6zCuuw5iFVjO3hF30LZ7bIm7pGzZlKo948X5mmaao06nVeaTb8C/V6fWprtnEef/x67Pe9kd8TPm3xXqg2vSQSPO6jEPXnhcDxSS6CSYpEmPSJpAVnZXltHRasp0IFtycprfAuxQpHvV4aTs5WG9PV2hj3PBIK9tnJs8e9JFYUq0pIcVdtw56q1ZztRCocDxOPh8aca9QatdIgURnVPMOFCAOPG9lO7sgkhn/DnZiYmChvBalU5hWV5ybKrf51Kp/LAyE/PF/vyyQeBCjiQWhOI/VK19hVL4kGQRVEJBWPRHluyr3JgD3csTo3yoFfnpuqnRtut99tqNGgz6DFXzqMFJ+Zac42mjPNCzdhLS8ZQhn7MwAA///5G2oQ6AYAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: aa1bdb53-ad11-4167-8bd1-124f6666a3f1-1
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x140003cf9b5}]'
+        filter: map[_id:6503654f-c57d-431a-ab32-1e7f6374b603]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: |-
+            [{$set {6503654f-c57d-431a-ab32-1e7f6374b603 FAILED 1669789788 1669789788 361c98ff-8d95-4e61-b43a-4895673ea1e9 fec1be96-8392-4e4e-833a-98d53331f782 /api/employees {POST 1 1 /api/employees map[] map[accept:[*/*] content-length:[100] content-type:[application/json] host:[localhost:8080] user-agent:[curl/7.84.0]] {
+                "firstName": "Myke",
+                "lastName": "Tyson",
+                "email": "mt@gmail.com",
+                "timestamp":1
+            }} [] {200 map[] {"id":6,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1669789788} OK 1 1}    [] {{true 200 200} [] {false JSON {"id":10,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1669789695} {"id":6,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1669789788}} []}}}]
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738rMyMgTWpCSWJIalFpcmlPC+L+NgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMBg+r+NmYmRrbikKDMvnUeNQcXM1MDYzNQkTTfZ1DxF18TYMFE3McnYSNcw1TzNzNjcJMnMwJgBEAAA///9R/ARlQAAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=
+---
+version: api.keploy.io/v1beta1
+kind: Generic
+name: aa1bdb53-ad11-4167-8bd1-124f6666a3f1-2
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x14000036328}]'
+        filter: map[_id:361c98ff-8d95-4e61-b43a-4895673ea1e9]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: map[$inc:[{failure 1}]]
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738rMyMgTWpCSWJIalFpcmlPC+L+NgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMDA/r+NkYmRiQEQAAD//zVzaY5nAAAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638jKyPS/hYGBgfV/EwMjIyAAAP//ngbw8hEAAAA=

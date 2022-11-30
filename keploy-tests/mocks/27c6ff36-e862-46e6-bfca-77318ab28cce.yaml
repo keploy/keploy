@@ -1,0 +1,16 @@
+version: api.keploy.io/v1beta1
+kind: Generic
+name: 27c6ff36-e862-46e6-bfca-77318ab28cce-0
+spec:
+    metadata:
+        DistinctOptions: '[]'
+        fieldName: app_id
+        filter: map[cid:default_company]
+        name: mongodb
+        operation: Distinct
+        type: NO_SQL_DB
+    objects:
+        - type: '*[]interface {}'
+          data: H4sIAAAAAAAA/+L538jEyPS/iYFRgIHh/4T/TQxsbMUlRZl56TzCDIIpqbn5uuGpSe75umFmuo4FBTA5PgaenMziktz8vGzdRIQwBwNbbiWyADsDa24lkj4xBpHixNyCnFTd0qIc3eKM/KKS1LzUIpi0AANfSWVBanFyUWZBiW5xSjYgAAD//8yLvQmfAAAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=

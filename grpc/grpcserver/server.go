@@ -6,15 +6,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/pkg"
 	"net"
 	"path/filepath"
 	"strings"
+
+	"go.keploy.io/server/pkg"
 
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/keploy/go-sdk/integrations/kgrpcserver"
+	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	grpcMock "go.keploy.io/server/grpc/mock"
 	proto "go.keploy.io/server/grpc/regression"
@@ -40,10 +43,10 @@ type Server struct {
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
+func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, k *keploy.Keploy, testExport bool, testReportPath string) error {
 
 	// create an instance for grpc server
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(kgrpcserver.UnaryInterceptor(k))
 	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath, tcSvc: tc})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
