@@ -67,6 +67,7 @@ type MockHttpResp struct {
 }
 
 type SQlSpec struct {
+	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
 	Type  SqlOutputType `json:"type" yaml:"type"` // eg - POST : save data (TABLE) or number of rows affected (INT)
 	Table Table         `json:"table" yaml:"table"`
 	Int   int           `json:"int" yaml:"int"`

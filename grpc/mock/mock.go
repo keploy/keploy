@@ -58,12 +58,14 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 		var spec models.SQlSpec
 		if commit!=0 {
 			spec = models.SQlSpec{
+				Metadata: doc.Spec.Metadata,
 				Type: models.SqlOutputType(doc.Spec.Type),
 				Int: int(doc.Spec.Int),
 			}
 		}else{
 			spec = models.SQlSpec{
 				Type: models.SqlOutputType(doc.Spec.Type),
+				Metadata: doc.Spec.Metadata,
 				Table: models.Table{
 					Cols: ToModelCols(doc.Spec.Table.Cols), //conversion to do
 					Rows: doc.Spec.Table.Rows,
@@ -217,6 +219,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 			cols, err := toProtoCols(spec.Table.Cols)
 			mock.Spec = &proto.Mock_SpecSchema{
 				Type: string(spec.Type),
+				Metadata: spec.Metadata,
 				Table: &proto.Table{
 					Cols: cols, //mock.Spec.Table.Cols, //verify this
 					Rows: spec.Table.Rows,
