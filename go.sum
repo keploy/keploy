@@ -133,8 +133,8 @@ github.com/k0kubun/pp/v3 v3.1.0/go.mod h1:vIrP5CF0n78pKHm2Ku6GVerpZBJvscg48WepUY
 github.com/kelseyhightower/envconfig v1.4.0 h1:Im6hONhd3pLkfDFsbRgu68RDNkGF1r3dvMUtDTo2cv8=
 github.com/kelseyhightower/envconfig v1.4.0/go.mod h1:cccZRl6mQpaq41TPp5QxidR+Sa3axMbJDNb//FQX6Gg=
 github.com/keploy/go-sdk v0.5.3/go.mod h1:FrKEdAbypVbeHdboueHZ3icD24pPRSn/jsZ5KLzzjJQ=
-github.com/keploy/go-sdk v0.6.4 h1:cW5Rkbgg2UmYgRXy+EXdgXJyCokjC/PxCHyKFkbcRrg=
-github.com/keploy/go-sdk v0.6.4/go.mod h1:lmxe/wYYTTIXKtfG7RmGv2AMAadx1+5059/RAPBNoBY=
+github.com/keploy/go-sdk v0.6.6-alpha h1:k51tm3eL35skbB23yOqNbNDn4kALJ18IQxdEdpEBZE8=
+github.com/keploy/go-sdk v0.6.6-alpha/go.mod h1:ytWcfOLeqCr9GyZLTRljEARgtSHuuvaKhOpIX20SIps=
 github.com/kevinmbeaulieu/eq-go v1.0.0/go.mod h1:G3S8ajA56gKBZm4UB9AOyoOS37JO3roToPzKNM8dtdM=
 github.com/klauspost/compress v1.13.6/go.mod h1:/3/Vjq9QcHkK5uEr5lBEmyoZ1iFhe47etQ6QUkpK6sk=
 github.com/klauspost/compress v1.15.0/go.mod h1:/3/Vjq9QcHkK5uEr5lBEmyoZ1iFhe47etQ6QUkpK6sk=
