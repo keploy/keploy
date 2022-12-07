@@ -2,7 +2,7 @@ module go.keploy.io/server
 
 go 1.17
 
-// replace github.com/keploy/go-sdk => ../go-sdk
+replace github.com/keploy/go-sdk => ../go-sdk
 
 require (
 	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
@@ -15,7 +15,7 @@ require (
 	github.com/vektah/gqlparser/v2 v2.2.0 // v should b4 less or equal 2.2.0
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.22.0
-	google.golang.org/protobuf v1.28.0
+	google.golang.org/protobuf v1.28.1
 )
 
 require (
