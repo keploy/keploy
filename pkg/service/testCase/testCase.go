@@ -211,7 +211,7 @@ func (r *TestCase) WriteToYaml(ctx context.Context, test []models.Mock, testCase
 	r.log.Info(fmt.Sprint("\n💾 Recorded testcase with name: ", test[0].Name, " in yaml file at path: ", testCasePath, "\n"))
 
 	if len(test) > 1 {
-		err = r.mockFS.WriteAll(ctx, mockPath, test[0].Name, test[1:])
+		err = r.mockFS.WriteAll(ctx, mockPath,mock[0].Name , test[1:])
 		if err != nil {
 			r.log.Error(err.Error())
 		}
