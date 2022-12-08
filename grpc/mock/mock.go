@@ -16,12 +16,12 @@ import (
 
 func Encode(doc *proto.Mock) (models.Mock, error) {
 	res := models.Mock{
-		Version: doc.Version,
-		Kind:    doc.Kind,
+		Version: models.Version(doc.Version),
+		Kind:    models.Kind(doc.Kind),
 		Name:    doc.Name,
 	}
 	switch doc.Kind {
-	case string(models.HTTP_EXPORT):
+	case string(models.HTTP):
 		spec := models.HttpSpec{
 			Metadata: doc.Spec.Metadata,
 			Request: models.MockHttpReq{
@@ -52,7 +52,24 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 		if err != nil {
 			return res, fmt.Errorf("failed to encode http spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
-	case string(models.GENERIC_EXPORT):
+
+	case string(models.SQL):
+			spec := models.SQlSpec{
+				Type: models.SqlOutputType(doc.Spec.Type),
+				Metadata: doc.Spec.Metadata,
+				Table: models.Table{
+					Cols: ToModelCols(doc.Spec.Table.Cols), //conversion to do
+					Rows: doc.Spec.Table.Rows,
+				},
+				Int: int(doc.Spec.Int),
+			}
+		
+		err := res.Spec.Encode(&spec)
+		if err != nil {
+			return res, fmt.Errorf("failed to encode sql spec for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+
+	case string(models.GENERIC):
 		err := res.Spec.Encode(&models.GenericSpec{
 			Metadata: doc.Spec.Metadata,
 			Objects:  ToModelObjects(doc.Spec.Objects),
@@ -66,6 +83,32 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 	return res, nil
 }
 
+func ToModelCols(cols []*proto.SqlCol) []models.SqlCol {
+	res := []models.SqlCol{}
+	for _, j := range cols {
+		res = append(res, models.SqlCol{
+			Name:      j.Name,
+			Type:      j.Type,
+			Precision: int(j.Precision),
+			Scale:     int(j.Scale),
+		})
+	}
+	return res
+}
+
+func toProtoCols(cols []models.SqlCol) ([]*proto.SqlCol, error) {
+	res := []*proto.SqlCol{}
+	for _, j := range cols {
+
+		res = append(res, &proto.SqlCol{
+			Name:      j.Name,
+			Type:      j.Type,
+			Precision: int64(j.Precision),
+			Scale:     int64(j.Scale),
+		})
+	}
+	return res, nil
+}
 func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 	res := []models.Object{}
 	for _, j := range objs {
@@ -112,12 +155,12 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 	res := []*proto.Mock{}
 	for _, j := range doc {
 		mock := &proto.Mock{
-			Version: j.Version,
+			Version: string(j.Version),
 			Name:    j.Name,
-			Kind:    j.Kind,
+			Kind:    string(j.Kind),
 		}
 		switch j.Kind {
-		case string(models.HTTP_EXPORT):
+		case models.HTTP:
 			spec := &models.HttpSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
@@ -152,7 +195,25 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					Data: []byte(j.Data),
 				})
 			}
-		case string(models.GENERIC_EXPORT):
+
+		case models.SQL:
+			spec := &models.SQlSpec{}
+			err := j.Spec.Decode(spec)
+			if err != nil {
+				return res, fmt.Errorf("failed to decode the sql spec of mock with name: %s.  error: %s", j.Name, err.Error())
+			}
+			cols, err := toProtoCols(spec.Table.Cols)
+			mock.Spec = &proto.Mock_SpecSchema{
+				Type: string(spec.Type),
+				Metadata: spec.Metadata,
+				Table: &proto.Table{
+					Cols: cols,
+					Rows: spec.Table.Rows,
+				},
+				Int: int64(spec.Int),
+			}
+
+		case models.GENERIC:
 			spec := &models.GenericSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
