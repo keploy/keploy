@@ -9,7 +9,7 @@ RUN git clone https://github.com/keploy/ui
 
 WORKDIR /ui
 
-RUN npm install
+RUN npm install --legacy-peer-deps
 
 ARG KEPLOY_PATH_PREFIX='/'
 
