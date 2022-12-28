@@ -146,7 +146,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		val, ok := h2[k]
 		if !isNoisy {
 			if !ok {
-				//fmt.Println("header not present", k)
 				if checkKey(res, k) {
 					*res = append(*res, models.HeaderResult{
 						Normal: false,
@@ -165,7 +164,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 				continue
 			}
 			if len(v) != len(val) {
-				//fmt.Println("value not same", k, v, val)
 				if checkKey(res, k) {
 					*res = append(*res, models.HeaderResult{
 						Normal: false,
@@ -184,7 +182,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 			}
 			for i, e := range v {
 				if val[i] != e {
-					//fmt.Println("value not same", k, v, val)
 					if checkKey(res, k) {
 						*res = append(*res, models.HeaderResult{
 							Normal: false,
@@ -240,7 +237,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 			continue
 		}
 		if !ok {
-			//fmt.Println("header not present", k)
 			if checkKey(res, k) {
 				*res = append(*res, models.HeaderResult{
 					Normal: false,

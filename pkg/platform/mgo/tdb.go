@@ -2,7 +2,6 @@ package mgo
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"time"
 
@@ -255,9 +254,5 @@ func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, 
 	findOptions.SetLimit(int64(limit))
 	findOptions.SetSort(bson.M{"created": -1}) //reverse sort
 
-	tcs, err := t.getAll(ctx, filter, findOptions)
-	if err != nil {
-		fmt.Println("After getAll ", err)
-	}
-	return tcs, nil
+	return t.getAll(ctx, filter, findOptions)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/wI2L/jsondiff"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,16 +14,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
+	"github.com/wI2L/jsondiff"
 	grpcMock "go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/service/run"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, TestExport bool, mFS models.MockFS, tFS models.TestReportFS) *Regression {
+func New(tdb models.TestCaseDB, rdb models.TestRunDB, log *zap.Logger, TestExport bool, mFS models.MockFS, tFS models.TestReportFS) *Regression {
 	return &Regression{
 		yamlTcs:      sync.Map{},
 		tdb:          tdb,
@@ -39,14 +38,14 @@ func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, TestExport bool, mF
 type Regression struct {
 	yamlTcs      sync.Map
 	tdb          models.TestCaseDB
-	rdb          run.DB
+	rdb          models.TestRunDB
 	mockFS       models.MockFS
 	testReportFS models.TestReportFS
 	testExport   bool
 	log          *zap.Logger
 }
 
-func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error {
+func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		r.log.Error("file path should be absolute to read and write testcases and their mocks")
 		return fmt.Errorf("file path should be absolute")
@@ -114,7 +113,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			tcsMap := val.(sync.Map)
 			if val, ok := tcsMap.Load(id); ok {
 				tc = val.(models.TestCase)
-				tcsMap.Delete(id)
+				// tcsMap.Delete(id)
 			} else {
 				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
 				r.log.Error(err.Error())
@@ -274,11 +273,11 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	return pass, res, &tc, nil
 }
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
-	var t *run.Test
+	var t *models.Test
 	started := time.Now().UTC()
 	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp)
 	if tc != nil {
-		t = &run.Test{
+		t = &models.Test{
 			ID:         uuid.New().String(),
 			Started:    started.Unix(),
 			RunID:      runID,
@@ -292,12 +291,22 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 		}
 	}
 	t.Completed = time.Now().UTC().Unix()
+
+	if err != nil {
+		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		t.Status = models.TestStatusFailed
+	}
+	t.Status = models.TestStatusFailed
+	if ok {
+		t.Status = models.TestStatusPassed
+	}
 	defer func() {
 		if r.testExport {
 			mockIds := []string{}
 			for i := 0; i < len(tc.Mocks); i++ {
 				mockIds = append(mockIds, tc.Mocks[i].Name)
 			}
+			r.testReportFS.Lock()
 			// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
 			r.testReportFS.SetResult(runID, models.TestResult{
 				Name:       runID,
@@ -328,6 +337,8 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 				Noise:        tc.Noise,
 				Result:       *res,
 			})
+			r.testReportFS.Lock()
+			defer r.testReportFS.Unlock()
 		} else {
 			err2 := r.saveResult(ctx, t)
 			if err2 != nil {
@@ -335,20 +346,10 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 			}
 		}
 	}()
-
-	if err != nil {
-		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
-		t.Status = models.TestStatusFailed
-	}
-	if ok {
-		t.Status = models.TestStatusPassed
-		return ok, nil
-	}
-	t.Status = models.TestStatusFailed
-	return false, nil
+	return ok, nil
 }
 
-func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
+func (r *Regression) saveResult(ctx context.Context, t *models.Test) error {
 	err := r.rdb.PutTest(ctx, *t)
 	if err != nil {
 		return err

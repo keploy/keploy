@@ -67,7 +67,7 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err = rg.run.Put(r.Context(), run.TestRun{
+	err = rg.run.Put(r.Context(), models.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
@@ -102,13 +102,13 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 
 	// user := "default"
 	if rg.testExport {
-		err = rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath, rg.testReportPath)
+		err = rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath, rg.testReportPath, total)
 		if err != nil {
 			render.Render(w, r, ErrInvalidRequest(err))
 			return
 		}
 	}
-	err = rg.run.Put(r.Context(), run.TestRun{
+	err = rg.run.Put(r.Context(), models.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,

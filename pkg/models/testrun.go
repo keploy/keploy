@@ -1,12 +1,17 @@
 package models
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type TestReportFS interface {
 	Write(ctx context.Context, path string, doc TestReport) error
 	Read(ctx context.Context, path, name string) (TestReport, error)
 	SetResult(runId string, test TestResult)
 	GetResults(runId string) ([]TestResult, error)
+	Lock()
+	Unlock()
 }
 
 type TestReport struct {
@@ -17,14 +22,6 @@ type TestReport struct {
 	Total   int          `json:"total" yaml:"total"`
 	Tests   []TestResult `json:"tests" yaml:"tests,omitempty"`
 }
-
-type TestRunStatus string
-
-const (
-	TestRunStatusRunning TestRunStatus = "RUNNING"
-	TestRunStatusFailed  TestRunStatus = "FAILED"
-	TestRunStatusPassed  TestRunStatus = "PASSED"
-)
 
 type TestResult struct {
 	Name         string       `json:"name" yaml:"name"`
@@ -40,6 +37,53 @@ type TestResult struct {
 	Noise        []string     `json:"noise" yaml:"noise,omitempty"`
 	Result       Result       `json:"result" yaml:"result"`
 }
+
+type TestRunDB interface {
+	Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*TestRun, error)
+	Upsert(ctx context.Context, run TestRun) error
+	ReadOne(ctx context.Context, id string) (*TestRun, error)
+	ReadTest(ctx context.Context, id string) (Test, error)
+	ReadTests(ctx context.Context, runID string) ([]Test, error)
+	PutTest(ctx context.Context, t Test) error
+	Increment(ctx context.Context, success, failure bool, id string) error
+}
+
+type TestRun struct {
+	ID      string        `json:"id" bson:"_id"`
+	Created int64         `json:"created" bson:"created,omitempty"`
+	Updated int64         `json:"updated" bson:"updated,omitempty"`
+	Status  TestRunStatus `json:"status" bson:"status"`
+	CID     string        `json:"cid" bson:"cid,omitempty"`
+	App     string        `json:"app" bson:"app,omitempty"`
+	User    string        `json:"user" bson:"user,omitempty"`
+	Success int           `json:"success" bson:"success,omitempty"`
+	Failure int           `json:"failure" bson:"failure,omitempty"`
+	Total   int           `json:"total" bson:"total,omitempty"`
+	Tests   []Test        `json:"tests" bson:"-"`
+}
+
+type Test struct {
+	ID         string       `json:"id" bson:"_id"`
+	Status     TestStatus   `json:"status" bson:"status"`
+	Started    int64        `json:"started" bson:"started"`
+	Completed  int64        `json:"completed" bson:"completed"`
+	RunID      string       `json:"run_id" bson:"run_id"`
+	TestCaseID string       `json:"testCaseID" bson:"test_case_id"`
+	URI        string       `json:"uri" bson:"uri"`
+	Req        HttpReq      `json:"req" bson:"req"`
+	Dep        []Dependency `json:"dep" bson:"dep"`
+	Resp       HttpResp     `json:"http_resp" bson:"http_resp,omitempty"`
+	Noise      []string     `json:"noise" bson:"noise"`
+	Result     Result       `json:"result" bson:"result"`
+}
+
+type TestRunStatus string
+
+const (
+	TestRunStatusRunning TestRunStatus = "RUNNING"
+	TestRunStatusFailed  TestRunStatus = "FAILED"
+	TestRunStatusPassed  TestRunStatus = "PASSED"
+)
 
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`

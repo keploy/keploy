@@ -210,7 +210,7 @@ func Server(ver string) *chi.Mux {
 		return err
 	})
 	g.Go(func() error { return m.Serve() })
-	fmt.Println(logo)
+	fmt.Println(logo, " ")
 	fmt.Printf("keploy %v\n\n.", ver)
 	logger.Info("keploy started at port " + port)
 	g.Wait()

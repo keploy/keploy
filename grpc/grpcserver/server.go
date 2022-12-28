@@ -1,24 +1,23 @@
 package grpcserver
 
-// this will be the server file for the grpc connection
-
 import (
 	"context"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/pkg"
 	"net"
 	"path/filepath"
-	"strings"
-
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-test/deep"
 	"github.com/google/uuid"
 	"go.keploy.io/server/graph"
 	grpcMock "go.keploy.io/server/grpc/mock"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
@@ -33,6 +32,7 @@ type Server struct {
 	logger         *zap.Logger
 	testExport     bool
 	testReportPath string
+	mocks          sync.Map
 	svc            regression2.Service
 	tcSvc          tcSvc.Service
 	run            run.Service
@@ -44,7 +44,7 @@ func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Se
 
 	// create an instance for grpc server
 	srv := grpc.NewServer()
-	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath, tcSvc: tc})
+	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath, tcSvc: tc, mocks: sync.Map{}})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
@@ -59,7 +59,27 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 	}
 	exists := srv.mock.FileExists(ctx, request.Path)
 	if exists {
-		srv.logger.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(request.Path)))
+		if !request.OverWrite {
+			srv.logger.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(request.Path)))
+		} else {
+			path := strings.Split(request.Path, "/")
+			fileName := strings.Split(path[len(path)-1], ".")[0]
+
+			mocks, err := srv.mock.GetAll(ctx, strings.Join(path[0:len(path)-1], "/"), fileName)
+			if err != nil {
+				return nil, err
+			}
+			res, err := grpcMock.Decode(mocks)
+			if err != nil {
+				return nil, err
+			}
+
+			if _, ok := srv.mocks.Load(fileName); ok {
+				srv.mocks.Delete(fileName)
+			}
+			srv.mocks.Store(fileName, res)
+		}
+
 	}
 	return &proto.StartMockResp{
 		Exists: exists,
@@ -71,11 +91,46 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 	doc, err := grpcMock.Encode(request.Mock)
 	if err != nil {
 		srv.logger.Error(err.Error())
-	}
-	err = srv.mock.Put(ctx, request.Path, doc, request.Mock.Spec.Metadata)
-	if err != nil {
 		return &proto.PutMockResp{}, err
 	}
+
+	mocksFromMap, ok := srv.mocks.Load(doc.Name)
+	var mocks = []*proto.Mock{}
+	if ok {
+		mocks = mocksFromMap.([]*proto.Mock)
+	}
+	if len(mocks) > 0 {
+		err := srv.mock.IsEqual(ctx, mocks[0], request.Mock, request.Path, doc.Name, len(mocks))
+		if err == nil {
+			mocks = mocks[1:]
+			if len(mocks) > 0 {
+				srv.mocks.Store(doc.Name, mocks)
+			} else {
+				srv.mocks.Delete(doc.Name)
+			}
+
+		} else if err != nil && err.Error() == mock.ERR_DEP_REQ_UNEQUAL_REMOVE {
+			for i := 1; i < len(mocks); i++ {
+				if mocks[i].Kind == request.Mock.Kind || deep.Equal(mocks[i].Spec.Metadata, request.Mock.Spec.Metadata) == nil && srv.mock.CompareMockResponses(mocks[i], request.Mock) {
+					mocks = mocks[i+1:]
+					if len(mocks) > 0 {
+						srv.mocks.Store(doc.Name, mocks)
+					} else {
+						srv.mocks.Delete(doc.Name)
+					}
+					break
+				}
+			}
+		} else if err != nil && err.Error() != mock.ERR_DEP_REQ_UNEQUAL_INSERT {
+			return &proto.PutMockResp{}, err
+		}
+	} else {
+		err = srv.mock.Put(ctx, request.Path, doc, request.Mock.Spec.Metadata)
+		if err != nil {
+			return &proto.PutMockResp{}, err
+		}
+	}
+
 	return &proto.PutMockResp{Inserted: 1}, nil
 }
 
@@ -109,7 +164,7 @@ func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.E
 			return &proto.EndResponse{Message: err.Error()}, nil
 		}
 	}
-	err := srv.run.Put(ctx, run.TestRun{
+	err := srv.run.Put(ctx, models.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
@@ -133,12 +188,12 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	id := uuid.New().String()
 	now := time.Now().Unix()
 	if srv.testExport {
-		err = srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath, srv.testReportPath)
+		err = srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath, srv.testReportPath, total)
 		if err != nil {
 			return nil, err
 		}
 	}
-	err = srv.run.Put(ctx, run.TestRun{
+	err = srv.run.Put(ctx, models.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,
@@ -308,10 +363,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		}
 
 		// maybe we need to concatenate the values
-		if pkg.IsTime(strings.Join(vals, ", ")) {
-			return true
-		}
-		return false
+		return pkg.IsTime(strings.Join(vals, ", "))
 	})
 
 	// find number of files in the test folder
@@ -338,7 +390,6 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			mocks = append(mocks, m)
 		}
 		tc[0].Spec.Encode(&models.HttpSpec{
-			// Metadata: , TODO: What should be here
 			Created: request.Captured,
 			Request: models.MockHttpReq{
 				Method:     models.Method(request.HttpReq.Method),

@@ -153,6 +153,7 @@ message Mock {
     string Type = 8;
     optional Table Table = 9;
     int64 Int = 10; // change it to rows commited 
+    repeated string Err = 11;
   }
   SpecSchema Spec = 4;
 }
@@ -191,6 +192,8 @@ message getMockResp {
 message StartMockReq {
   string Path = 1;
   string Mode = 2;
+  bool OverWrite = 3;
+  string Name = 4;
 }
 
 message StartMockResp {

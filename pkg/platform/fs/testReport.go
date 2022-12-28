@@ -16,33 +16,39 @@ import (
 
 type testReport struct {
 	isTestMode bool
-	tests      sync.Map
+	tests      map[string][]models.TestResult
+	m          sync.Mutex
 }
 
 func NewTestReportFS(isTestMode bool) *testReport {
 	return &testReport{
 		isTestMode: isTestMode,
-		tests:      sync.Map{},
+		tests:      map[string][]models.TestResult{},
+		m:          sync.Mutex{},
 	}
+}
+
+func (fe *testReport) Lock() {
+	fe.m.Lock()
+}
+
+func (fe *testReport) Unlock() {
+	fe.m.Unlock()
 }
 
 func (fe *testReport) SetResult(runId string, test models.TestResult) {
-
-	val, ok := fe.tests.Load(runId)
-	tests := []models.TestResult{}
-	if ok {
-		tests = val.([]models.TestResult)
-	}
+	tests, _ := fe.tests[runId]
 	tests = append(tests, test)
-	fe.tests.Store(runId, tests)
+	fe.tests[runId] = tests
+	fe.m.Unlock()
 }
 
 func (fe *testReport) GetResults(runId string) ([]models.TestResult, error) {
-	val, ok := fe.tests.Load(runId)
+	val, ok := fe.tests[runId]
 	if !ok {
 		return nil, fmt.Errorf("found no test results for test report with id: %v", runId)
 	}
-	return val.([]models.TestResult), nil
+	return val, nil
 }
 
 func (fe *testReport) Read(ctx context.Context, path, name string) (models.TestReport, error) {

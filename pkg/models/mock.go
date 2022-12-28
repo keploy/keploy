@@ -21,8 +21,8 @@ const (
 )
 
 type Mock struct {
-	Version Version    `json:"version" yaml:"version"`
-	Kind    Kind    `json:"kind" yaml:"kind"`
+	Version Version   `json:"version" yaml:"version"`
+	Kind    Kind      `json:"kind" yaml:"kind"`
 	Name    string    `json:"name" yaml:"name"`
 	Spec    yaml.Node `json:"spec" yaml:"spec"`
 }
@@ -67,10 +67,11 @@ type MockHttpResp struct {
 }
 
 type SQlSpec struct {
-	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
-	Type  SqlOutputType `json:"type" yaml:"type"` // eg - POST : save data (TABLE) or number of rows affected (INT)
-	Table Table         `json:"table" yaml:"table"`
-	Int   int           `json:"int" yaml:"int"`
+	Metadata map[string]string `json:"metadata" yaml:"metadata"`
+	Type     SqlOutputType     `json:"type" yaml:"type"` // eg - POST : save data (TABLE) or number of rows affected (INT)
+	Table    Table             `json:"table" yaml:"table,omitempty"`
+	Int      int               `json:"int" yaml:"int"`
+	Err      []string          `json:"error" yaml:"error",omitempty`
 }
 
 type Table struct {
@@ -91,6 +92,7 @@ type SqlOutputType string
 const (
 	TableType SqlOutputType = "table"
 	IntType   SqlOutputType = "int"
+	ErrType   SqlOutputType = "error"
 )
 
 type MockFS interface {

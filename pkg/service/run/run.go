@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(rdb DB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service, cl http.Client, testReportFS models.TestReportFS) *Run {
+func New(rdb models.TestRunDB, tdb models.TestCaseDB, log *zap.Logger, adb telemetry.Service, cl http.Client, testReportFS models.TestReportFS) *Run {
 	return &Run{
 		tele:         adb,
 		rdb:          rdb,
@@ -27,7 +27,7 @@ type Run struct {
 	tele         telemetry.Service
 	runCount     int
 	testReportFS models.TestReportFS
-	rdb          DB
+	rdb          models.TestRunDB
 	tdb          models.TestCaseDB
 	client       http.Client
 	log          *zap.Logger
@@ -55,7 +55,7 @@ func (r *Run) Normalize(ctx context.Context, cid, id string) error {
 	return nil
 }
 
-func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time, offset *int, limit *int) ([]*TestRun, error) {
+func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time, offset *int, limit *int) ([]*models.TestRun, error) {
 	off, lim := 0, 25
 	if offset != nil {
 		off = *offset
@@ -91,7 +91,7 @@ func (r *Run) Get(ctx context.Context, summary bool, cid string, user, app, id *
 	return res, nil
 }
 
-func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
+func (r *Run) updateStatus(ctx context.Context, trs []*models.TestRun) error {
 	tests := 0
 
 	for _, tr := range trs {
@@ -145,7 +145,7 @@ func (r *Run) updateStatus(ctx context.Context, trs []*TestRun) error {
 	return nil
 }
 
-func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error {
+func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *models.TestRun) error {
 	diff := time.Now().UTC().Sub(time.Unix(ts, 0))
 	if diff < 5*time.Minute {
 		return nil
@@ -161,7 +161,7 @@ func (r *Run) failOldTestRuns(ctx context.Context, ts int64, tr *TestRun) error 
 
 }
 
-func (r *Run) Put(ctx context.Context, run TestRun, testExport bool, testReportPath string) error {
+func (r *Run) Put(ctx context.Context, run models.TestRun, testExport bool, testReportPath string) error {
 	if run.Status == models.TestRunStatusRunning {
 		pp.SetColorScheme(models.PassingColorScheme)
 		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
@@ -179,7 +179,7 @@ func (r *Run) Put(ctx context.Context, run TestRun, testExport bool, testReportP
 			success = res.Success
 			failure = res.Failure
 		} else {
-			var res *TestRun
+			var res *models.TestRun
 			res, err = r.rdb.ReadOne(ctx, run.ID)
 			total = res.Total
 			success = res.Success

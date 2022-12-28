@@ -70,7 +70,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 		res = append(res, tests...)
 	}
 	sort.Slice(res, func(i, j int) bool {
-		return res[i].Captured > res[j].Captured
+		return res[i].Captured < res[j].Captured
 	})
 
 	return res, nil
