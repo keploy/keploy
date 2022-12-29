@@ -110,6 +110,11 @@ The UI can be accessed at http://localhost:6789
 ### Helm chart
 Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
 
+## Language Support
+- [x] [Go SDK](https://github.com/keploy/go-sdk)
+- [x] [Java SDK](https://github.com/keploy/java-sdk)
+- [x] [Typescript/Javascript SDK](https://github.com/keploy/typescript-sdk)
+- [ ] Python SDK - WIP [#58](https://github.com/keploy/keploy/issues/58)
 
 ## Run Sample application
 
@@ -214,12 +219,6 @@ export KEPLOY_MODE="record"
 ```
 export KEPLOY_MODE="test"
 ```
-
-## Language Support
-- [x] [Go SDK](https://github.com/keploy/go-sdk)
-- [x] [Java SDK](https://github.com/keploy/java-sdk)
-- [x] [Typescript/Javascript SDK](https://github.com/keploy/typescript-sdk)
-- [ ] Python SDK - WIP [#58](https://github.com/keploy/keploy/issues/58)
 
 Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 
