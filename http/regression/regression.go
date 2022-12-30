@@ -12,16 +12,22 @@ import (
 	"github.com/google/uuid"
 
 	"go.keploy.io/server/graph"
-	"go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/pkg/models"
 	regression2 "go.keploy.io/server/pkg/service/regression"
-	"go.keploy.io/server/pkg/service/run"
+
+	// "go.keploy.io/server/pkg/service/run"
 	tcSvc "go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 )
 
-func New(r chi.Router, logger *zap.Logger, svc regression2.Service, run run.Service, tc tcSvc.Service, testExport bool, testReportPath string) {
-	s := &regression{logger: logger, svc: svc, run: run, testExport: testExport, testReportPath: testReportPath, tcSvc: tc}
+func New(r chi.Router, logger *zap.Logger, svc regression2.Service, tc tcSvc.Service, testExport bool, testReportPath string) {
+	s := &regression{
+		logger:         logger,
+		svc:            svc,
+		testExport:     testExport,
+		testReportPath: testReportPath,
+		tcSvc:          tc,
+	}
 
 	r.Route("/regression", func(r chi.Router) {
 		r.Route("/testcase", func(r chi.Router) {
@@ -44,7 +50,6 @@ type regression struct {
 	logger         *zap.Logger
 	svc            regression2.Service
 	tcSvc          tcSvc.Service
-	run            run.Service
 }
 
 func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
@@ -60,27 +65,16 @@ func (rg *regression) End(w http.ResponseWriter, r *http.Request) {
 		now = time.Now().Unix()
 	)
 
-	if rg.testExport {
-		err := rg.svc.StopTestRun(r.Context(), id, rg.testReportPath)
-		if err != nil {
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
-		}
-	}
-	err = rg.run.Put(r.Context(), models.TestRun{
+	err = rg.svc.PutTest(r.Context(), models.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
-	}, rg.testExport, rg.testReportPath)
-
+	}, rg.testExport, id, "", "", rg.testReportPath, 0)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
-
 	}
-
 	render.Status(r, http.StatusOK)
-
 }
 
 func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
@@ -96,19 +90,10 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 	if app == "" {
 		return
 	}
-
 	id := uuid.New().String()
 	now := time.Now().Unix()
 
-	// user := "default"
-	if rg.testExport {
-		err = rg.svc.StartTestRun(r.Context(), id, testCasePath, mockPath, rg.testReportPath, total)
-		if err != nil {
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
-		}
-	}
-	err = rg.run.Put(r.Context(), models.TestRun{
+	err = rg.svc.PutTest(r.Context(), models.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,
@@ -117,7 +102,7 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 		App:     app,
 		User:    graph.DEFAULT_USER,
 		Total:   total,
-	}, rg.testExport, rg.testReportPath)
+	}, rg.testExport, id, testCasePath, mockPath, rg.testReportPath, total)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
@@ -181,21 +166,11 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// switch rg.testExport {
-	// case false:
 	tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	// case true:
-	// 	tcs, err = rg.tcSvc.ReadTCS(r.Context(), testCasePath, mockPath)
-	// 	if err != nil {
-	// 		render.Render(w, r, ErrInvalidRequest(err))
-	// 		return
-	// 	}
-	// 	eof = true
-	// }
 	render.Status(r, http.StatusOK)
 	// In test-export, eof is true to stop the infinite for loop in sdk
 	w.Header().Set("EOF", fmt.Sprintf("%v", eof))
@@ -213,66 +188,67 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Unix()
-	if rg.testExport {
-		var (
-			id = uuid.New().String()
-			tc = []models.Mock{{
-				Version: models.V1Beta1,
-				Kind:    models.HTTP,
-				Name:    id,
-			}}
-			mocks = []string{}
-		)
-		for i, j := range data.Mocks {
-			doc, err := mock.Encode(j)
-			if err != nil {
-				rg.logger.Error(err.Error())
-			}
-			tc = append(tc, doc)
-			m := id + "-" + strconv.Itoa(i)
-			tc[len(tc)-1].Name = m
-			mocks = append(mocks, m)
-		}
-		tc[0].Spec.Encode(&models.HttpSpec{
-			// Metadata: , TODO: What should be here
-			Request: models.MockHttpReq{
-				Method:     models.Method(data.HttpReq.Method),
-				ProtoMajor: int(data.HttpReq.ProtoMajor),
-				ProtoMinor: int(data.HttpReq.ProtoMinor),
-				URL:        data.HttpReq.URL,
-				URLParams:  data.HttpReq.URLParams,
-				Body:       data.HttpReq.Body,
-				Header:     mock.ToMockHeader(data.HttpReq.Header),
-			},
-			Response: models.MockHttpResp{
-				StatusCode:    int(data.HttpResp.StatusCode),
-				Body:          data.HttpResp.Body,
-				Header:        mock.ToMockHeader(data.HttpResp.Header),
-				StatusMessage: data.HttpResp.StatusMessage,
-				ProtoMajor:    int(data.HttpReq.ProtoMajor),
-				ProtoMinor:    int(data.HttpReq.ProtoMinor),
-			},
-			Objects: []models.Object{{
-				Type: "error",
-				Data: "",
-			}},
-			Mocks: mocks,
-			Assertions: map[string][]string{
-				"noise": {},
-			},
-			Created: data.Captured,
-		})
-		inserted, err := rg.tcSvc.WriteToYaml(r.Context(), tc, data.TestCasePath, data.MockPath)
-		if err != nil {
-			rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
-			render.Render(w, r, ErrInvalidRequest(err))
-			return
-		}
-		render.Status(r, http.StatusOK)
-		render.JSON(w, r, map[string]string{"id": inserted[0]})
-		return
-	}
-	inserted, err := rg.tcSvc.InsertToDB(r.Context(), graph.DEFAULT_COMPANY, []models.TestCase{{
+
+	// if rg.testExport {
+	// 	var (
+	// 		id = uuid.New().String()
+	// 		tc = []models.Mock{{
+	// 			Version: models.V1Beta1,
+	// 			Kind:    models.HTTP,
+	// 			Name:    id,
+	// 		}}
+	// 		mocks = []string{}
+	// 	)
+	// 	for i, j := range data.Mocks {
+	// 		doc, err := mock.Encode(j)
+	// 		if err != nil {
+	// 			rg.logger.Error(err.Error())
+	// 		}
+	// 		tc = append(tc, doc)
+	// 		m := id + "-" + strconv.Itoa(i)
+	// 		tc[len(tc)-1].Name = m
+	// 		mocks = append(mocks, m)
+	// 	}
+	// 	tc[0].Spec.Encode(&models.HttpSpec{
+	// 		// Metadata: , TODO: What should be here
+	// 		Request: models.MockHttpReq{
+	// 			Method:     models.Method(data.HttpReq.Method),
+	// 			ProtoMajor: int(data.HttpReq.ProtoMajor),
+	// 			ProtoMinor: int(data.HttpReq.ProtoMinor),
+	// 			URL:        data.HttpReq.URL,
+	// 			URLParams:  data.HttpReq.URLParams,
+	// 			Body:       data.HttpReq.Body,
+	// 			Header:     mock.ToMockHeader(data.HttpReq.Header),
+	// 		},
+	// 		Response: models.MockHttpResp{
+	// 			StatusCode:    int(data.HttpResp.StatusCode),
+	// 			Body:          data.HttpResp.Body,
+	// 			Header:        mock.ToMockHeader(data.HttpResp.Header),
+	// 			StatusMessage: data.HttpResp.StatusMessage,
+	// 			ProtoMajor:    int(data.HttpReq.ProtoMajor),
+	// 			ProtoMinor:    int(data.HttpReq.ProtoMinor),
+	// 		},
+	// 		Objects: []models.Object{{
+	// 			Type: "error",
+	// 			Data: "",
+	// 		}},
+	// 		Mocks: mocks,
+	// 		Assertions: map[string][]string{
+	// 			"noise": {},
+	// 		},
+	// 		Created: data.Captured,
+	// 	})
+	// 	inserted, err := rg.tcSvc.WriteToYaml(r.Context(), tc, data.TestCasePath, data.MockPath)
+	// 	if err != nil {
+	// 		rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
+	// 		render.Render(w, r, ErrInvalidRequest(err))
+	// 		return
+	// 	}
+	// 	render.Status(r, http.StatusOK)
+	// 	render.JSON(w, r, map[string]string{"id": inserted[0]})
+	// 	return
+	// }
+	inserted, err := rg.tcSvc.Insert(r.Context(), []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,
@@ -281,13 +257,13 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		AppID:    data.AppID,
 		HttpReq:  data.HttpReq,
 		HttpResp: data.HttpResp,
+		Mocks:    data.Mocks,
 		Deps:     data.Deps,
-	}})
+	}}, data.TestCasePath, data.MockPath, graph.DEFAULT_COMPANY)
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
-
 	}
 
 	if len(inserted) == 0 {

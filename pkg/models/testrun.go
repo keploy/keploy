@@ -1,19 +1,5 @@
 package models
 
-import (
-	"context"
-	"time"
-)
-
-type TestReportFS interface {
-	Write(ctx context.Context, path string, doc TestReport) error
-	Read(ctx context.Context, path, name string) (TestReport, error)
-	SetResult(runId string, test TestResult)
-	GetResults(runId string) ([]TestResult, error)
-	Lock()
-	Unlock()
-}
-
 type TestReport struct {
 	Name    string       `json:"name" yaml:"name"`
 	Status  string       `json:"status" yaml:"status"`
@@ -36,16 +22,6 @@ type TestResult struct {
 	Res          MockHttpResp `json:"resp" yaml:"resp,omitempty"`
 	Noise        []string     `json:"noise" yaml:"noise,omitempty"`
 	Result       Result       `json:"result" yaml:"result"`
-}
-
-type TestRunDB interface {
-	Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*TestRun, error)
-	Upsert(ctx context.Context, run TestRun) error
-	ReadOne(ctx context.Context, id string) (*TestRun, error)
-	ReadTest(ctx context.Context, id string) (Test, error)
-	ReadTests(ctx context.Context, runID string) ([]Test, error)
-	PutTest(ctx context.Context, t Test) error
-	Increment(ctx context.Context, success, failure bool, id string) error
 }
 
 type TestRun struct {

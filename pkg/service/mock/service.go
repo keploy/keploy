@@ -14,9 +14,10 @@ const (
 )
 
 type Service interface {
-	Put(ctx context.Context, path string, doc models.Mock, meta interface{}) error
+	// Put(ctx context.Context, path string, doc models.Mock, meta interface{}) error
+	Put(ctx context.Context, path string, doc *proto.Mock, meta interface{}) error
 	GetAll(ctx context.Context, path string, name string) ([]models.Mock, error)
-	FileExists(ctx context.Context, path string) bool
-	IsEqual(ctx context.Context, old, new *proto.Mock, path, name string, updateCount int) error
-	CompareMockResponses(old, new *proto.Mock) bool
+	FileExists(ctx context.Context, path string, overWrite bool) (bool, error)
+	// IsEqual(ctx context.Context, old, new *proto.Mock, path, name string, updateCount int) error
+	// CompareMockResponses(old, new *proto.Mock) bool
 }

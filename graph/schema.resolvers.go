@@ -38,7 +38,7 @@ func (r *mutationResolver) DeleteTestCase(ctx context.Context, id string) (bool,
 func (r *mutationResolver) NormalizeTests(ctx context.Context, ids []string) (bool, error) {
 	var errStrings []string
 	for _, id := range ids {
-		err := r.run.Normalize(ctx, DEFAULT_COMPANY, id)
+		err := r.reg.Normalize(ctx, DEFAULT_COMPANY, id)
 		if err != nil {
 			errStrings = append(errStrings, id+": "+err.Error())
 		}
@@ -71,7 +71,7 @@ func (r *queryResolver) TestRun(ctx context.Context, user *string, app *string, 
 
 	usr := DEFAULT_USER
 
-	runs, err := r.run.Get(ctx, summary, DEFAULT_COMPANY, &usr, app, id, from, to, offset, limit)
+	runs, err := r.reg.GetTestRun(ctx, summary, DEFAULT_COMPANY, &usr, app, id, from, to, offset, limit)
 	if err != nil {
 		return nil, err
 	}

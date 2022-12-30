@@ -3,15 +3,11 @@ package grpcserver
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/go-test/deep"
 	"github.com/google/uuid"
 	"go.keploy.io/server/graph"
 	grpcMock "go.keploy.io/server/grpc/mock"
@@ -21,7 +17,6 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
-	"go.keploy.io/server/pkg/service/run"
 	tcSvc "go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -32,19 +27,24 @@ type Server struct {
 	logger         *zap.Logger
 	testExport     bool
 	testReportPath string
-	mocks          sync.Map
 	svc            regression2.Service
 	tcSvc          tcSvc.Service
-	run            run.Service
 	mock           mock.Service
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, run run.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
+func New(logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer()
-	proto.RegisterRegressionServiceServer(srv, &Server{logger: logger, svc: svc, run: run, mock: m, testExport: testExport, testReportPath: testReportPath, tcSvc: tc, mocks: sync.Map{}})
+	proto.RegisterRegressionServiceServer(srv, &Server{
+		logger:         logger,
+		svc:            svc,
+		mock:           m,
+		testExport:     testExport,
+		testReportPath: testReportPath,
+		tcSvc:          tc,
+	})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
 	return err
@@ -57,80 +57,17 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 			Exists: false,
 		}, nil
 	}
-	exists := srv.mock.FileExists(ctx, request.Path)
-	if exists {
-		if !request.OverWrite {
-			srv.logger.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(request.Path)))
-		} else {
-			path := strings.Split(request.Path, "/")
-			fileName := strings.Split(path[len(path)-1], ".")[0]
-
-			mocks, err := srv.mock.GetAll(ctx, strings.Join(path[0:len(path)-1], "/"), fileName)
-			if err != nil {
-				return nil, err
-			}
-			res, err := grpcMock.Decode(mocks)
-			if err != nil {
-				return nil, err
-			}
-
-			if _, ok := srv.mocks.Load(fileName); ok {
-				srv.mocks.Delete(fileName)
-			}
-			srv.mocks.Store(fileName, res)
-		}
-
-	}
+	exists, err := srv.mock.FileExists(ctx, request.Path, request.OverWrite)
 	return &proto.StartMockResp{
 		Exists: exists,
-	}, nil
+	}, err
 }
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
-	// writes to yaml file
-	doc, err := grpcMock.Encode(request.Mock)
+	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata)
 	if err != nil {
-		srv.logger.Error(err.Error())
-		return &proto.PutMockResp{}, err
+		return nil, err
 	}
-
-	mocksFromMap, ok := srv.mocks.Load(doc.Name)
-	var mocks = []*proto.Mock{}
-	if ok {
-		mocks = mocksFromMap.([]*proto.Mock)
-	}
-	if len(mocks) > 0 {
-		err := srv.mock.IsEqual(ctx, mocks[0], request.Mock, request.Path, doc.Name, len(mocks))
-		if err == nil {
-			mocks = mocks[1:]
-			if len(mocks) > 0 {
-				srv.mocks.Store(doc.Name, mocks)
-			} else {
-				srv.mocks.Delete(doc.Name)
-			}
-
-		} else if err != nil && err.Error() == mock.ERR_DEP_REQ_UNEQUAL_REMOVE {
-			for i := 1; i < len(mocks); i++ {
-				if mocks[i].Kind == request.Mock.Kind || deep.Equal(mocks[i].Spec.Metadata, request.Mock.Spec.Metadata) == nil && srv.mock.CompareMockResponses(mocks[i], request.Mock) {
-					mocks = mocks[i+1:]
-					if len(mocks) > 0 {
-						srv.mocks.Store(doc.Name, mocks)
-					} else {
-						srv.mocks.Delete(doc.Name)
-					}
-					break
-				}
-			}
-		} else if err != nil && err.Error() != mock.ERR_DEP_REQ_UNEQUAL_INSERT {
-			return &proto.PutMockResp{}, err
-		}
-	} else {
-		err = srv.mock.Put(ctx, request.Path, doc, request.Mock.Spec.Metadata)
-		if err != nil {
-			return &proto.PutMockResp{}, err
-		}
-	}
-
 	return &proto.PutMockResp{Inserted: 1}, nil
 }
 
@@ -158,17 +95,12 @@ func (srv *Server) End(ctx context.Context, request *proto.EndRequest) (*proto.E
 		stat = models.TestRunStatusPassed
 	}
 	now := time.Now().Unix()
-	if srv.testExport {
-		err := srv.svc.StopTestRun(ctx, id, srv.testReportPath)
-		if err != nil {
-			return &proto.EndResponse{Message: err.Error()}, nil
-		}
-	}
-	err := srv.run.Put(ctx, models.TestRun{
+
+	err := srv.svc.PutTest(ctx, models.TestRun{
 		ID:      id,
 		Updated: now,
 		Status:  stat,
-	}, srv.testExport, srv.testReportPath)
+	}, srv.testExport, id, "", "", srv.testReportPath, 0)
 	if err != nil {
 		return &proto.EndResponse{Message: err.Error()}, nil
 	}
@@ -187,13 +119,8 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	}
 	id := uuid.New().String()
 	now := time.Now().Unix()
-	if srv.testExport {
-		err = srv.svc.StartTestRun(ctx, id, request.TestCasePath, request.MockPath, srv.testReportPath, total)
-		if err != nil {
-			return nil, err
-		}
-	}
-	err = srv.run.Put(ctx, models.TestRun{
+
+	err = srv.svc.PutTest(ctx, models.TestRun{
 		ID:      id,
 		Created: now,
 		Updated: now,
@@ -202,7 +129,7 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 		App:     app,
 		User:    graph.DEFAULT_USER,
 		Total:   total,
-	}, srv.testExport, srv.testReportPath)
+	}, srv.testExport, id, request.TestCasePath, request.MockPath, srv.testReportPath, total)
 	if err != nil {
 		return nil, err
 	}
@@ -314,19 +241,10 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		}
 	}
 
-	// switch srv.testExport {
-	// case false:
 	tcs, err = srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, request.TestCasePath, request.MockPath)
 	if err != nil {
 		return nil, err
 	}
-	// case true:
-	// 	tcs, err = srv.tcSvc.ReadTCS(ctx, request.TestCasePath, request.MockPath)
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-	// 	eof = true
-	// }
 	var ptcs []*proto.TestCase
 	for i := 0; i < len(tcs); i++ {
 		ptc, err := getProtoTC(tcs[i])
@@ -366,67 +284,6 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		return pkg.IsTime(strings.Join(vals, ", "))
 	})
 
-	// find number of files in the test folder
-	tcs, _ := srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, request.AppID, nil, nil, request.TestCasePath, request.MockPath)
-
-	if srv.testExport {
-		var (
-			id = fmt.Sprintf("test-%v", len(tcs)+1)
-			tc = []models.Mock{{
-				Version: models.V1Beta1,
-				Kind:    models.HTTP,
-				Name:    id,
-			}}
-			mocks = []string{}
-		)
-		for i, j := range request.Mocks {
-			doc, err := grpcMock.Encode(j)
-			if err != nil {
-				srv.logger.Error(err.Error())
-			}
-			tc = append(tc, doc)
-			m := id + "-" + strconv.Itoa(i)
-			tc[len(tc)-1].Name = m
-			mocks = append(mocks, m)
-		}
-		tc[0].Spec.Encode(&models.HttpSpec{
-			Created: request.Captured,
-			Request: models.MockHttpReq{
-				Method:     models.Method(request.HttpReq.Method),
-				ProtoMajor: int(request.HttpReq.ProtoMajor),
-				ProtoMinor: int(request.HttpReq.ProtoMinor),
-				URL:        request.HttpReq.URL,
-				URLParams:  request.HttpReq.URLParams,
-				Body:       request.HttpReq.Body,
-				Header:     grpcMock.ToMockHeader(utils.GetHttpHeader(request.HttpReq.Header)),
-			},
-			Response: models.MockHttpResp{
-				StatusCode:    int(request.HttpResp.StatusCode),
-				Body:          request.HttpResp.Body,
-				Header:        grpcMock.ToMockHeader(utils.GetHttpHeader(request.HttpResp.Header)),
-				StatusMessage: request.HttpResp.StatusMessage,
-				ProtoMajor:    int(request.HttpResp.ProtoMajor),
-				ProtoMinor:    int(request.HttpResp.ProtoMinor),
-			},
-			Objects: grpcMock.ToModelObjects([]*proto.Mock_Object{{ // TODO: remove this. after making range check in go-sdk http interceptor logic check cause there 0th index is picked up directly. ELse it will panic
-				Type: "error",
-				Data: []byte{},
-			}}),
-			Mocks: mocks,
-			Assertions: map[string][]string{
-				"noise": noise, // TODO: it should be popuplated after denoise
-			},
-		})
-		inserted, err := srv.tcSvc.WriteToYaml(ctx, tc, request.TestCasePath, request.MockPath)
-		if err != nil {
-			srv.logger.Error("error writing testcase to yaml file", zap.Error(err))
-			return nil, err
-		}
-
-		return &proto.PostTCResponse{
-			TcsId: map[string]string{"id": inserted[0]},
-		}, nil
-	}
 	deps := []models.Dependency{}
 	for _, j := range request.Dependency {
 		data := [][]byte{}
@@ -441,7 +298,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		})
 	}
 	now := time.Now().UTC().Unix()
-	inserted, err := srv.tcSvc.InsertToDB(ctx, graph.DEFAULT_COMPANY, []models.TestCase{{
+	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,
@@ -465,8 +322,10 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			ProtoMajor:    int(request.HttpResp.ProtoMajor),
 			ProtoMinor:    int(request.HttpResp.ProtoMinor),
 		},
-		Deps: deps,
-	}})
+		Deps:  deps,
+		Noise: noise,
+		Mocks: request.Mocks,
+	}}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY)
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err

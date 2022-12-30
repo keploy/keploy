@@ -30,7 +30,6 @@ import (
 	mock2 "go.keploy.io/server/pkg/service/browserMock"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
-	"go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/pkg/service/testCase"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
@@ -128,12 +127,12 @@ func Server(ver string) *chi.Mux {
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	regSrv := regression2.New(tdb, rdb, logger, conf.EnableTestExport, mockFS, testReportFS)
 	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
-	runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
+	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
+	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
 	mockSrv := mock.NewMockService(mockFS, logger)
 
-	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, runSrv, regSrv, tcSvc)}))
+	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
 
 	// initialize the client serveri
 	r := chi.NewRouter()
@@ -177,7 +176,7 @@ func Server(ver string) *chi.Mux {
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
-		regression.New(r, logger, regSrv, runSrv, tcSvc, conf.EnableTestExport, conf.ReportPath)
+		regression.New(r, logger, regSrv, tcSvc, conf.EnableTestExport, conf.ReportPath)
 		browserMock.New(r, logger, browserMockSrv)
 
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
@@ -201,7 +200,7 @@ func Server(ver string) *chi.Mux {
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(logger, regSrv, runSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
+		return grpcserver.New(logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
 	})
 
 	g.Go(func() error {

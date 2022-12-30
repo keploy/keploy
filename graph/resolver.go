@@ -4,7 +4,7 @@ package graph
 
 import (
 	"go.keploy.io/server/pkg/service/regression"
-	"go.keploy.io/server/pkg/service/run"
+	// "go.keploy.io/server/pkg/service/run"
 	"go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 )
@@ -12,12 +12,10 @@ import (
 // This file will not be regenerated automatically.
 //
 // It serves as dependency injection for your app, add any dependencies you require here.
-
-func NewResolver(logger *zap.Logger, run run.Service, reg regression.Service, tcSvc testCase.Service) *Resolver {
+func NewResolver(logger *zap.Logger, reg regression.Service, tcSvc testCase.Service) *Resolver {
 	return &Resolver{
 		logger: logger,
 		// user:   user,
-		run:   run,
 		tcSvc: tcSvc,
 		reg:   reg,
 	}
@@ -26,7 +24,6 @@ func NewResolver(logger *zap.Logger, run run.Service, reg regression.Service, tc
 type Resolver struct {
 	logger *zap.Logger
 	// user   user.Service
-	run   run.Service
 	reg   regression.Service
 	tcSvc testCase.Service
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/go-test/deep"
 	"github.com/google/uuid"
@@ -30,14 +31,89 @@ func NewMockService(mockFS models.MockFS, log *zap.Logger) *Mock {
 // Mock is a service to read-write mocks during record and replay in unit-tests only.
 type Mock struct {
 	log    *zap.Logger
+	mocks  sync.Map
 	mockFS models.MockFS
 }
 
-func (m *Mock) FileExists(ctx context.Context, path string) bool {
-	return m.mockFS.Exists(ctx, path)
+func (m *Mock) FileExists(ctx context.Context, path string, overWrite bool) (bool, error) {
+	exists, err := m.mockFS.Exists(ctx, path)
+	if err != nil {
+		m.log.Error("failed to load yaml file", zap.String("with path", path), zap.Error(err))
+		return exists, err
+	}
+	if exists {
+		if !overWrite {
+			m.log.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(path)))
+		} else {
+			path := strings.Split(path, "/")
+			fileName := strings.Split(path[len(path)-1], ".")[0]
+
+			mocks, err := m.GetAll(ctx, strings.Join(path[0:len(path)-1], "/"), fileName)
+			if err != nil {
+				return false, err
+			}
+			res, err := grpcMock.Decode(mocks)
+			if err != nil {
+				return false, err
+			}
+
+			if _, ok := m.mocks.Load(fileName); ok {
+				m.mocks.Delete(fileName)
+			}
+			m.mocks.Store(fileName, res)
+		}
+
+	}
+	return exists, nil
 }
 
-func (m *Mock) Put(ctx context.Context, path string, doc models.Mock, meta interface{}) error {
+func (m *Mock) Put(ctx context.Context, path string, doc *proto.Mock, meta interface{}) error {
+	newMock, err := grpcMock.Encode(doc)
+	if err != nil {
+		m.log.Error("failed to encode the mock to yaml document", zap.Error(err))
+		return err
+	}
+
+	mocksFromMap, ok := m.mocks.Load(newMock.Name)
+	var mocks = []*proto.Mock{}
+	if ok {
+		mocks = mocksFromMap.([]*proto.Mock)
+	}
+	if len(mocks) > 0 {
+		err := m.isEqual(ctx, mocks[0], doc, path, doc.Name, len(mocks))
+		if err == nil {
+			mocks = mocks[1:]
+			if len(mocks) > 0 {
+				m.mocks.Store(doc.Name, mocks)
+			} else {
+				m.mocks.Delete(doc.Name)
+			}
+
+		} else if err != nil && err.Error() == ERR_DEP_REQ_UNEQUAL_REMOVE {
+			for i := 1; i < len(mocks); i++ {
+				if mocks[i].Kind == doc.Kind || deep.Equal(mocks[i].Spec.Metadata, doc.Spec.Metadata) == nil && m.compareMockResponses(mocks[i], doc) {
+					mocks = mocks[i+1:]
+					if len(mocks) > 0 {
+						m.mocks.Store(doc.Name, mocks)
+					} else {
+						m.mocks.Delete(doc.Name)
+					}
+					break
+				}
+			}
+		} else if err != nil && err.Error() != ERR_DEP_REQ_UNEQUAL_INSERT {
+			return err
+		}
+	} else {
+		err = m.put(ctx, path, newMock, doc.Spec.Metadata)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Mock) put(ctx context.Context, path string, doc models.Mock, meta interface{}) error {
 
 	isGenerated := false
 	if doc.Name == "" {
@@ -138,7 +214,7 @@ func (m *Mock) insertAt(ctx context.Context, mock *proto.Mock, path, name string
 	return nil
 }
 
-func (m *Mock) CompareMockResponses(old, new *proto.Mock) bool {
+func (m *Mock) compareMockResponses(old, new *proto.Mock) bool {
 	matched := true
 
 	if old.Version != new.Version || old.Name != new.Name {
@@ -224,7 +300,7 @@ func (m *Mock) trimMocks(ctx context.Context, mocks []models.Mock, path, name st
 	return nil
 }
 
-func (m *Mock) IsEqual(ctx context.Context, old, new *proto.Mock, path, name string, updateCount int) error {
+func (m *Mock) isEqual(ctx context.Context, old, new *proto.Mock, path, name string, updateCount int) error {
 
 	if old.Kind != new.Kind || deep.Equal(old.Spec.Metadata, new.Spec.Metadata) != nil {
 		mArr, err := m.mockFS.Read(ctx, path, name, true)
@@ -239,7 +315,7 @@ func (m *Mock) IsEqual(ctx context.Context, old, new *proto.Mock, path, name str
 		}
 
 		for i := len(mocks) - updateCount + 1; i < len(mocks); i++ {
-			if mocks[i].Kind == new.Kind && deep.Equal(mocks[i].Spec.Metadata, new.Spec.Metadata) == nil && m.CompareMockResponses(mocks[i], new) {
+			if mocks[i].Kind == new.Kind && deep.Equal(mocks[i].Spec.Metadata, new.Spec.Metadata) == nil && m.compareMockResponses(mocks[i], new) {
 				err := m.trimMocks(ctx, mArr, path, name, len(mocks)-updateCount, i)
 				if err != nil {
 					return err
@@ -257,7 +333,7 @@ func (m *Mock) IsEqual(ctx context.Context, old, new *proto.Mock, path, name str
 		return errors.New(ERR_DEP_REQ_UNEQUAL_INSERT)
 	}
 
-	matched := m.CompareMockResponses(old, new)
+	matched := m.compareMockResponses(old, new)
 	if !matched {
 		err := m.upsert(ctx, new, path, name, updateCount)
 		if err != nil {
