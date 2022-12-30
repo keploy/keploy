@@ -188,66 +188,6 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Unix()
-
-	// if rg.testExport {
-	// 	var (
-	// 		id = uuid.New().String()
-	// 		tc = []models.Mock{{
-	// 			Version: models.V1Beta1,
-	// 			Kind:    models.HTTP,
-	// 			Name:    id,
-	// 		}}
-	// 		mocks = []string{}
-	// 	)
-	// 	for i, j := range data.Mocks {
-	// 		doc, err := mock.Encode(j)
-	// 		if err != nil {
-	// 			rg.logger.Error(err.Error())
-	// 		}
-	// 		tc = append(tc, doc)
-	// 		m := id + "-" + strconv.Itoa(i)
-	// 		tc[len(tc)-1].Name = m
-	// 		mocks = append(mocks, m)
-	// 	}
-	// 	tc[0].Spec.Encode(&models.HttpSpec{
-	// 		// Metadata: , TODO: What should be here
-	// 		Request: models.MockHttpReq{
-	// 			Method:     models.Method(data.HttpReq.Method),
-	// 			ProtoMajor: int(data.HttpReq.ProtoMajor),
-	// 			ProtoMinor: int(data.HttpReq.ProtoMinor),
-	// 			URL:        data.HttpReq.URL,
-	// 			URLParams:  data.HttpReq.URLParams,
-	// 			Body:       data.HttpReq.Body,
-	// 			Header:     mock.ToMockHeader(data.HttpReq.Header),
-	// 		},
-	// 		Response: models.MockHttpResp{
-	// 			StatusCode:    int(data.HttpResp.StatusCode),
-	// 			Body:          data.HttpResp.Body,
-	// 			Header:        mock.ToMockHeader(data.HttpResp.Header),
-	// 			StatusMessage: data.HttpResp.StatusMessage,
-	// 			ProtoMajor:    int(data.HttpReq.ProtoMajor),
-	// 			ProtoMinor:    int(data.HttpReq.ProtoMinor),
-	// 		},
-	// 		Objects: []models.Object{{
-	// 			Type: "error",
-	// 			Data: "",
-	// 		}},
-	// 		Mocks: mocks,
-	// 		Assertions: map[string][]string{
-	// 			"noise": {},
-	// 		},
-	// 		Created: data.Captured,
-	// 	})
-	// 	inserted, err := rg.tcSvc.WriteToYaml(r.Context(), tc, data.TestCasePath, data.MockPath)
-	// 	if err != nil {
-	// 		rg.logger.Error("error writing testcase to yaml file", zap.Error(err))
-	// 		render.Render(w, r, ErrInvalidRequest(err))
-	// 		return
-	// 	}
-	// 	render.Status(r, http.StatusOK)
-	// 	render.JSON(w, r, map[string]string{"id": inserted[0]})
-	// 	return
-	// }
 	inserted, err := rg.tcSvc.Insert(r.Context(), []models.TestCase{{
 		ID:       uuid.New().String(),
 		Created:  now,
