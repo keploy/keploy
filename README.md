@@ -109,7 +109,7 @@ The UI can be accessed at http://localhost:6789
 ### Windows
 
 <details>
-<summary>Linux</summary>
+<summary>Windows</summary>
 
 
 - Download the [Keploy Windows AMD64](https://github.com/keploy/keploy/releases/latest/download/keploy_windows_amd64.tar.gz), and extract the files from the zip folder.
@@ -119,7 +119,7 @@ The UI can be accessed at http://localhost:6789
 </details>
 
 <details>
-<summary>Linux ARM</summary>
+<summary>Windows ARM</summary>
 
 - Download the [Keploy Windows ARM64](https://github.com/keploy/keploy/releases/latest/download/keploy_windows_arm64.tar.gz), and extract the files from the zip folder.
 
