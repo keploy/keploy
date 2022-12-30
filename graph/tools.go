@@ -1,5 +1,5 @@
-//go:build tools
-// +build tools
+//go:build keploy_codegen_tools
+// +build keploy_codegen_tools
 
 package graph
 
