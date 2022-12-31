@@ -145,8 +145,8 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 	return nil
 }
 
-func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
-	res := []models.TestCase{}
+func toMockCase(tcs []models.Mock, fileName, mockPath string) ([]models.MockCase, error) {
+	res := []models.MockCase{}
 	for _, j := range tcs {
 		spec := models.HttpSpec{}
 		err := j.Spec.Decode(&spec)
@@ -165,7 +165,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		if err != nil {
 			return res, err
 		}
-		res = append(res, models.TestCase{
+		res = append(res, models.MockCase{
 			ID: j.Name,
 			HttpReq: models.HttpReq{
 				Method:     spec.Request.Method,
