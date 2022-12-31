@@ -3,8 +3,8 @@ package regression
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/wI2L/jsondiff"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,38 +15,45 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
+	"github.com/wI2L/jsondiff"
 	grpcMock "go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb run.DB, log *zap.Logger, TestExport bool, mFS models.MockFS, tFS models.TestReportFS) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
 	return &Regression{
 		yamlTcs:      sync.Map{},
+		tele:         adb,
 		tdb:          tdb,
 		log:          log,
+		client:       cl,
 		rdb:          rdb,
+		testReportFS: testReportFS,
 		mockFS:       mFS,
-		testReportFS: tFS,
 		testExport:   TestExport,
 	}
 }
 
 type Regression struct {
-	yamlTcs      sync.Map
+	yamlTcs  sync.Map
+	runCount int
+
 	tdb          models.TestCaseDB
-	rdb          run.DB
+	client       http.Client
+	testReportFS TestReportFS
+	rdb          TestRunDB
+	tele         telemetry.Service
 	mockFS       models.MockFS
-	testReportFS models.TestReportFS
 	testExport   bool
 	log          *zap.Logger
 }
 
-func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string) error {
+func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		r.log.Error("file path should be absolute to read and write testcases and their mocks")
 		return fmt.Errorf("file path should be absolute")
@@ -70,7 +77,7 @@ func (r *Regression) StartTestRun(ctx context.Context, runId, testCasePath, mock
 	return nil
 }
 
-func (r *Regression) StopTestRun(ctx context.Context, runId, testReportPath string) error {
+func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath string) error {
 	r.yamlTcs.Delete(runId)
 	testResults, err := r.testReportFS.GetResults(runId)
 	if err != nil {
@@ -114,7 +121,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			tcsMap := val.(sync.Map)
 			if val, ok := tcsMap.Load(id); ok {
 				tc = val.(models.TestCase)
-				tcsMap.Delete(id)
+				// tcsMap.Delete(id)
 			} else {
 				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
 				r.log.Error(err.Error())
@@ -274,11 +281,11 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	return pass, res, &tc, nil
 }
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
-	var t *run.Test
+	var t *models.Test
 	started := time.Now().UTC()
 	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp)
 	if tc != nil {
-		t = &run.Test{
+		t = &models.Test{
 			ID:         uuid.New().String(),
 			Started:    started.Unix(),
 			RunID:      runID,
@@ -292,12 +299,23 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 		}
 	}
 	t.Completed = time.Now().UTC().Unix()
+
+	if err != nil {
+		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		t.Status = models.TestStatusFailed
+	}
+	t.Status = models.TestStatusFailed
+	if ok {
+		t.Status = models.TestStatusPassed
+	}
 	defer func() {
+
 		if r.testExport {
 			mockIds := []string{}
 			for i := 0; i < len(tc.Mocks); i++ {
 				mockIds = append(mockIds, tc.Mocks[i].Name)
 			}
+			r.testReportFS.Lock()
 			// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
 			r.testReportFS.SetResult(runID, models.TestResult{
 				Name:       runID,
@@ -328,27 +346,23 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 				Noise:        tc.Noise,
 				Result:       *res,
 			})
+			r.testReportFS.Lock()
+			defer r.testReportFS.Unlock()
 		} else {
 			err2 := r.saveResult(ctx, t)
 			if err2 != nil {
 				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
 		}
+		// err := r.runService.SaveResult(ctx, t, tc, res, runID, id, testCasePath, mockPath, r.testExport)
+		// if err != nil {
+		// 	r.log.Error("failed test result to db", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		// }
 	}()
-
-	if err != nil {
-		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
-		t.Status = models.TestStatusFailed
-	}
-	if ok {
-		t.Status = models.TestStatusPassed
-		return ok, nil
-	}
-	t.Status = models.TestStatusFailed
-	return false, nil
+	return ok, nil
 }
 
-func (r *Regression) saveResult(ctx context.Context, t *run.Test) error {
+func (r *Regression) saveResult(ctx context.Context, t *models.Test) error {
 	err := r.rdb.PutTest(ctx, *t)
 	if err != nil {
 		return err
@@ -477,6 +491,185 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 	if err != nil {
 		r.log.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
+	}
+	return nil
+}
+
+func (r *Regression) Normalize(ctx context.Context, cid, id string) error {
+	t, err := r.rdb.ReadTest(ctx, id)
+	if err != nil {
+		r.log.Error("failed to fetch test from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		return errors.New("test not found")
+	}
+	tc, err := r.tdb.Get(ctx, cid, t.TestCaseID)
+	if err != nil {
+		r.log.Error("failed to fetch testcase from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		return errors.New("testcase not found")
+	}
+	// update the responses
+	tc.HttpResp = t.Resp
+	err = r.tdb.Upsert(ctx, tc)
+	if err != nil {
+		r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		return errors.New("could not update testcase")
+	}
+	r.tele.Normalize(r.client, ctx)
+	return nil
+}
+
+func (r *Regression) GetTestRun(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time, offset *int, limit *int) ([]*models.TestRun, error) {
+	off, lim := 0, 25
+	if offset != nil {
+		off = *offset
+	}
+	if limit != nil {
+		lim = *limit
+	}
+	res, err := r.rdb.Read(ctx, cid, user, app, id, from, to, off, lim)
+	if err != nil {
+		r.log.Error("failed to read test runs from DB", zap.String("cid", cid), zap.Any("user", user), zap.Any("app", app), zap.Any("id", id), zap.Any("from", from), zap.Any("to", to), zap.Error(err))
+		return nil, errors.New("failed getting test runs")
+	}
+	err = r.updateStatus(ctx, res)
+	if err != nil {
+		return nil, err
+	}
+	if summary {
+		return res, nil
+	}
+	if len(res) == 0 {
+		return res, nil
+	}
+
+	for _, v := range res {
+		tests, err1 := r.rdb.ReadTests(ctx, v.ID)
+		if err1 != nil {
+			msg := "failed getting tests from DB"
+			r.log.Error(msg, zap.String("cid", cid), zap.String("test run id", v.ID), zap.Error(err1))
+			return nil, errors.New(msg)
+		}
+		v.Tests = tests
+	}
+	return res, nil
+}
+
+func (r *Regression) updateStatus(ctx context.Context, trs []*models.TestRun) error {
+	tests := 0
+
+	for _, tr := range trs {
+
+		if tr.Status != models.TestRunStatusRunning {
+			// r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
+			tests++
+			continue
+		}
+		tests, err1 := r.rdb.ReadTests(ctx, tr.ID)
+
+		if err1 != nil {
+			msg := "failed getting tests from DB"
+			r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err1))
+			return errors.New(msg)
+		}
+		if len(tests) == 0 {
+
+			// check if the testrun is more than 5 mins old
+			err := r.failOldTestRuns(ctx, tr.Created, tr)
+			if err != nil {
+				return err
+			}
+			continue
+
+		}
+		// find the newest test
+		ts := tests[0].Started
+		for _, test := range tests {
+			if test.Started > ts {
+				ts = test.Started
+			}
+		}
+		// if the oldest test is older than 5 minutes then fail the whole test run
+		err := r.failOldTestRuns(ctx, ts, tr)
+		if err != nil {
+			return err
+		}
+	}
+	if tests != r.runCount {
+
+		for _, tr := range trs {
+
+			if tr.Status != models.TestRunStatusRunning {
+
+				r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
+			}
+		}
+		r.runCount = tests
+	}
+	return nil
+}
+
+func (r *Regression) failOldTestRuns(ctx context.Context, ts int64, tr *models.TestRun) error {
+	diff := time.Now().UTC().Sub(time.Unix(ts, 0))
+	if diff < 5*time.Minute {
+		return nil
+	}
+	tr.Status = models.TestRunStatusFailed
+	err2 := r.rdb.Upsert(ctx, *tr)
+	if err2 != nil {
+		msg := "failed validating and updating test run status"
+		r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err2))
+		return errors.New(msg)
+	}
+	return nil
+
+}
+
+func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport bool, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
+	if run.Status == models.TestRunStatusRunning {
+		if testExport {
+			err := r.startTestRun(ctx, runId, testCasePath, mockPath, testReportPath, totalTcs)
+			if err != nil {
+				return err
+			}
+		}
+		pp.SetColorScheme(models.PassingColorScheme)
+		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
+	} else {
+		var (
+			total   int
+			success int
+			failure int
+			err     error
+		)
+		if testExport {
+			err = r.stopTestRun(ctx, runId, testReportPath)
+			if err != nil {
+				return err
+			}
+			res := models.TestReport{}
+			res, err = r.testReportFS.Read(ctx, testReportPath, run.ID)
+			total = res.Total
+			success = res.Success
+			failure = res.Failure
+		} else {
+			var res *models.TestRun
+			res, err = r.rdb.ReadOne(ctx, run.ID)
+			total = res.Total
+			success = res.Success
+			failure = res.Failure
+		}
+		if err != nil {
+			r.log.Error("failed to load testrun for logging test summary", zap.Error(err))
+			return err
+		}
+		if run.Status == models.TestRunStatusFailed {
+			pp.SetColorScheme(models.FailingColorScheme)
+		} else {
+			pp.SetColorScheme(models.PassingColorScheme)
+		}
+		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
+	}
+	if !testExport {
+		return r.rdb.Upsert(ctx, run)
 	}
 	return nil
 }

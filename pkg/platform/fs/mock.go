@@ -30,11 +30,11 @@ func NewMockExportFS(isTestMode bool) *mockExport {
 	}
 }
 
-func (fe *mockExport) Exists(ctx context.Context, path string) bool {
-	if _, err := os.Stat(filepath.Join(path)); err == nil {
-		return true
+func (fe *mockExport) Exists(ctx context.Context, path string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(path)); err != nil {
+		return false, err
 	}
-	return false
+	return true, nil
 }
 
 func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
@@ -70,7 +70,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 		res = append(res, tests...)
 	}
 	sort.Slice(res, func(i, j int) bool {
-		return res[i].Captured > res[j].Captured
+		return res[i].Captured < res[j].Captured
 	})
 
 	return res, nil

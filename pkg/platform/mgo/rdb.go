@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"go.keploy.io/server/pkg/service/run"
+	"go.keploy.io/server/pkg/models"
 
 	"go.mongodb.org/mongo-driver/bson"
 
@@ -27,12 +27,12 @@ type RunDB struct {
 	log  *zap.Logger
 }
 
-func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
+func (r *RunDB) ReadTest(ctx context.Context, id string) (models.Test, error) {
 
 	// too repetitive
 	// TODO write a generic FindOne for all get calls
 	filter := bson.M{"_id": id}
-	var t run.Test
+	var t models.Test
 	err := r.test.FindOne(ctx, filter).Decode(&t)
 	if err != nil {
 		return t, err
@@ -40,12 +40,12 @@ func (r *RunDB) ReadTest(ctx context.Context, id string) (run.Test, error) {
 	return t, nil
 }
 
-func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error) {
+func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]models.Test, error) {
 
 	filter := bson.M{"run_id": runID}
 	findOptions := options.Find()
 
-	var res []run.Test
+	var res []models.Test
 	cur, err := r.test.Find(ctx, filter, findOptions)
 	if err != nil {
 		return nil, err
@@ -53,7 +53,7 @@ func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error)
 
 	// Loop through the cursor
 	for cur.Next(ctx) {
-		var t run.Test
+		var t models.Test
 		err = cur.Decode(&t)
 		if err != nil {
 			return nil, err
@@ -73,7 +73,7 @@ func (r *RunDB) ReadTests(ctx context.Context, runID string) ([]run.Test, error)
 	return res, nil
 }
 
-func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
+func (r *RunDB) PutTest(ctx context.Context, t models.Test) error {
 
 	upsert := true
 	opt := &options.UpdateOptions{
@@ -90,18 +90,18 @@ func (r *RunDB) PutTest(ctx context.Context, t run.Test) error {
 	return nil
 }
 
-func (r *RunDB) ReadOne(ctx context.Context, id string) (*run.TestRun, error) {
+func (r *RunDB) ReadOne(ctx context.Context, id string) (*models.TestRun, error) {
 	filter := bson.M{}
 	if id != "" {
 		filter["_id"] = id
 	}
-	testrun := &run.TestRun{}
+	testrun := &models.TestRun{}
 	cur := r.c.FindOne(ctx, filter)
 	err := cur.Decode(testrun)
 	return testrun, err
 }
 
-func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*run.TestRun, error) {
+func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, from, to *time.Time, offset int, limit int) ([]*models.TestRun, error) {
 
 	filter := bson.M{
 		"cid": cid,
@@ -125,7 +125,7 @@ func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, fro
 		filter["updated"] = bson.M{"$lte": to.Unix()}
 	}
 
-	var tcs []*run.TestRun
+	var tcs []*models.TestRun
 	opt := options.Find()
 
 	opt.SetSort(bson.M{"created": -1}) //for descending order
@@ -139,7 +139,7 @@ func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, fro
 
 	// Loop through the cursor
 	for cur.Next(ctx) {
-		var tc *run.TestRun
+		var tc *models.TestRun
 		err = cur.Decode(&tc)
 		if err != nil {
 			return nil, err
@@ -160,7 +160,7 @@ func (r *RunDB) Read(ctx context.Context, cid string, user, app, id *string, fro
 	return tcs, nil
 }
 
-func (r *RunDB) Upsert(ctx context.Context, testRun run.TestRun) error {
+func (r *RunDB) Upsert(ctx context.Context, testRun models.TestRun) error {
 
 	upsert := true
 	opt := &options.UpdateOptions{
