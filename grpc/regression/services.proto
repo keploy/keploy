@@ -64,6 +64,15 @@ message HttpReq {
   map<string, string> URLParams = 5;
   map<string, StrArr> Header = 6;
   string Body = 7;
+  string Binary = 8;
+  repeated FormData Form = 9;
+}
+
+//for multipart request
+message FormData {
+  string Key = 1; //partName
+  repeated string Values = 2;
+  repeated string Paths = 3;
 }
 
 message StrArr {
@@ -77,6 +86,7 @@ message HttpResp {
   string StatusMessage = 4;
   int64 ProtoMajor = 5;
   int64 ProtoMinor = 6;
+  string Binary = 7;
 }
 
 message endRequest {

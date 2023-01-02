@@ -55,6 +55,14 @@ type MockHttpReq struct {
 	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
 	Header     map[string]string `json:"header" yaml:"header"`
 	Body       string            `json:"body" yaml:"body"`
+	Binary     string            `json:"binary" yaml:"binary,omitempty"`
+	Form       []FormData        `json:"form" yaml:"form,omitempty"`
+}
+
+type FormData struct {
+	Key    string   `json:"key" bson:"key" yaml:"key"`
+	Values []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
+	Paths  []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
 }
 
 type MockHttpResp struct {
@@ -64,6 +72,7 @@ type MockHttpResp struct {
 	StatusMessage string            `json:"status_message" yaml:"status_message"`
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
+	Binary     string               `json:"binary" yaml:"binary,omitempty"`
 }
 
 type SQlSpec struct {
