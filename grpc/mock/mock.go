@@ -40,30 +40,30 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				ProtoMajor:    int(doc.Spec.Res.ProtoMajor),
 				ProtoMinor:    int(doc.Spec.Res.ProtoMinor),
 			},
-			Objects:    []models.Object{},
+			Objects:    ToModelObjects(doc.Spec.Objects),
 			Mocks:      doc.Spec.Mocks,
 			Assertions: utils.GetHttpHeader(doc.Spec.Assertions),
 			Created:    doc.Spec.Created,
 		}
-		for _, j := range doc.Spec.Objects {
-			spec.Objects = append(spec.Objects, models.Object{Type: j.Type, Data: string(j.Data)})
-		}
+
 		err := res.Spec.Encode(&spec)
 		if err != nil {
 			return res, fmt.Errorf("failed to encode http spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
 
 	case string(models.SQL):
-			spec := models.SQlSpec{
-				Type: models.SqlOutputType(doc.Spec.Type),
-				Metadata: doc.Spec.Metadata,
-				Table: models.Table{
-					Cols: ToModelCols(doc.Spec.Table.Cols), //conversion to do
-					Rows: doc.Spec.Table.Rows,
-				},
-				Int: int(doc.Spec.Int),
+		spec := models.SQlSpec{
+			Type:     models.SqlOutputType(doc.Spec.Type),
+			Metadata: doc.Spec.Metadata,
+			Int:      int(doc.Spec.Int),
+			Err:      doc.Spec.Err,
+		}
+		if doc.Spec.Table != nil {
+			spec.Table = models.Table{
+				Cols: ToModelCols(doc.Spec.Table.Cols),
+				Rows: doc.Spec.Table.Rows,
 			}
-		
+		}
 		err := res.Spec.Encode(&spec)
 		if err != nil {
 			return res, fmt.Errorf("failed to encode sql spec for mock with name: %s.  error: %s", doc.Name, err.Error())
@@ -97,6 +97,9 @@ func ToModelCols(cols []*proto.SqlCol) []models.SqlCol {
 }
 
 func toProtoCols(cols []models.SqlCol) ([]*proto.SqlCol, error) {
+	if len(cols) == 0 {
+		return nil, nil
+	}
 	res := []*proto.SqlCol{}
 	for _, j := range cols {
 
@@ -130,18 +133,21 @@ func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 func toProtoObjects(objs []models.Object) ([]*proto.Mock_Object, error) {
 	res := []*proto.Mock_Object{}
 	for _, j := range objs {
+		data := []byte{}
 		bin, err := base64.StdEncoding.DecodeString(j.Data)
+		if err != nil {
+			return nil, err
+		}
 		r := bytes.NewReader(bin)
-		gzr, err := gzip.NewReader(r)
-		if err != nil {
-			return nil, err
-		}
-		data, err := ioutil.ReadAll(gzr)
-		if err != nil {
-			return nil, err
-		}
-		if err != nil {
-			return res, fmt.Errorf("failed to decode base64 data from yaml file into byte array. error: %s", err.Error())
+		if r.Len() > 0 {
+			gzr, err := gzip.NewReader(r)
+			if err != nil {
+				return nil, err
+			}
+			data, err = ioutil.ReadAll(gzr)
+			if err != nil {
+				return nil, err
+			}
 		}
 		res = append(res, &proto.Mock_Object{
 			Type: j.Type,
@@ -166,6 +172,10 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 			if err != nil {
 				return res, fmt.Errorf("failed to decode the http spec of mock with name: %s.  error: %s", j.Name, err.Error())
 			}
+			obj, err := toProtoObjects(spec.Objects)
+			if err != nil {
+				return res, err
+			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
 				Req: &proto.HttpReq{
@@ -176,7 +186,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					Header:     utils.GetProtoMap(ToHttpHeader(spec.Request.Header)),
 					Body:       spec.Request.Body,
 				},
-				Objects: []*proto.Mock_Object{},
+				Objects: obj,
 				Res: &proto.HttpResp{
 					StatusCode:    int64(spec.Response.StatusCode),
 					Header:        utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
@@ -189,13 +199,6 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				Assertions: utils.GetProtoMap(spec.Assertions),
 				Created:    spec.Created,
 			}
-			for _, j := range spec.Objects {
-				mock.Spec.Objects = append(mock.Spec.Objects, &proto.Mock_Object{
-					Type: j.Type,
-					Data: []byte(j.Data),
-				})
-			}
-
 		case models.SQL:
 			spec := &models.SQlSpec{}
 			err := j.Spec.Decode(spec)
@@ -203,14 +206,23 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				return res, fmt.Errorf("failed to decode the sql spec of mock with name: %s.  error: %s", j.Name, err.Error())
 			}
 			cols, err := toProtoCols(spec.Table.Cols)
+			if err != nil {
+				return res, err
+			}
 			mock.Spec = &proto.Mock_SpecSchema{
-				Type: string(spec.Type),
+				Type:     string(spec.Type),
 				Metadata: spec.Metadata,
-				Table: &proto.Table{
+				Int:      int64(spec.Int),
+				Err:      spec.Err,
+			}
+			if cols != nil {
+				mock.Spec.Table = &proto.Table{
 					Cols: cols,
 					Rows: spec.Table.Rows,
-				},
-				Int: int64(spec.Int),
+				}
+			}
+			if spec.Err == nil {
+				fmt.Println("\n\n\n nilnil", spec.Err, mock.Spec.Err)
 			}
 
 		case models.GENERIC:

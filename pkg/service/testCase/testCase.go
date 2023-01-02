@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
+	grpcMock "go.keploy.io/server/grpc/mock"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -107,8 +109,8 @@ func (r *TestCase) Get(ctx context.Context, cid, appID, id string) (models.TestC
 	return tcs, nil
 }
 
-// ReadTCS reads all the generated testcases and their mocks from the testCasePath and mockPath directory. It returns all the testcases.
-func (r *TestCase) ReadTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
+// readTCS returns all the generated testcases and their mocks from the testCasePath and mockPath directory. It returns all the testcases.
+func (r *TestCase) readTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
@@ -129,7 +131,7 @@ func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, l
 	}
 
 	if r.testExport && testCasePath != "" && mockPath != "" {
-		return r.ReadTCS(ctx, testCasePath, mockPath)
+		return r.readTCS(ctx, testCasePath, mockPath)
 	}
 
 	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
@@ -179,7 +181,7 @@ func (r *TestCase) putTC(ctx context.Context, cid string, t models.TestCase) (st
 	return t.ID, nil
 }
 
-func (r *TestCase) InsertToDB(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
+func (r *TestCase) insertToDB(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
 	var ids []string
 	if len(tcs) == 0 {
 		return ids, errors.New("no testcase to update")
@@ -196,9 +198,9 @@ func (r *TestCase) InsertToDB(ctx context.Context, cid string, tcs []models.Test
 	return ids, nil
 }
 
-// WriteToYaml Write will write testcases into the path directory as yaml files.
+// writeToYaml Write will write testcases into the path directory as yaml files.
 // Note: dedup algo is not executed during testcase-export currently.
-func (r *TestCase) WriteToYaml(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
+func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
 	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
@@ -207,6 +209,7 @@ func (r *TestCase) WriteToYaml(ctx context.Context, test []models.Mock, testCase
 	err := r.mockFS.Write(ctx, testCasePath, test[0])
 	if err != nil {
 		r.log.Error(err.Error())
+		return nil, err
 	}
 	r.log.Info(fmt.Sprint("\n💾 Recorded testcase with name: ", test[0].Name, " in yaml file at path: ", testCasePath, "\n"))
 
@@ -214,10 +217,83 @@ func (r *TestCase) WriteToYaml(ctx context.Context, test []models.Mock, testCase
 		err = r.mockFS.WriteAll(ctx, mockPath, test[0].Name, test[1:])
 		if err != nil {
 			r.log.Error(err.Error())
+			return nil, err
+
 		}
 		r.log.Info(fmt.Sprint("\n💾 Recorded mocks for testcase with name: ", test[0].Name, " at path: ", mockPath, "\n"))
 	}
 	return []string{test[0].Name}, nil
+}
+
+func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath, mockPath, cid string) ([]string, error) {
+	var (
+		inserted = []string{}
+		err      error
+	)
+	for _, v := range t {
+		// store testcase in yaml file
+		if r.testExport {
+			tcs, _ := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
+
+			var (
+				id = fmt.Sprintf("test-%v", len(tcs)+1)
+				tc = []models.Mock{{
+					Version: models.V1Beta1,
+					Kind:    models.HTTP,
+					Name:    id,
+				}}
+				mocks = []string{}
+			)
+			for i, j := range v.Mocks {
+				doc, err := grpcMock.Encode(j)
+				if err != nil {
+					r.log.Error(err.Error())
+				}
+				tc = append(tc, doc)
+				m := id + "-" + strconv.Itoa(i)
+				tc[len(tc)-1].Name = m
+				mocks = append(mocks, m)
+			}
+			tc[0].Spec.Encode(&models.HttpSpec{
+				// Metadata: , TODO: What should be here
+				Request: models.MockHttpReq{
+					Method:     models.Method(v.HttpReq.Method),
+					ProtoMajor: int(v.HttpReq.ProtoMajor),
+					ProtoMinor: int(v.HttpReq.ProtoMinor),
+					URL:        v.HttpReq.URL,
+					URLParams:  v.HttpReq.URLParams,
+					Body:       v.HttpReq.Body,
+					Header:     grpcMock.ToMockHeader(v.HttpReq.Header),
+				},
+				Response: models.MockHttpResp{
+					StatusCode:    int(v.HttpResp.StatusCode),
+					Body:          v.HttpResp.Body,
+					Header:        grpcMock.ToMockHeader(v.HttpResp.Header),
+					StatusMessage: v.HttpResp.StatusMessage,
+					ProtoMajor:    int(v.HttpReq.ProtoMajor),
+					ProtoMinor:    int(v.HttpReq.ProtoMinor),
+				},
+				Objects: []models.Object{{
+					Type: "error",
+					Data: "",
+				}},
+				Mocks: mocks,
+				Assertions: map[string][]string{
+					"noise": v.Noise,
+				},
+				Created: v.Captured,
+			})
+			return r.writeToYaml(ctx, tc, testCasePath, mockPath)
+		}
+
+		// store testcase in mongoDB
+		v.Mocks = nil
+		inserted, err = r.insertToDB(ctx, cid, []models.TestCase{v})
+		if err != nil {
+			return inserted, err
+		}
+	}
+	return inserted, err
 }
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
