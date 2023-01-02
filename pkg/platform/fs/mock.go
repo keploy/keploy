@@ -51,7 +51,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 	)
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return res, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
+		return nil, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
 	}
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" {
@@ -61,11 +61,11 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
 		tcs, err := read(testCasePath, name, false)
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 		tests, err := toTestCase(tcs, name, mockPath)
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 		res = append(res, tests...)
 	}

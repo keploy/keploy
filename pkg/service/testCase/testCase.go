@@ -21,29 +21,36 @@ import (
 
 func New(tdb models.TestCaseDB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool, mFS models.MockFS) *TestCase {
 	return &TestCase{
-		tdb:         tdb,
-		tele:        adb,
-		log:         log,
-		mockFS:      mFS,
-		testExport:  TestExport,
-		client:      client,
-		mu:          sync.Mutex{},
-		anchors:     map[string][]map[string][]string{},
-		noisyFields: map[string]map[string]bool{},
-		fieldCounts: map[string]map[string]map[string]int{},
-		EnableDeDup: EnableDeDup,
+		tdb:           tdb,
+		tele:          adb,
+		log:           log,
+		mockFS:        mFS,
+		testExport:    TestExport,
+		client:        client,
+		mu:            sync.Mutex{},
+		anchors:       map[string][]map[string][]string{},
+		noisyFields:   map[string]map[string]bool{},
+		fieldCounts:   map[string]map[string]map[string]int{},
+		EnableDeDup:   EnableDeDup,
+		nextYamlIndex: yamlTcsIndx{tcsCount: map[string]int{}, mu: sync.Mutex{}},
 	}
 }
 
+type yamlTcsIndx struct {
+	tcsCount map[string]int // number of testcases with app_id
+	mu       sync.Mutex
+}
+
 type TestCase struct {
-	tdb        models.TestCaseDB
-	tele       telemetry.Service
-	mockFS     models.MockFS
-	testExport bool
-	client     http.Client
-	log        *zap.Logger
-	mu         sync.Mutex
-	appCount   int
+	tdb           models.TestCaseDB
+	tele          telemetry.Service
+	mockFS        models.MockFS
+	testExport    bool
+	client        http.Client
+	log           *zap.Logger
+	nextYamlIndex yamlTcsIndx
+	mu            sync.Mutex
+	appCount      int
 	// index is `cid-appID-uri`
 	//
 	// anchors is map[index][]map[key][]value or map[index]combinationOfAnchors
@@ -184,14 +191,14 @@ func (r *TestCase) putTC(ctx context.Context, cid string, t models.TestCase) (st
 func (r *TestCase) insertToDB(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
 	var ids []string
 	if len(tcs) == 0 {
-		return ids, errors.New("no testcase to update")
+		return nil, errors.New("no testcase to update")
 	}
 	for _, t := range tcs {
 		id, err := r.putTC(ctx, cid, t)
 		if err != nil {
 			msg := "failed saving testcase"
 			r.log.Error(msg, zap.Error(err), zap.String("cid", cid), zap.String("id", t.ID), zap.String("app", t.AppID))
-			return ids, errors.New(msg)
+			return nil, errors.New(msg)
 		}
 		ids = append(ids, id)
 	}
@@ -233,10 +240,19 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 	for _, v := range t {
 		// store testcase in yaml file
 		if r.testExport {
-			tcs, _ := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
-
+			r.nextYamlIndex.mu.Lock()
+			defer r.nextYamlIndex.mu.Unlock()
+			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
+			if !ok {
+				tcs, err := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
+				if err != nil {
+					return nil, err
+				}
+				lastIndex = len(tcs)
+			}
+			r.nextYamlIndex.tcsCount[v.AppID] = lastIndex + 1
 			var (
-				id = fmt.Sprintf("test-%v", len(tcs)+1)
+				id = fmt.Sprintf("test-%v", lastIndex+1)
 				tc = []models.Mock{{
 					Version: models.V1Beta1,
 					Kind:    models.HTTP,
@@ -244,6 +260,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				}}
 				mocks = []string{}
 			)
+
 			for i, j := range v.Mocks {
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
@@ -290,7 +307,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 		v.Mocks = nil
 		inserted, err = r.insertToDB(ctx, cid, []models.TestCase{v})
 		if err != nil {
-			return inserted, err
+			return nil, err
 		}
 	}
 	return inserted, err
