@@ -133,8 +133,9 @@ github.com/k0kubun/pp/v3 v3.1.0/go.mod h1:vIrP5CF0n78pKHm2Ku6GVerpZBJvscg48WepUY
 github.com/kelseyhightower/envconfig v1.4.0 h1:Im6hONhd3pLkfDFsbRgu68RDNkGF1r3dvMUtDTo2cv8=
 github.com/kelseyhightower/envconfig v1.4.0/go.mod h1:cccZRl6mQpaq41TPp5QxidR+Sa3axMbJDNb//FQX6Gg=
 github.com/keploy/go-sdk v0.5.3/go.mod h1:FrKEdAbypVbeHdboueHZ3icD24pPRSn/jsZ5KLzzjJQ=
-github.com/keploy/go-sdk v0.6.6-alpha h1:k51tm3eL35skbB23yOqNbNDn4kALJ18IQxdEdpEBZE8=
 github.com/keploy/go-sdk v0.6.6-alpha/go.mod h1:ytWcfOLeqCr9GyZLTRljEARgtSHuuvaKhOpIX20SIps=
+github.com/keploy/go-sdk v0.6.7 h1:U3fgOWpufSOj3drU9ZKPWqN5w6ra5bqAKyVjlzlZGBg=
+github.com/keploy/go-sdk v0.6.7/go.mod h1:uD1ds3mbVdhQaRVzK33Dch5Nbocc/1LzQ5oda96/Hss=
 github.com/kevinmbeaulieu/eq-go v1.0.0/go.mod h1:G3S8ajA56gKBZm4UB9AOyoOS37JO3roToPzKNM8dtdM=
 github.com/klauspost/compress v1.13.6/go.mod h1:/3/Vjq9QcHkK5uEr5lBEmyoZ1iFhe47etQ6QUkpK6sk=
 github.com/klauspost/compress v1.15.0/go.mod h1:/3/Vjq9QcHkK5uEr5lBEmyoZ1iFhe47etQ6QUkpK6sk=
@@ -262,6 +263,7 @@ github.com/yuin/goldmark v1.3.5/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1
 github.com/yuin/goldmark v1.4.1/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1Zlc8k=
 go.keploy.io/server v0.5.2/go.mod h1:TL7IcngMUjrpm9uoJbY7dfqfNNOqE5NSgQ+eHh3pp0I=
 go.keploy.io/server v0.5.6/go.mod h1:/wHYlepZLITJ+MsYnRfRED9K/ENset2JhfzeAqSGnV0=
+go.keploy.io/server v0.7.8/go.mod h1:Xm0Zzt2iBRrvoDY7fBMm8M+geV+ZlkknbqKRVjC3K0I=
 go.mongodb.org/mongo-driver v1.8.3 h1:TDKlTkGDKm9kkJVUOAXDK5/fkqKHJVwYQSpoRfB43R4=
 go.mongodb.org/mongo-driver v1.8.3/go.mod h1:0sQWfOeY63QTntERDJJ/0SuKK0T1uVSgKCuAROlKEPY=
 go.opentelemetry.io/proto/otlp v0.7.0/go.mod h1:PqfVotwruBrMGOCsRd/89rSnXhoiJIqeYNgFYFoEGnI=
