@@ -175,11 +175,13 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				Header:     grpcMock.ToHttpHeader(spec.Request.Header),
 				Body:       spec.Request.Body,
 				URLParams:  spec.Request.URLParams,
+				Form:       spec.Request.Form,
 			},
 			HttpResp: models.HttpResp{
 				StatusCode: spec.Response.StatusCode,
 				Header:     grpcMock.ToHttpHeader(spec.Response.Header),
 				Body:       spec.Response.Body,
+				Binary:     spec.Response.Binary,
 			},
 			Noise:    noise,
 			Mocks:    doc,
