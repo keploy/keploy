@@ -245,10 +245,9 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
 			if !ok {
 				tcs, err := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
-				if err != nil {
-					return nil, err
+				if err == nil {
+					lastIndex = len(tcs)
 				}
-				lastIndex = len(tcs)
 			}
 			r.nextYamlIndex.tcsCount[v.AppID] = lastIndex + 1
 			var (
