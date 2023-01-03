@@ -280,6 +280,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					URLParams:  v.HttpReq.URLParams,
 					Body:       v.HttpReq.Body,
 					Header:     grpcMock.ToMockHeader(v.HttpReq.Header),
+					Form:       v.HttpReq.Form,
 				},
 				Response: models.MockHttpResp{
 					StatusCode:    int(v.HttpResp.StatusCode),
@@ -288,6 +289,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					StatusMessage: v.HttpResp.StatusMessage,
 					ProtoMajor:    int(v.HttpReq.ProtoMajor),
 					ProtoMinor:    int(v.HttpReq.ProtoMinor),
+					Binary:        v.HttpResp.Binary,
 				},
 				Objects: []models.Object{{
 					Type: "error",

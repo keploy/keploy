@@ -31,6 +31,7 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				URL:        doc.Spec.Req.URL,
 				Header:     ToMockHeader(utils.GetHttpHeader(doc.Spec.Req.Header)),
 				Body:       doc.Spec.Req.Body,
+				Form:       GetMockFormData(doc.Spec.Req.Form),
 			},
 			Response: models.MockHttpResp{
 				StatusCode:    int(doc.Spec.Res.StatusCode),
@@ -39,6 +40,7 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				StatusMessage: doc.Spec.Res.StatusMessage,
 				ProtoMajor:    int(doc.Spec.Res.ProtoMajor),
 				ProtoMinor:    int(doc.Spec.Res.ProtoMinor),
+				Binary:        doc.Spec.Res.Binary,
 			},
 			Objects:    ToModelObjects(doc.Spec.Objects),
 			Mocks:      doc.Spec.Mocks,
@@ -185,6 +187,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					URL:        spec.Request.URL,
 					Header:     utils.GetProtoMap(ToHttpHeader(spec.Request.Header)),
 					Body:       spec.Request.Body,
+					Form:       GetProtoFormData(spec.Request.Form),
 				},
 				Objects: obj,
 				Res: &proto.HttpResp{
@@ -194,6 +197,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					StatusMessage: spec.Response.StatusMessage,
 					ProtoMajor:    int64(spec.Response.ProtoMajor),
 					ProtoMinor:    int64(spec.Request.ProtoMinor),
+					Binary:        spec.Response.Binary,
 				},
 				Mocks:      spec.Mocks,
 				Assertions: utils.GetProtoMap(spec.Assertions),
@@ -261,4 +265,31 @@ func ToMockHeader(httpHeader http.Header) map[string]string {
 		header[i] = strings.Join(j, ",")
 	}
 	return header
+}
+
+func GetMockFormData(formData []*proto.FormData) []models.FormData {
+	mockFormDataList := []models.FormData{}
+
+	for _, j := range formData {
+		mockFormDataList = append(mockFormDataList, models.FormData{
+			Key:    j.Key,
+			Values: j.Values,
+			Paths:  j.Paths,
+		})
+	}
+	return mockFormDataList
+}
+
+func GetProtoFormData(formData []models.FormData) []*proto.FormData {
+
+	protoFormDataList := []*proto.FormData{}
+
+	for _, j := range formData {
+		protoFormDataList = append(protoFormDataList, &proto.FormData{
+			Key:    j.Key,
+			Values: j.Values,
+			Paths:  j.Paths,
+		})
+	}
+	return protoFormDataList
 }
