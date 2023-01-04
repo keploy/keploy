@@ -123,7 +123,7 @@ func (r *TestCase) readTCS(ctx context.Context, testCasePath, mockPath string) (
 	}
 	res, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
-		r.log.Info(fmt.Sprintf("testcases found in %s directory.", pkg.SanitiseInput(testCasePath)), zap.Error(err))
+		r.log.Info(fmt.Sprintf("testcases found in %s directory.", pkg.SanitiseInput(testCasePath)))
 	}
 	return res, err
 }

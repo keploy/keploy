@@ -33,3 +33,6 @@ coverage.txt
 ._.DS_Store
 **/.DS_Store
 **/._.DS_Store
+
+#Ignore the test reports
+test-reports
