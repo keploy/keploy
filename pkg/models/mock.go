@@ -72,7 +72,7 @@ type MockHttpResp struct {
 	StatusMessage string            `json:"status_message" yaml:"status_message"`
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
-	Binary     string               `json:"binary" yaml:"binary,omitempty"`
+	Binary        string            `json:"binary" yaml:"binary,omitempty"`
 }
 
 type SQlSpec struct {
@@ -109,5 +109,5 @@ type MockFS interface {
 	Read(ctx context.Context, path, name string, libMode bool) ([]Mock, error)
 	Write(ctx context.Context, path string, doc Mock) error
 	WriteAll(ctx context.Context, path, fileName string, docs []Mock) error
-	Exists(ctx context.Context, path string) (bool, error)
+	Exists(ctx context.Context, path string) bool
 }
