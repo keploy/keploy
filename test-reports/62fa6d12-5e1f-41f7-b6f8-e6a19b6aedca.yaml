@@ -1,0 +1,256 @@
+name: 62fa6d12-5e1f-41f7-b6f8-e6a19b6aedca
+status: FAILED
+success: 0
+failure: 4
+total: 4
+tests:
+    - name: 62fa6d12-5e1f-41f7-b6f8-e6a19b6aedca
+      status: FAILED
+      started: 1672827244
+      completed: 1672827244
+      test_case_path: /home/pranshu/java-webservice-example/src/test/e2e/keploy-tests
+      mock_path: /home/pranshu/java-webservice-example/src/test/e2e/mocks
+      test_case_id: test-4
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/todo/tasks
+        header:
+            accept: '*/*'
+            accept-encoding: gzip, deflate, br
+            connection: keep-alive
+            content-length: "67"
+            content-type: application/json
+            host: localhost:8080
+            postman-token: 7a32b769-85ec-4fc0-8d6b-e253f3345528
+            user-agent: PostmanRuntime/7.29.2
+        body: ""
+      mocks: []
+      noise:
+        - body._embedded.task._links.self.href
+        - body._embedded.task.name
+        - body._embedded.task._links.task.href
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 0
+        headers_result: []
+        body_result:
+            normal: false
+            type: PLAIN
+            expected: |-
+                {
+                  "_embedded" : {
+                    "task" : [ {
+                      "name" : "name1",
+                      "description" : "This is name 1",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/1"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/1"
+                        }
+                      }
+                    }, {
+                      "name" : "name2",
+                      "description" : "This is name 2",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/2"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/2"
+                        }
+                      }
+                    }, {
+                      "name" : "name3",
+                      "description" : "This is name 3",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/3"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/3"
+                        }
+                      }
+                    } ]
+                  },
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/tasks?page=0&size=20"
+                    }
+                  },
+                  "page" : {
+                    "size" : 20,
+                    "totalElements" : 3,
+                    "totalPages" : 1,
+                    "number" : 0
+                  }
+                }
+            actual: ""
+        dep_result: []
+    - name: 62fa6d12-5e1f-41f7-b6f8-e6a19b6aedca
+      status: FAILED
+      started: 1672827244
+      completed: 1672827244
+      test_case_path: /home/pranshu/java-webservice-example/src/test/e2e/keploy-tests
+      mock_path: /home/pranshu/java-webservice-example/src/test/e2e/mocks
+      test_case_id: test-3
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/todo/task/1
+        header:
+            accept: '*/*'
+            accept-encoding: gzip, deflate, br
+            connection: keep-alive
+            content-length: "67"
+            content-type: application/json
+            host: localhost:8080
+            postman-token: 49b060a1-a7ae-4fd1-9ad6-f28af339bc46
+            user-agent: PostmanRuntime/7.29.2
+        body: ""
+      mocks: []
+      resp:
+        status_code: 404
+        header: {}
+        body: ""
+        status_message: Not Found
+        proto_major: 1
+        proto_minor: 1
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 404
+        headers_result: []
+        body_result:
+            normal: false
+            type: PLAIN
+            expected: |-
+                {
+                  "name" : "name1",
+                  "description" : "This is name 1",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/task/1"
+                    },
+                    "all tasks" : {
+                      "href" : "http://localhost:8080/api/todo/tasks"
+                    }
+                  }
+                }
+            actual: ""
+        dep_result: []
+    - name: 62fa6d12-5e1f-41f7-b6f8-e6a19b6aedca
+      status: FAILED
+      started: 1672827244
+      completed: 1672827244
+      test_case_path: /home/pranshu/java-webservice-example/src/test/e2e/keploy-tests
+      mock_path: /home/pranshu/java-webservice-example/src/test/e2e/mocks
+      test_case_id: test-2
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/todo/task/2
+        header:
+            accept: '*/*'
+            accept-encoding: gzip, deflate, br
+            connection: keep-alive
+            content-length: "67"
+            content-type: application/json
+            host: localhost:8080
+            postman-token: 4f9656c7-7edc-44e5-b7a5-7ffcf19b2cbd
+            user-agent: PostmanRuntime/7.29.2
+        body: ""
+      mocks: []
+      resp:
+        status_code: 404
+        header: {}
+        body: ""
+        status_message: Not Found
+        proto_major: 1
+        proto_minor: 1
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 404
+        headers_result: []
+        body_result:
+            normal: false
+            type: PLAIN
+            expected: |-
+                {
+                  "name" : "name2",
+                  "description" : "This is name 2",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/task/2"
+                    },
+                    "all tasks" : {
+                      "href" : "http://localhost:8080/api/todo/tasks"
+                    }
+                  }
+                }
+            actual: ""
+        dep_result: []
+    - name: 62fa6d12-5e1f-41f7-b6f8-e6a19b6aedca
+      status: FAILED
+      started: 1672827244
+      completed: 1672827244
+      test_case_path: /home/pranshu/java-webservice-example/src/test/e2e/keploy-tests
+      mock_path: /home/pranshu/java-webservice-example/src/test/e2e/mocks
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/todo/task/3
+        header:
+            accept: '*/*'
+            accept-encoding: gzip, deflate, br
+            connection: keep-alive
+            content-length: "67"
+            content-type: application/json
+            host: localhost:8080
+            postman-token: 13ba2cc7-f4e9-4218-9601-0cb766b6699b
+            user-agent: PostmanRuntime/7.29.2
+        body: ""
+      mocks: []
+      resp:
+        status_code: 404
+        header: {}
+        body: ""
+        status_message: Not Found
+        proto_major: 1
+        proto_minor: 1
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 404
+        headers_result: []
+        body_result:
+            normal: false
+            type: PLAIN
+            expected: |-
+                {
+                  "name" : "name3",
+                  "description" : "This is name 3",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/task/3"
+                    },
+                    "all tasks" : {
+                      "href" : "http://localhost:8080/api/todo/tasks"
+                    }
+                  }
+                }
+            actual: ""
+        dep_result: []

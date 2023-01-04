@@ -154,7 +154,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
 		}
 
-		mocks, _ := read(mockPath, fileName, false)
+		mocks, _ := read(mockPath, "mock-" + strings.Split(fileName, "-")[1], false)
 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
 
 		noise, ok := spec.Assertions["noise"]

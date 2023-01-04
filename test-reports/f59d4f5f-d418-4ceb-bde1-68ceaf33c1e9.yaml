@@ -1,0 +1,361 @@
+name: f59d4f5f-d418-4ceb-bde1-68ceaf33c1e9
+status: PASSED
+success: 3
+failure: 0
+total: 3
+tests:
+    - name: f59d4f5f-d418-4ceb-bde1-68ceaf33c1e9
+      status: PASSED
+      started: 1672811887
+      completed: 1672811887
+      test_case_path: /home/pranshu/java-webservice-example/src/test/e2e/keploy-tests
+      mock_path: /home/pranshu/java-webservice-example/src/test/e2e/mocks
+      test_case_id: test-3
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/todo/task/1
+        header:
+            accept: '*/*'
+            accept-encoding: gzip, deflate, br
+            connection: keep-alive
+            content-length: "8"
+            content-type: application/json
+            host: localhost:8080
+            postman-token: 27c3e760-85d4-448d-88ce-ce6a16c7d3ee
+            user-agent: PostmanRuntime/7.29.2
+        body: ""
+      mocks:
+        - test-3-0
+        - test-3-1
+      resp:
+        status_code: 200
+        header: {}
+        body: |-
+            {
+              "name" : "name1",
+              "description" : "This is name 1",
+              "_links" : {
+                "self" : {
+                  "href" : "http://localhost:8080/api/todo/task/1"
+                },
+                "all tasks" : {
+                  "href" : "http://localhost:8080/api/todo/tasks"
+                }
+              }
+            }
+        status_message: OK
+        proto_major: 1
+        proto_minor: 1
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result: []
+        body_result:
+            normal: true
+            type: JSON
+            expected: |-
+                {
+                  "name" : "name1",
+                  "description" : "This is name 1",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/task/1"
+                    },
+                    "all tasks" : {
+                      "href" : "http://localhost:8080/api/todo/tasks"
+                    }
+                  }
+                }
+            actual: |-
+                {
+                  "name" : "name1",
+                  "description" : "This is name 1",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/task/1"
+                    },
+                    "all tasks" : {
+                      "href" : "http://localhost:8080/api/todo/tasks"
+                    }
+                  }
+                }
+        dep_result: []
+    - name: f59d4f5f-d418-4ceb-bde1-68ceaf33c1e9
+      status: PASSED
+      started: 1672811887
+      completed: 1672811887
+      test_case_path: /home/pranshu/java-webservice-example/src/test/e2e/keploy-tests
+      mock_path: /home/pranshu/java-webservice-example/src/test/e2e/mocks
+      test_case_id: test-2
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/todo/task/1
+        header:
+            accept: '*/*'
+            accept-encoding: gzip, deflate, br
+            connection: keep-alive
+            content-length: "8"
+            content-type: application/json
+            host: localhost:8080
+            postman-token: 90e2a1e7-fd4d-4299-a049-819542c478d2
+            user-agent: PostmanRuntime/7.29.2
+        body: ""
+      mocks:
+        - test-2-0
+        - test-2-1
+      resp:
+        status_code: 200
+        header: {}
+        body: |-
+            {
+              "name" : "name1",
+              "description" : "This is name 1",
+              "_links" : {
+                "self" : {
+                  "href" : "http://localhost:8080/api/todo/task/1"
+                },
+                "all tasks" : {
+                  "href" : "http://localhost:8080/api/todo/tasks"
+                }
+              }
+            }
+        status_message: OK
+        proto_major: 1
+        proto_minor: 1
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result: []
+        body_result:
+            normal: true
+            type: JSON
+            expected: |-
+                {
+                  "name" : "name1",
+                  "description" : "This is name 1",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/task/1"
+                    },
+                    "all tasks" : {
+                      "href" : "http://localhost:8080/api/todo/tasks"
+                    }
+                  }
+                }
+            actual: |-
+                {
+                  "name" : "name1",
+                  "description" : "This is name 1",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/task/1"
+                    },
+                    "all tasks" : {
+                      "href" : "http://localhost:8080/api/todo/tasks"
+                    }
+                  }
+                }
+        dep_result: []
+    - name: f59d4f5f-d418-4ceb-bde1-68ceaf33c1e9
+      status: PASSED
+      started: 1672811887
+      completed: 1672811887
+      test_case_path: /home/pranshu/java-webservice-example/src/test/e2e/keploy-tests
+      mock_path: /home/pranshu/java-webservice-example/src/test/e2e/mocks
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/todo/tasks
+        header:
+            accept: '*/*'
+            accept-encoding: gzip, deflate, br
+            connection: keep-alive
+            content-length: "8"
+            content-type: application/json
+            host: localhost:8080
+            postman-token: 7857e5e0-ad8f-4b1a-9d6d-153cf3d4f420
+            user-agent: PostmanRuntime/7.29.2
+        body: ""
+      mocks:
+        - test-1-0
+        - test-1-1
+      resp:
+        status_code: 200
+        header: {}
+        body: |-
+            {
+              "_embedded" : {
+                "task" : [ {
+                  "name" : "name1",
+                  "description" : "This is name 1",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/task/1"
+                    },
+                    "task" : {
+                      "href" : "http://localhost:8080/api/task/1"
+                    }
+                  }
+                }, {
+                  "name" : "name2",
+                  "description" : "This is name 2",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/task/2"
+                    },
+                    "task" : {
+                      "href" : "http://localhost:8080/api/task/2"
+                    }
+                  }
+                }, {
+                  "name" : "name3",
+                  "description" : "This is name 3",
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/task/3"
+                    },
+                    "task" : {
+                      "href" : "http://localhost:8080/api/task/3"
+                    }
+                  }
+                } ]
+              },
+              "_links" : {
+                "self" : {
+                  "href" : "http://localhost:8080/api/todo/tasks?page=0&size=20"
+                }
+              },
+              "page" : {
+                "size" : 20,
+                "totalElements" : 3,
+                "totalPages" : 1,
+                "number" : 0
+              }
+            }
+        status_message: OK
+        proto_major: 1
+        proto_minor: 1
+      noise:
+        - body._embedded.task._links.task.href
+        - body._embedded.task._links.self.href
+        - body._embedded.task.name
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result: []
+        body_result:
+            normal: true
+            type: JSON
+            expected: |-
+                {
+                  "_embedded" : {
+                    "task" : [ {
+                      "name" : "name1",
+                      "description" : "This is name 1",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/1"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/1"
+                        }
+                      }
+                    }, {
+                      "name" : "name2",
+                      "description" : "This is name 2",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/2"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/2"
+                        }
+                      }
+                    }, {
+                      "name" : "name3",
+                      "description" : "This is name 3",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/3"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/3"
+                        }
+                      }
+                    } ]
+                  },
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/tasks?page=0&size=20"
+                    }
+                  },
+                  "page" : {
+                    "size" : 20,
+                    "totalElements" : 3,
+                    "totalPages" : 1,
+                    "number" : 0
+                  }
+                }
+            actual: |-
+                {
+                  "_embedded" : {
+                    "task" : [ {
+                      "name" : "name1",
+                      "description" : "This is name 1",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/1"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/1"
+                        }
+                      }
+                    }, {
+                      "name" : "name2",
+                      "description" : "This is name 2",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/2"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/2"
+                        }
+                      }
+                    }, {
+                      "name" : "name3",
+                      "description" : "This is name 3",
+                      "_links" : {
+                        "self" : {
+                          "href" : "http://localhost:8080/api/task/3"
+                        },
+                        "task" : {
+                          "href" : "http://localhost:8080/api/task/3"
+                        }
+                      }
+                    } ]
+                  },
+                  "_links" : {
+                    "self" : {
+                      "href" : "http://localhost:8080/api/todo/tasks?page=0&size=20"
+                    }
+                  },
+                  "page" : {
+                    "size" : 20,
+                    "totalElements" : 3,
+                    "totalPages" : 1,
+                    "number" : 0
+                  }
+                }
+        dep_result: []
