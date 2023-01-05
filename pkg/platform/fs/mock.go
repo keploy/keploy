@@ -63,6 +63,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 		if err != nil {
 			return nil, err
 		}
+
 		tests, err := toTestCase(tcs, name, mockPath)
 		if err != nil {
 			return nil, err
@@ -153,8 +154,15 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		if err != nil {
 			return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
 		}
+		nameCheck := strings.Split(spec.Mocks[0], "-")[0]
+		var mockName string;
+		if(nameCheck == "mock"){
+			mockName = "mock-" + strings.Split(fileName, "-")[1]
+		} else {
+			mockName = fileName
+		}
+		mocks, _ := read(mockPath, mockName, false)
 
-		mocks, _ := read(mockPath, "mock-" + strings.Split(fileName, "-")[1], false)
 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
 
 		noise, ok := spec.Assertions["noise"]
