@@ -10,6 +10,7 @@ type Kind string
 
 const (
 	V1Beta1 Version = Version("api.keploy.io/v1beta1")
+	V1Beta2 Version = Version("api.keploy.io/v1beta2")
 )
 
 type Version string
