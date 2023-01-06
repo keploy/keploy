@@ -255,7 +255,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				id = fmt.Sprintf("test-%v", lastIndex+1)
 
 				tc = []models.Mock{{
-					Version: models.V1Beta1,
+					Version: models.V1Beta2,
 					Kind:    models.HTTP,
 					Name:    id,
 				}}
