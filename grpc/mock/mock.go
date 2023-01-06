@@ -23,14 +23,6 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 	}
 	switch doc.Kind {
 	case string(models.HTTP):
-		// reqBody, err := base64.StdEncoding.DecodeString(doc.Spec.Req.Body)
-		// if err != nil {
-		// 	return res, err
-		// }
-		// resBody, err := base64.StdEncoding.DecodeString(doc.Spec.Res.Body)
-		// if err != nil {
-		// 	return res, err
-		// }
 		spec := models.HttpSpec{
 			Metadata: doc.Spec.Metadata,
 			Request: models.MockHttpReq{
@@ -39,13 +31,15 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				ProtoMinor: int(doc.Spec.Req.ProtoMinor),
 				URL:        doc.Spec.Req.URL,
 				Header:     ToMockHeader(utils.GetHttpHeader(doc.Spec.Req.Header)),
-				Body:       string(doc.Spec.Req.BodyData),
+				Body:       string(doc.Spec.Req.Body),
+				BodyType:   string(models.BodyTypeUtf8),
 				Form:       GetMockFormData(doc.Spec.Req.Form),
 			},
 			Response: models.MockHttpResp{
 				StatusCode:    int(doc.Spec.Res.StatusCode),
 				Header:        ToMockHeader(utils.GetHttpHeader(doc.Spec.Res.Header)),
-				Body:          string(doc.Spec.Res.BodyData),
+				Body:          string(doc.Spec.Res.Body),
+				BodyType:      string(models.BodyTypeUtf8),
 				StatusMessage: doc.Spec.Res.StatusMessage,
 				ProtoMajor:    int(doc.Spec.Res.ProtoMajor),
 				ProtoMinor:    int(doc.Spec.Res.ProtoMinor),
@@ -56,15 +50,21 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 			Assertions: utils.GetHttpHeader(doc.Spec.Assertions),
 			Created:    doc.Spec.Created,
 		}
-		spec.Metadata["request-content-type"] = "utf-8"
-		spec.Metadata["response-content-type"] = "utf-8"
-		if doc.Spec.Req.BodyData != nil && !utf8.ValidString(string(doc.Spec.Req.BodyData)) {
-			spec.Metadata["request-content-type"] = "binary"
-			spec.Request.Body = base64.StdEncoding.EncodeToString(doc.Spec.Req.BodyData)
+		if doc.Spec.Req.BodyData != nil {
+			if !utf8.ValidString(string(doc.Spec.Req.BodyData)) {
+				spec.Request.BodyType = string(models.BodyTypeBinary)
+				spec.Request.Body = base64.StdEncoding.EncodeToString(doc.Spec.Req.BodyData)
+			} else {
+				spec.Request.Body = string(doc.Spec.Req.BodyData)
+			}
 		}
-		if doc.Spec.Res.BodyData != nil && !utf8.ValidString(string(doc.Spec.Res.BodyData)) {
-			spec.Metadata["repsonse-content-type"] = "binary"
-			spec.Response.Body = base64.StdEncoding.EncodeToString(doc.Spec.Res.BodyData)
+		if doc.Spec.Res.BodyData != nil {
+			if !utf8.ValidString(string(doc.Spec.Res.BodyData)) {
+				spec.Response.BodyType = string(models.BodyTypeBinary)
+				spec.Response.Body = base64.StdEncoding.EncodeToString(doc.Spec.Res.BodyData)
+			} else {
+				spec.Response.Body = string(doc.Spec.Res.BodyData)
+			}
 		}
 
 		err := res.Spec.Encode(&spec)
@@ -224,7 +224,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				Assertions: utils.GetProtoMap(spec.Assertions),
 				Created:    spec.Created,
 			}
-			if spec.Metadata["request-content-type"] == "binary" {
+			if spec.Request.BodyType == string(models.BodyTypeBinary) {
 				bin, err := base64.StdEncoding.DecodeString(spec.Request.Body)
 				if err != nil {
 					return nil, err
@@ -232,7 +232,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				mock.Spec.Req.BodyData = bin
 				mock.Spec.Req.Body = ""
 			}
-			if spec.Metadata["response-content-type"] == "binary" {
+			if spec.Response.BodyType == string(models.BodyTypeBinary) {
 				bin, err := base64.StdEncoding.DecodeString(spec.Response.Body)
 				if err != nil {
 					return nil, err
