@@ -7,8 +7,8 @@ builds:
   - binary: keploy
     id: keploy
     main: ./cmd/server/main.go
-    ldflags:
-      - -s -w -X main.build={{.Version}}
+    # ldflags:
+    #   - -s -w -X main.build={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:

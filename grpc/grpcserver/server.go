@@ -181,6 +181,7 @@ func getProtoTC(tcs models.TestCase) (*proto.TestCase, error) {
 			URLParams:  tcs.HttpReq.URLParams,
 			Header:     reqHeader,
 			Body:       tcs.HttpReq.Body,
+			Form:       grpcMock.GetProtoFormData(tcs.HttpReq.Form),
 		},
 		HttpResp: &proto.HttpResp{
 			StatusCode:    int64(tcs.HttpResp.StatusCode),
@@ -189,6 +190,7 @@ func getProtoTC(tcs models.TestCase) (*proto.TestCase, error) {
 			StatusMessage: tcs.HttpResp.StatusMessage,
 			ProtoMajor:    int64(tcs.HttpResp.ProtoMajor),
 			ProtoMinor:    int64(tcs.HttpResp.ProtoMinor),
+			Binary:        tcs.HttpResp.Binary,
 		},
 		Deps:    deps,
 		Mocks:   tcs.Mocks,
@@ -313,6 +315,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			URLParams:  request.HttpReq.URLParams,
 			Body:       request.HttpReq.Body,
 			Header:     utils.GetHttpHeader(request.HttpReq.Header),
+			Form:       grpcMock.GetMockFormData(request.HttpReq.Form),
 		},
 		HttpResp: models.HttpResp{
 			StatusCode:    int(request.HttpResp.StatusCode),
@@ -321,6 +324,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			StatusMessage: request.HttpResp.StatusMessage,
 			ProtoMajor:    int(request.HttpResp.ProtoMajor),
 			ProtoMinor:    int(request.HttpResp.ProtoMinor),
+			Binary:        request.HttpResp.Binary,
 		},
 		Deps:  deps,
 		Noise: noise,

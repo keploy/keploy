@@ -36,11 +36,7 @@ type Mock struct {
 }
 
 func (m *Mock) FileExists(ctx context.Context, path string, overWrite bool) (bool, error) {
-	exists, err := m.mockFS.Exists(ctx, path)
-	if err != nil {
-		m.log.Error("failed to load yaml file", zap.String("with path", path), zap.Error(err))
-		return exists, err
-	}
+	exists := m.mockFS.Exists(ctx, path)
 	if exists {
 		if !overWrite {
 			m.log.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(path)))

@@ -30,11 +30,11 @@ func NewMockExportFS(isTestMode bool) *mockExport {
 	}
 }
 
-func (fe *mockExport) Exists(ctx context.Context, path string) (bool, error) {
+func (fe *mockExport) Exists(ctx context.Context, path string) bool {
 	if _, err := os.Stat(filepath.Join(path)); err != nil {
-		return false, err
+		return false
 	}
-	return true, nil
+	return true
 }
 
 func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
@@ -51,7 +51,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 	)
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return res, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
+		return nil, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
 	}
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" {
@@ -61,11 +61,11 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
 		tcs, err := read(testCasePath, name, false)
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 		tests, err := toTestCase(tcs, name, mockPath)
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 		res = append(res, tests...)
 	}
@@ -151,10 +151,13 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		spec := models.HttpSpec{}
 		err := j.Spec.Decode(&spec)
 		if err != nil {
-			return res, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
+			return nil, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
 		}
 
-		mocks, _ := read(mockPath, fileName, false)
+		mocks, err := read(mockPath, fileName, false)
+		if err != nil {
+			return nil, err
+		}
 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
 
 		noise, ok := spec.Assertions["noise"]
@@ -163,7 +166,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		}
 		doc, err := grpcMock.Decode(mocks)
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 		res = append(res, models.TestCase{
 			ID: j.Name,
@@ -175,11 +178,13 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				Header:     grpcMock.ToHttpHeader(spec.Request.Header),
 				Body:       spec.Request.Body,
 				URLParams:  spec.Request.URLParams,
+				Form:       spec.Request.Form,
 			},
 			HttpResp: models.HttpResp{
 				StatusCode: spec.Response.StatusCode,
 				Header:     grpcMock.ToHttpHeader(spec.Response.Header),
 				Body:       spec.Response.Body,
+				Binary:     spec.Response.Binary,
 			},
 			Noise:    noise,
 			Mocks:    doc,

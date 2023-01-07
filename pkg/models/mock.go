@@ -10,14 +10,17 @@ type Kind string
 
 const (
 	V1Beta1 Version = Version("api.keploy.io/v1beta1")
+	V1Beta2 Version = Version("api.keploy.io/v1beta2")
 )
 
 type Version string
 
 const (
-	HTTP    Kind = "Http"
-	GENERIC Kind = "Generic"
-	SQL     Kind = "SQL"
+	HTTP           Kind     = "Http"
+	GENERIC        Kind     = "Generic"
+	SQL            Kind     = "SQL"
+	BodyTypeUtf8   BodyType = "utf-8"
+	BodyTypeBinary BodyType = "binary"
 )
 
 type Mock struct {
@@ -55,15 +58,26 @@ type MockHttpReq struct {
 	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
 	Header     map[string]string `json:"header" yaml:"header"`
 	Body       string            `json:"body" yaml:"body"`
+	BodyType   string            `json:"body_type" yaml:"body_type"`
+	Binary     string            `json:"binary" yaml:"binary,omitempty"`
+	Form       []FormData        `json:"form" yaml:"form,omitempty"`
+}
+
+type FormData struct {
+	Key    string   `json:"key" bson:"key" yaml:"key"`
+	Values []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
+	Paths  []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
 }
 
 type MockHttpResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
 	Body          string            `json:"body" yaml:"body"`
+	BodyType      string            `json:"body_type" yaml:"body_type"`
 	StatusMessage string            `json:"status_message" yaml:"status_message"`
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
+	Binary        string            `json:"binary" yaml:"binary,omitempty"`
 }
 
 type SQlSpec struct {
@@ -100,5 +114,5 @@ type MockFS interface {
 	Read(ctx context.Context, path, name string, libMode bool) ([]Mock, error)
 	Write(ctx context.Context, path string, doc Mock) error
 	WriteAll(ctx context.Context, path, fileName string, docs []Mock) error
-	Exists(ctx context.Context, path string) (bool, error)
+	Exists(ctx context.Context, path string) bool
 }
