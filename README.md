@@ -106,6 +106,27 @@ sudo mv /tmp/keploy /usr/local/bin && keploy
 The UI can be accessed at http://localhost:6789
 </details>
 
+### Windows
+
+<details>
+<summary>Windows</summary>
+
+
+- Download the [Keploy Windows AMD64](https://github.com/keploy/keploy/releases/latest/download/keploy_windows_amd64.tar.gz), and extract the files from the zip folder.
+
+- Run the `keploy.exe` file.
+
+</details>
+
+<details>
+<summary>Windows ARM</summary>
+
+- Download the [Keploy Windows ARM64](https://github.com/keploy/keploy/releases/latest/download/keploy_windows_arm64.tar.gz), and extract the files from the zip folder.
+
+- Run the `keploy.exe` file.
+
+</details>
+
 
 ### Helm chart
 Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
