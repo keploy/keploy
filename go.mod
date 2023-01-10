@@ -29,7 +29,7 @@ require (
 )
 
 require (
-	github.com/keploy/go-sdk v0.6.7
+	github.com/keploy/go-sdk v0.7.4
 	github.com/soheilhy/cmux v0.1.5
 	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
