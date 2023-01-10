@@ -5,8 +5,6 @@
 </p>
 
 <p align="center">
-
-
   <a href="CODE_OF_CONDUCT.md" alt="Contributions welcome">
     <img src="https://img.shields.io/badge/Contributions-Welcome-brightgreen?logo=github" /></a>
     
@@ -28,51 +26,54 @@
 </p>
 
 # Keploy
-Keploy is a functional testing toolkit for developers. Currently, it can generate: 
-1. E2E tests for APIs (along with mocks) by recording real API calls. These test files can be imported as mocks for consumers and vice-versa. 
-2. Realistic mocks by capturing real calls and be imported and used anywhere (including any testing framework). These mocks can also be used as tests for the server.   
+Keploy is a functional testing toolkit for developers. It **generates E2E tests for APIs (KTests)** along with **mocks or stubs(KMocks)** by recording real API calls.
+KTests can be imported as mocks for consumers and vice-versa.
+
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/how-keploy-works.gif" width="100%"  alt="Generate Test Case from API call"/>
+
+Merge KTests with unit testing libraries(like Go-Test, JUnit..) to track combined test-coverage.
+
+KMocks can also be referenced in existing tests or use anywhere (including any testing framework). KMocks can also be used as tests for the server.   
 
 > Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main)](https://coveralls.io/github/keploy/keploy?branch=main) &nbsp;  without writing any test-cases and data-mocks. 😎
-<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%" heigth="50%"/></a>
 
-## Quick Start
-The fastest way to start with Keploy is the Gitpod-hosted version. When you're ready, you can install locally or host yourself.
+[//]: # (<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%" heigth="50%"/></a>)
 
-One-click deploy sample URL Shortener application sample with Keploy using Gitpod 
+## Language Support
+- [x] [![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)](https://github.com/keploy/go-sdk)
+- [x] [![Java](https://img.shields.io/badge/java-%23ED8B00.svg?style=for-the-badge&logo=java&logoColor=white)](https://github.com/keploy/java-sdk)
+- [x] [![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white)](https://github.com/keploy/typescript-sdk)
+- [ ] ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) : WIP [#58](https://github.com/keploy/keploy/issues/58)
 
-[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/keploy/samples-go)
-
-## Features
-* **Convert API calls from any source to Test-Cases**: Keploy captures all the API calls and subsequent network traffic served by the application. You can use any existing API management tools like Postman, Hoppscotch, Curl to generate test-case.
-
-* **Automatically Mocks Dependencies**
-* **Safely replays non-idempotent CRUD operations**
-* **Export tests and mocks and maintain alongside existing tests**
-
-<img src="https://github.com/keploy/docs/blob/main/static/gif/record-testcase.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>
-
-* **Common file for tests and mocks**: Server tests can be shared with client applications and be imported as mocks and vice versa. 
-
-* **Native interoperability** with popular testing libraries like `go-test`. Code coverage will be reported with existing and Keploy recorded test cases and can also be integrated in CI pipelines/infrastructure.
-
-[//]: # (<img src="https://github.com/keploy/docs/blob/main/static/gif/unit-test.gif?raw=true" width="100%"  alt="Generate Test Case from API call"/>)
-
-* **Accurate Noise Detection** in responses like (timestamps, random values) to ensure high quality tests.
-* **Statistical deduplication** ensures that redundant testcases are not generated. WIP (ref [#27](https://github.com/keploy/keploy/issues/27)).
-* **Web Console** to visually understand the results, update behaviour and share findings across your team.
-* **Test Export** generates and stores testcases(and their mocks) in the project directory or mongoDB cluster. By default, they are stored in project directory.
 
 ## How it works?
+#### Safely replays all CRUD operations (including non-idempotent APIs)
 
-![How it works](https://raw.githubusercontent.com/keploy/docs/main/static/img/how-it-works.png)
+Keploy is added as a middleware to your application that captures and replays all network interaction served to application from any source.
 
-Keploy is added as a middleware to your application that captures and replays all network interaction served to application from any source. 
+Visit [https://docs.keploy.io](https://docs.keploy.io/docs/keploy-explained/how-keploy-works) to read more in detail..
 
-Visit [https://docs.keploy.io](https://docs.keploy.io/docs/keploy-explained/how-keploy-works) to read more in detail
 
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="100%"  alt="Generate Test Case from API call"/>
+
+## Features
+
+### 1. Export tests and mocks and maintain alongside existing tests
+
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="100%"  alt="Generate Test Case from API call"/>
+
+### 2.  Integrates with `go-test`, `junit`
+Keploy has native interoperability as it integrates with popular testing libraries like `go-test`, `junit`. 
+Code coverage will be reported with existing plus KTests. It'll also be **integrated in CI pipelines/infrastructure automatically** if you already have `go-test`, `junit` integrated.
+
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/replay-tc.gif" width="100%"  alt="Generate Test Case from API call"/>
+
+### 3. Accurate Noise Detection
+Filters noisy fields in API responses like (timestamps, random values) to ensure high quality tests.
+
+**WIP** - **Statistical deduplication** ensures that redundant testcases are not generated. WIP (ref [#27](https://github.com/keploy/keploy/issues/27)).
 
 ## Quick Installation
-> Note that Testcases are exported as files in the repo by default
 
 ### MacOS 
 
@@ -127,17 +128,17 @@ The UI can be accessed at http://localhost:6789
 
 </details>
 
+## SDK Integration
+After running Keploy Server, **let's integrate the SDK** into the application. 
+If you're integrating in custom project please choose installation [documentation according to the language](https://docs.keploy.io/application-development/) you're using.
 
-### Helm chart
-Keploy can also be installed to your Kubernetes cluster using the Helm chart available [here](deployment/keploy)
 
-## Language Support
-- [x] [Go SDK](https://github.com/keploy/go-sdk)
-- [x] [Java SDK](https://github.com/keploy/java-sdk)
-- [x] [Typescript/Javascript SDK](https://github.com/keploy/typescript-sdk)
-- [ ] Python SDK - WIP [#58](https://github.com/keploy/keploy/issues/58)
+[![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)](https://docs.keploy.io/docs/go/installation)
+[![Java](https://img.shields.io/badge/java-%23ED8B00.svg?style=for-the-badge&logo=java&logoColor=white)](https://docs.keploy.io/docs/java/installation)
+[![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white)](https://docs.keploy.io/docs/typescript/installation)
 
-## Run Sample application
+
+## Try Sample application
 
 Demos using *Echo/PostgreSQL* and *Gin/MongoDB* are available [here](https://github.com/keploy/samples-go). For this example, we will use the **Echo/PostgreSQL** sample.
 
@@ -158,6 +159,8 @@ export KEPLOY_MODE=record && go run handler.go main.go
 
 ### Generate testcases
 To genereate testcases we just need to make some API calls. You can use [Postman](https://www.postman.com/), [Hoppscotch](https://hoppscotch.io/), or simply `curl`
+
+> Note : KTests are exported as files in the current directory(.) by default
 
 #### 1. Generate shortned url
 ```shell
@@ -243,6 +246,13 @@ export KEPLOY_MODE="test"
 
 Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 
+## Try Quickstart on GitPod
+The fastest way to start with Keploy is the Gitpod-hosted version. When you're ready, you can install locally or host yourself.
+
+One-click deploy sample URL Shortener application sample with Keploy using Gitpod
+
+[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/keploy/samples-go)
+
 ##  Current Limitations
 * **Async operations**: Currently Keploy stores dependencies in an array and expects them to be executed in the same order (FIFO). This means if the order of dependency execution changes (typical in async), keploy would likely throw an error. This is generally fine for E2E tests since the responses are generally unaffected. We plan to fix this by using a map instead in the future. 
 * **Unit Testing**: While Keploy is designed to run alongside unit testing frameworks (Go test, JUnit..) and can add to the overall code coverage, it still generates E2E tests. So it might be easier to write unit tests for some methods instead of E2E tests. 
@@ -266,39 +276,10 @@ We'd love to collaborate with you to make Keploy great. To get started:
 * [Slack](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA) - Discussions with the community and the team.
 * [GitHub](https://github.com/keploy/keploy/issues) - For bug reports and feature requests.
 
-[![Generic badge](https://img.shields.io/badge/Slack-teal.svg?style=for-the-badge)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
-[![Generic badge](https://img.shields.io/badge/LinkedIn-blue.svg?style=for-the-badge)](https://www.linkedin.com/company/keploy/)
-[![Generic badge](https://img.shields.io/badge/Youtube-teal.svg?style=for-the-badge)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
-[![Generic badge](https://img.shields.io/badge/Twitter-blue.svg?style=for-the-badge)](https://twitter.com/Keployio)
-
-## 📌 Our valuable Contributors👩‍💻👨‍💻 :
-
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)): 
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable -->
-<table>
-  <tr>
-
-<td align="center"><a href="https://github.com/slayerjain"><img src="https://avatars.githubusercontent.com/u/12831254?v=4" width="100px;" alt=""/><br /><sub><b>Shubham Jain</b></sub></a><br /><a href="#maintenance-slayerjain" title="Maintenance">🚧</a></td>
-<td align="center"><a href="https://github.com/Sarthak160"><img src="https://avatars.githubusercontent.com/u/50234097?v=4" width="100px;" alt=""/><br /><sub><b>Sarthak</b></sub></a><br /><a href="contributer-Sarthak160" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/re-Tick"><img src="https://avatars.githubusercontent.com/u/60597329?v=4" width="100px;" alt=""/><br /><sub><b>Ritik Jain</b></sub></a><br /><a href="#contributer-slayerjain" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/nehagup"><img src="https://avatars.githubusercontent.com/u/15074229?v=4" width="100px;" alt=""/><br /><sub><b>Neha Gupta</b></sub></a><br /><a href="#maintenance-nehagup" title="Maintenance">🚧</a></td>
-<td align="center"><a href="https://github.com/Ayush7614"><img src="https://avatars.githubusercontent.com/u/67006255?v=4" width="100px;" alt=""/><br /><sub><b>Felix-Ayush</b></sub></a><br /><a href="#contributer-Ayush7614" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/madhavsikka"><img src="https://avatars.githubusercontent.com/u/39848688?v=4" width="100px;" alt=""/><br /><sub><b>Madhav Sikka</b></sub></a><br /><a href="#maintenance-madhavsikka" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/unnati914"><img src="https://avatars.githubusercontent.com/u/69121168?v=4" width="100px;" alt=""/><br /><sub><b>Unnati</b></sub></a><br /><a href="#contributer-unnati914" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/thunderboltsid"><img src="https://avatars.githubusercontent.com/u/6081171?v=4" width="100px;" alt=""/><br /><sub><b>Sid Shukla</b></sub></a><br /><a href="#contributer-thunderboltsid" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/petergeorgas"><img src="https://avatars.githubusercontent.com/u/21143531?v=4" width="100px;" alt=""/><br /><sub><b>Peter Georgas</b></sub></a><br /><a href="#contributer-petergeorgas" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/michaelgrigoryan25"><img src="https://avatars.githubusercontent.com/u/56165400?v=4" width="100px;" alt=""/><br /><sub><b>Michael Grigoryan</b></sub></a><br /><a href="#contributer-michaelgrigoryan25" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/skant7"><img src="https://avatars.githubusercontent.com/u/65185019?v=4" width="100px;" alt=""/><br /><sub><b>Surya Kant</b></sub></a><br /><a href="#contributer-skant7" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/mahi-official"><img src="https://avatars.githubusercontent.com/u/25299699?v=4" width="100px;" alt=""/><br /><sub><b>Mahesh Gupta</b></sub></a><br /><a href="#contributer-mahi-official" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/namantaneja167"><img src="https://avatars.githubusercontent.com/u/42579074?v=4" width="100px;" alt=""/><br /><sub><b>Naman Taneja</b></sub></a><br /><a href="#contributer-namantaneja167" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/rajatsharma"><img src="https://avatars.githubusercontent.com/u/13231434?v=4" width="100px;" alt=""/><br /><sub><b>Rajat Sharma</b></sub></a><br /><a href="#contributer-rajatsharma" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/Akshit42-hue"><img src="https://avatars.githubusercontent.com/u/59443454?v=4" width="100px;" alt=""/><br /><sub><b>Axit Patel</b></sub></a><br /><a href="#contributer-Akshit42-hue" title="Contributer">🚧</a></td>
-<td align="center"><a href="https://github.com/ditsuke"><img src="https://avatars.githubusercontent.com/u/72784348?v=4" width="100px;" alt=""/><br /><sub><b>Tushar Malik</b></sub></a><br /><a href="#contributer-ditsuke" title="Contributer">🚧</a></td>
-
-</tr>
-</table>
+[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
+[![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
+[![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
+[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
 
 <!-- markdownlint-restore -->
 <!-- prettier-ignore-end -->
