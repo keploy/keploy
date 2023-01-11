@@ -144,7 +144,7 @@ func Server(ver string) *chi.Mux {
 			Name: conf.KeployApp,
 			Port: port,
 			Filter: keploy.Filter{
-				UrlRegex: "^/api",
+				AcceptUrlRegex: "^/api",
 			},
 
 			Timeout: 80 * time.Second,
