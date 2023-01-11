@@ -124,6 +124,7 @@ func (r *TestCase) readTCS(ctx context.Context, testCasePath, mockPath string) (
 	res, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
 		r.log.Info(fmt.Sprintf("no testcases found in %s directory.", pkg.SanitiseInput(testCasePath)))
+		return nil, err
 	}
 	return res, err
 }
@@ -249,8 +250,16 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
 			if !ok {
 				tcs, err := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
-				if err == nil {
-					lastIndex = len(tcs)
+				if len(tcs) > 0 && err == nil {
+					if len(strings.Split(tcs[len(tcs)-1].ID, "-")) < 1 || len(strings.Split(strings.Split(tcs[len(tcs)-1].ID, "-")[1], ".")) == 0 {
+						return nil, errors.New("failed to decode the last sequence number from yaml test")
+					}
+					indx := strings.Split(strings.Split(tcs[len(tcs)-1].ID, "-")[1], ".")[0]
+					lastIndex, err = strconv.Atoi(indx)
+					if err != nil {
+						r.log.Error("failed to get the last sequence number for testcase", zap.Error(err))
+						return nil, err
+					}
 				}
 			}
 			r.nextYamlIndex.tcsCount[v.AppID] = lastIndex + 1
