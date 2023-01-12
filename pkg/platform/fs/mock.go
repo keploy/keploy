@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	grpcMock "go.keploy.io/server/grpc/mock"
+	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"gopkg.in/yaml.v3"
@@ -149,7 +150,10 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
 	res := []models.TestCase{}
 	for _, j := range tcs {
-		spec := models.HttpSpec{}
+		var (
+			spec  = models.HttpSpec{}
+			mocks = []*proto.Mock{}
+		)
 		err := j.Spec.Decode(&spec)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
@@ -162,18 +166,21 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			mockName = fileName
 		}
 		mocks, err := read(mockPath, mockName, false)
-		if err != nil {
-			return nil, err
+		if len(spec.Mocks) > 0 {
+			yamlDocs, err := read(mockPath, mockName, false)
+			if err != nil {
+				return nil, err
+			}
+			mocks, err = grpcMock.Decode(yamlDocs)
+			if err != nil {
+				return nil, err
+			}
 		}
 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
 
 		noise, ok := spec.Assertions["noise"]
 		if !ok {
 			noise = []string{}
-		}
-		doc, err := grpcMock.Decode(mocks)
-		if err != nil {
-			return nil, err
 		}
 		res = append(res, models.TestCase{
 			ID: j.Name,
@@ -194,7 +201,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				Binary:     spec.Response.Binary,
 			},
 			Noise:    noise,
-			Mocks:    doc,
+			Mocks:    mocks,
 			Captured: spec.Created,
 		})
 	}

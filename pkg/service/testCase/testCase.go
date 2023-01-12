@@ -191,7 +191,9 @@ func (r *TestCase) putTC(ctx context.Context, cid string, t models.TestCase) (st
 func (r *TestCase) insertToDB(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
 	var ids []string
 	if len(tcs) == 0 {
-		return nil, errors.New("no testcase to update")
+		err := errors.New("no testcase to update")
+		r.log.Error(err.Error())
+		return nil, err
 	}
 	for _, t := range tcs {
 		id, err := r.putTC(ctx, cid, t)
@@ -209,7 +211,9 @@ func (r *TestCase) insertToDB(ctx context.Context, cid string, tcs []models.Test
 // Note: dedup algo is not executed during testcase-export currently.
 func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
 	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		return nil, fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
+		err := fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
+		r.log.Error(err.Error())
+		return nil, err
 	}
 	// test[0] will always be a testcase. test[1:] will be the mocks.
 	// check for known noisy fields like dates
@@ -242,7 +246,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 		// store testcase in yaml file
 		if r.testExport {
 			r.nextYamlIndex.mu.Lock()
-			defer r.nextYamlIndex.mu.Unlock()
+			// defer r.nextYamlIndex.mu.Unlock()
 			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
 			if !ok {
 				tcs, err := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
@@ -303,15 +307,22 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				},
 				Created: v.Captured,
 			})
-			return r.writeToYaml(ctx, tc, testCasePath, mockPath)
+			insertedIds, err := r.writeToYaml(ctx, tc, testCasePath, mockPath)
+			if err != nil {
+				return nil, err
+			}
+			inserted = append(inserted, insertedIds...)
+			r.nextYamlIndex.mu.Unlock()
+			continue
 		}
 
 		// store testcase in mongoDB
 		v.Mocks = nil
-		inserted, err = r.insertToDB(ctx, cid, []models.TestCase{v})
+		insertedIds, err := r.insertToDB(ctx, cid, []models.TestCase{v})
 		if err != nil {
 			return nil, err
 		}
+		inserted = append(inserted, insertedIds...)
 	}
 	return inserted, err
 }
