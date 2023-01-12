@@ -38,6 +38,8 @@ import (
 
 // const defaultPort = "8080"
 
+const DefaultVersion string = "0.1.0-dev" //DefaultVersion is the default version of the server
+
 const logo string = `
        ▓██▓▄
     ▓▓▓▓██▓█▓▄
