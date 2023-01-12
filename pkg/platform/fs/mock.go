@@ -165,7 +165,6 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		} else {
 			mockName = fileName
 		}
-		mocks, err := read(mockPath, mockName, false)
 		if len(spec.Mocks) > 0 {
 			yamlDocs, err := read(mockPath, mockName, false)
 			if err != nil {
