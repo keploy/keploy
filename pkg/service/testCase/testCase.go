@@ -224,9 +224,10 @@ func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCase
 		return nil, err
 	}
 	r.log.Info(fmt.Sprint("\n💾 Recorded testcase with name: ", test[0].Name, " in yaml file at path: ", testCasePath, "\n"))
+	mockName := "mock" + test[0].Name[4:]
 
 	if len(test) > 1 {
-		err = r.mockFS.WriteAll(ctx, mockPath, test[0].Name, test[1:])
+		err = r.mockFS.WriteAll(ctx, mockPath,mockName , test[1:])
 		if err != nil {
 			r.log.Error(err.Error())
 			return nil, err
@@ -265,6 +266,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			r.nextYamlIndex.tcsCount[v.AppID] = lastIndex + 1
 			var (
 				id = fmt.Sprintf("test-%v", lastIndex+1)
+
 				tc = []models.Mock{{
 					Version: models.V1Beta2,
 					Kind:    models.HTTP,
@@ -279,7 +281,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					r.log.Error(err.Error())
 				}
 				tc = append(tc, doc)
-				m := id + "-" + strconv.Itoa(i)
+				m := "mock-" + fmt.Sprint(lastIndex + 1) + "-"+ strconv.Itoa(i)
 				tc[len(tc)-1].Name = m
 				mocks = append(mocks, m)
 			}
