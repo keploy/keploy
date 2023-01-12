@@ -64,6 +64,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 		if err != nil {
 			return nil, err
 		}
+
 		tests, err := toTestCase(tcs, name, mockPath)
 		if err != nil {
 			return nil, err
@@ -157,9 +158,15 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
 		}
-
+		nameCheck := strings.Split(spec.Mocks[0], "-")[0]
+		var mockName string;
+		if(nameCheck == "mock"){
+			mockName = "mock-" + strings.Split(fileName, "-")[1]
+		} else {
+			mockName = fileName
+		}
 		if len(spec.Mocks) > 0 {
-			yamlDocs, err := read(mockPath, fileName, false)
+			yamlDocs, err := read(mockPath, mockName, false)
 			if err != nil {
 				return nil, err
 			}
