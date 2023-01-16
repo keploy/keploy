@@ -12,7 +12,7 @@ type Service interface {
 	GetApps(ctx context.Context, cid string) ([]string, error)
 	Update(ctx context.Context, t []models.TestCase) error
 	Delete(ctx context.Context, cid, id string) error
-	Insert(ctx context.Context, t []models.TestCase, testCasePath, mockPath, cid string) ([]string, error)
+	Insert(ctx context.Context, t []models.TestCase, testCasePath, mockPath, cid string, fieldFilter []string) ([]string, error)
 	// InsertToDB(ctx context.Context, cid string, t []models.TestCase) ([]string, error)
 	// WriteToYaml(ctx context.Context, t []models.Mock, testCasePath, mockPath string) ([]string, error)
 }

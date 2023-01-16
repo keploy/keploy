@@ -329,7 +329,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		Deps:  deps,
 		Noise: noise,
 		Mocks: request.Mocks,
-	}}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY)
+	}}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.RejectFields)
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err

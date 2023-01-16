@@ -24,6 +24,7 @@ message TestCaseReq {
   string TestCasePath = 7;
   string MockPath = 8;
   repeated Mock Mocks = 9;
+  repeated string RejectFields = 10;
 }
 
 
@@ -164,7 +165,7 @@ message Mock {
     // for sql
     string Type = 8;
     optional Table Table = 9;
-    int64 Int = 10; // change it to rows commited 
+    int64 Int = 10; // change it to rows commited
     repeated string Err = 11;
   }
   SpecSchema Spec = 4;

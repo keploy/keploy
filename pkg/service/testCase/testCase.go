@@ -1,6 +1,7 @@
 package testCase
 
 import (
+	"regexp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -238,7 +239,7 @@ func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCase
 	return []string{test[0].Name}, nil
 }
 
-func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath, mockPath, cid string) ([]string, error) {
+func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath, mockPath, cid string, fieldFilters []string) ([]string, error) {
 	var (
 		inserted = []string{}
 		err      error
@@ -294,7 +295,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					URL:        v.HttpReq.URL,
 					URLParams:  v.HttpReq.URLParams,
 					Body:       v.HttpReq.Body,
-					Header:     grpcMock.ToMockHeader(v.HttpReq.Header),
+					Header:     filterFields(grpcMock.ToMockHeader(v.HttpReq.Header), fieldFilters),
 					Form:       v.HttpReq.Form,
 				},
 				Response: models.MockHttpResp{
@@ -334,6 +335,20 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 		inserted = append(inserted, insertedIds...)
 	}
 	return inserted, err
+}
+
+func filterFields(r map[string]string, filter []string)(map[string]string) {
+	var t map[string]string = map[string]string{}
+	for _, v := range filter {
+		fieldRegex := regexp.MustCompile(v)
+		for k, v := range r {
+			if fieldRegex.MatchString(k) == false {
+				t[k] = v
+			}
+		}
+	}
+	return t
+
 }
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
