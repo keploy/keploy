@@ -1,7 +1,6 @@
 package testCase
 
 import (
-	"regexp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -295,7 +294,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					URL:        v.HttpReq.URL,
 					URLParams:  v.HttpReq.URLParams,
 					Body:       v.HttpReq.Body,
-					Header:     filterFields(grpcMock.ToMockHeader(v.HttpReq.Header), fieldFilters),
+					Header:     grpcMock.FilterFields(grpcMock.ToMockHeader(v.HttpReq.Header), fieldFilters),
 					Form:       v.HttpReq.Form,
 				},
 				Response: models.MockHttpResp{
@@ -337,19 +336,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 	return inserted, err
 }
 
-func filterFields(r map[string]string, filter []string)(map[string]string) {
-	var t map[string]string = map[string]string{}
-	for _, v := range filter {
-		fieldRegex := regexp.MustCompile(v)
-		for k, v := range r {
-			if fieldRegex.MatchString(k) == false {
-				t[k] = v
-			}
-		}
-	}
-	return t
 
-}
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
 
