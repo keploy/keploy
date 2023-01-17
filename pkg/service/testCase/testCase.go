@@ -124,6 +124,7 @@ func (r *TestCase) readTCS(ctx context.Context, testCasePath, mockPath string) (
 	res, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
 		r.log.Info(fmt.Sprintf("no testcases found in %s directory.", pkg.SanitiseInput(testCasePath)))
+		return nil, err
 	}
 	return res, err
 }
@@ -223,9 +224,10 @@ func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCase
 		return nil, err
 	}
 	r.log.Info(fmt.Sprint("\n💾 Recorded testcase with name: ", test[0].Name, " in yaml file at path: ", testCasePath, "\n"))
+	mockName := "mock" + test[0].Name[4:]
 
 	if len(test) > 1 {
-		err = r.mockFS.WriteAll(ctx, mockPath, test[0].Name, test[1:])
+		err = r.mockFS.WriteAll(ctx, mockPath,mockName , test[1:])
 		if err != nil {
 			r.log.Error(err.Error())
 			return nil, err
@@ -249,13 +251,22 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
 			if !ok {
 				tcs, err := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
-				if err == nil {
-					lastIndex = len(tcs)
+				if len(tcs) > 0 && err == nil {
+					if len(strings.Split(tcs[len(tcs)-1].ID, "-")) < 1 || len(strings.Split(strings.Split(tcs[len(tcs)-1].ID, "-")[1], ".")) == 0 {
+						return nil, errors.New("failed to decode the last sequence number from yaml test")
+					}
+					indx := strings.Split(strings.Split(tcs[len(tcs)-1].ID, "-")[1], ".")[0]
+					lastIndex, err = strconv.Atoi(indx)
+					if err != nil {
+						r.log.Error("failed to get the last sequence number for testcase", zap.Error(err))
+						return nil, err
+					}
 				}
 			}
 			r.nextYamlIndex.tcsCount[v.AppID] = lastIndex + 1
 			var (
 				id = fmt.Sprintf("test-%v", lastIndex+1)
+
 				tc = []models.Mock{{
 					Version: models.V1Beta2,
 					Kind:    models.HTTP,
@@ -270,7 +281,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					r.log.Error(err.Error())
 				}
 				tc = append(tc, doc)
-				m := id + "-" + strconv.Itoa(i)
+				m := "mock-" + fmt.Sprint(lastIndex + 1) + "-"+ strconv.Itoa(i)
 				tc[len(tc)-1].Name = m
 				mocks = append(mocks, m)
 			}
