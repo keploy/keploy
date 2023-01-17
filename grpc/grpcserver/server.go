@@ -314,7 +314,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			URL:        request.HttpReq.URL,
 			URLParams:  request.HttpReq.URLParams,
 			Body:       request.HttpReq.Body,
-			Header:     grpcMock(utils.GetHttpHeader(request.HttpReq.Header),request.RejectFields),
+			Header:     utils.GetHttpHeader(request.HttpReq.Header),
 			Form:       grpcMock.GetMockFormData(request.HttpReq.Form),
 		},
 		HttpResp: models.HttpResp{

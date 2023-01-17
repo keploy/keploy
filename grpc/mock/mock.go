@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"regexp"
 	"strings"
 	"unicode/utf8"
-	"regexp"
 
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
@@ -339,7 +339,7 @@ func GetProtoFormData(formData []models.FormData) []*proto.FormData {
 	return protoFormDataList
 }
 
-func FilterFields(r map[string]string, filter []string)(map[string]string) {
+func FilterFields(r map[string][]string, filter []string) map[string][]string {
 	for _, v := range filter {
 		fieldRegex := regexp.MustCompile(v)
 		fmt.Println("This is the field we are rejecting", v)

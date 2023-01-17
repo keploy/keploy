@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	grpcMock "go.keploy.io/server/grpc/mock"
+	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -227,7 +228,7 @@ func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCase
 	mockName := "mock" + test[0].Name[4:]
 
 	if len(test) > 1 {
-		err = r.mockFS.WriteAll(ctx, mockPath,mockName , test[1:])
+		err = r.mockFS.WriteAll(ctx, mockPath, mockName, test[1:])
 		if err != nil {
 			r.log.Error(err.Error())
 			return nil, err
@@ -244,6 +245,9 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 		err      error
 	)
 	for _, v := range t {
+		// filter the header fields of http testcase
+		v.HttpReq.Header = grpcMock.FilterFields(v.HttpReq.Header, fieldFilters)
+
 		// store testcase in yaml file
 		if r.testExport {
 			r.nextYamlIndex.mu.Lock()
@@ -276,12 +280,16 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			)
 
 			for i, j := range v.Mocks {
+				// filter the header fields in http mocks
+				if j.Spec != nil && j.Spec.Req != nil {
+					j.Spec.Req.Header = utils.GetProtoMap(grpcMock.FilterFields(utils.GetHttpHeader(j.Spec.Req.Header), fieldFilters))
+				}
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
 					r.log.Error(err.Error())
 				}
 				tc = append(tc, doc)
-				m := "mock-" + fmt.Sprint(lastIndex + 1) + "-"+ strconv.Itoa(i)
+				m := "mock-" + fmt.Sprint(lastIndex+1) + "-" + strconv.Itoa(i)
 				tc[len(tc)-1].Name = m
 				mocks = append(mocks, m)
 			}
@@ -294,8 +302,9 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					URL:        v.HttpReq.URL,
 					URLParams:  v.HttpReq.URLParams,
 					Body:       v.HttpReq.Body,
-					Header:     grpcMock.FilterFields(grpcMock.ToMockHeader(v.HttpReq.Header), fieldFilters),
-					Form:       v.HttpReq.Form,
+					// Header:     grpcMock.FilterFields(grpcMock.ToMockHeader(v.HttpReq.Header), fieldFilters),
+					Header: grpcMock.ToMockHeader(v.HttpReq.Header),
+					Form:   v.HttpReq.Form,
 				},
 				Response: models.MockHttpResp{
 					StatusCode:    int(v.HttpResp.StatusCode),
@@ -335,8 +344,6 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 	}
 	return inserted, err
 }
-
-
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
 
