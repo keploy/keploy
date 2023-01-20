@@ -339,12 +339,11 @@ func GetProtoFormData(formData []models.FormData) []*proto.FormData {
 	return protoFormDataList
 }
 
-func FilterFields(r map[string][]string, filter []string) map[string][]string {
+func FilterFields(r map[string][]string, filter []string) map[string][]string { //This filters the headers that the user does not want to record
 	for _, v := range filter {
-		fieldRegex := regexp.MustCompile(v)
-		fmt.Println("This is the field we are rejecting", v)
+		fieldRegex := regexp.MustCompile(v) //Compile the regex of each header in the filter list.
 		for k, _ := range r {
-			if fieldRegex.MatchString(k) == true {
+			if fieldRegex.MatchString(k) == true { //If the header matches the regex, delete it
 				delete(r, k)
 			}
 		}

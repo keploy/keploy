@@ -186,7 +186,6 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	fmt.Println("This is the data", data.RejectFields)
 	now := time.Now().UTC().Unix()
 	inserted, err := rg.tcSvc.Insert(r.Context(), []models.TestCase{{
 		ID:       uuid.New().String(),

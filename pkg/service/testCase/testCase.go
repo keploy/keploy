@@ -246,7 +246,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 	)
 	for _, v := range t {
 		// filter the header fields of http testcase
-		v.HttpReq.Header = grpcMock.FilterFields(v.HttpReq.Header, fieldFilters)
+		v.HttpReq.Header = grpcMock.FilterFields(v.HttpReq.Header, fieldFilters) //Filtering the headers from the testcases.
 
 		// store testcase in yaml file
 		if r.testExport {
@@ -282,7 +282,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			for i, j := range v.Mocks {
 				// filter the header fields in http mocks
 				if j.Spec != nil && j.Spec.Req != nil {
-					j.Spec.Req.Header = utils.GetProtoMap(grpcMock.FilterFields(utils.GetHttpHeader(j.Spec.Req.Header), fieldFilters))
+					j.Spec.Req.Header = utils.GetProtoMap(grpcMock.FilterFields(utils.GetHttpHeader(j.Spec.Req.Header), fieldFilters)) //Filtering the headers from the mocks.
 				}
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
