@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
@@ -16,12 +17,12 @@ import (
 
 func Encode(doc *proto.Mock) (models.Mock, error) {
 	res := models.Mock{
-		Version: doc.Version,
-		Kind:    doc.Kind,
+		Version: models.Version(doc.Version),
+		Kind:    models.Kind(doc.Kind),
 		Name:    doc.Name,
 	}
 	switch doc.Kind {
-	case string(models.HTTP_EXPORT):
+	case string(models.HTTP):
 		spec := models.HttpSpec{
 			Metadata: doc.Spec.Metadata,
 			Request: models.MockHttpReq{
@@ -30,29 +31,66 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 				ProtoMinor: int(doc.Spec.Req.ProtoMinor),
 				URL:        doc.Spec.Req.URL,
 				Header:     ToMockHeader(utils.GetHttpHeader(doc.Spec.Req.Header)),
-				Body:       doc.Spec.Req.Body,
+				Body:       string(doc.Spec.Req.Body),
+				BodyType:   string(models.BodyTypeUtf8),
+				Form:       GetMockFormData(doc.Spec.Req.Form),
 			},
 			Response: models.MockHttpResp{
 				StatusCode:    int(doc.Spec.Res.StatusCode),
 				Header:        ToMockHeader(utils.GetHttpHeader(doc.Spec.Res.Header)),
-				Body:          doc.Spec.Res.Body,
+				Body:          string(doc.Spec.Res.Body),
+				BodyType:      string(models.BodyTypeUtf8),
 				StatusMessage: doc.Spec.Res.StatusMessage,
 				ProtoMajor:    int(doc.Spec.Res.ProtoMajor),
 				ProtoMinor:    int(doc.Spec.Res.ProtoMinor),
+				Binary:        doc.Spec.Res.Binary,
 			},
-			Objects:    []models.Object{},
+			Objects:    ToModelObjects(doc.Spec.Objects),
 			Mocks:      doc.Spec.Mocks,
 			Assertions: utils.GetHttpHeader(doc.Spec.Assertions),
 			Created:    doc.Spec.Created,
 		}
-		for _, j := range doc.Spec.Objects {
-			spec.Objects = append(spec.Objects, models.Object{Type: j.Type, Data: string(j.Data)})
+		if doc.Spec.Req.BodyData != nil {
+			if !utf8.ValidString(string(doc.Spec.Req.BodyData)) {
+				spec.Request.BodyType = string(models.BodyTypeBinary)
+				spec.Request.Body = base64.StdEncoding.EncodeToString(doc.Spec.Req.BodyData)
+			} else {
+				spec.Request.Body = string(doc.Spec.Req.BodyData)
+			}
 		}
+		if doc.Spec.Res.BodyData != nil {
+			if !utf8.ValidString(string(doc.Spec.Res.BodyData)) {
+				spec.Response.BodyType = string(models.BodyTypeBinary)
+				spec.Response.Body = base64.StdEncoding.EncodeToString(doc.Spec.Res.BodyData)
+			} else {
+				spec.Response.Body = string(doc.Spec.Res.BodyData)
+			}
+		}
+
 		err := res.Spec.Encode(&spec)
 		if err != nil {
 			return res, fmt.Errorf("failed to encode http spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
-	case string(models.GENERIC_EXPORT):
+
+	case string(models.SQL):
+		spec := models.SQlSpec{
+			Type:     models.SqlOutputType(doc.Spec.Type),
+			Metadata: doc.Spec.Metadata,
+			Int:      int(doc.Spec.Int),
+			Err:      doc.Spec.Err,
+		}
+		if doc.Spec.Table != nil {
+			spec.Table = models.Table{
+				Cols: ToModelCols(doc.Spec.Table.Cols),
+				Rows: doc.Spec.Table.Rows,
+			}
+		}
+		err := res.Spec.Encode(&spec)
+		if err != nil {
+			return res, fmt.Errorf("failed to encode sql spec for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+
+	case string(models.GENERIC):
 		err := res.Spec.Encode(&models.GenericSpec{
 			Metadata: doc.Spec.Metadata,
 			Objects:  ToModelObjects(doc.Spec.Objects),
@@ -63,7 +101,7 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 	case string(models.GRPC_EXPORT):
 		spec := models.GrpcSpec{
 			Metadata: doc.Spec.Metadata,
-			Request: models.MockGrpcReq{
+			Request: models.GrpcReq{
 				Body:   doc.Spec.GrpcRequest.Body,
 				Method: doc.Spec.GrpcRequest.Method,
 			},
@@ -83,8 +121,11 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 			// 	ProtoMajor:    int(doc.Spec.Res.ProtoMajor),
 			// 	ProtoMinor:    int(doc.Spec.Res.ProtoMinor),
 			// },
-			Response:   doc.Spec.GrpcResp,
-			Objects:    []models.Object{},
+			Response: models.GrpcResp{
+				Body: doc.Spec.GrpcResp.Body,
+				Err:  doc.Spec.GrpcResp.Err,
+			},
+			Objects:    ToModelObjects(doc.Spec.Objects),
 			Mocks:      doc.Spec.Mocks,
 			Assertions: utils.GetHttpHeader(doc.Spec.Assertions),
 			Created:    doc.Spec.Created,
@@ -102,6 +143,35 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 	return res, nil
 }
 
+func ToModelCols(cols []*proto.SqlCol) []models.SqlCol {
+	res := []models.SqlCol{}
+	for _, j := range cols {
+		res = append(res, models.SqlCol{
+			Name:      j.Name,
+			Type:      j.Type,
+			Precision: int(j.Precision),
+			Scale:     int(j.Scale),
+		})
+	}
+	return res
+}
+
+func toProtoCols(cols []models.SqlCol) ([]*proto.SqlCol, error) {
+	if len(cols) == 0 {
+		return nil, nil
+	}
+	res := []*proto.SqlCol{}
+	for _, j := range cols {
+
+		res = append(res, &proto.SqlCol{
+			Name:      j.Name,
+			Type:      j.Type,
+			Precision: int64(j.Precision),
+			Scale:     int64(j.Scale),
+		})
+	}
+	return res, nil
+}
 func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 	res := []models.Object{}
 	for _, j := range objs {
@@ -123,18 +193,21 @@ func ToModelObjects(objs []*proto.Mock_Object) []models.Object {
 func toProtoObjects(objs []models.Object) ([]*proto.Mock_Object, error) {
 	res := []*proto.Mock_Object{}
 	for _, j := range objs {
+		data := []byte{}
 		bin, err := base64.StdEncoding.DecodeString(j.Data)
+		if err != nil {
+			return nil, err
+		}
 		r := bytes.NewReader(bin)
-		gzr, err := gzip.NewReader(r)
-		if err != nil {
-			return nil, err
-		}
-		data, err := ioutil.ReadAll(gzr)
-		if err != nil {
-			return nil, err
-		}
-		if err != nil {
-			return res, fmt.Errorf("failed to decode base64 data from yaml file into byte array. error: %s", err.Error())
+		if r.Len() > 0 {
+			gzr, err := gzip.NewReader(r)
+			if err != nil {
+				return nil, err
+			}
+			data, err = ioutil.ReadAll(gzr)
+			if err != nil {
+				return nil, err
+			}
 		}
 		res = append(res, &proto.Mock_Object{
 			Type: j.Type,
@@ -148,20 +221,24 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 	res := []*proto.Mock{}
 	for _, j := range doc {
 		mock := &proto.Mock{
-			Version: j.Version,
+			Version: string(j.Version),
 			Name:    j.Name,
-			Kind:    j.Kind,
+			Kind:    string(j.Kind),
 		}
 		switch j.Kind {
-		case string(models.HTTP_EXPORT):
+		case models.HTTP:
 			spec := &models.HttpSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
 				return res, fmt.Errorf("failed to decode the http spec of mock with name: %s.  error: %s", j.Name, err.Error())
 			}
+			obj, err := toProtoObjects(spec.Objects)
+			if err != nil {
+				return res, err
+			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
-				Type:     "http",
+				Type:     string(models.HTTP),
 				Req: &proto.HttpReq{
 					Method:     string(spec.Request.Method),
 					ProtoMajor: int64(spec.Request.ProtoMajor),
@@ -169,8 +246,10 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					URL:        spec.Request.URL,
 					Header:     utils.GetProtoMap(ToHttpHeader(spec.Request.Header)),
 					Body:       spec.Request.Body,
+					Form:       GetProtoFormData(spec.Request.Form),
+					BodyData:   nil,
 				},
-				Objects: []*proto.Mock_Object{},
+				Objects: obj,
 				Res: &proto.HttpResp{
 					StatusCode:    int64(spec.Response.StatusCode),
 					Header:        utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
@@ -178,18 +257,56 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					StatusMessage: spec.Response.StatusMessage,
 					ProtoMajor:    int64(spec.Response.ProtoMajor),
 					ProtoMinor:    int64(spec.Request.ProtoMinor),
+					Binary:        spec.Response.Binary,
+					BodyData:      nil,
 				},
 				Mocks:      spec.Mocks,
 				Assertions: utils.GetProtoMap(spec.Assertions),
 				Created:    spec.Created,
 			}
-			for _, j := range spec.Objects {
-				mock.Spec.Objects = append(mock.Spec.Objects, &proto.Mock_Object{
-					Type: j.Type,
-					Data: []byte(j.Data),
-				})
+			if spec.Request.BodyType == string(models.BodyTypeBinary) {
+				bin, err := base64.StdEncoding.DecodeString(spec.Request.Body)
+				if err != nil {
+					return nil, err
+				}
+				mock.Spec.Req.BodyData = bin
+				mock.Spec.Req.Body = ""
 			}
-		case string(models.GENERIC_EXPORT):
+			if spec.Response.BodyType == string(models.BodyTypeBinary) {
+				bin, err := base64.StdEncoding.DecodeString(spec.Response.Body)
+				if err != nil {
+					return nil, err
+				}
+				mock.Spec.Res.BodyData = bin
+				mock.Spec.Res.Body = ""
+			}
+		case models.SQL:
+			spec := &models.SQlSpec{}
+			err := j.Spec.Decode(spec)
+			if err != nil {
+				return res, fmt.Errorf("failed to decode the sql spec of mock with name: %s.  error: %s", j.Name, err.Error())
+			}
+			cols, err := toProtoCols(spec.Table.Cols)
+			if err != nil {
+				return res, err
+			}
+			mock.Spec = &proto.Mock_SpecSchema{
+				Type:     string(spec.Type),
+				Metadata: spec.Metadata,
+				Int:      int64(spec.Int),
+				Err:      spec.Err,
+			}
+			if cols != nil {
+				mock.Spec.Table = &proto.Table{
+					Cols: cols,
+					Rows: spec.Table.Rows,
+				}
+			}
+			if spec.Err == nil {
+				fmt.Println("\n\n\n nilnil", spec.Err, mock.Spec.Err)
+			}
+
+		case models.GENERIC:
 			spec := &models.GenericSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
@@ -203,7 +320,7 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				Metadata: spec.Metadata,
 				Objects:  obj,
 			}
-		case string(models.GRPC_EXPORT):
+		case models.GRPC_EXPORT:
 			spec := &models.GrpcSpec{}
 			err := j.Spec.Decode(spec)
 			if err != nil {
@@ -220,13 +337,16 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 				// 	Header:     utils.GetProtoMap(ToHttpHeader(spec.Request.Header)),
 				// 	Body:       spec.Request.Body,
 				// },
-				GrpcRequest: &proto.Mock_GrpcReq{
+				GrpcRequest: &proto.GrpcReq{
 					Body:   spec.Request.Body,
 					Method: spec.Request.Method,
 				},
-				GrpcResp: spec.Response,
-				Type:     "grpc",
-				Objects:  []*proto.Mock_Object{},
+				GrpcResp: &proto.GrpcResp{
+					Body: spec.Response.Body,
+					Err:  spec.Response.Err,
+				},
+				Type:    "grpc",
+				Objects: []*proto.Mock_Object{},
 				// Res: &proto.HttpResp{
 				// 	StatusCode:    int64(spec.Response.StatusCode),
 				// 	Header:        utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
@@ -267,4 +387,31 @@ func ToMockHeader(httpHeader http.Header) map[string]string {
 		header[i] = strings.Join(j, ",")
 	}
 	return header
+}
+
+func GetMockFormData(formData []*proto.FormData) []models.FormData {
+	mockFormDataList := []models.FormData{}
+
+	for _, j := range formData {
+		mockFormDataList = append(mockFormDataList, models.FormData{
+			Key:    j.Key,
+			Values: j.Values,
+			Paths:  j.Paths,
+		})
+	}
+	return mockFormDataList
+}
+
+func GetProtoFormData(formData []models.FormData) []*proto.FormData {
+
+	protoFormDataList := []*proto.FormData{}
+
+	for _, j := range formData {
+		protoFormDataList = append(protoFormDataList, &proto.FormData{
+			Key:    j.Key,
+			Values: j.Values,
+			Paths:  j.Paths,
+		})
+	}
+	return protoFormDataList
 }

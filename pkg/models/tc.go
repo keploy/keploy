@@ -7,24 +7,24 @@ import (
 )
 
 type TestCase struct {
-	ID         string              `json:"id" bson:"_id"`
-	Created    int64               `json:"created" bson:"created,omitempty"`
-	Updated    int64               `json:"updated" bson:"updated,omitempty"`
-	Captured   int64               `json:"captured" bson:"captured,omitempty"`
-	CID        string              `json:"cid" bson:"cid,omitempty"`
-	AppID      string              `json:"app_id" bson:"app_id,omitempty"`
-	URI        string              `json:"uri" bson:"uri,omitempty"`
-	GrpcMethod string              `json:"grpc_method" bson:"grpc_method,omitempty"`
-	HttpReq    HttpReq             `json:"http_req" bson:"http_req,omitempty"`
-	HttpResp   HttpResp            `json:"http_resp" bson:"http_resp,omitempty"`
-	GrpcReq    string              `json:"grpc_req" bson:"grpc_req,omitempty"`
-	GrpcResp   string              `json:"grpc_resp" bson:"response,omitempty"`
-	Deps       []Dependency        `json:"deps" bson:"deps,omitempty"`
-	AllKeys    map[string][]string `json:"all_keys" bson:"all_keys,omitempty"`
-	Anchors    map[string][]string `json:"anchors" bson:"anchors,omitempty"`
-	Noise      []string            `json:"noise" bson:"noise,omitempty"`
-	Mocks      []*proto.Mock       `json:"mocks"`
-	Type       string              `json:"type" bson:"type,omitempty"`
+	ID       string `json:"id" bson:"_id"`
+	Created  int64  `json:"created" bson:"created,omitempty"`
+	Updated  int64  `json:"updated" bson:"updated,omitempty"`
+	Captured int64  `json:"captured" bson:"captured,omitempty"`
+	CID      string `json:"cid" bson:"cid,omitempty"`
+	AppID    string `json:"app_id" bson:"app_id,omitempty"`
+	URI      string `json:"uri" bson:"uri,omitempty"`
+	// GrpcMethod string              `json:"grpc_method" bson:"grpc_method,omitempty"`
+	HttpReq  HttpReq             `json:"http_req" bson:"http_req,omitempty"`
+	HttpResp HttpResp            `json:"http_resp" bson:"http_resp,omitempty"`
+	GrpcReq  GrpcReq             `json:"grpc_req" bson:"grpc_req,omitempty"`
+	GrpcResp GrpcResp            `json:"grpc_resp" bson:"grpc_resp,omitempty"`
+	Deps     []Dependency        `json:"deps" bson:"deps,omitempty"`
+	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys,omitempty"`
+	Anchors  map[string][]string `json:"anchors" bson:"anchors,omitempty"`
+	Noise    []string            `json:"noise" bson:"noise,omitempty"`
+	Mocks    []*proto.Mock       `json:"mocks"`
+	Type     string              `json:"type" bson:"type,omitempty"`
 }
 
 type TestCaseDB interface {

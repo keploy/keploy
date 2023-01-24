@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	grpcMock "go.keploy.io/server/grpc/mock"
+	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"gopkg.in/yaml.v3"
@@ -32,10 +33,10 @@ func NewMockExportFS(isTestMode bool) *mockExport {
 }
 
 func (fe *mockExport) Exists(ctx context.Context, path string) bool {
-	if _, err := os.Stat(filepath.Join(path)); err == nil {
-		return true
+	if _, err := os.Stat(filepath.Join(path)); err != nil {
+		return false
 	}
-	return false
+	return true
 }
 
 func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
@@ -52,7 +53,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 	)
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return res, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
+		return nil, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
 	}
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" {
@@ -62,16 +63,17 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
 		tcs, err := read(testCasePath, name, false)
 		if err != nil {
-			return res, err
+			return nil, err
 		}
+
 		tests, err := toTestCase(tcs, name, mockPath)
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 		res = append(res, tests...)
 	}
 	sort.Slice(res, func(i, j int) bool {
-		return res[i].Captured > res[j].Captured
+		return res[i].Captured < res[j].Captured
 	})
 
 	return res, nil
@@ -149,14 +151,37 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
 	res := []models.TestCase{}
 	for _, j := range tcs {
-		mocks, _ := read(mockPath, fileName, false)
+		var (
+			// spec  = models.HttpSpec{}
+			mocks = []*proto.Mock{}
+		)
+		// <<<<<<< HEAD
+		// mocks, _ := read(mockPath, fileName, false)
+		// if len(spec.Mocks) > 0 {
+		// 	nameCheck := strings.Split(spec.Mocks[0], "-")[0]
+		// 	var mockName string
+		// 	if nameCheck == "mock" {
+		// 		mockName = "mock-" + strings.Split(fileName, "-")[1]
+		// 	} else {
+		// 		mockName = fileName
+		// 	}
+		// 	yamlDocs, err := read(mockPath, mockName, false)
+		// 	if err != nil {
+		// 		return nil, err
+		// 	}
+		// 	mocks, err = grpcMock.Decode(yamlDocs)
+		// 	if err != nil {
+		// 		return nil, err
+		// 	}
+		// }
+		// fmt.Println("  testcases mocks: ", mocks)
 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
-		doc, err := grpcMock.Decode(mocks)
-		if err != nil {
-			return res, err
-		}
+		// doc, err := grpcMock.Decode(mocks)
+		// if err != nil {
+		// 	return res, err
+		// }
 		switch j.Kind {
-		case string(models.HTTP_EXPORT):
+		case models.HTTP:
 			spec := models.HttpSpec{}
 			err := j.Spec.Decode(&spec)
 			if err != nil {
@@ -166,6 +191,23 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			noise, ok := spec.Assertions["noise"]
 			if !ok {
 				noise = []string{}
+			}
+			if len(spec.Mocks) > 0 {
+				nameCheck := strings.Split(spec.Mocks[0], "-")[0]
+				var mockName string
+				if nameCheck == "mock" {
+					mockName = "mock-" + strings.Split(fileName, "-")[1]
+				} else {
+					mockName = fileName
+				}
+				yamlDocs, err := read(mockPath, mockName, false)
+				if err != nil {
+					return nil, err
+				}
+				mocks, err = grpcMock.Decode(yamlDocs)
+				if err != nil {
+					return nil, err
+				}
 			}
 			res = append(res, models.TestCase{
 				ID: j.Name,
@@ -184,11 +226,11 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 					Body:       spec.Response.Body,
 				},
 				Noise:    noise,
-				Mocks:    doc,
+				Mocks:    mocks,
 				Captured: spec.Created,
-				Type:     "http",
+				Type:     string(models.HTTP),
 			})
-		case string(models.GRPC_EXPORT):
+		case models.GRPC_EXPORT:
 			spec := models.GrpcSpec{}
 			err := j.Spec.Decode(&spec)
 			if err != nil {
@@ -199,34 +241,93 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			if !ok {
 				noise = []string{}
 			}
+			if len(spec.Mocks) > 0 {
+				nameCheck := strings.Split(spec.Mocks[0], "-")[0]
+				var mockName string
+				if nameCheck == "mock" {
+					mockName = "mock-" + strings.Split(fileName, "-")[1]
+				} else {
+					mockName = fileName
+				}
+				yamlDocs, err := read(mockPath, mockName, false)
+				if err != nil {
+					return nil, err
+				}
+				mocks, err = grpcMock.Decode(yamlDocs)
+				if err != nil {
+					return nil, err
+				}
+			}
 			res = append(res, models.TestCase{
-				ID:         j.Name,
-				GrpcReq:    spec.Request.Body,
-				GrpcMethod: spec.Request.Method,
-				GrpcResp:   spec.Response,
-				// HttpReq: models.HttpReq{
-				// 	Method:     spec.Request.Method,
-				// 	ProtoMajor: spec.Request.ProtoMajor,
-				// 	ProtoMinor: spec.Request.ProtoMinor,
-				// 	URL:        spec.Request.URL,
-				// 	Header:     grpcMock.ToHttpHeader(spec.Request.Header),
-				// 	Body:       spec.Request.Body,
-				// 	URLParams:  spec.Request.URLParams,
-				// },
-				// HttpResp: models.HttpResp{
-				// 	StatusCode: spec.Response.StatusCode,
-				// 	Header:     grpcMock.ToHttpHeader(spec.Response.Header),
-				// 	Body:       spec.Response.Body,
-				// },
+				ID: j.Name,
+				// GrpcReq:    spec.Request.Body,
+				GrpcReq: spec.Request,
+				// GrpcMethod: spec.Request.Method,
+				GrpcResp: spec.Response,
 				Noise:    noise,
-				Mocks:    doc,
+				Mocks:    mocks,
 				Captured: spec.Created,
-				Type:     "grpc",
+				Type:     string(models.GRPC_EXPORT),
 			})
 		default:
 			return res, fmt.Errorf("failed to decode the yaml. file: %s  error: Invalid kind of yaml", pkg.SanitiseInput(fileName))
 		}
 
+		// =======
+		// 		var (
+		// 			spec  = models.HttpSpec{}
+		// 			mocks = []*proto.Mock{}
+		// 		)
+		// 		err := j.Spec.Decode(&spec)
+		// 		if err != nil {
+		// 			return nil, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
+		// 		}
+		// 		nameCheck := strings.Split(spec.Mocks[0], "-")[0]
+		// 		var mockName string;
+		// 		if(nameCheck == "mock"){
+		// 			mockName = "mock-" + strings.Split(fileName, "-")[1]
+		// 		} else {
+		// 			mockName = fileName
+		// 		}
+		// 		if len(spec.Mocks) > 0 {
+		// 			yamlDocs, err := read(mockPath, mockName, false)
+		// 			if err != nil {
+		// 				return nil, err
+		// 			}
+		// 			mocks, err = grpcMock.Decode(yamlDocs)
+		// 			if err != nil {
+		// 				return nil, err
+		// 			}
+		// 		}
+		// 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
+
+		// 		noise, ok := spec.Assertions["noise"]
+		// 		if !ok {
+		// 			noise = []string{}
+		// 		}
+		// 		res = append(res, models.TestCase{
+		// 			ID: j.Name,
+		// 			HttpReq: models.HttpReq{
+		// 				Method:     spec.Request.Method,
+		// 				ProtoMajor: spec.Request.ProtoMajor,
+		// 				ProtoMinor: spec.Request.ProtoMinor,
+		// 				URL:        spec.Request.URL,
+		// 				Header:     grpcMock.ToHttpHeader(spec.Request.Header),
+		// 				Body:       spec.Request.Body,
+		// 				URLParams:  spec.Request.URLParams,
+		// 				Form:       spec.Request.Form,
+		// 			},
+		// 			HttpResp: models.HttpResp{
+		// 				StatusCode: spec.Response.StatusCode,
+		// 				Header:     grpcMock.ToHttpHeader(spec.Response.Header),
+		// 				Body:       spec.Response.Body,
+		// 				Binary:     spec.Response.Binary,
+		// 			},
+		// 			Noise:    noise,
+		// 			Mocks:    mocks,
+		// 			Captured: spec.Created,
+		// 		})
+		// >>>>>>> main
 	}
 	return res, nil
 }

@@ -2,7 +2,7 @@ module go.keploy.io/server
 
 go 1.17
 
-// replace github.com/keploy/go-sdk => ../go-sdk
+replace github.com/keploy/go-sdk => github.com/iamskp99/go-sdk v0.0.4-alpha
 
 require (
 	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
@@ -15,7 +15,7 @@ require (
 	github.com/vektah/gqlparser/v2 v2.2.0 // v should b4 less or equal 2.2.0
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.22.0
-	google.golang.org/protobuf v1.28.0
+	google.golang.org/protobuf v1.28.1
 )
 
 require (
@@ -31,12 +31,12 @@ require (
 )
 
 require (
-	github.com/keploy/go-sdk v0.6.4
+	github.com/keploy/go-sdk v0.7.4
 	github.com/soheilhy/cmux v0.1.5
 	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
-	google.golang.org/grpc v1.45.0
+	google.golang.org/grpc v1.48.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
