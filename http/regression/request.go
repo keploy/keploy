@@ -20,7 +20,8 @@ type TestCaseReq struct {
 	TestCasePath string              `json:"test_case_path" bson:"test_case_path"`
 	MockPath     string              `json:"mock_path" bson:"mock_path"`
 	Mocks        []*proto.Mock       `json:"mocks" bson:"mocks"`
-	RejectFields []string            `json:"reject_fields" bson:"reject_fields"`
+	Remove 		 []string            `json:"reject_fields" bson:"reject_fields"`
+	Replace	  	 map[string]string   `json:"replace_fields" bson:"replace_fields"`
 }
 
 func (req *TestCaseReq) Bind(r *http.Request) error {
