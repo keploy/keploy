@@ -24,7 +24,8 @@ message TestCaseReq {
   string TestCasePath = 7;
   string MockPath = 8;
   repeated Mock Mocks = 9;
-  repeated string RejectFields = 10;
+  repeated string Remove = 10;
+  map<string, string> Replace = 11;
 }
 
 

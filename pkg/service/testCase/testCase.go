@@ -13,7 +13,7 @@ import (
 	"sync"
 
 	grpcMock "go.keploy.io/server/grpc/mock"
-	"go.keploy.io/server/grpc/utils"
+	// "go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -239,14 +239,15 @@ func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCase
 	return []string{test[0].Name}, nil
 }
 
-func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath, mockPath, cid string, fieldFilters []string) ([]string, error) {
+func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath, mockPath, cid string, fieldFilters []string, replace map[string]string) ([]string, error) {
 	var (
 		inserted = []string{}
 		err      error
 	)
 	for _, v := range t {
 		// filter the header fields of http testcase
-		v.HttpReq.Header = grpcMock.FilterFields(v.HttpReq.Header, fieldFilters) //Filtering the headers from the testcases.
+		v = grpcMock.FilterFields(v, fieldFilters) //Filtering the headers from the testcases.
+		v = grpcMock.ReplaceFields(v, replace)     //Replacing the fields in the testcases.
 
 		// store testcase in yaml file
 		if r.testExport {
@@ -280,10 +281,6 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			)
 
 			for i, j := range v.Mocks {
-				// filter the header fields in http mocks
-				if j.Spec != nil && j.Spec.Req != nil {
-					j.Spec.Req.Header = utils.GetProtoMap(grpcMock.FilterFields(utils.GetHttpHeader(j.Spec.Req.Header), fieldFilters)) //Filtering the headers from the mocks.
-				}
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
 					r.log.Error(err.Error())

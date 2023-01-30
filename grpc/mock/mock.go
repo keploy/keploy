@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+	"strconv"
 
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
@@ -339,15 +341,101 @@ func GetProtoFormData(formData []models.FormData) []*proto.FormData {
 	return protoFormDataList
 }
 
-func FilterFields(r map[string][]string, filter []string) map[string][]string { //This filters the headers that the user does not want to record
+//	Filter: keploy.Filter{
+//		Remove:  []string{"req.headers.Accept", "resp.headers.Referer", "req.body.Keploy", "metadata.name", "headers.Cookies"},
+//		Replace: []keploy.KV{{key: "req.headers.User-Agent", value: "Keploy"}, {key: "domain", value: "mocking.com"}, {key:"url", value:"domain.com/path"}},
+//	},
+//
+// split on //req.headers.User-Agent //req.headers.Accept
+func FilterFields(r models.TestCase, filter []string) models.TestCase { //This filters the headers that the user does not want to record
 	for _, v := range filter {
-		fieldRegex := regexp.MustCompile(v) //Compile the regex of each header in the filter list.
-		for k, _ := range r {
-			if fieldRegex.MatchString(k) == true { //If the header matches the regex, delete it
-				delete(r, k)
+		fieldType := strings.Split(v, ".")[0]
+		fieldValue := strings.Split(v, ".")[1]
+		fieldName := strings.Split(v, ".")[2]
+		if fieldType == "req" || fieldType == "all" {
+			fieldRegex := regexp.MustCompile(fieldName)
+			switch fieldValue {
+			case "header":
+				for k, _ := range r.HttpReq.Header {
+					if fieldRegex.MatchString(k) == true {
+						delete(r.HttpReq.Header, k)
+					}
+				}
+
+			case "body":
+				var newBody map[string]string
+				err := json.Unmarshal([]byte(r.HttpReq.Body), &newBody)
+				if err != nil {
+					fmt.Println("Error while unmarshalling body", err)
+				}
+				for k, _ := range newBody {
+					if fieldRegex.MatchString(k) == true {
+						delete(newBody, k)
+					}
+				}
+				oldBody, err := json.Marshal(newBody)
+				r.HttpReq.Body = string(oldBody)
+			}
+		}
+		if fieldType == "resp" || fieldType == "all" {
+			fieldRegex := regexp.MustCompile(fieldName)
+			switch fieldValue {
+			case "header":
+				for k, _ := range r.HttpResp.Header {
+					if fieldRegex.MatchString(k) == true {
+						delete(r.HttpResp.Header, k)
+					}
+				}
+
+			case "body":
+				var newBody map[string]string
+				err := json.Unmarshal([]byte(r.HttpResp.Body), &newBody)
+				if err != nil {
+					fmt.Println("Error while unmarshalling body", err)
+				}
+				for k, _ := range newBody {
+					if fieldRegex.MatchString(k) == true {
+						delete(newBody, k)
+					}
+				}
+				oldBody, err := json.Marshal(newBody)
+				r.HttpResp.Body = string(oldBody)
 			}
 		}
 	}
 	return r
-
 }
+func ReplaceFields(r models.TestCase, replace map[string]string) models.TestCase {
+	for k, v := range replace {
+		fieldType := strings.Split(k, ".")[0]
+		fieldValue := strings.Split(k, ".")[1]
+		if fieldType == "req" || fieldType == "all" {
+			switch fieldValue {
+			case "header":
+				newHeader := strings.Split(v, "|")
+				r.HttpReq.Header[strings.Split(k, ".")[2]] = newHeader
+			case "url":
+				r.HttpReq.URL = v
+			case "method":
+				r.HttpReq.Method = models.Method(v)
+			case "proto_major":
+			protomajor, err := strconv.Atoi(v)
+			if err != nil {
+				fmt.Println("Error while converting proto_major to int", err)
+			}
+			r.HttpReq.ProtoMajor = protomajor
+			case "proto_minor":
+			protominor, err := strconv.Atoi(v)
+			if err != nil {
+				fmt.Println("Error while converting proto_minor to int", err)
+			}
+			r.HttpReq.ProtoMinor = protominor
+			}
+		}
+	}
+	return r
+}
+
+//r.HttpReq.
+//character
+//0123456789
