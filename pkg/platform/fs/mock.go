@@ -155,6 +155,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			// spec  = models.HttpSpec{}
 			mocks = []*proto.Mock{}
 		)
+    
 		switch j.Kind {
 		case models.HTTP:
 			spec := models.HttpSpec{}

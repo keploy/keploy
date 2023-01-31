@@ -12,6 +12,7 @@ import (
 
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 )
 
@@ -359,6 +360,12 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 func ToHttpHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
+		match := pkg.IsTime(j)
+		if match {
+			//Values like "Tue, 17 Jan 2023 16:34:58 IST" should be considered as single element
+			header[i] = []string{j}
+			continue
+		}
 		header[i] = strings.Split(j, ",")
 	}
 	return header
