@@ -206,7 +206,7 @@ func TestDeNoise(t *testing.T) {
 				body: `{"message":"Failed", "ts":1674553123}`,
 				path: tcsPath,
 			},
-			result: errors.New("open /Users/ritikjain/Desktop/go-practice/skp-workspace/keploy/pkg/service/regression/tests/test-1.yaml: no such file or directory"),
+			result: errors.New("open " + tcsPath + "/test-1.yaml: no such file or directory"),
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
