@@ -25,6 +25,8 @@ message TestCaseReq {
   string MockPath = 8;
   repeated Mock Mocks = 9;
   string Type = 10;
+  GrpcReq GrpcReq = 11;
+  GrpcResp GrpcResp = 12;
 }
 
 
@@ -35,6 +37,8 @@ message TestReq {
   HttpResp Resp = 4;
   string TestCasePath = 5;
   string MockPath = 6;
+  string Type = 7;
+  GrpcResp GrpcResp = 8;
 }
 
 message TestCase {

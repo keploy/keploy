@@ -328,15 +328,6 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
-
-				// Req: &proto.HttpReq{
-				// 	Method:     string(spec.Request.Method),
-				// 	ProtoMajor: int64(spec.Request.ProtoMajor),
-				// 	ProtoMinor: int64(spec.Request.ProtoMinor),
-				// 	URL:        spec.Request.URL,
-				// 	Header:     utils.GetProtoMap(ToHttpHeader(spec.Request.Header)),
-				// 	Body:       spec.Request.Body,
-				// },
 				GrpcRequest: &proto.GrpcReq{
 					Body:   spec.Request.Body,
 					Method: spec.Request.Method,
@@ -345,16 +336,8 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 					Body: spec.Response.Body,
 					Err:  spec.Response.Err,
 				},
-				Type:    "grpc",
-				Objects: []*proto.Mock_Object{},
-				// Res: &proto.HttpResp{
-				// 	StatusCode:    int64(spec.Response.StatusCode),
-				// 	Header:        utils.GetProtoMap(ToHttpHeader(spec.Response.Header)),
-				// 	Body:          spec.Response.Body,
-				// 	StatusMessage: spec.Response.StatusMessage,
-				// 	ProtoMajor:    int64(spec.Response.ProtoMajor),
-				// 	ProtoMinor:    int64(spec.Request.ProtoMinor),
-				// },
+				Type:       string(models.GRPC_EXPORT),
+				Objects:    []*proto.Mock_Object{},
 				Mocks:      spec.Mocks,
 				Assertions: utils.GetProtoMap(spec.Assertions),
 				Created:    spec.Created,

@@ -155,31 +155,6 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			// spec  = models.HttpSpec{}
 			mocks = []*proto.Mock{}
 		)
-		// <<<<<<< HEAD
-		// mocks, _ := read(mockPath, fileName, false)
-		// if len(spec.Mocks) > 0 {
-		// 	nameCheck := strings.Split(spec.Mocks[0], "-")[0]
-		// 	var mockName string
-		// 	if nameCheck == "mock" {
-		// 		mockName = "mock-" + strings.Split(fileName, "-")[1]
-		// 	} else {
-		// 		mockName = fileName
-		// 	}
-		// 	yamlDocs, err := read(mockPath, mockName, false)
-		// 	if err != nil {
-		// 		return nil, err
-		// 	}
-		// 	mocks, err = grpcMock.Decode(yamlDocs)
-		// 	if err != nil {
-		// 		return nil, err
-		// 	}
-		// }
-		// fmt.Println("  testcases mocks: ", mocks)
-		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
-		// doc, err := grpcMock.Decode(mocks)
-		// if err != nil {
-		// 	return res, err
-		// }
 		switch j.Kind {
 		case models.HTTP:
 			spec := models.HttpSpec{}
@@ -272,62 +247,6 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 		default:
 			return res, fmt.Errorf("failed to decode the yaml. file: %s  error: Invalid kind of yaml", pkg.SanitiseInput(fileName))
 		}
-
-		// =======
-		// 		var (
-		// 			spec  = models.HttpSpec{}
-		// 			mocks = []*proto.Mock{}
-		// 		)
-		// 		err := j.Spec.Decode(&spec)
-		// 		if err != nil {
-		// 			return nil, fmt.Errorf("failed to decode the yaml spec field of testcase. file: %s  error: %s", pkg.SanitiseInput(fileName), err.Error())
-		// 		}
-		// 		nameCheck := strings.Split(spec.Mocks[0], "-")[0]
-		// 		var mockName string;
-		// 		if(nameCheck == "mock"){
-		// 			mockName = "mock-" + strings.Split(fileName, "-")[1]
-		// 		} else {
-		// 			mockName = fileName
-		// 		}
-		// 		if len(spec.Mocks) > 0 {
-		// 			yamlDocs, err := read(mockPath, mockName, false)
-		// 			if err != nil {
-		// 				return nil, err
-		// 			}
-		// 			mocks, err = grpcMock.Decode(yamlDocs)
-		// 			if err != nil {
-		// 				return nil, err
-		// 			}
-		// 		}
-		// 		// TODO: what to log when the testcase dont have any mocks. Either the testcase don't have a mock or it have but keploy is unable to read the mock yaml
-
-		// 		noise, ok := spec.Assertions["noise"]
-		// 		if !ok {
-		// 			noise = []string{}
-		// 		}
-		// 		res = append(res, models.TestCase{
-		// 			ID: j.Name,
-		// 			HttpReq: models.HttpReq{
-		// 				Method:     spec.Request.Method,
-		// 				ProtoMajor: spec.Request.ProtoMajor,
-		// 				ProtoMinor: spec.Request.ProtoMinor,
-		// 				URL:        spec.Request.URL,
-		// 				Header:     grpcMock.ToHttpHeader(spec.Request.Header),
-		// 				Body:       spec.Request.Body,
-		// 				URLParams:  spec.Request.URLParams,
-		// 				Form:       spec.Request.Form,
-		// 			},
-		// 			HttpResp: models.HttpResp{
-		// 				StatusCode: spec.Response.StatusCode,
-		// 				Header:     grpcMock.ToHttpHeader(spec.Response.Header),
-		// 				Body:       spec.Response.Body,
-		// 				Binary:     spec.Response.Binary,
-		// 			},
-		// 			Noise:    noise,
-		// 			Mocks:    mocks,
-		// 			Captured: spec.Created,
-		// 		})
-		// >>>>>>> main
 	}
 	return res, nil
 }

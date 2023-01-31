@@ -1,0 +1,49 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-6-0
+spec:
+    metadata:
+        FindOneOptions: '[]'
+        filter: map[_id:415e534e-10f5-488b-a781-19a4bede11b5 cid:default_company]
+        name: mongodb
+        operation: FindOne.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: H4sIAAAAAAAA/6xU33MT1Rc/Z3fTJiH86Bfm+4WHr1MWHPzRhIa2WvPgTEkEOlBaE8pLptO52b2ki8nucvcGyTAdR0RFRVRU/IWiiAqKiAioqIi++OgTTz75L/jseJy726bJWNQZfUnO2XvuuedzPudz6CY9qSPGd/FA5lnAkY4A9qA2WsAUYHdecCa5jQZg96Rvz9vxPPNlQ0SOno+CYyO+H1n6ZHE0vL5NSr/I9yE9DRiPnMBHOgHYvVX4Vnj0KmA8ctTR64BGgfsB0tuA3SO12nbeDJBOK8e1ZjwRObGdnqOKPQYYG/OshwKk7wGNXU2fYwoAHqGndOx8P4FdY1zOeLaqLDkhPOmNsb2eUBDmXMeNXH2yuENFJSaLOyaYYPUA6Shg1zbObC6Qngc0Nnt2U8V0bXZcJkLT2OKJOtJLALCWnjEQe+rMLwdSOG51KvoL86RUif+j5wzsSJlScCBFz2qoKWApgF56UUPsKU/VPZvXgox6oMAkU48gHQcYohcUewvfjwPqqG/nUW27Wa3Bg6hNE0zOhCZAg15WtzoJwWRJMtkI8p7NVRMWRbs0ihnjQcCq/K87udAdgDvpFcVJO/FaWx9b5ABsoNdUfR1T0RaqPyBEGGfSKQ1xZas9Be5z1+au1QzHh04C3E9v6IjJ9pOTgAYaO1k9rH9+ZtAY46qBR9UAhq18CxRLb2qIifJUearhuHJYfcUkwHp6x0Bc2cZvucXw6Xkq19J3GuJ/ylN3CV4VPAgcz82oaQ2Hlc4ADNK7Omp0RlXUvZsLFRHW0qpuu+OGA2uUfG4hvQ8AdIXe0xGXq0zT6nPJmuF1pg5xKcYVDJvNQeker+zllgyQPgTUw7afD40A6eqCdo4BJkeCgAvpeG6AdLFT+q0exXaxSo0jfQGoj7oy1IoiQyVYMkdsgwcS6XqHqm8AwB10TkNc88duTEc1hiXSWYDb6APVlLMh5y12Qk6SCv5R+qhD2+cBk/+eti+2TXtcGXMPLyL0ywCQoU8MxP+3DUI7vJIUIyJKmkK6oObpY4XtAiBiLFRnpMjb6TMN8b+dzVlQ9WVAugRwN32qbl/6OxqnQ3SlU+RXAeO3FPktYf8TxW+gz3VsHxoNjbxXC5C+BjSK3sNzta6jrzTEVZ3oS/tqea8WhtI1gHvoS4X92uLiTUwIbjmhfAzAWMliNYVPLZ1vOpbO9T9ZOt92Lp0biy+d37T1dATXD2aH+NDAIE9n+/cMpQeHhytpdu9wNp29jw1WuM2z2coQ/vrDqeKmjt/lNt/DGjU5bXl1n7lNXF4VvpV2eSC5nWa+rwEC4rKD5gEzl+0zm2Zu08AsLmW+kxmxbS7ULyC6B03Bg0ZNmrnhbJ+pBG/mDpouq3MzZ25hFcfrLTi9W7krmet4Zp8pOau3hRQaFpOO2WdaM6zuK9nPOH5g5sx+s8/0PceVysn292fN2dlZNa/ddc+tenYFEzvHp0sP7pgubMbYilFXrY1xl4/74fLQylNx27Made7KxIFctre3mds0YKhX5xMkPJ8LpqITrduGbPq8LbFGJ/roUbXmWiHFEC/SIVVMMvrM7dECrgCAcTqEA1UvM/dExhPVjaGdtoWzn4uNlcBzN/rCqTvS2c8z0c4ZLdBjiBif95AOA3bhaoDVdHgVpCz6kc6t6bHp53V0k35ZRj9BT5Iej6FGRwAgRk8AIui4pOLZzUxEiGZUixN5+D0AAP//4jUDflkJAAA=
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-6-1
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x14000395e2a}]'
+        filter: map[_id:5ffa8085-a457-4f14-ae27-d879f46dbb7a]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: '[{$set {5ffa8085-a457-4f14-ae27-d879f46dbb7a PASSED 1674553692 1674553692 68a5f15b-790f-488c-afa5-d81eaa2347bd 415e534e-10f5-488b-a781-19a4bede11b5  { 0 0  map[] map[]   []} [{mongodb NO_SQL_DB map[InsertOneOptions:[] document:x:1  y:23 name:mongodb operation:InsertOne type:NO_SQL_DB] [[44 255 129 3 1 1 15 73 110 115 101 114 116 79 110 101 82 101 115 117 108 116 1 255 130 0 1 1 1 10 73 110 115 101 114 116 101 100 73 68 1 16 0 0 0 79 255 130 1 51 103 111 46 109 111 110 103 111 100 98 46 111 114 103 47 109 111 110 103 111 45 100 114 105 118 101 114 47 98 115 111 110 47 112 114 105 109 105 116 105 118 101 46 79 98 106 101 99 116 73 68 255 131 1 1 1 8 79 98 106 101 99 116 73 68 1 255 132 0 1 6 1 24 0 0 24 255 132 20 0 12 99 255 207 255 169 25 17 100 255 225 35 255 213 255 242 14 255 219 0] [10 255 133 5 1 2 255 136 0 0 0 5 255 134 0 1 1]]}] {0 map[]   0 0 } [body.result] {{false 0 0} [] {true JSON {"result":81,"data":{"name":"Fabio Di Gentanio","team":{"name":"Ducati","championships":"0","points":"1001"}}} {"result":81,"data":{"name":"Fabio Di Gentanio","team":{"name":"Ducati","championships":"0","points":"1001"}}}} []} {{"x":1,"y":23} api.Adder.Add} {{"result":81,"data":{"name":"Fabio Di Gentanio","team":{"name":"Ducati","championships":"0","points":"1001"}}} }}}]'
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738jMyMgTWpCSWJIalFpcmlPC+L+JgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMBg+r+JmYmRrbikKDMvnUeNQcU0LS3RwsDCVDfRxNRc1yTN0EQ3MdXIXDfFwtwyzcQsJSnJPJEBEAAA//8w+cMrlQAAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-6-2
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x140001344f0}]'
+        filter: map[_id:68a5f15b-790f-488c-afa5-d81eaa2347bd]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: map[$inc:[{success 1}]]
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738jMyMgTWpCSWJIalFpcmlPC+L+JgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMDA/r+JkYmRiQEQAAD//4pyI9BnAAAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=

@@ -42,13 +42,13 @@ type GrpcSpec struct {
 }
 
 type GrpcReq struct {
-	Body   string `json:"body" yaml:"body,omitempty" bson:"body,omitempty"`
-	Method string `json:"method" yaml:"method,omitempty" bson:"method,omitempty"`
+	Body   string `json:"body" yaml:"body" bson:"body"`
+	Method string `json:"method" yaml:"method" bson:"method"`
 }
 
 type GrpcResp struct {
-	Body string `json:"body" yaml:"body,omitempty" bson:"body,omitempty"`
-	Err  string `json:"error" yaml:"error,omitempty" bson:"error,omitempty"`
+	Body string `json:"body" yaml:"body" bson:"body"`
+	Err  string `json:"error" yaml:"error" bson:"error"`
 }
 
 type GenericSpec struct {

@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/pkg/models"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/keploy/go-sdk/integrations/kmongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -53,8 +54,14 @@ func (t *testCaseDB) GetApps(ctx context.Context, cid string) ([]string, error) 
 	return apps, nil
 }
 
-func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri string) ([]models.TestCase, error) {
-	filter := bson.M{"cid": cid, "app_id": app, "uri": uri}
+func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri, tcsType string) ([]models.TestCase, error) {
+	var filter primitive.M
+	switch tcsType {
+	case string(models.HTTP):
+		filter = bson.M{"cid": cid, "app_id": app, "uri": uri}
+	case string(models.GRPC_EXPORT):
+		filter = bson.M{"cid": cid, "app_id": app, "grpc_req.method": uri}
+	}
 	findOptions := options.Find()
 	findOptions.SetProjection(bson.M{"anchors": 1, "all_keys": 1})
 	return t.getAll(ctx, filter, findOptions)
@@ -88,12 +95,22 @@ func (t *testCaseDB) GetKeys(ctx context.Context, cid, app, uri string) ([]model
 //	return false, nil
 //}
 
-func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri string, filterKeys map[string][]string) error {
+func (t *testCaseDB) DeleteByAnchor(ctx context.Context, cid, app, uri, tcsType string, filterKeys map[string][]string) error {
 
-	filters := bson.M{
-		"cid":    cid,
-		"app_id": app,
-		"uri":    uri,
+	filters := bson.M{}
+	switch tcsType {
+	case string(models.HTTP):
+		filters = bson.M{
+			"cid":    cid,
+			"app_id": app,
+			"uri":    uri,
+		}
+	case string(models.GRPC_EXPORT):
+		filters = bson.M{
+			"cid":             cid,
+			"app_id":          app,
+			"grpc_req.method": uri,
+		}
 	}
 	_, err := t.c.UpdateMany(ctx, filters, bson.M{
 		"$set": bson.M{"anchors": filterKeys},

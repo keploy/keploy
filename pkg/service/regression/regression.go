@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-test/deep"
 	"github.com/wI2L/jsondiff"
 
 	"github.com/google/uuid"
@@ -159,12 +160,12 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			Expected: tc.HttpResp.StatusCode,
 			Actual:   resp.StatusCode,
 		},
-		BodyResult: models.BodyResult{
+		BodyResult: []models.BodyResult{{
 			Normal:   false,
 			Type:     bodyType,
 			Expected: tc.HttpResp.Body,
 			Actual:   resp.Body,
-		},
+		}},
 	}
 
 	var (
@@ -201,7 +202,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 	}
 
-	res.BodyResult.Normal = pass
+	res.BodyResult[0].Normal = pass
 
 	if !pkg.CompareHeaders(tc.HttpResp.Header, grpcMock.ToHttpHeader(grpcMock.ToMockHeader(resp.Header)), hRes, headerNoise) {
 
@@ -254,7 +255,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			logs += "\t}\n"
 		}
 		// TODO: cleanup the logging related code. this is a mess
-		if !res.BodyResult.Normal {
+		if !res.BodyResult[0].Normal {
 			logs += "\tResponse body: {\n"
 			if json.Valid([]byte(resp.Body)) {
 				// compute and log body's json diff
@@ -323,11 +324,6 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 			return false, nil, nil, err
 		}
 	}
-	// tc, err = r.tdb.Get(ctx, cid, id)
-	// if err != nil {
-	// 	r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-	// 	return false, nil, nil, err
-	// }
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(resp.Body)) {
 		bodyType = models.BodyTypeJSON
@@ -335,11 +331,19 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	pass := true
 
 	res := &models.Result{
-		BodyResult: models.BodyResult{
-			Normal:   false,
-			Type:     bodyType,
-			Expected: tc.GrpcResp.Body,
-			Actual:   resp.Body,
+		BodyResult: []models.BodyResult{
+			{
+				Normal:   false,
+				Type:     bodyType,
+				Expected: tc.GrpcResp.Body,
+				Actual:   resp.Body,
+			},
+			{
+				Normal:   true,
+				Type:     models.BodyTypeError,
+				Expected: tc.GrpcResp.Err,
+				Actual:   resp.Err,
+			},
 		},
 	}
 
@@ -371,8 +375,13 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 			pass = false
 		}
 	}
+	res.BodyResult[0].Normal = pass
 
-	res.BodyResult.Normal = pass
+	if diff := deep.Equal(resp.Err, tc.GrpcResp.Err); diff != nil {
+		pass = false
+		res.BodyResult[1].Normal = false
+	}
+
 	if !pass {
 		logger := pp.New()
 		logger.WithLineInfo = false
@@ -387,7 +396,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 			"%+v\n\n"+"DIFF: \n", tc.ID, tc.GrpcReq, tc.GrpcResp, resp)
 
 		// TODO: cleanup the logging related code. this is a mess
-		if !res.BodyResult.Normal {
+		if !res.BodyResult[0].Normal {
 			logs += "\tResponse body: {\n"
 			if json.Valid([]byte(resp.Body)) {
 				// compute and log body's json diff
@@ -412,6 +421,10 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.GrpcResp, resp)
 
 			}
+		}
+		if !res.BodyResult[1].Normal {
+			logs += "\tResponse error: {\n"
+			logs += logger.Sprintf("\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t}\n", tc.GrpcResp.Err, resp.Err)
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 		logger.Printf(logs)
@@ -454,85 +467,7 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 	t.Status = models.TestStatusFailed
 	if ok {
 		t.Status = models.TestStatusPassed
-		// <<<<<<< HEAD
-		// 		// return ok, nil
-		// 	}
-		// 	// defer func() {
-		// 	if r.testExport {
-		// 		mockIds := []string{}
-		// 		for i := 0; i < len(tc.Mocks); i++ {
-		// 			mockIds = append(mockIds, tc.Mocks[i].Name)
-		// 		}
-		// 		// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
-		// 		r.testReportFS.SetResult(runID, models.TestResult{
-		// 			Name:       runID,
-		// 			Status:     t.Status,
-		// 			Started:    t.Started,
-		// 			Completed:  t.Completed,
-		// 			TestCaseID: id,
-		// 			Req: models.MockHttpReq{
-		// 				Method:     t.Req.Method,
-		// 				ProtoMajor: t.Req.ProtoMajor,
-		// 				ProtoMinor: t.Req.ProtoMinor,
-		// 				URL:        t.Req.URL,
-		// 				URLParams:  t.Req.URLParams,
-		// 				Header:     grpcMock.ToMockHeader(t.Req.Header),
-		// 				Body:       t.Req.Body,
-		// 			},
-		// 			Res: models.MockHttpResp{
-		// 				StatusCode:    t.Resp.StatusCode,
-		// 				Header:        grpcMock.ToMockHeader(t.Resp.Header),
-		// 				Body:          t.Resp.Body,
-		// 				StatusMessage: t.Resp.StatusMessage,
-		// 				ProtoMajor:    t.Resp.ProtoMajor,
-		// 				ProtoMinor:    t.Resp.ProtoMinor,
-		// 			},
-		// 			Mocks:        mockIds,
-		// 			TestCasePath: testCasePath,
-		// 			MockPath:     mockPath,
-		// 			Noise:        tc.Noise,
-		// 			Result:       *res,
-		// 		})
-		// 	} else {
-		// 		err2 := r.saveResult(ctx, t)
-		// 		if err2 != nil {
-		// 			r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
-		// 		}
-		// 	}
-		// 	// }()
-
-		// 	return ok, nil
-		// }
-
-		// func (r *Regression) TestGrpc(ctx context.Context, cid, app, runID, id, resp, testCasePath, mockPath string) (bool, error) {
-		// 	var t *run.Test
-		// 	started := time.Now().UTC()
-		// 	ok, res, tc, err := r.testGrpc(ctx, cid, runID, id, app, resp)
-		// 	if tc != nil {
-		// 		t = &run.Test{
-		// 			ID:         uuid.New().String(),
-		// 			Started:    started.Unix(),
-		// 			RunID:      runID,
-		// 			TestCaseID: id,
-		// 			GrpcMethod: tc.GrpcMethod,
-		// 			GrpcReq:    tc.GrpcReq,
-		// 			Dep:        tc.Deps,
-		// 			GrpcResp:   resp,
-		// 			Result:     *res,
-		// 			Noise:      tc.Noise,
-		// 		}
-		// 	}
-		// 	t.Completed = time.Now().UTC().Unix()
-		// 	// defer func() {
-		// 	// 	err2 := r.saveResult(ctx, t)
-		// 	// 	if err2 != nil {
-		// 	// 		r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
-		// 	// 	}
-		// 	// }()
-
-		// =======
 	}
-	// >>>>>>> main
 	defer func() {
 
 		if r.testExport {
@@ -541,7 +476,6 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 				mockIds = append(mockIds, tc.Mocks[i].Name)
 			}
 			r.testReportFS.Lock()
-			// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
 			r.testReportFS.SetResult(runID, models.TestResult{
 				Kind:       models.HTTP,
 				Name:       runID,
@@ -580,10 +514,6 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
 		}
-		// err := r.runService.SaveResult(ctx, t, tc, res, runID, id, testCasePath, mockPath, r.testExport)
-		// if err != nil {
-		// 	r.log.Error("failed test result to db", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
-		// }
 	}()
 	return ok, nil
 }
@@ -624,7 +554,6 @@ func (r *Regression) TestGrpc(ctx context.Context, resp models.GrpcResp, cid, ap
 				mockIds = append(mockIds, tc.Mocks[i].Name)
 			}
 			r.testReportFS.Lock()
-			// r.store.WriteTestReport(ctx, testReportPath, models.TestReport{})
 			r.testReportFS.SetResult(runID, models.TestResult{
 				Kind:         models.GRPC_EXPORT,
 				Name:         runID,
@@ -648,18 +577,7 @@ func (r *Regression) TestGrpc(ctx context.Context, resp models.GrpcResp, cid, ap
 				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
 		}
-		// err := r.runService.SaveResult(ctx, t, tc, res, runID, id, testCasePath, mockPath, r.testExport)
-		// if err != nil {
-		// 	r.log.Error("failed test result to db", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
-		// }
 	}()
-
-	// defer func() {
-	// 	err2 := r.saveResult(ctx, t)
-	// 	if err2 != nil {
-	// 		r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
-	// 	}
-	// }()
 	return ok, nil
 }
 

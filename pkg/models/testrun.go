@@ -71,7 +71,7 @@ const (
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
 	HeadersResult []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
-	BodyResult    BodyResult     `json:"body_result" bson:"body_result" yaml:"body_result"`
+	BodyResult    []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	DepResult     []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
 }
 
@@ -117,6 +117,7 @@ type BodyType string
 const (
 	BodyTypePlain BodyType = "PLAIN"
 	BodyTypeJSON  BodyType = "JSON"
+	BodyTypeError BodyType = "ERROR"
 )
 
 type TestStatus string
