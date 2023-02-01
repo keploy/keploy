@@ -43,10 +43,6 @@ func MakeFunctionRunOnRootFolder() {
 
 func TestKeploy(t *testing.T) {
 	MakeFunctionRunOnRootFolder()
-	os.Setenv("PORT", "6791")
-	os.Setenv("ENABLE_TEST_EXPORT", "false")
-	os.Setenv("ENABLE_DEDUP", "true")
-	os.Setenv("ENABLE_TELEMETRY", "false")
 	keploy.SetTestMode()
 	go main()
 	keploy.AssertTests(t)
