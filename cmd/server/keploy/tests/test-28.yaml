@@ -1,0 +1,50 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-28
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/deps
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: "229"
+            Content-Type: application/json
+            Postman-Token: f3144cf8-bcc2-4800-996b-306d3f993e36
+            User-Agent: PostmanRuntime/7.30.0
+        body: |-
+            {
+                "app_id": "sample-mocks",
+                "test_name": "test-1",
+                "deps": [
+                    {
+                        "status": 200,
+                        "headers": {
+                            "Accept": "en"
+                        },
+                        "body": "hi there"
+                    }
+                ]
+            }
+        body_type: utf-8
+    resp:
+        status_code: 400
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"status":"Invalid request.","error":"json: cannot unmarshal number into Go struct field BrowserMockReq.deps of type models.FetchResponse"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise: []
+    created: 1674642296
