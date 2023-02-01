@@ -131,10 +131,10 @@ func ConvertResult(r models.Result) *model.Result {
 		StatusCode:    ConvertIntResult(r.StatusCode),
 		HeadersResult: headers,
 		BodyResult: &model.BodyResult{
-			Normal:   r.BodyResult.Normal,
-			Type:     ConvertBodyType(r.BodyResult.Type),
-			Expected: r.BodyResult.Expected,
-			Actual:   r.BodyResult.Actual,
+			Normal:   r.BodyResult[0].Normal,
+			Type:     ConvertBodyType(r.BodyResult[0].Type),
+			Expected: r.BodyResult[0].Expected,
+			Actual:   r.BodyResult[0].Actual,
 		},
 		DepResult: nil,
 	}

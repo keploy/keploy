@@ -1,0 +1,16 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-19-0
+spec:
+    metadata:
+        DistinctOptions: '[]'
+        fieldName: app_id
+        filter: map[cid:default_company]
+        name: mongodb
+        operation: Distinct
+        type: NO_SQL_DB
+    objects:
+        - type: '*[]interface {}'
+          data: H4sIAAAAAAAA/3TOPU/DQAzGcScSAYkoL4D4Fl4QYmdiYEUwh5ybRLk3nd3hxuaDN10a9Tp0/f8k+ynXQ57l6wJZA3DMntYFHguWMNmhbKH+Jq9dxB9iwU/vN3mGVpFx+Ef/Xw5/P1JroR6C79ESCynsLlJBqScW4+yc5gaqNOPbLXjf4AEKE9MT93Bn4vU+7ozXhNYpwh1JP272Ci9n2weNPLogZCkkTyV64j5MXpDVfAoAAP//qWsI9iIBAAA=
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
