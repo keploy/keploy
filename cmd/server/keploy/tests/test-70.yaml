@@ -1,0 +1,95 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-70
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: "232"
+            Content-Type: application/json
+            Postman-Token: 5d5d45e4-cda3-4ab0-8e46-7156350c473c
+            User-Agent: PostmanRuntime/7.30.0
+        body: |-
+            {
+                "operationName": "getRecentTestRuns",
+                "variables": {},
+                "query": "query getRecentTestRuns {\n  testRun {\n    id\n    created\n    updated\n    status\n    app\n    user\n    success\n    failure\n    total\n  }\n}\n"
+            }
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"testRun":[{"id":"4cfe7945-ed00-4ee0-89c9-3da465962754","created":"2023-01-26T07:32:56Z","updated":"2023-01-26T07:32:56Z","status":"FAILED","app":"grpc-nested-app","user":"default_user","success":0,"failure":0,"total":1},{"id":"9a14ece4-0f76-4687-86d8-d6f30f222c1a","created":"2023-01-25T09:49:36Z","updated":"2023-01-25T09:49:36Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":9,"failure":1,"total":10},{"id":"f34ad94f-917f-408f-8992-d423a5bec342","created":"2023-01-25T09:45:37Z","updated":"2023-01-25T09:45:37Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":3},{"id":"3671187f-7659-40b4-83c9-8757e40eeb29","created":"2023-01-25T09:36:46Z","updated":"2023-01-25T09:36:46Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":3},{"id":"cf3d18c9-33ff-4827-b4b6-e78fca48adbb","created":"2023-01-25T09:28:19Z","updated":"2023-01-25T09:28:19Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":3},{"id":"390d7d1b-0af7-45f9-bb38-fd0eb7165e2d","created":"2023-01-25T09:27:35Z","updated":"2023-01-25T09:27:35Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":3},{"id":"bfda8f01-3e45-46c7-acf3-c01af15ee5ad","created":"2023-01-25T09:16:05Z","updated":"2023-01-25T09:16:05Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":3},{"id":"e98f3e7e-2921-4afd-a782-6d8a21512d43","created":"2023-01-25T09:11:09Z","updated":"2023-01-25T09:11:09Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":3},{"id":"953f5304-4f33-4479-af1c-1362dae25888","created":"2023-01-25T09:10:45Z","updated":"2023-01-25T09:10:45Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":3},{"id":"4177067f-0381-447a-a112-02f24fba956d","created":"2023-01-25T08:48:05Z","updated":"2023-01-25T08:48:05Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":2,"failure":1,"total":3},{"id":"46bb19ac-71a8-4945-ab81-1663fb4e9d4b","created":"2023-01-25T08:46:28Z","updated":"2023-01-25T08:46:28Z","status":"PASSED","app":"sample-node-fetch","user":"default_user","success":3,"failure":0,"total":3},{"id":"27ceccb7-6d04-4b03-ade2-6bb45930b20e","created":"2023-01-25T08:46:08Z","updated":"2023-01-25T08:46:08Z","status":"PASSED","app":"sample-node-fetch","user":"default_user","success":3,"failure":0,"total":3},{"id":"2bb03b31-58f8-4a0b-ac6d-4e6f1776b877","created":"2023-01-25T07:27:44Z","updated":"2023-01-25T07:27:44Z","status":"PASSED","app":"sample-node-fetch","user":"default_user","success":3,"failure":0,"total":3},{"id":"84eefacb-8429-4fba-a2e9-4f6158466435","created":"2023-01-25T06:23:42Z","updated":"2023-01-25T09:45:37Z","status":"PASSED","app":"sample-node-fetch","user":"default_user","success":24,"failure":0,"total":3},{"id":"b38c9579-2f13-49f3-a615-30695904f424","created":"2023-01-25T06:18:48Z","updated":"2023-01-25T06:18:48Z","status":"PASSED","app":"sample-node-fetch","user":"default_user","success":14,"failure":0,"total":14},{"id":"d19440f4-17ad-4bee-917e-242348eac05b","created":"2023-01-25T06:12:23Z","updated":"2023-01-25T06:12:23Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":14},{"id":"91bc0561-5eb3-448a-9aa9-6cfe0e31e1bc","created":"2023-01-25T06:07:44Z","updated":"2023-01-25T06:07:44Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":14},{"id":"bb135ddc-27fd-47f1-bbd6-85a8145231c4","created":"2023-01-25T05:59:17Z","updated":"2023-01-25T05:59:17Z","status":"FAILED","app":"sample-node-fetch","user":"default_user","success":0,"failure":0,"total":14},{"id":"68a5f15b-790f-488c-afa5-d81eaa2347bd","created":"2023-01-24T09:48:12Z","updated":"2023-01-24T09:48:12Z","status":"PASSED","app":"grpc-nested-app","user":"default_user","success":2,"failure":2,"total":1},{"id":"3cf26063-09e1-4a42-addd-4e3da2c35709","created":"2023-01-23T12:15:52Z","updated":"2023-01-23T12:15:54Z","status":"PASSED","app":"sample-url-shortener","user":"default_user","success":2,"failure":0,"total":2},{"id":"e760d882-cb4f-4c37-8b40-db19f7e16e43","created":"2023-01-23T12:08:07Z","updated":"2023-01-23T12:08:08Z","status":"PASSED","app":"sample-url-shortener","user":"default_user","success":2,"failure":0,"total":2},{"id":"cc4bd761-55ad-459b-af95-bc46efe7055f","created":"2023-01-23T12:00:04Z","updated":"2023-01-23T12:00:04Z","status":"FAILED","app":"sample-url-shortener","user":"default_user","success":0,"failure":0,"total":0},{"id":"376c3d64-6f1b-4012-962f-c2183ef97750","created":"2023-01-23T11:48:14Z","updated":"2023-01-23T11:48:14Z","status":"FAILED","app":"sample-url-shortener","user":"default_user","success":0,"failure":0,"total":0},{"id":"19f5f107-3183-4ad3-aede-c0b1771adddc","created":"2023-01-23T11:47:23Z","updated":"2023-01-23T11:47:23Z","status":"PASSED","app":"sample-url-shortener","user":"default_user","success":0,"failure":0,"total":0},{"id":"9b897957-892d-41fb-b09b-cb5aa2d29479","created":"2023-01-03T19:07:15Z","updated":"2023-01-03T19:07:15Z","status":"PASSED","app":"sample-url-shortener","user":"default_user","success":2,"failure":0,"total":2}]}}'
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-70-0
+        - mock-70-1
+        - mock-70-2
+        - mock-70-3
+        - mock-70-4
+        - mock-70-5
+        - mock-70-6
+        - mock-70-7
+        - mock-70-8
+        - mock-70-9
+        - mock-70-10
+        - mock-70-11
+        - mock-70-12
+        - mock-70-13
+        - mock-70-14
+        - mock-70-15
+        - mock-70-16
+        - mock-70-17
+        - mock-70-18
+        - mock-70-19
+        - mock-70-20
+        - mock-70-21
+        - mock-70-22
+        - mock-70-23
+        - mock-70-24
+        - mock-70-25
+        - mock-70-26
+        - mock-70-27
+        - mock-70-28
+        - mock-70-29
+        - mock-70-30
+        - mock-70-31
+        - mock-70-32
+        - mock-70-33
+        - mock-70-34
+        - mock-70-35
+        - mock-70-36
+        - mock-70-37
+        - mock-70-38
+        - mock-70-39
+        - mock-70-40
+        - mock-70-41
+        - mock-70-42
+        - mock-70-43
+        - mock-70-44
+        - mock-70-45
+        - mock-70-46
+        - mock-70-47
+        - mock-70-48
+        - mock-70-49
+        - mock-70-50
+        - mock-70-51
+        - mock-70-52
+    assertions:
+        noise: []
+    created: 1675075786

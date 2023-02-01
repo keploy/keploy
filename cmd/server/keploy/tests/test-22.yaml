@@ -1,0 +1,49 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-22
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-GB,en
+            Authorization: BEARER
+            Connection: keep-alive
+            Content-Length: "1004"
+            Content-Type: application/json
+            Cookie: connect.sid=s%3AdxWsE0jhYYsXQwFQKZJhtK_5Jli7MPB1.Wjbj0YQ3J7yJE1Zx21NQAWPtrz1f8i73j9FAnlvbrSg
+            Origin: http://localhost:6790
+            Referer: http://localhost:6790/testlist?index=7&tcId=fec1be96-8392-4e4e-833a-98d53331f782
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36
+        body: '{"operationName":"updateTestCase","variables":{"tc":[{"id":"fec1be96-8392-4e4e-833a-98d53331f782","created":"2022-11-30T06:28:15Z","updated":"2022-11-30T06:28:15Z","captured":"2022-11-30T06:28:15Z","cid":"default_company","app":"myApp","uri":"/api/employees","httpReq":{"protoMajor":1,"protoMinor":1,"url":"/api/employees","urlParam":null,"header":[{"key":"content-length","value":["100"]},{"key":"host","value":["localhost:8080"]},{"key":"content-type","value":["application/json"]},{"key":"user-agent","value":["curl/7.84.0"]},{"key":"accept","value":["*/*"]}],"method":"POST","body":"{\n    \"firstName\": \"Myke\",\n    \"lastName\": \"Tyson\",\n    \"email\": \"mt@gmail.com\",\n    \"timestamp\":1\n}"},"httpResp":{"statusCode":200,"header":null,"body":"{\"id\":6,\"firstName\":\"Myke\",\"lastName\":\"Tyson\",\"email\":\"mt@gmail.com\",\"timestamp\":1669789788}"},"deps":null,"anchors":null,"noise":null}]},"query":"mutation updateTestCase($tc: [TestCaseInput]) {\n  updateTestCase(tc: $tc)\n}\n"}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Credentials: "true"
+            Access-Control-Allow-Origin: '*'
+            Access-Control-Expose-Headers: Link
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"updateTestCase":true}}'
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-22-0
+    assertions:
+        noise: []
+    created: 1674637546

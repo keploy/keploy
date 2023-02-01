@@ -19,6 +19,7 @@ const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
 	SQL            Kind     = "SQL"
+	GRPC_EXPORT    Kind     = "gRPC"
 	BodyTypeUtf8   BodyType = "utf-8"
 	BodyTypeBinary BodyType = "binary"
 )
@@ -28,6 +29,26 @@ type Mock struct {
 	Kind    Kind      `json:"kind" yaml:"kind"`
 	Name    string    `json:"name" yaml:"name"`
 	Spec    yaml.Node `json:"spec" yaml:"spec"`
+}
+
+type GrpcSpec struct {
+	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
+	Request    GrpcReq             `json:"grpc_req" yaml:"grpc_req"`
+	Response   GrpcResp            `json:"grpc_resp" yaml:"grpc_resp"`
+	Objects    []Object            `json:"objects" yaml:"objects"`
+	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
+	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
+	Created    int64               `json:"created" yaml:"created,omitempty"`
+}
+
+type GrpcReq struct {
+	Body   string `json:"body" yaml:"body" bson:"body"`
+	Method string `json:"method" yaml:"method" bson:"method"`
+}
+
+type GrpcResp struct {
+	Body string `json:"body" yaml:"body" bson:"body"`
+	Err  string `json:"error" yaml:"error" bson:"error"`
 }
 
 type GenericSpec struct {

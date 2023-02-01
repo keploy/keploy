@@ -1,0 +1,35 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-43-0
+spec:
+    metadata:
+        FindOneOptions: '[]'
+        filter: map[_id:0542250d-c4b0-4425-9aff-5d10a573faf5 cid:default_company]
+        name: mongodb
+        operation: FindOne.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestCase'
+          data: H4sIAAAAAAAA/7RW7XMTXxU+Z3fTpPmlQgF1/KCGiIOASbZ5adMozKSpQoeW1qbFD5nYud29SRY3u8vem9FOp+NYFFEB8Q3fEBURERFRQRH97le/+N84XOfuJm1Ci++/6cz23nPPvfec8zzPyRV/E59XEWMrlPEqYRTFNuA4KnOzmACMVn1KODVRA4yuemZ/HKsSj3f9cKJWQ+dIxfPCkbq6PBdsP8e5t0wvo/gCYCycMA/FLcDoWd8zgqVvAMbCiVz6FqA2Sz2G4vuA0Yptn6cbDMUdOXGMtuuHk8gF15LBXgOMLLjGpxmKPwNqKxsexQQAfE5cUXH4/lEcWaC87ZoysviS73J3gVxyfZlCb2o54VRdXZ6XXqOry/NLxCcdhuIq4Mg5Skzqo/gKoDbjmhvSZ2TGcogfDLWPu34HxU0AOCq+qCGOd4hXZ9y3nFYj/Beck5Ahvlt8WcOhIxMyHUiILymoyMQSAElxQ0Ecrzc6rkltlpEXzBJO5CUorgMUxVclerv264AqqudpGNtFYncpC8u0RHg7GAJ0xdfkrmFAMF7jhHdZ1TWpLMK+2Y6FPguUMdKi/7qSu9UBOCG+LjEZBF4ZqOMOOADHxTdlfEOsGHBVP+b7gV9KfE9BPLxTnlnqUcekjrER0EfcBjgjvq0ixgdXbgNqqF0gnSD+PmdQW6CygFclAYNSfhckSt9REEfrjXqjazm8JK0YBzgmfqAhHh7At76D8J0+lEfFnxTEQ/XGSZ+2fMqY5ToZydaArOIuQEH8UEVF3JURRS9SX3oEsexEd95yAsJqNY8aKH4MAOK5+JGKeECetCbNNaNNO0Qu4hjGZBom6aUSXVy/RA3OUNwHVIOyPwgGDMXTXe1cA4xXGKM+t1yHoXg0LP2dGkVWyLpNUfwWUJ1zeKAVCYY84K0esF3KOIoXQ6p+CQAfEj9VEN+ztxprYYxBiOIewPvET2RR7gWY76ATYBKX6V8XPxvS9gPA+P9P248G2B6Tg97F+wj9CQBkxC80xPcOEGEwvRr3K354aALFQ8mnn8vcHgIiRgJ1hor8oPiVgviu4eLsqvoJoHgMcEr8Uu5+/O9oXGyLXw+L/Clg7I0if2Pa/4vij4vfqDhIGgW1qmszFL8H1Jbdz/Ri/YB4riAeGc6+dtmuunbgKp4BTIrfydyf7S/e0SWfGlYgHw0wUjOILfOTTecPQ03nxT9pOn8cbjov9286r7SzYhuP6cVCLlfUzbRRWNfThUKumJ4mzWa6aE7opDiVb5JmEf/+l/s3/jr0PWDSJunafM1wOx5xNvAIIx3Ppumub6dZ2/U5daiPWrbr24ja0mJtBRUZhzQoWnyVUT9daVGH41tG17ezU5lSMaOPVAyDehzVk9mT76i6DqcOT89Tp8XbqOTzib4pqNdB4nm2ZRAp9uwl5jp4dDOeTKa6vp0qJ1Ntzj1WzmZbrtuyacZwO6n4FiC+wluIwye9//WTPpI02sRnlJ/u8ma6hJXNFGep8sTkVGEqV9SnJ0v5qXx+Wtf1D4fXBbeVs1nbNYjddhkvl/SSnp1v+4WZT1as1Bag/EOMdlyn5ZrrOHphca32ifm12Rkc0fiGR3cNI93giSJu1jePMcqTm/1jkjk9l0/rE+ncZHKiUC4WysXJTCk3XSgVk6f0Yl5PztVWkp3Tp3KZvD6d16dLU5P/1Z69tdvaaoyFL6dFL+iuJ+qbH3Us+0xy71f/7ERB1/XJfG6qUNpqjDQtm1M/eEWsWWa5n01Dc0iH9gsy6nrUDxAY7d3jUFRanwredYnQtExZ1+bB207DxALhRpuaVbcbtvCxBde0mtagZdWTPwYDlnjfMjeLBwEgKrYlL2E8Lq5EUBFXASAin1kIGHlnO+gqmb1EPPzayv58HO95vYHsY73lAc7H1l1zIyM1c2gvBBj5T3e8zQmomuzK8I8AAAD//2SlDvl8CwAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L6v5eVken/AQYGBtb/+xgYGQEBAAD//2juDlYRAAAA
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-43-1
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x14000457e4f}]'
+        filter: map[_id:0542250d-c4b0-4425-9aff-5d10a573faf5]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: |-
+            [{$set {0542250d-c4b0-4425-9aff-5d10a573faf5 1674725096 1674725096 1674725096 default_company sample-url-shortener /url {POST 1 1 /url map[] map[Accept:[*/*] Content-Length:[33] Content-Type:[application/json] User-Agent:[curl/7.85.0]] {
+              "url": "https://google.com"
+            }  []} {200 map[Content-Type:[application/json; charset=utf-8]] {"ts":1674725096837339000,"url":"http://localhost:8080/Lhr4BWAi"}  0 0 } { } { } [{mongodb NO_SQL_DB map[UpdateOptions:[{<nil> <nil> <nil> <nil> 0x14000632748}] filter:map[_id:Lhr4BWAi] name:mongodb operation:UpdateOne type:NO_SQL_DB update:[{$set {Lhr4BWAi 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 https://google.com}}]] [[94 255 129 3 1 1 12 85 112 100 97 116 101 82 101 115 117 108 116 1 255 130 0 1 4 1 12 77 97 116 99 104 101 100 67 111 117 110 116 1 4 0 1 13 77 111 100 105 102 105 101 100 67 111 117 110 116 1 4 0 1 13 85 112 115 101 114 116 101 100 67 111 117 110 116 1 4 0 1 10 85 112 115 101 114 116 101 100 73 68 1 16 0 0 0 7 255 130 1 2 1 2 0] [10 255 131 5 1 2 255 134 0 0 0 5 255 132 0 1 1]]}] map[body.url:[https://google.com] header.Accept:[*/*] header.Content-Length:[33] header.Content-Type:[application/json] header.User-Agent:[curl/7.85.0]] map[body.url:[https://google.com] header.Accept:[*/*] header.Content-Length:[33] header.Content-Type:[application/json] header.User-Agent:[curl/7.85.0]] [body.ts] [] Http}}]
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r7f5CZkZEntCAlsSQ1KLW4NKeE8f8hBkYWRh7fxJLkjNQU5/zSvBJGFgZGXt/8lMy0TGSR0ILi1KISJBEumIinC6MAAwMD+/9DjEyMTAyAAAAA//+9etQ0ZwAAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L6v5eVken/AQYGBtb/+xgYGQEBAAD//2juDlYRAAAA

@@ -1,6 +1,7 @@
 package models
 
 type TestReport struct {
+	Version Version      `json:"version" yaml:"version"`
 	Name    string       `json:"name" yaml:"name"`
 	Status  string       `json:"status" yaml:"status"`
 	Success int          `json:"success" yaml:"success"`
@@ -10,6 +11,7 @@ type TestReport struct {
 }
 
 type TestResult struct {
+	Kind         Kind         `json:"kind" yaml:"kind"`
 	Name         string       `json:"name" yaml:"name"`
 	Status       TestStatus   `json:"status" yaml:"status"`
 	Started      int64        `json:"started" yaml:"started"`
@@ -17,11 +19,13 @@ type TestResult struct {
 	TestCasePath string       `json:"testCasePath" yaml:"test_case_path"`
 	MockPath     string       `json:"mockPath" yaml:"mock_path"`
 	TestCaseID   string       `json:"testCaseID" yaml:"test_case_id"`
-	Req          MockHttpReq  `json:"req" yaml:"req"`
+	Req          MockHttpReq  `json:"req" yaml:"req,omitempty"`
 	Mocks        []string     `json:"mocks" yaml:"mocks"`
 	Res          MockHttpResp `json:"resp" yaml:"resp,omitempty"`
 	Noise        []string     `json:"noise" yaml:"noise,omitempty"`
 	Result       Result       `json:"result" yaml:"result"`
+	GrpcReq      GrpcReq      `json:"grpc_req" yaml:"grpc_req,omitempty"`
+	GrpcResp     GrpcResp     `json:"grpc_resp" yaml:"grpc_resp,omitempty"`
 }
 
 type TestRun struct {
@@ -51,6 +55,9 @@ type Test struct {
 	Resp       HttpResp     `json:"http_resp" bson:"http_resp,omitempty"`
 	Noise      []string     `json:"noise" bson:"noise"`
 	Result     Result       `json:"result" bson:"result"`
+	// GrpcMethod string       `json:"grpc_method" bson:"grpc_method"`
+	GrpcReq  GrpcReq  `json:"grpc_req" bson:"grpc_req"`
+	GrpcResp GrpcResp `json:"grpc_resp" bson:"grpc_resp,omitempty"`
 }
 
 type TestRunStatus string
@@ -64,7 +71,7 @@ const (
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
 	HeadersResult []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
-	BodyResult    BodyResult     `json:"body_result" bson:"body_result" yaml:"body_result"`
+	BodyResult    []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	DepResult     []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
 }
 
@@ -110,6 +117,7 @@ type BodyType string
 const (
 	BodyTypePlain BodyType = "PLAIN"
 	BodyTypeJSON  BodyType = "JSON"
+	BodyTypeError BodyType = "ERROR"
 )
 
 type TestStatus string
