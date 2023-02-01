@@ -42,14 +42,12 @@ jobs:
       - name: Test
         run: |
           export PORT=6790
-          go run cmd/server/main.go &
-          export PORT=6789 && export ENABLE_TEST_EXPORT=true && go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
+          export KEPLOY_MODE=off && go run cmd/server/main.go &
+          export PORT=6789 && export ENABLE_TEST_EXPORT=false && go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
           cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
         env:
-          # KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: true
           ENABLE_TELEMETRY: false
-          # ENABLE_TEST_EXPORT: false
 
       # - name: Test-withDeDupEnabled
       #   run: |
