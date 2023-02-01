@@ -127,21 +127,16 @@ func ConvertResult(r models.Result) *model.Result {
 	for _, h := range r.HeadersResult {
 		headers = append(headers, ConvertHeaderResult(h))
 	}
-	// TODO: change type of model.Result.BodyResult from *model.BodyResult to []*model.BodyResult
-	var bodyResult *model.BodyResult
-	if len(r.BodyResult) > 0 {
-		bodyResult = &model.BodyResult{
+	return &model.Result{
+		StatusCode:    ConvertIntResult(r.StatusCode),
+		HeadersResult: headers,
+		BodyResult: &model.BodyResult{
 			Normal:   r.BodyResult[0].Normal,
 			Type:     ConvertBodyType(r.BodyResult[0].Type),
 			Expected: r.BodyResult[0].Expected,
 			Actual:   r.BodyResult[0].Actual,
-		}
-	}
-	return &model.Result{
-		StatusCode:    ConvertIntResult(r.StatusCode),
-		HeadersResult: headers,
-		BodyResult:    bodyResult,
-		DepResult:     nil,
+		},
+		DepResult: nil,
 	}
 }
 
