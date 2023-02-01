@@ -38,7 +38,6 @@ import (
 
 // const defaultPort = "8080"
 
-
 const logo string = `
        ▓██▓▄
     ▓▓▓▓██▓█▓▄
@@ -147,14 +146,15 @@ func Server(ver string) *chi.Mux {
 			Filter: keploy.Filter{
 				AcceptUrlRegex: "^/api",
 			},
-
-			Timeout: 80 * time.Second,
+			TestPath: "./cmd/server/keploy/tests",
+			MockPath: "./cmd/server/keploy/mocks",
+			Timeout:  80 * time.Second,
 		},
 
 		Server: keploy.ServerConfig{
-			LicenseKey: conf.APIKey,
-			URL:        "https://api.keploy.io",
-			// URL: "http://localhost:6789/api",
+			// LicenseKey: conf.APIKey,
+			// URL:        "https://api.keploy.io",
+			URL: "http://localhost:6790/api",
 		},
 	})
 
@@ -201,7 +201,7 @@ func Server(ver string) *chi.Mux {
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
+		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
 	})
 
 	g.Go(func() error {

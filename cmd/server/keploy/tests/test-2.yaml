@@ -1,0 +1,35 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-2
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/denoise
+        header:
+            Accept-Encoding: gzip
+            Content-Length: "579"
+            Content-Type: application/json
+            User-Agent: Go-http-client/1.1
+        body: '{"id":"415e534e-10f5-488b-a781-19a4bede11b5","app_id":"grpc-nested-app","run_id":"","resp":{"status_code":0,"header":null,"body":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"grpc_resp":{"body":"{\"result\":87,\"data\":{\"name\":\"Fabio Di Gentanio\",\"team\":{\"name\":\"Ducati\",\"championships\":\"0\",\"points\":\"1001\"}}}","error":""},"test_case_path":"/Users/ritikjain/Desktop/go-practice/skp-workspace/go/grpc-example-app/keploy/tests","mock_path":"/Users/ritikjain/Desktop/go-practice/skp-workspace/go/grpc-example-app/keploy/mocks","type":"gRPC"}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Vary: Origin
+        body: ""
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-2-0
+        - mock-2-1
+    assertions:
+        noise: []
+    created: 1674553627

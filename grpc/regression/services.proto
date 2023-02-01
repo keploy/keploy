@@ -24,6 +24,9 @@ message TestCaseReq {
   string TestCasePath = 7;
   string MockPath = 8;
   repeated Mock Mocks = 9;
+  string Type = 10;
+  GrpcReq GrpcReq = 11;
+  GrpcResp GrpcResp = 12;
 }
 
 
@@ -34,6 +37,8 @@ message TestReq {
   HttpResp Resp = 4;
   string TestCasePath = 5;
   string MockPath = 6;
+  string Type = 7;
+  GrpcResp GrpcResp = 8;
 }
 
 message TestCase {
@@ -135,6 +140,14 @@ message deNoiseResponse {
 message testResponse{
   map<string, bool> pass = 1;
 }
+message GrpcReq {
+  string Body = 1;
+  string Method = 2;
+}
+message GrpcResp {
+  string Body = 1;
+  string Err = 2;
+}
 
 message Mock {
   message Request {
@@ -166,6 +179,8 @@ message Mock {
     optional Table Table = 9;
     int64 Int = 10; // change it to rows commited 
     repeated string Err = 11;
+    GrpcReq GrpcRequest = 12;
+    GrpcResp GrpcResp = 13;
   }
   SpecSchema Spec = 4;
 }
