@@ -323,9 +323,9 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		Deps:  deps,
 		Noise: noise,
 		Mocks: request.Mocks,
-	}}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.Remove, request.Replace)
 		Type:  request.Type,
 	}
+
 	if request.GrpcReq != nil {
 		tc.GrpcReq = models.GrpcReq{
 			Body:   request.GrpcReq.Body,
@@ -338,7 +338,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			Err:  request.GrpcResp.Err,
 		}
 	}
-	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY)
+	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.Remove, request.Replace)
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err
