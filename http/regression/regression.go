@@ -215,6 +215,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		GrpcResp: data.GrpcResp,
 		Mocks:    data.Mocks,
 		Deps:     data.Deps,
+		Type:     string(data.Type),
 	}}, data.TestCasePath, data.MockPath, graph.DEFAULT_COMPANY, data.Remove, data.Replace)
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))

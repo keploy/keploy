@@ -248,7 +248,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 	for _, v := range t {
 		// filter the header fields of http testcase
 		v = grpcMock.FilterFields(v, fieldFilters).(models.TestCase) //Filtering the headers from the testcases.
-		v = grpcMock.ReplaceFields(v, replace)     //Replacing the fields in the testcases.
+		v = grpcMock.ReplaceFields(v, replace)                       //Replacing the fields in the testcases.
 
 		// store testcase in yaml file
 		if r.testExport {
@@ -282,9 +282,9 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			)
 
 			for i, j := range v.Mocks {
-			if j.Spec != nil && j.Spec.Req != nil {
+				if j.Spec != nil && j.Spec.Req != nil {
 					j.Spec = grpcMock.FilterFields(j.Spec, fieldFilters).(*proto.Mock_SpecSchema)
-			}
+				}
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
 					r.log.Error(err.Error())
@@ -320,11 +320,11 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					URL:        v.HttpReq.URL,
 					URLParams:  v.HttpReq.URLParams,
 					Body:       v.HttpReq.Body,
-					Header:     grpcMock.ToMockHeader(v.HttpReq.Header),
-					Form:       v.HttpReq.Form,
-				},
-				Response: models.MockHttpResp{
-					StatusCode:    int(v.HttpResp.StatusCode),
+					Header:     utils.GetProtoMap(v.HttpReq.Header),
+					Form:       grpcMock.GetProtoFormData(v.HttpReq.Form),
+				}
+				testcase.Spec.Res = &proto.HttpResp{
+					StatusCode:    int64(v.HttpResp.StatusCode),
 					Body:          v.HttpResp.Body,
 					Header:        utils.GetProtoMap(v.HttpResp.Header),
 					StatusMessage: v.HttpResp.StatusMessage,
@@ -370,7 +370,13 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 }
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
-
+	uri := ""
+	switch t.Type {
+	case string(models.HTTP):
+		uri = t.URI
+	case string(models.GRPC_EXPORT):
+		uri = t.GrpcReq.Method
+	}
 	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
 	_, ok1 := r.noisyFields[index]
 	_, ok2 := r.fieldCounts[index]
