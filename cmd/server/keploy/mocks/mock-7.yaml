@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-7-0
+spec:
+    metadata:
+        FindOneOptions: '[]'
+        filter: map[_id:68a5f15b-790f-488c-afa5-d81eaa2347bd]
+        name: mongodb
+        operation: FindOne.Decode
+        type: NO_SQL_DB
+    objects:
+        - type: '*models.TestRun'
+          data: H4sIAAAAAAAA/4RUS28cRRCub2Z217uMiQICLhwABSEOiwiJycIBlOzGiUW8ssbeXCwLdWbazqLdmWG6R8InThyA8ApvCIQ/wJ07IYEQzCuE8PgpSIW6Z2d3bGFxmanqqq6vHl8Xv8Jfu0BjTSod5DH4CuEOOEs9+IRGN5NCywgeoTFIo1Kur2qhc2Vc3G7h6h5PU/P3Bkpm9u5qHoZSKXt3UQxHeSaNXFtLtBgVklRagf8movv5LweYX98YJ5EcqceMyVjAV4n4S/7GBbzi8CrhzjLBSiKNVS2ySX7NbjJOR3Ki1YI8LtxbJkJXKDnJeRAs2X8gXwS/RnB7MgV/QfACqVLwB4RaPxkqCX6TUA+kykca/C2hcSpLQ3vtI8JcoZgbnxDRy/yq6ehprdMycBP1ZanPJ5HNYiVLdLIsXkgyk95EHcaF6g6CM8arOQjOrIhMjBX4AqF+WopIZuC3Cd6JJNq25Z8YxiKzoreYZGPwe0T0IL/uAQfHIl1XOhvGWxvFz8bx4RPdx2952BXSNxWSz284cEytPtED/K4DHJyOxAD0hBYGBHyRaIHfcYG52flFggv3OVnkdlaMcqls52orQp+3ItFDfNkB7p6G7clUxpGMw23beb5E9Ax/6gKtquUSwYPXF2Npi13bTgthWRrgCwSvSOFzMtV95gDN9Y31jXwY6445RYso5/dNvsVcJuNtoFVQqJtElp7/2ef5wmdZKiW25P/PcDYXorN8zcUu7ni7MPk6Yb4AVaXTT4SWwS71XwjNnkxL9U8iepq/c4HmUqzL0+um+/V+ko3FCA5h7uRLqQzLF3s81Ll9dkSH+EcHuGc6gQK8gs03iJ7l713A3227sS8E78wweIeIHuEf3ArFdgjOlBo1S42CDj3+2cx6T7VeFWU67RmcP0PzLeP/cIC7qpya9Qp8k+gI/2raVTHcNLXsy6jbRPQw/+4A91ajGmMZ4DaBbxEt8m8uML/HeGtPDWXp+5bwKH9olkZ1rTiVhz7dHqazHxsaV3dO1dU9mWXWL+MrOPRkRyxsHl441z721OOb7aOdTtgWm2KhHXUOSyGeOHL02LkI/1y7HHw1+TaCQb+/1D+FA5HcFPlIPx8m41TE2ziwlaVhO5ZKy6gtzLYvPXKz8h3HoX8DAAD//zy1xX9NBgAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-7-1
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x1400069981a}]'
+        filter: map[_id:68a5f15b-790f-488c-afa5-d81eaa2347bd]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: '[{$set {68a5f15b-790f-488c-afa5-d81eaa2347bd 0 1674553692 PASSED    0 0 0 []}}]'
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738jMyMgTWpCSWJIalFpcmlPC+L+JgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMDA/r+JkYmRiQEQAAD//4pyI9BnAAAA
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=

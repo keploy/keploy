@@ -1,0 +1,22 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-22-0
+spec:
+    metadata:
+        UpdateOptions: '[]'
+        filter: map[_id:fec1be96-8392-4e4e-833a-98d53331f782]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: |-
+            [{$set map[http_req:{POST 1 1 /api/employees map[] map[accept:[*/*] content-length:[100] content-type:[application/json] host:[localhost:8080] user-agent:[curl/7.84.0]] {
+                "firstName": "Myke",
+                "lastName": "Tyson",
+                "email": "mt@gmail.com",
+                "timestamp":1
+            }  []} http_resp:{200 map[] {"id":6,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1669789788}  0 0 }]}]
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r7f5iZkZEntCAlsSQ1KLW4NKeE8f8RBkYWRh7fxJLkjNQU5/zSvBJGFgZGXt/8lMy0TGSR0ILi1KISJBEumIinC6MAAwMD+/8jjEyMTAyAAAAA///CMr3+ZwAAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=

@@ -13,8 +13,8 @@ import (
 	"sync"
 
 	grpcMock "go.keploy.io/server/grpc/mock"
-	// "go.keploy.io/server/grpc/utils"
 	proto "go.keploy.io/server/grpc/regression"
+	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -120,7 +120,7 @@ func (r *TestCase) Get(ctx context.Context, cid, appID, id string) (models.TestC
 
 // readTCS returns all the generated testcases and their mocks from the testCasePath and mockPath directory. It returns all the testcases.
 func (r *TestCase) readTCS(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
-	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
+	if testCasePath == "" || mockPath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
 	res, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)
@@ -140,7 +140,7 @@ func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, l
 		lim = *limit
 	}
 
-	if r.testExport && testCasePath != "" && mockPath != "" {
+	if r.testExport {
 		return r.readTCS(ctx, testCasePath, mockPath)
 	}
 
@@ -294,44 +294,67 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				tc[len(tc)-1].Name = m
 				mocks = append(mocks, m)
 			}
-			tc[0].Spec.Encode(&models.HttpSpec{
-				// Metadata: , TODO: What should be here
-				Request: models.MockHttpReq{
-					Method:     models.Method(v.HttpReq.Method),
-					ProtoMajor: int(v.HttpReq.ProtoMajor),
-					ProtoMinor: int(v.HttpReq.ProtoMinor),
+
+			testcase := &proto.Mock{
+				Version: string(models.V1Beta2),
+				Name:    id,
+				Spec: &proto.Mock_SpecSchema{
+					Objects: []*proto.Mock_Object{{
+						Type: "error",
+						Data: []byte{},
+					}},
+					Mocks: mocks,
+					Assertions: map[string]*proto.StrArr{
+						"noise": {Value: v.Noise},
+					},
+					Created: v.Captured,
+				},
+			}
+			switch v.Type {
+			case string(models.HTTP):
+				testcase.Kind = string(models.HTTP)
+				testcase.Spec.Req = &proto.HttpReq{
+					Method:     string(v.HttpReq.Method),
+					ProtoMajor: int64(v.HttpReq.ProtoMajor),
+					ProtoMinor: int64(v.HttpReq.ProtoMinor),
 					URL:        v.HttpReq.URL,
 					URLParams:  v.HttpReq.URLParams,
 					Body:       v.HttpReq.Body,
-					// Header:     grpcMock.FilterFields(grpcMock.ToMockHeader(v.HttpReq.Header), fieldFilters),
-					Header: grpcMock.ToMockHeader(v.HttpReq.Header),
-					Form:   v.HttpReq.Form,
+					Header:     grpcMock.ToMockHeader(v.HttpReq.Header),
+					Form:       v.HttpReq.Form,
 				},
 				Response: models.MockHttpResp{
 					StatusCode:    int(v.HttpResp.StatusCode),
 					Body:          v.HttpResp.Body,
-					Header:        grpcMock.ToMockHeader(v.HttpResp.Header),
+					Header:        utils.GetProtoMap(v.HttpResp.Header),
 					StatusMessage: v.HttpResp.StatusMessage,
-					ProtoMajor:    int(v.HttpReq.ProtoMajor),
-					ProtoMinor:    int(v.HttpReq.ProtoMinor),
+					ProtoMajor:    int64(v.HttpReq.ProtoMajor),
+					ProtoMinor:    int64(v.HttpReq.ProtoMinor),
 					Binary:        v.HttpResp.Binary,
-				},
-				Objects: []models.Object{{
-					Type: "error",
-					Data: "",
-				}},
-				Mocks: mocks,
-				Assertions: map[string][]string{
-					"noise": v.Noise,
-				},
-				Created: v.Captured,
-			})
+				}
+			case string(models.GRPC_EXPORT):
+				testcase.Kind = string(models.GRPC_EXPORT)
+				testcase.Spec.GrpcRequest = &proto.GrpcReq{
+					Body:   v.GrpcReq.Body,
+					Method: v.GrpcReq.Method,
+				}
+				testcase.Spec.GrpcResp = &proto.GrpcResp{
+					Body: v.GrpcResp.Body,
+					Err:  v.GrpcResp.Err,
+				}
+			}
+			tcsMock, err := grpcMock.Encode(testcase)
+			if err != nil {
+				r.log.Error(err.Error())
+				return nil, err
+			}
+			tc[0] = tcsMock
 			insertedIds, err := r.writeToYaml(ctx, tc, testCasePath, mockPath)
+			r.nextYamlIndex.mu.Unlock()
 			if err != nil {
 				return nil, err
 			}
 			inserted = append(inserted, insertedIds...)
-			r.nextYamlIndex.mu.Unlock()
 			continue
 		}
 
@@ -347,6 +370,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 }
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
+
 	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
 	_, ok1 := r.noisyFields[index]
 	_, ok2 := r.fieldCounts[index]
@@ -364,7 +388,7 @@ func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, e
 	if !ok1 || !ok2 {
 		var anchors []map[string][]string
 		fieldCounts, noisyFields := map[string]map[string]int{}, map[string]bool{}
-		tcs, err := r.tdb.GetKeys(ctx, t.CID, t.AppID, t.URI)
+		tcs, err := r.tdb.GetKeys(ctx, t.CID, t.AppID, uri, t.Type) // TODO: add method for grpc
 		if err != nil {
 			return "", err
 		}
@@ -395,41 +419,64 @@ func (r *TestCase) isDup(ctx context.Context, t *models.TestCase) (bool, error) 
 
 	reqKeys := map[string][]string{}
 	filterKeys := map[string][]string{}
+	uri := ""
 
 	index, err := r.fillCache(ctx, t)
 	if err != nil {
 		return false, err
 	}
 
-	// add headers
-	for k, v := range t.HttpReq.Header {
-		reqKeys["header."+k] = []string{strings.Join(v, "")}
-	}
-
-	// add url params
-	for k, v := range t.HttpReq.URLParams {
-		reqKeys["url_params."+k] = []string{v}
-	}
-
-	// add body if it is a valid json
-	if json.Valid([]byte(t.HttpReq.Body)) {
-		var result interface{}
-
-		err = json.Unmarshal([]byte(t.HttpReq.Body), &result)
-		if err != nil {
-			return false, err
+	switch t.Type {
+	case string(models.HTTP):
+		uri = t.URI
+		// add headers
+		for k, v := range t.HttpReq.Header {
+			reqKeys["header."+k] = []string{strings.Join(v, "")}
 		}
-		body := pkg.Flatten(result)
-		for k, v := range body {
-			nk := "body"
-			if k != "" {
-				nk = nk + "." + k
+
+		// add url params
+		for k, v := range t.HttpReq.URLParams {
+			reqKeys["url_params."+k] = []string{v}
+		}
+
+		// add body if it is a valid json
+		if json.Valid([]byte(t.HttpReq.Body)) {
+			var result interface{}
+
+			err = json.Unmarshal([]byte(t.HttpReq.Body), &result)
+			if err != nil {
+				return false, err
 			}
-			reqKeys[nk] = v
+			body := pkg.Flatten(result)
+			for k, v := range body {
+				nk := "body"
+				if k != "" {
+					nk = nk + "." + k
+				}
+				reqKeys[nk] = v
+			}
+		}
+	case string(models.GRPC_EXPORT):
+		uri = t.GrpcReq.Method
+		if json.Valid([]byte(t.GrpcReq.Body)) {
+			var result interface{}
+
+			err = json.Unmarshal([]byte(t.GrpcReq.Body), &result)
+			if err != nil {
+				return false, err
+			}
+			body := pkg.Flatten(result)
+			for k, v := range body {
+				nk := "body"
+				if k != "" {
+					nk = nk + "." + k
+				}
+				reqKeys[nk] = v
+			}
 		}
 	}
 
-	isAnchorChange := true
+	isAnchorChange := false
 	for k, v := range reqKeys {
 		if !r.noisyFields[index][k] {
 			// update field count
@@ -452,7 +499,7 @@ func (r *TestCase) isDup(ctx context.Context, t *models.TestCase) (bool, error) 
 		return true, nil
 	}
 	if isAnchorChange {
-		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, t.URI, filterKeys)
+		err = r.tdb.DeleteByAnchor(ctx, t.CID, t.AppID, uri, t.Type, filterKeys)
 		if err != nil {
 			return false, err
 		}
