@@ -1,0 +1,16 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-12-0
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x14000544d0e}]'
+        filter: map[_id:84eefacb-8429-4fba-a2e9-4f6158466435]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: '[{$set {84eefacb-8429-4fba-a2e9-4f6158466435 1674627822 1674627822 RUNNING default_company sample-node-fetch default_user 0 0 3 []}}]'
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r7f5CZkZEntCAlsSQ1KLW4NKeE8f8hBkYWRh7fxJLkjNQU5/zSvBJGFgZGXt/8lMy0TGSR0ILi1KISJBEumIinC6MAAwOD6f9DzEyMbMUlRZl56TxqDCoWJqmpaYnJSboWJkaWuiZpSYm6iUapIJaZoamFiZmZibEpAyAAAP//CuzUdpUAAAA=
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L6v5eVken/AQYGBtb/+xgYGQEBAAD//2juDlYRAAAA

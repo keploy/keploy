@@ -1,0 +1,36 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-35
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/test
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: "0"
+            Postman-Token: bd3e03bc-7690-4b17-a598-ad2e5e9aadeb
+            User-Agent: PostmanRuntime/7.30.0
+        body: ""
+        body_type: utf-8
+    resp:
+        status_code: 400
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"status":"Invalid request.","error":"render: unable to automatically decode the request content type"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise: []
+    created: 1674712662

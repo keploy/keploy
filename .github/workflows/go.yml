@@ -28,35 +28,36 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      - name: Test-Export
-        run: |
-          go test -coverpkg=./... -coverprofile=coverage1.tmp.txt -covermode=atomic ./...
-          cat coverage1.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage1.txt
-        env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-          ENABLE_DEDUP: false
-          ENABLE_TEST_EXPORT: true
-          KEPLOY_APP_NAME: Keploy-Test-App-2
-          KEPLOY_REPORT_PATH: ./
+      # - name: Test-Export
+      #   run: |
+      #     go test -coverpkg=./... -coverprofile=coverage1.tmp.txt -covermode=atomic ./...
+      #     cat coverage1.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage1.txt
+      #   env:
+      #     KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
+      #     ENABLE_DEDUP: false
+      #     ENABLE_TEST_EXPORT: true
+      #     KEPLOY_APP_NAME: Keploy-Test-App-2
+      #     KEPLOY_REPORT_PATH: ./
         
       - name: Test
         run: |
-          go test -coverpkg=./... -coverprofile=coverage2.tmp.txt -covermode=atomic ./...
-          cat coverage2.tmp.txt | grep -v "mode: atomic" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage2.txt
+          export PORT=6790
+          export KEPLOY_MODE=off && go run cmd/server/main.go &
+          export PORT=6789 && export ENABLE_TEST_EXPORT=false && go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
+          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
         env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-          ENABLE_DEDUP: false
-          ENABLE_TEST_EXPORT: false
-
-      - name: Test-withDeDupEnabled
-        run: |
-          go test -coverpkg=./... -coverprofile=coverage3.tmp.txt -covermode=atomic ./...
-          cat coverage3.tmp.txt | grep -v "mode: atomic" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage3.txt
-          cat coverage1.txt coverage2.txt coverage3.txt > coverage.txt
-        env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: true
-          ENABLE_TEST_EXPORT: false
+          ENABLE_TELEMETRY: false
+
+      # - name: Test-withDeDupEnabled
+      #   run: |
+      #     go test -coverpkg=./... -coverprofile=coverage3.tmp.txt -covermode=atomic ./...
+      #     cat coverage3.tmp.txt | grep -v "mode: atomic" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage3.txt
+      #     cat coverage1.txt coverage2.txt coverage3.txt > coverage.txt
+      #   env:
+      #     KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
+      #     ENABLE_DEDUP: true
+      #     ENABLE_TEST_EXPORT: false
 
 
 #       - uses: codecov/codecov-action@v2

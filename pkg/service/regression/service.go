@@ -11,6 +11,8 @@ import (
 type Service interface {
 	DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path string) error
 	Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error)
+	// For Grpc
+	TestGrpc(ctx context.Context, resp models.GrpcResp, cid, app, runID, id, testCasePath, mockPath string) (bool, error)
 	Normalize(ctx context.Context, cid, id string) error
 	GetTestRun(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time, offset *int, limit *int) ([]*models.TestRun, error)
 	PutTest(ctx context.Context, run models.TestRun, testExport bool, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error
