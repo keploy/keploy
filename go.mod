@@ -2,8 +2,6 @@ module go.keploy.io/server
 
 go 1.17
 
-// replace github.com/keploy/go-sdk => github.com/iamskp99/go-sdk v0.0.6-alpha
-
 require (
 	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
 	github.com/go-chi/chi v1.5.4
