@@ -14,6 +14,7 @@ import (
 
 	grpcMock "go.keploy.io/server/grpc/mock"
 	// "go.keploy.io/server/grpc/utils"
+	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -246,7 +247,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 	)
 	for _, v := range t {
 		// filter the header fields of http testcase
-		v = grpcMock.FilterFields(v, fieldFilters) //Filtering the headers from the testcases.
+		v = grpcMock.FilterFields(v, fieldFilters).(models.TestCase) //Filtering the headers from the testcases.
 		v = grpcMock.ReplaceFields(v, replace)     //Replacing the fields in the testcases.
 
 		// store testcase in yaml file
@@ -281,6 +282,9 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			)
 
 			for i, j := range v.Mocks {
+			if j.Spec != nil && j.Spec.Req != nil {
+					j.Spec = grpcMock.FilterFields(j.Spec, fieldFilters).(*proto.Mock_SpecSchema)
+			}
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
 					r.log.Error(err.Error())
@@ -343,7 +347,6 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 }
 
 func (r *TestCase) fillCache(ctx context.Context, t *models.TestCase) (string, error) {
-
 	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
 	_, ok1 := r.noisyFields[index]
 	_, ok2 := r.fieldCounts[index]
