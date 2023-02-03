@@ -35,7 +35,7 @@ Merge KTests with unit testing libraries(like Go-Test, JUnit..) to track combine
 
 KMocks can also be referenced in existing tests or use anywhere (including any testing framework). KMocks can also be used as tests for the server.   
 
-> Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main)](https://coveralls.io/github/keploy/keploy?branch=main) &nbsp;  without writing many test-cases or data-mocks. 😎
+> Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;  without writing many test-cases or data-mocks. 😎
 
 [//]: # (<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%" heigth="50%"/></a>)
 
