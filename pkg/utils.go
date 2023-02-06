@@ -9,9 +9,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"net/url"
 
 	"github.com/araddon/dateparse"
 	"go.keploy.io/server/pkg/models"
+	proto "go.keploy.io/server/grpc/regression"
 )
 
 func IsTime(stringDate string) bool {
@@ -273,4 +275,126 @@ func Contains(elems []string, v string) bool {
 		}
 	}
 	return false
+}
+func FilterFields(r interface{}, filter []string) interface{} { //This filters the headers that the user does not want to record
+	for _, v := range filter {
+		fieldType := strings.Split(v, ".")[0]  //req, resp, all
+		fieldValue := strings.Split(v, ".")[1] //header, body
+		fieldName := strings.Split(v, ".")[2]  //name of the header or body
+		switch r.(type) {
+		case models.TestCase: //This is for the case when the user wants to filter the headers of the testcases
+			i := r.(models.TestCase)
+			if fieldType == "req" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header":
+					for k := range i.HttpReq.Header { //If the regex matches the header name, delete it
+						if fieldRegex.MatchString(k) == true {
+							delete(i.HttpReq.Header, k)
+						}
+					}
+				}
+			}
+			if fieldType == "resp" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header":
+					for k, _ := range i.HttpResp.Header {
+						if fieldRegex.MatchString(k) == true {
+							delete(i.HttpResp.Header, k)
+						}
+					}
+				}
+			}
+		case *proto.Mock_SpecSchema: //This is for the case when the user wants to filter the headers of the mocks
+			i := r.(*proto.Mock_SpecSchema)
+			if fieldType == "req" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header":
+					for k := range i.Req.Header {
+						if fieldRegex.MatchString(k) == true {
+							delete(i.Req.Header, k)
+						}
+					}
+				}
+			}
+			if fieldType == "resp" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header":
+					for k := range i.Res.Header {
+						if fieldRegex.MatchString(k) == true {
+							delete(i.Res.Header, k)
+						}
+					}
+				}
+			}
+		}
+	}
+	return r
+}
+func ReplaceFields(r models.TestCase, replace map[string]string) models.TestCase { //For replacing the values of fields in the testcase.
+	for k, v := range replace {
+		fieldType := strings.Split(k, ".")[0]  //req, resp, all
+		fieldValue := strings.Split(k, ".")[1] //header, body, proto_major, proto_minor, method, url
+		if fieldType == "req" || fieldType == "all" {
+			switch fieldValue {
+			case "header":
+				newHeader := strings.Split(v, "|") //The value of the header is a string of the form "value1|value2"
+				r.HttpReq.Header[strings.Split(k, ".")[2]] = newHeader
+			case "domain":
+				url, err := url.Parse(r.HttpReq.URL)
+				if err != nil {
+					fmt.Println("Error while parsing url", err)
+				}
+				url.Host = v
+				r.HttpReq.URL = "something"
+			case "method":
+				r.HttpReq.Method = models.Method(v)
+			case "proto_major":
+				protomajor, err := strconv.Atoi(v)
+				if err != nil {
+					fmt.Println("Error while converting proto_major to int", err)
+				}
+				r.HttpReq.ProtoMajor = protomajor
+			case "proto_minor":
+				protominor, err := strconv.Atoi(v)
+				if err != nil {
+					fmt.Println("Error while converting proto_minor to int", err)
+				}
+				r.HttpReq.ProtoMinor = protominor
+			}
+		}
+		if(fieldType == "meta" || fieldType == "all"){
+
+			switch fieldValue {
+			case "header":
+				newHeader := strings.Split(v, "|") //The value of the header is a string of the form "value1|value2"
+				r.HttpReq.Header[strings.Split(k, ".")[2]] = newHeader
+			case "domain":
+				url, err := url.Parse(r.HttpReq.URL)
+				if err != nil {
+					fmt.Println("Error while parsing url", err)
+				}
+				url.Host = v
+				r.HttpReq.URL = "something"
+			case "method":
+				r.HttpReq.Method = models.Method(v)
+			case "proto_major":
+				protomajor, err := strconv.Atoi(v)
+				if err != nil {
+					fmt.Println("Error while converting proto_major to int", err)
+				}
+				r.HttpReq.ProtoMajor = protomajor
+			case "proto_minor":
+				protominor, err := strconv.Atoi(v)
+				if err != nil {
+					fmt.Println("Error while converting proto_minor to int", err)
+				}
+				r.HttpReq.ProtoMinor = protominor
+			}
+		}
+	}
+	return r
 }
