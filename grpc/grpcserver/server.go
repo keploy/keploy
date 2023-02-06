@@ -66,7 +66,7 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 }
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
-	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata)
+	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata, request.Remove, request.Replace)
 	if err != nil {
 		return nil, err
 	}

@@ -14,7 +14,7 @@ const (
 )
 
 type Service interface {
-	Put(ctx context.Context, path string, doc *proto.Mock, meta interface{}) error
+	Put(ctx context.Context, path string, doc *proto.Mock, meta interface{}, remove []string, replace map[string]string) error
 	GetAll(ctx context.Context, path string, name string) ([]models.Mock, error)
 	FileExists(ctx context.Context, path string, overWrite bool) (bool, error)
 }

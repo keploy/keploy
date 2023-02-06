@@ -203,6 +203,8 @@ message SqlCol  {
 message PutMockReq {
   Mock Mock = 1;
   string Path = 2;
+  repeated string Remove = 3;
+  map<string, string> Replace = 4;
 }
 
 message PutMockResp {

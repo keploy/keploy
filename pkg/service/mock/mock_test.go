@@ -447,7 +447,7 @@ func TestService(t *testing.T) {
 	} {
 		var actErr error
 		if tt.input.doc != nil {
-			actErr = mockSrv.Put(context.Background(), path, tt.input.doc, tt.input.meta)
+			actErr = mockSrv.Put(context.Background(), path, tt.input.doc, tt.input.meta, []string{}, map[string]string{})
 			if (actErr == nil && tt.result.putErr != nil) || (actErr != nil && tt.result.putErr == nil) || (actErr != nil && tt.result.putErr != nil && actErr.Error() != tt.result.putErr.Error()) {
 				t.Fatal("test failed at Put", "Expected error", tt.result.putErr, "Actual error", actErr)
 			}
@@ -463,7 +463,7 @@ func TestService(t *testing.T) {
 			t.Fatal("test failed at FileExists", "Expected error", tt.result.getAllErr, "Actual error", actErr)
 		}
 		for i, v := range tt.input.appendDocs {
-			actErr = mockSrv.Put(context.Background(), path, v, tt.input.meta)
+			actErr = mockSrv.Put(context.Background(), path, v, tt.input.meta, []string{}, map[string]string{})
 			if (actErr == nil && tt.result.FinalErr[i] != nil) || (actErr != nil && tt.result.FinalErr[i] == nil) || (actErr != nil && tt.result.FinalErr[i] != nil && actErr.Error() != tt.result.FinalErr[i].Error()) {
 				t.Fatal("test failed at Put after FileExists", "Expected error", tt.result.putErr, "Actual error", actErr)
 			}
