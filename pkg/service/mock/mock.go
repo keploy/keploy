@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -63,7 +65,76 @@ func (m *Mock) FileExists(ctx context.Context, path string, overWrite bool) (boo
 	return exists, nil
 }
 
-func (m *Mock) Put(ctx context.Context, path string, doc *proto.Mock, meta interface{}) error {
+func replaceHttpFields(doc *proto.Mock, replace map[string]string) {
+	if doc.Kind == string(models.HTTP) {
+		for k, v := range replace {
+			fieldType := strings.Split(k, ".")[0]  //req, resp, all
+			fieldValue := strings.Split(k, ".")[1] //header, body, proto_major, proto_minor, method, url
+			if fieldType == "req" || fieldType == "all" {
+				switch fieldValue {
+				case "header":
+					newHeader := strings.Split(v, "|") //The value of the header is a string of the form "value1|value2"
+					doc.Spec.Req.Header[strings.Split(k, ".")[2]] = utils.ToStrArr(newHeader)
+				case "domain":
+					url, err := url.Parse(doc.Spec.Req.URL)
+					if err != nil {
+						fmt.Println("Error while parsing url", err)
+					}
+					url.Host = v
+					doc.Spec.Req.URL = "something"
+				case "method":
+					doc.Spec.Req.Method = v
+				case "proto_major":
+					protomajor, err := strconv.Atoi(v)
+					if err != nil {
+						fmt.Println("Error while converting proto_major to int", err)
+					}
+					doc.Spec.Req.ProtoMajor = int64(protomajor)
+				case "proto_minor":
+					protominor, err := strconv.Atoi(v)
+					if err != nil {
+						fmt.Println("Error while converting proto_minor to int", err)
+					}
+					doc.Spec.Req.ProtoMinor = int64(protominor)
+				}
+			}
+			if fieldType == "meta" || fieldType == "all" {
+
+				switch fieldValue {
+				case "header":
+					newHeader := strings.Split(v, "|") //The value of the header is a string of the form "value1|value2"
+					doc.Spec.Req.Header[strings.Split(k, ".")[2]] = utils.ToStrArr(newHeader)
+				case "domain":
+					url, err := url.Parse(doc.Spec.Req.URL)
+					if err != nil {
+						fmt.Println("Error while parsing url", err)
+					}
+					url.Host = v
+					doc.Spec.Req.URL = "something"
+				case "method":
+					doc.Spec.Req.Method = v
+				case "proto_major":
+					protomajor, err := strconv.Atoi(v)
+					if err != nil {
+						fmt.Println("Error while converting proto_major to int", err)
+					}
+					doc.Spec.Req.ProtoMajor = int64(protomajor)
+				case "proto_minor":
+					protominor, err := strconv.Atoi(v)
+					if err != nil {
+						fmt.Println("Error while converting proto_minor to int", err)
+					}
+					doc.Spec.Req.ProtoMinor = int64(protominor)
+				}
+			}
+		}
+
+	}
+}
+
+func (m *Mock) Put(ctx context.Context, path string, doc *proto.Mock, meta interface{}, remove []string, replace map[string]string) error {
+	doc.Spec = pkg.FilterFields(doc.Spec, remove).(*proto.Mock_SpecSchema)
+	replaceHttpFields(doc, replace)
 	newMock, err := grpcMock.Encode(doc)
 	if err != nil {
 		m.log.Error("failed to encode the mock to yaml document", zap.Error(err))
