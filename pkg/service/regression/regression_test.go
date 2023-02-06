@@ -211,7 +211,7 @@ func TestDeNoise(t *testing.T) {
 	} {
 		// setup. Write the tcs yaml which is to be tested
 		tcSvc := testCase.New(nil, logger, false, nil, http.Client{}, true, mockFS)
-		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany)
+		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, )
 
 		// update the tcs yaml with noised fields
 		ctx := context.Background()
