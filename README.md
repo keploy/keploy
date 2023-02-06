@@ -35,7 +35,7 @@ Merge KTests with unit testing libraries(like Go-Test, JUnit..) to track combine
 
 KMocks can also be referenced in existing tests or use anywhere (including any testing framework). KMocks can also be used as tests for the server.   
 
-> Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main)](https://coveralls.io/github/keploy/keploy?branch=main) &nbsp;  without writing any test-cases and data-mocks. 😎
+> Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;  without writing many test-cases or data-mocks. 😎
 
 [//]: # (<a href="https://www.youtube.com/watch?v=i7OqSVHjY1k"><img alt="link-to-video-demo" src="https://raw.githubusercontent.com/keploy/docs/main/static/img/link-to-demo-video.png" title="Link to Demo Video" width="50%" heigth="50%"/></a>)
 
@@ -54,19 +54,19 @@ Keploy is added as a middleware to your application that captures and replays al
 Visit [https://docs.keploy.io](https://docs.keploy.io/docs/keploy-explained/how-keploy-works) to read more in detail..
 
 
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="100%"  alt="Generate Test Case from API call"/>
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="80%"  alt="Generate Test Case from API call"/>
 
 ## Features
 
 ### 1. Export tests and mocks and maintain alongside existing tests
 
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="100%"  alt="Generate Test Case from API call"/>
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="80%"  alt="Generate Test Case from API call"/>
 
 ### 2.  Integrates with `go-test`, `junit`
 Keploy has native interoperability as it integrates with popular testing libraries like `go-test`, `junit`. 
 Code coverage will be reported with existing plus KTests. It'll also be **integrated in CI pipelines/infrastructure automatically** if you already have `go-test`, `junit` integrated.
 
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/replay-tc.gif" width="100%"  alt="Generate Test Case from API call"/>
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/replay-tc.gif" width="80%"  alt="Generate Test Case from API call"/>
 
 ### 3. Accurate Noise Detection
 Filters noisy fields in API responses like (timestamps, random values) to ensure high quality tests.
@@ -212,7 +212,8 @@ this should show you have 74.4% coverage without writing any code!
 ok      echo-psql-url-shortener 5.820s  coverage: 74.4% of statements in ./...
 ```
 
-All of these can be visualised here - http://localhost:6789/testlist
+The Test Run can be visualised in the terminal where Keploy server is running. You can also checkout the details of the 
+Test Run Report as a report file generated locally in the Keploy Server directory.  
 
 ## Keploy SDK Modes
 ### SDK Modes
@@ -254,9 +255,7 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 [![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/keploy/samples-go)
 
 ##  Current Limitations
-* **Async operations**: Currently Keploy stores dependencies in an array and expects them to be executed in the same order (FIFO). This means if the order of dependency execution changes (typical in async), keploy would likely throw an error. This is generally fine for E2E tests since the responses are generally unaffected. We plan to fix this by using a map instead in the future. 
 * **Unit Testing**: While Keploy is designed to run alongside unit testing frameworks (Go test, JUnit..) and can add to the overall code coverage, it still generates E2E tests. So it might be easier to write unit tests for some methods instead of E2E tests. 
-* **K8S CRDs** Keploy generates yamls for test and mocks which share a similar structure to K8s CRDs. However, they cannot be installed on kubernetes.
 * **Production usage** Keploy is currently focused on generating tests for developers. These tests can be captured from any environment, but we have not tested it on high volume production environments. This would need robust deduplication to avoid too many redundant tests being captured. We do have ideas on building a robust deduplication system [#27](https://github.com/keploy/keploy/issues/27) 
 * **De-noise requires mocking** Keploy issues a duplicate request and compares the responses with the previous responses to find "noisy" or non-deterministic fields. We have to ensure all non-idempotent dependencies are mocked/wrapped by Keploy to avoid unnecessary side effects in downstream services.  
 
@@ -284,11 +283,3 @@ We'd love to collaborate with you to make Keploy great. To get started:
 <!-- markdownlint-restore -->
 <!-- prettier-ignore-end -->
 <!-- ALL-CONTRIBUTORS-LIST:END -->
-
-## Launching keploy Rewards
- Contributed to keploy? Here is a big thank you from our community to you.
- Claim your badge and showcase them with pride.
- Let us inspire more folks !
-
- ![keploy Badges](https://aviyel.com/assets/uploads/rewards/share/project/41/512/share.png)
- ### **[Claim Now!](https://aviyel.com/projects/41/keploy/rewards)**
