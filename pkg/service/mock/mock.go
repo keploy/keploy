@@ -133,8 +133,9 @@ func replaceHttpFields(doc *proto.Mock, replace map[string]string) {
 }
 
 func (m *Mock) Put(ctx context.Context, path string, doc *proto.Mock, meta interface{}, remove []string, replace map[string]string) error {
-	doc.Spec = pkg.FilterFields(doc.Spec, remove).(*proto.Mock_SpecSchema)
-	replaceHttpFields(doc, replace)
+	doc.Spec = pkg.FilterFields(doc.Spec, remove, m.log).(*proto.Mock_SpecSchema)
+	// replaceHttpFields(doc, replace)
+	doc.Spec = pkg.ReplaceFields(doc.Spec, replace, m.log).(*proto.Mock_SpecSchema)
 	newMock, err := grpcMock.Encode(doc)
 	if err != nil {
 		m.log.Error("failed to encode the mock to yaml document", zap.Error(err))
