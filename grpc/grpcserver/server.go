@@ -3,7 +3,6 @@ package grpcserver
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -67,7 +66,6 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 }
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
-	fmt.Println("put mock called", request.Remove)
 	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata, request.Remove, request.Replace)
 	if err != nil {
 		return nil, err
