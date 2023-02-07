@@ -247,8 +247,8 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 	)
 	for _, v := range t {
 		// filter the header fields of http testcase
-		v = pkg.FilterFields(v, fieldFilters).(models.TestCase) //Filtering the headers from the testcases.
-		v = pkg.ReplaceFields(v, replace)                       //Replacing the fields in the testcases.
+		v = pkg.FilterFields(v, fieldFilters, r.log).(models.TestCase) //Filtering the headers from the testcases.
+		v = pkg.ReplaceFields(v, replace, r.log).(models.TestCase)     //Replacing the fields in the testcases.
 
 		// store testcase in yaml file
 		if r.testExport {
@@ -283,7 +283,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 
 			for i, j := range v.Mocks {
 				if j.Spec != nil && j.Spec.Req != nil {
-					j.Spec = pkg.FilterFields(j.Spec, fieldFilters).(*proto.Mock_SpecSchema)
+					j.Spec = pkg.FilterFields(j.Spec, fieldFilters, r.log).(*proto.Mock_SpecSchema)
 				}
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
