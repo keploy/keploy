@@ -39,8 +39,7 @@ func (m *Mock) FileExists(ctx context.Context, path string, overWrite bool) (boo
 	exists := m.mockFS.Exists(ctx, path)
 	if exists {
 		if !overWrite {
-			// TODO: chaNGE	to Info level
-			m.log.Error(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(path)))
+			m.log.Info(fmt.Sprint("❌ Yaml file already exists with mock name: ", filepath.Base(path)))
 		} else {
 			path := strings.Split(path, "/")
 			fileName := strings.Split(path[len(path)-1], ".")[0]
@@ -68,8 +67,6 @@ func (m *Mock) Put(ctx context.Context, path string, doc *proto.Mock, meta inter
 	newMock, err := grpcMock.Encode(doc)
 	if err != nil {
 		return pkg.LogError("failed to encode the mock to yaml document", m.log, err)
-		// m.log.Error("failed to encode the mock to yaml document", zap.Error(err))
-		// return err
 	}
 
 	mocksFromMap, ok := m.mocks.Load(newMock.Name)
@@ -121,7 +118,6 @@ func (m *Mock) put(ctx context.Context, path string, doc models.Mock, meta inter
 	err := m.mockFS.Write(ctx, path, doc)
 	if err != nil {
 		return pkg.LogError("", m.log, err)
-		// m.log.Error(err.Error())
 	}
 	MockPathStr := fmt.Sprint("\n✅ Mocks are successfully written in yaml file at path: ", path, "/", doc.Name, ".yaml", "\n")
 	if isGenerated {
@@ -139,8 +135,6 @@ func (m *Mock) GetAll(ctx context.Context, path string, name string) ([]models.M
 	arr, err := m.mockFS.Read(ctx, path, name, true)
 	if err != nil {
 		return nil, pkg.LogError("failed to read then yaml file", m.log, err)
-		// m.log.Error("failed to read then yaml file", zap.Any("error", err))
-		// return nil, err
 	}
 	MockPathStr := fmt.Sprint("\n✅ Mocks are read successfully from yaml file at path: ", path, "/", name, ".yaml", "\n")
 	m.log.Info(MockPathStr)
@@ -152,28 +146,20 @@ func (m *Mock) upsert(ctx context.Context, mock *proto.Mock, path, name string, 
 	mocks, err := m.mockFS.Read(ctx, path, name, true)
 	if err != nil {
 		return pkg.LogError("", m.log, err)
-		// m.log.Error(err.Error())
-		// return err
 	}
 	newMock, err := grpcMock.Encode(mock)
 	if err != nil {
 		return pkg.LogError("", m.log, err)
-		// m.log.Error(err.Error())
-		// return err
 	}
 
 	err = os.Remove(filepath.Join(path, name+".yaml"))
 	if err != nil {
 		return pkg.LogError("failed to remove mocks from", m.log, err, map[string]interface{}{"file": name})
-		// m.log.Error("failed to remove mocks from", zap.String("file", name), zap.Error(err))
-		// return err
 	}
 	mocks[len(mocks)-updateCount] = newMock
 	err = m.mockFS.WriteAll(ctx, path, name, mocks)
 	if err != nil {
 		return pkg.LogError("failed to write updated mocks", m.log, err)
-		// m.log.Error("failed to write updated mocks", zap.Error(err))
-		// return err
 	}
 	// for i := 0; i < len(arr)-updateCount; i++ {
 	// 	err := m.mockFS.Write(ctx, path, arr[i])
