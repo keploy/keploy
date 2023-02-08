@@ -233,13 +233,14 @@ func TestService(t *testing.T) {
 						Objects: []*proto.Mock_Object{},
 					},
 				},
-				remove: []string{"all.header.Content-Type"},
+				remove: []string{"all.header.Content-Type", "invalid_format"},
 				replace: map[string]string{
 					"header.Accept": "all",
 					"domain":        "google.com",
 					"method":        "PATCH",
 					"proto_major":   "0",
 					"proto_minor":   "0",
+					"header":        "Invalid_format", // format should header.<key>
 				},
 				appendDocs: []*proto.Mock{
 					{
