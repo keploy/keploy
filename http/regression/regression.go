@@ -201,7 +201,6 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-
 	now := time.Now().UTC().Unix()
 	inserted, err = rg.tcSvc.Insert(r.Context(), []models.TestCase{{
 		ID:       uuid.New().String(),
@@ -217,7 +216,7 @@ func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
 		Mocks:    data.Mocks,
 		Deps:     data.Deps,
 		Type:     string(data.Type),
-	}}, data.TestCasePath, data.MockPath, graph.DEFAULT_COMPANY)
+	}}, data.TestCasePath, data.MockPath, graph.DEFAULT_COMPANY, data.Remove, data.Replace)
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
