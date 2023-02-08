@@ -1,0 +1,19 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mock-72-0
+spec:
+    metadata:
+        UpdateOptions: '[{<nil> <nil> <nil> <nil> 0x140001f1f58}]'
+        filter: map[_id:8bb569cb-197c-4646-8237-ff6dec1654e0]
+        name: mongodb
+        operation: UpdateOne
+        type: NO_SQL_DB
+        update: |-
+            [{$set {8bb569cb-197c-4646-8237-ff6dec1654e0 1675766517 1675766517 1674725096 default_company sample-url-shortener /url {POST 1 1 /url map[] map[Accept:[*/*] Content-Length:[33] User-Agent:[foo-bar]] {
+              "url": "https://google.com"
+            }  []} {200 map[] {"ts":1674725096837339000,"url":"http://localhost:8080/Lhr4BWAi"}  0 0 } { } { } [{mongodb NO_SQL_DB map[UpdateOptions:[{<nil> <nil> <nil> <nil> 0x14000632748}] filter:map[_id:Lhr4BWAi] name:mongodb operation:UpdateOne type:NO_SQL_DB update:[{$set {Lhr4BWAi 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 https://google.com}}]] [[94 255 129 3 1 1 12 85 112 100 97 116 101 82 101 115 117 108 116 1 255 130 0 1 4 1 12 77 97 116 99 104 101 100 67 111 117 110 116 1 4 0 1 13 77 111 100 105 102 105 101 100 67 111 117 110 116 1 4 0 1 13 85 112 115 101 114 116 101 100 67 111 117 110 116 1 4 0 1 10 85 112 115 101 114 116 101 100 73 68 1 16 0 0 0 7 255 130 1 2 1 2 0] [10 255 131 5 1 2 255 134 0 0 0 5 255 132 0 1 1]]}] map[] map[] [] [] Http}}]
+    objects:
+        - type: '*mongo.UpdateResult'
+          data: H4sIAAAAAAAA/4r738jMyMgTWpCSWJIalFpcmlPC+L+JgZGFkcc3sSQ5IzXFOb80r4SRhYGR1zc/JTMtE1kktKA4tagESYQLJuLpwijAwMBg+r+JmYmRrbikKDMvnUeNQcUiKcnUzDI5SdfQ0jxZ18TMxEzXwsjYXDctzSwlNdnQzNQk1YABEAAA///oBBdQlQAAAA==
+        - type: '*keploy.KError'
+          data: H4sIAAAAAAAA/+L638zKyPS/jYGBgfV/CwMjIyAAAP//7jjoexEAAAA=
