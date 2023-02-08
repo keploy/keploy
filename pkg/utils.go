@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"net/url"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/araddon/dateparse"
+	proto "go.keploy.io/server/grpc/regression"
+	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
+	"go.uber.org/zap"
 )
 
 func IsTime(stringDate string) bool {
@@ -273,4 +277,172 @@ func Contains(elems []string, v string) bool {
 		}
 	}
 	return false
+}
+
+func FilterFields(r interface{}, filter []string, logger *zap.Logger) interface{} { //This filters the headers that the user does not want to record
+	for _, v := range filter {
+		fields := strings.Split(v, ".")
+		if len(fields) < 3 {
+			LogError(fmt.Sprintf("failed to filter a tcs field `%v` due to invalid format. Format should be `<req_OR_resp_OR_all>.<header_OR_body>.<FIELD_NAME>`", v), logger, nil)
+			// logger.Error(fmt.Sprintf("failed to filter a tcs field `%v` due to invalid format. Format should be `<req_OR_resp_OR_all>.<header_OR_body>.<FIELD_NAME>`", v))
+			continue
+		}
+		fieldType := fields[0]  //req, resp, all
+		fieldValue := fields[1] //header, body
+		fieldName := fields[2]  //name of the header or body
+
+		switch i := r.(type) {
+		case models.TestCase: //This is for the case when the user wants to filter the headers of the testcases
+			// i := r.(models.TestCase)
+			if fieldType == "req" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header": // pair with matching key is filtered from request headers
+					for k := range i.HttpReq.Header { //If the regex matches the header name, delete it
+						if fieldRegex.MatchString(k) {
+							delete(i.HttpReq.Header, k)
+						}
+					}
+					// TODO: Filter for request body
+				}
+			}
+			if fieldType == "resp" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header": // filters pair with matching key from the response headers
+					for k := range i.HttpResp.Header {
+						if fieldRegex.MatchString(k) {
+							delete(i.HttpResp.Header, k)
+						}
+					}
+					// TODO: Filter for response body
+				}
+			}
+		case *proto.Mock_SpecSchema: //This is for the case when the user wants to filter the headers of the mocks
+			// i := r.(*proto.Mock_SpecSchema)
+			if fieldType == "req" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header": // pair with matching key is filtered from request headers
+					for k := range i.Req.Header {
+						if fieldRegex.MatchString(k) {
+							delete(i.Req.Header, k)
+						}
+					}
+					// TODO: Filter for response body
+				}
+			}
+			if fieldType == "resp" || fieldType == "all" {
+				fieldRegex := regexp.MustCompile(fieldName)
+				switch fieldValue {
+				case "header": // filters pair with matching key from the response headers
+					for k := range i.Res.Header {
+						if fieldRegex.MatchString(k) {
+							delete(i.Res.Header, k)
+						}
+					}
+				}
+			}
+		}
+	}
+	return r
+}
+
+// replaceUrlDomain changes the Domain of the full urlStr to domain
+func replaceUrlDomain(urlStr string, domain string, logger *zap.Logger) (*url.URL, error) {
+	replaceUrl, err := url.Parse(urlStr)
+	if err != nil {
+		return replaceUrl, LogError("failed to replace http.Request domain field due to error while parsing url", logger, err)
+		// logger.Error("failed to replace http.Request domain field due to error while parsing url", zap.Error(err))
+		// return replaceUrl, err
+	}
+	replaceUrl.Host = domain // changes the Domain of parsed url
+	return replaceUrl, nil
+}
+
+// ReplaceFields replaces the http test-case Request fields to values from the "replace" map.
+func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger) interface{} {
+	for k, v := range replace {
+		fields := strings.Split(k, ".")
+		fieldType := fields[0] //header, domain, method, proto_major, proto_minor
+
+		switch fieldType {
+		case "header": // FORMAT should be "header.key":"val1 | val2 | val3"
+			newHeader := strings.Split(v, " | ") //The value of the header is a string of the form "value1 | value2"
+			if len(fields) > 1 {
+				switch i := r.(type) {
+				case models.TestCase:
+					i.HttpReq.Header[fields[1]] = newHeader
+				case *proto.Mock_SpecSchema:
+					i.Req.Header[fields[1]] = utils.ToStrArr(newHeader)
+				}
+			} else {
+				LogError("failed to replace http.Request header field due to no header key provided. The format should be `map[string]string{'header.Accept': 'val1 | val2 | val3'}`", logger, nil)
+				// logger.Error("failed to replace http.Request header field due to no header key provided. The format should be `map[string]string{'header.Accept': 'val1 | val2 | val3'}`")
+			}
+		case "domain":
+			switch i := r.(type) {
+			case models.TestCase:
+				if replacedUrl, err := replaceUrlDomain(i.HttpReq.URL, v, logger); err == nil {
+					i.HttpReq.URL = replacedUrl.String()
+				}
+			case *proto.Mock_SpecSchema:
+				if replacedUrl, err := replaceUrlDomain(i.Req.URL, v, logger); err == nil {
+					i.Req.URL = replacedUrl.String()
+
+				}
+			}
+		case "method":
+			switch i := r.(type) {
+			case models.TestCase:
+				i.HttpReq.Method = models.Method(v)
+			case *proto.Mock_SpecSchema:
+				i.Req.Method = v
+				i.Metadata["operation"] = v
+			}
+		case "proto_major":
+			protomajor, err := strconv.Atoi(v)
+			if err != nil {
+				LogError("failed to replace http.Request proto_major field", logger, err)
+				// logger.Error("failed to replace http.Request proto_major field", zap.Error(err))
+			}
+			switch i := r.(type) {
+			case models.TestCase:
+				i.HttpReq.ProtoMajor = protomajor
+			case *proto.Mock_SpecSchema:
+				i.Req.ProtoMajor = int64(protomajor)
+			}
+		case "proto_minor":
+			protominor, err := strconv.Atoi(v)
+			if err != nil {
+				LogError("failed to replace http.Request proto_minor field", logger, err)
+				// logger.Error("failed to replace http.Request proto_minor field", zap.Error(err))
+			}
+			switch i := r.(type) {
+			case models.TestCase:
+				i.HttpReq.ProtoMinor = protominor
+			case *proto.Mock_SpecSchema:
+				i.Req.ProtoMinor = int64(protominor)
+			}
+		default:
+			LogError("Invlaid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`", logger, nil)
+			// logger.Error("Invlaid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`")
+		}
+	}
+	return r
+}
+
+func LogError(message string, logger *zap.Logger, err error, params ...map[string]interface{}) error {
+	var zapFields []zap.Field = []zap.Field{zap.Error(err)}
+	for _, m := range params {
+		for k, v := range m {
+			sanitisedOutput := v
+			if val, ok := v.(string); ok {
+				sanitisedOutput = SanitiseInput(val)
+			}
+			zapFields = append(zapFields, zap.Any(k, sanitisedOutput))
+		}
+	}
+	logger.Error(message, zapFields...)
+	return err
 }

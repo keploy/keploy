@@ -81,8 +81,9 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 	}
 	res, err := grpcMock.Decode(mocks)
 	if err != nil {
-		srv.logger.Error(err.Error())
-		return &proto.GetMockResp{}, err
+		return nil, pkg.LogError("", srv.logger, err)
+		// srv.logger.Error(err.Error())
+		// return &proto.GetMockResp{}, err
 	}
 	response := &proto.GetMockResp{
 		Mocks: res,
@@ -235,13 +236,15 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
 		if err != nil {
-			srv.logger.Error("request for fetching testcases in converting offset to integer")
+			return nil, pkg.LogError("request for fetching testcases in converting offset to intege", srv.logger, err)
+			// srv.logger.Error("request for fetching testcases in converting offset to integer")
 		}
 	}
 	if limitStr != "" {
 		limit, err = strconv.Atoi(limitStr)
 		if err != nil {
-			srv.logger.Error("request for fetching testcases in converting limit to integer")
+			return nil, pkg.LogError("request for fetching testcases in converting limit to integer", srv.logger, err)
+			// srv.logger.Error("request for fetching testcases in converting limit to integer")
 		}
 	}
 
@@ -264,9 +267,10 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 	// find noisy fields
 	m, err := pkg.FlattenHttpResponse(utils.GetHttpHeader(request.HttpResp.Header), request.HttpResp.Body)
 	if err != nil {
-		msg := "error in flattening http response"
-		srv.logger.Error(msg, zap.Error(err))
-		return nil, errors.New(msg)
+		pkg.LogError("error in flattening http response", srv.logger, err)
+		// msg := "error in flattening http response"
+		// srv.logger.Error(msg, zap.Error(err))
+		return nil, errors.New("error in flattening http response")
 	}
 	noise := pkg.FindNoisyFields(m, func(k string, vals []string) bool {
 		// check if k is date
@@ -339,12 +343,14 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 	}
 	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY)
 	if err != nil {
-		srv.logger.Error("error putting testcase", zap.Error(err))
-		return nil, err
+		return nil, pkg.LogError("error putting testcase", srv.logger, err)
+		// srv.logger.Error("error putting testcase", zap.Error(err))
+		// return nil, err
 	}
 	if len(inserted) == 0 {
-		srv.logger.Error("unknown failure while inserting testcase")
-		return nil, err
+		return nil, pkg.LogError("unknown failure while inserting testcase", srv.logger, err)
+		// srv.logger.Error("unknown failure while inserting testcase")
+		// return nil, err
 	}
 	return &proto.PostTCResponse{
 		TcsId: map[string]string{"id": inserted[0]},
