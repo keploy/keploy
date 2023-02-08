@@ -241,6 +241,7 @@ func TestService(t *testing.T) {
 					"proto_major":   "0",
 					"proto_minor":   "0",
 					"header":        "Invalid_format", // format should header.<key>
+					"invalid_field": "val",
 				},
 				appendDocs: []*proto.Mock{
 					{
@@ -331,6 +332,11 @@ func TestService(t *testing.T) {
 				replace    map[string]string
 			}{
 				name: "mock-4",
+				replace: map[string]string{
+					"proto_major": "xyz",
+					"proto_minor": "xyz",
+					"domain":      "google.com",
+				},
 				doc: &proto.Mock{
 					Version: string(models.V1Beta2),
 					Name:    "mock-4",
@@ -344,7 +350,7 @@ func TestService(t *testing.T) {
 							Method:     "POST",
 							ProtoMajor: 0,
 							ProtoMinor: 0,
-							URL:        "/url",
+							URL:        `&www.example:.com/file[/].html`, // invalid URL for url parser error handling
 							BodyData:   []byte{0x80, 0x81, 0x82, 0x83},
 							Header: map[string]*proto.StrArr{
 								"Accept":  {Value: []string{"*/*"}},
