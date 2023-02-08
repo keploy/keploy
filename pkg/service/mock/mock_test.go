@@ -43,6 +43,8 @@ func TestService(t *testing.T) {
 			meta       interface{}
 			name       string
 			appendDocs []*proto.Mock
+			remove     []string
+			replace    map[string]string
 		}
 		result struct {
 			putErr    error
@@ -59,6 +61,8 @@ func TestService(t *testing.T) {
 				meta       interface{}
 				name       string
 				appendDocs []*proto.Mock
+				remove     []string
+				replace    map[string]string
 			}{
 				name: "mock-1",
 				doc: &proto.Mock{
@@ -152,6 +156,8 @@ func TestService(t *testing.T) {
 				meta       interface{}
 				name       string
 				appendDocs []*proto.Mock
+				remove     []string
+				replace    map[string]string
 			}{
 				name: "mock-2",
 				doc: &proto.Mock{
@@ -187,6 +193,8 @@ func TestService(t *testing.T) {
 				meta       interface{}
 				name       string
 				appendDocs []*proto.Mock
+				remove     []string
+				replace    map[string]string
 			}{
 				name: "mock-3",
 				doc: &proto.Mock{
@@ -202,17 +210,21 @@ func TestService(t *testing.T) {
 							Method:     "POST",
 							ProtoMajor: 0,
 							ProtoMinor: 0,
-							URL:        "/url",
+							URL:        "https://youtube.com/url",
 							BodyData:   []byte("sample request data"),
 							Body:       "sample request data",
 							Header: map[string]*proto.StrArr{
-								"Accept": {Value: []string{"*/*"}},
+								"Accept":         {Value: []string{"*/*"}},
+								"Content-Length": {Value: []string{"28"}},
+								"Content-Type":   {Value: []string{"application/json"}},
 							},
 						},
 						Res: &proto.HttpResp{
 							StatusCode: 200,
 							Header: map[string]*proto.StrArr{
-								"Connection": {Value: []string{"Close"}},
+								"Connection":     {Value: []string{"Close"}},
+								"Content-Length": {Value: []string{"16"}},
+								"Content-Type":   {Value: []string{"application/json"}},
 							},
 							BodyData: []byte(`{"message": "passed"}`),
 							Body:     `{"message": "passed"}`,
@@ -220,6 +232,16 @@ func TestService(t *testing.T) {
 						Created: time.Now().Unix(),
 						Objects: []*proto.Mock_Object{},
 					},
+				},
+				remove: []string{"all.header.Content-Type", "invalid_format"},
+				replace: map[string]string{
+					"header.Accept": "all",
+					"domain":        "google.com",
+					"method":        "PATCH",
+					"proto_major":   "0",
+					"proto_minor":   "0",
+					"header":        "Invalid_format", // format should header.<key>
+					"invalid_field": "val",
 				},
 				appendDocs: []*proto.Mock{
 					{
@@ -306,8 +328,15 @@ func TestService(t *testing.T) {
 				meta       interface{}
 				name       string
 				appendDocs []*proto.Mock
+				remove     []string
+				replace    map[string]string
 			}{
 				name: "mock-4",
+				replace: map[string]string{
+					"proto_major": "xyz",
+					"proto_minor": "xyz",
+					"domain":      "google.com",
+				},
 				doc: &proto.Mock{
 					Version: string(models.V1Beta2),
 					Name:    "mock-4",
@@ -321,7 +350,7 @@ func TestService(t *testing.T) {
 							Method:     "POST",
 							ProtoMajor: 0,
 							ProtoMinor: 0,
-							URL:        "/url",
+							URL:        `&www.example:.com/file[/].html`, // invalid URL for url parser error handling
 							BodyData:   []byte{0x80, 0x81, 0x82, 0x83},
 							Header: map[string]*proto.StrArr{
 								"Accept":  {Value: []string{"*/*"}},
@@ -397,6 +426,8 @@ func TestService(t *testing.T) {
 				meta       interface{}
 				name       string
 				appendDocs []*proto.Mock
+				remove     []string
+				replace    map[string]string
 			}{
 				name: "mock-3",
 				appendDocs: []*proto.Mock{
@@ -447,7 +478,7 @@ func TestService(t *testing.T) {
 	} {
 		var actErr error
 		if tt.input.doc != nil {
-			actErr = mockSrv.Put(context.Background(), path, tt.input.doc, tt.input.meta)
+			actErr = mockSrv.Put(context.Background(), path, tt.input.doc, tt.input.meta, tt.input.remove, tt.input.replace)
 			if (actErr == nil && tt.result.putErr != nil) || (actErr != nil && tt.result.putErr == nil) || (actErr != nil && tt.result.putErr != nil && actErr.Error() != tt.result.putErr.Error()) {
 				t.Fatal("test failed at Put", "Expected error", tt.result.putErr, "Actual error", actErr)
 			}
@@ -463,7 +494,7 @@ func TestService(t *testing.T) {
 			t.Fatal("test failed at FileExists", "Expected error", tt.result.getAllErr, "Actual error", actErr)
 		}
 		for i, v := range tt.input.appendDocs {
-			actErr = mockSrv.Put(context.Background(), path, v, tt.input.meta)
+			actErr = mockSrv.Put(context.Background(), path, v, tt.input.meta, []string{}, map[string]string{})
 			if (actErr == nil && tt.result.FinalErr[i] != nil) || (actErr != nil && tt.result.FinalErr[i] == nil) || (actErr != nil && tt.result.FinalErr[i] != nil && actErr.Error() != tt.result.FinalErr[i].Error()) {
 				t.Fatal("test failed at Put after FileExists", "Expected error", tt.result.putErr, "Actual error", actErr)
 			}

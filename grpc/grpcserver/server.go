@@ -66,7 +66,7 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 }
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
-	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata)
+	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata, request.Remove, request.Replace)
 	if err != nil {
 		return nil, err
 	}
@@ -325,6 +325,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		Mocks: request.Mocks,
 		Type:  request.Type,
 	}
+
 	if request.GrpcReq != nil {
 		tc.GrpcReq = models.GrpcReq{
 			Body:   request.GrpcReq.Body,
@@ -337,7 +338,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 			Err:  request.GrpcResp.Err,
 		}
 	}
-	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY)
+	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.Remove, request.Replace)
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err

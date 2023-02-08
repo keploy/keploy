@@ -189,7 +189,7 @@ func TestInsert(t *testing.T) {
 			},
 		},
 	} {
-		actId, actErr := tcSvc.Insert(context.Background(), tt.input.t, tt.input.testCasePath, tt.input.mockPath, defaultCompany)
+		actId, actErr := tcSvc.Insert(context.Background(), tt.input.t, tt.input.testCasePath, tt.input.mockPath, defaultCompany, []string{}, map[string]string{})
 		if (actErr == nil && tt.result.err != nil) || (actErr != nil && tt.result.err == nil) || (actErr != nil && tt.result.err != nil && actErr.Error() != tt.result.err.Error()) {
 			t.Fatal("Err from Insert does not matches", "Expected", tt.result.err, "Actual", actErr)
 		}
@@ -320,7 +320,7 @@ func TestGetAll(t *testing.T) {
 			},
 		},
 	} {
-		tcSvc.Insert(context.Background(), tt.result.tcs, tt.input.testCasePath, tt.input.mockPath, defaultCompany)
+		tcSvc.Insert(context.Background(), tt.result.tcs, tt.input.testCasePath, tt.input.mockPath, defaultCompany, []string{}, map[string]string{})
 
 		actTcs, actErr := tcSvc.GetAll(context.Background(), defaultCompany, "", nil, nil, tt.input.testCasePath, tt.input.mockPath)
 		if (actErr == nil && tt.result.err != nil) || (actErr != nil && tt.result.err == nil) || (actErr != nil && tt.result.err != nil && actErr.Error() != tt.result.err.Error()) {
