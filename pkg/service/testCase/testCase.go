@@ -78,14 +78,17 @@ func (r *TestCase) Delete(ctx context.Context, cid, id string) error {
 	defer r.mu.Unlock()
 	t, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.Error(err))
+
+		// r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.Error(err))
+		pkg.LogError("failed to get testcases from the DB", r.log, err, map[string]interface{}{"cid": cid, "id": id})
 		return errors.New("internal failure")
 	}
 	index := fmt.Sprintf("%s-%s-%s", t.CID, t.AppID, t.URI)
 	delete(r.anchors, index)
 	err = r.tdb.Delete(ctx, id)
 	if err != nil {
-		r.log.Error("failed to delete testcase from the DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
+		pkg.LogError("failed to delete testcases from the DB", r.log, err, map[string]interface{}{"cid": cid, "id": id})
+		// r.log.Error("failed to delete testcase from the DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
 		return errors.New("internal failure")
 	}
 
@@ -107,12 +110,14 @@ func (r *TestCase) GetApps(ctx context.Context, cid string) ([]string, error) {
 // Note: During testcase-export, generated testcase will not be displayed in ui currently. Because path is not provided by the ui graphQL query.
 func (r *TestCase) Get(ctx context.Context, cid, appID, id string) (models.TestCase, error) {
 	if r.testExport {
-		return models.TestCase{}, nil
+		return models.TestCase{}, pkg.LogError("failed to call query call for tcs", r.log, errors.New("keploy is running on test-export. Export `ENABLE_TEST_EXPORT` env variable as 'false'"))
 	}
 	tcs, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {
-		sanitizedAppID := pkg.SanitiseInput(appID)
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
+		// return nil,
+		// sanitizedAppID := pkg.SanitiseInput(appID)
+		// r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
+		pkg.LogError("failed to get testcases from the DB", r.log, err, map[string]interface{}{"appID": appID, "cid": cid})
 		return models.TestCase{}, errors.New("internal failure")
 	}
 	return tcs, nil
@@ -147,9 +152,10 @@ func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, l
 	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
 
 	if err != nil {
-		sanitizedAppID := pkg.SanitiseInput(appID)
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
-		return nil, errors.New("internal failure")
+		return nil, pkg.LogError("failed to get testcases from the DB", r.log, err, map[string]interface{}{"appID": appID, "cid": cid})
+		// sanitizedAppID := pkg.SanitiseInput(appID)
+		// r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
+		// return nil, errors.New("internal failure")
 	}
 	return tcs, nil
 }
@@ -158,8 +164,9 @@ func (r *TestCase) Update(ctx context.Context, t []models.TestCase) error {
 	for _, v := range t {
 		err := r.tdb.UpdateTC(ctx, v)
 		if err != nil {
-			r.log.Error("failed to insert testcase into DB", zap.String("appID", v.AppID), zap.Error(err))
-			return errors.New("internal failure")
+			return pkg.LogError("failed to insert testcase into DB", r.log, err, map[string]interface{}{"appID": v.AppID})
+			// r.log.Error("failed to insert testcase into DB", zap.String("appID", v.AppID), zap.Error(err))
+			// return errors.New("internal failure")
 		}
 	}
 	r.tele.EditTc(r.client, ctx)
@@ -174,18 +181,21 @@ func (r *TestCase) putTC(ctx context.Context, cid string, t models.TestCase) (st
 		// check if already exists
 		dup, err := r.isDup(ctx, &t)
 		if err != nil {
-			r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-			return "", errors.New("internal failure")
+			return "", pkg.LogError("failed to run deduplication on the testcase", r.log, err, map[string]interface{}{"appID": t.AppID, "cid": cid})
+			// r.log.Error("failed to run deduplication on the testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
+			// return "", errors.New("internal failure")
 		}
 		if dup {
+			// TODO: Call the generic info logger func
 			r.log.Info("found duplicate testcase", zap.String("cid", cid), zap.String("appID", t.AppID), zap.String("uri", t.URI))
 			return "", nil
 		}
 	}
 	err = r.tdb.Upsert(ctx, t)
 	if err != nil {
-		r.log.Error("failed to insert testcase into DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
-		return "", errors.New("internal failure")
+		return "", pkg.LogError("failed to insert testcase into DB", r.log, err, map[string]interface{}{"cid": cid, "appID": t.AppID})
+		// r.log.Error("failed to insert testcase into DB", zap.String("cid", cid), zap.String("appID", t.AppID), zap.Error(err))
+		// return "", errors.New("internal failure")
 	}
 
 	return t.ID, nil
@@ -194,16 +204,20 @@ func (r *TestCase) putTC(ctx context.Context, cid string, t models.TestCase) (st
 func (r *TestCase) insertToDB(ctx context.Context, cid string, tcs []models.TestCase) ([]string, error) {
 	var ids []string
 	if len(tcs) == 0 {
-		err := errors.New("no testcase to update")
-		r.log.Error(err.Error())
-		return nil, err
+		return nil, pkg.LogError("no testcase to update", r.log, errors.New("no testcase to update"))
+		// err := errors.New("no testcase to update")
+		// r.log.Error(err.Error())
+		// return nil, err
+
 	}
 	for _, t := range tcs {
 		id, err := r.putTC(ctx, cid, t)
 		if err != nil {
-			msg := "failed saving testcase"
-			r.log.Error(msg, zap.Error(err), zap.String("cid", cid), zap.String("id", t.ID), zap.String("app", t.AppID))
-			return nil, errors.New(msg)
+			// msg := "failed saving testcase"
+			return nil, pkg.LogError("failed saving testcase", r.log, err, map[string]interface{}{"id": t.ID, "appID": t.AppID, "cid": cid})
+
+			// r.log.Error(msg, zap.Error(err), zap.String("cid", cid), zap.String("id", t.ID), zap.String("app", t.AppID))
+			// return nil, errors.New(msg)
 		}
 		ids = append(ids, id)
 	}
@@ -215,15 +229,17 @@ func (r *TestCase) insertToDB(ctx context.Context, cid string, tcs []models.Test
 func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCasePath, mockPath string) ([]string, error) {
 	if testCasePath == "" || !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		err := fmt.Errorf("path directory not found. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
-		r.log.Error(err.Error())
-		return nil, err
+		return nil, pkg.LogError("", r.log, err)
+		// r.log.Error(err.Error())
+		// return nil, err
 	}
 	// test[0] will always be a testcase. test[1:] will be the mocks.
 	// check for known noisy fields like dates
 	err := r.mockFS.Write(ctx, testCasePath, test[0])
 	if err != nil {
-		r.log.Error(err.Error())
-		return nil, err
+		return nil, pkg.LogError("", r.log, err)
+		// r.log.Error(err.Error())
+		// return nil, err
 	}
 	r.log.Info(fmt.Sprint("\n💾 Recorded testcase with name: ", test[0].Name, " in yaml file at path: ", testCasePath, "\n"))
 	mockName := "mock" + test[0].Name[4:]
@@ -231,8 +247,9 @@ func (r *TestCase) writeToYaml(ctx context.Context, test []models.Mock, testCase
 	if len(test) > 1 {
 		err = r.mockFS.WriteAll(ctx, mockPath, mockName, test[1:])
 		if err != nil {
-			r.log.Error(err.Error())
-			return nil, err
+			return nil, pkg.LogError("", r.log, err)
+			// r.log.Error(err.Error())
+			// return nil, err
 
 		}
 		r.log.Info(fmt.Sprint("\n💾 Recorded mocks for testcase with name: ", test[0].Name, " at path: ", mockPath, "\n"))
@@ -258,14 +275,21 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			if !ok {
 				tcs, err := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
 				if len(tcs) > 0 && err == nil {
-					if len(strings.Split(tcs[len(tcs)-1].ID, "-")) < 1 || len(strings.Split(strings.Split(tcs[len(tcs)-1].ID, "-")[1], ".")) == 0 {
+					// filename is of the format "test-<Sequence_Number>.yaml"
+					if len(strings.Split(tcs[len(tcs)-1].ID, "-")) < 1 ||
+						len(strings.Split(strings.Split(tcs[len(tcs)-1].ID, "-")[1], ".")) == 0 {
 						return nil, errors.New("failed to decode the last sequence number from yaml test")
 					}
 					indx := strings.Split(strings.Split(tcs[len(tcs)-1].ID, "-")[1], ".")[0]
 					lastIndex, err = strconv.Atoi(indx)
 					if err != nil {
-						r.log.Error("failed to get the last sequence number for testcase", zap.Error(err))
-						return nil, err
+						return nil, pkg.LogError(
+							"failed to get the last sequence number for testcase",
+							r.log,
+							err,
+						)
+						// r.log.Error("failed to get the last sequence number for testcase", zap.Error(err))
+						// return nil, err
 					}
 				}
 			}
@@ -287,7 +311,13 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				}
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
-					r.log.Error(err.Error())
+					return nil, pkg.LogError(
+						"failed to encode mocks to write",
+						r.log,
+						err,
+						map[string]interface{}{"test id": doc.Name},
+					)
+					// r.log.Error(err.Error())
 				}
 				tc = append(tc, doc)
 				m := "mock-" + fmt.Sprint(lastIndex+1) + "-" + strconv.Itoa(i)
@@ -345,8 +375,9 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			}
 			tcsMock, err := grpcMock.Encode(testcase)
 			if err != nil {
-				r.log.Error(err.Error())
-				return nil, err
+				return nil, pkg.LogError("", r.log, err)
+				// r.log.Error(err.Error())
+				// return nil, err
 			}
 			tc[0] = tcsMock
 			insertedIds, err := r.writeToYaml(ctx, tc, testCasePath, mockPath)

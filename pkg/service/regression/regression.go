@@ -57,13 +57,15 @@ type Regression struct {
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		r.log.Error("file path should be absolute to read and write testcases and their mocks")
-		return fmt.Errorf("file path should be absolute")
+		return pkg.LogError("file path should be absolute to read and write testcases and their mocks", r.log, fmt.Errorf("file path should be absolute"))
+		// r.log.Error("file path should be absolute to read and write testcases and their mocks")
+		// return fmt.Errorf("file path should be absolute")
 	}
 	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)
 	if err != nil {
-		r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)), zap.Error(err))
-		return err
+		return pkg.LogError("failed to read and cache testcases from ", r.log, err, map[string]interface{}{"mock path": mockPath, "testcase path": testCasePath})
+		// r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)), zap.Error(err))
+		// return err
 	}
 	tcsMap := sync.Map{}
 	for _, j := range tcs {
@@ -77,8 +79,9 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 		Status:  string(models.TestRunStatusRunning),
 	})
 	if err != nil {
-		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
-		return err
+		return pkg.LogError("failed to create test report file", r.log, err, map[string]interface{}{"file path": testReportPath})
+		// r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
+		// return err
 	}
 	return nil
 }
@@ -87,7 +90,8 @@ func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath stri
 	r.yamlTcs.Delete(runId)
 	testResults, err := r.testReportFS.GetResults(runId)
 	if err != nil {
-		r.log.Error(err.Error())
+		return pkg.LogError("failed to stopTestRun", r.log, err)
+		// r.log.Error(err.Error())
 	}
 	var (
 		success = 0
@@ -112,8 +116,9 @@ func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath stri
 		Failure: failure,
 	})
 	if err != nil {
-		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
-		return err
+		return pkg.LogError("failed to create test report file", r.log, err, map[string]interface{}{"file path": testReportPath})
+		// r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
+		// return err
 	}
 	return nil
 }
@@ -127,8 +132,9 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	case false:
 		tc, err = r.tdb.Get(ctx, cid, id)
 		if err != nil {
-			r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-			return false, nil, nil, err
+			return false, nil, nil, pkg.LogError("failed to get testcase from DB", r.log, err, map[string]interface{}{"id": id, "cid": cid, "appID": app})
+			// r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+			// return false, nil, nil, err
 		}
 	case true:
 		if val, ok := r.yamlTcs.Load(runId); ok {
@@ -137,14 +143,16 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 				tc = val.(models.TestCase)
 				// tcsMap.Delete(id)
 			} else {
-				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
-				r.log.Error(err.Error())
-				return false, nil, nil, err
+				return false, nil, nil, pkg.LogError("", r.log, fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id)))
+				// err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
+				// r.log.Error(err.Error())
+				// return false, nil, nil, err
 			}
 		} else {
-			err := fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId))
-			r.log.Error(err.Error())
-			return false, nil, nil, err
+			return false, nil, nil, pkg.LogError("", r.log, fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId)))
+			// err := fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId))
+			// r.log.Error(err.Error())
+			// return false, nil, nil, err
 		}
 	}
 	bodyType := models.BodyTypePlain
@@ -304,8 +312,9 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	case false:
 		tc, err = r.tdb.Get(ctx, cid, id)
 		if err != nil {
-			r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-			return false, nil, nil, err
+			return false, nil, nil, pkg.LogError("failed to get testcase from DB", r.log, err, map[string]interface{}{"id": id, "cid": cid, "appID": app})
+			// r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+			// return false, nil, nil, err
 		}
 	case true:
 		if val, ok := r.yamlTcs.Load(runId); ok {
@@ -314,14 +323,16 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 				tc = val.(models.TestCase)
 				// tcsMap.Delete(id)
 			} else {
-				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
-				r.log.Error(err.Error())
-				return false, nil, nil, err
+				return false, nil, nil, pkg.LogError("", r.log, fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id)))
+				// err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
+				// r.log.Error(err.Error())
+				// return false, nil, nil, err
 			}
 		} else {
-			err := fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId))
-			r.log.Error(err.Error())
-			return false, nil, nil, err
+			return false, nil, nil, pkg.LogError("", r.log, fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId)))
+			// err := fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId))
+			// r.log.Error(err.Error())
+			// return false, nil, nil, err
 		}
 	}
 	bodyType := models.BodyTypePlain
@@ -461,7 +472,8 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 	t.Completed = time.Now().UTC().Unix()
 
 	if err != nil {
-		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		pkg.LogError("failed to run the testcase", r.log, err, map[string]interface{}{"app": app, "cid": cid})
+		// r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
 		t.Status = models.TestStatusFailed
 	}
 	t.Status = models.TestStatusFailed
@@ -511,7 +523,8 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 		} else {
 			err2 := r.saveResult(ctx, t)
 			if err2 != nil {
-				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+				pkg.LogError("failed test result to db", r.log, err2, map[string]interface{}{"cid": cid, "app": app})
+				// r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
 		}
 	}()
@@ -539,7 +552,8 @@ func (r *Regression) TestGrpc(ctx context.Context, resp models.GrpcResp, cid, ap
 	t.Completed = time.Now().UTC().Unix()
 
 	if err != nil {
-		r.log.Error("failed to run the grpc testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		pkg.LogError("failed to run the grpc testcase", r.log, err, map[string]interface{}{"cid": cid, "app": app})
+		// r.log.Error("failed to run the grpc testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
 		t.Status = models.TestStatusFailed
 	}
 	t.Status = models.TestStatusFailed
@@ -574,7 +588,8 @@ func (r *Regression) TestGrpc(ctx context.Context, resp models.GrpcResp, cid, ap
 		} else {
 			err2 := r.saveResult(ctx, t)
 			if err2 != nil {
-				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+				pkg.LogError("ailed test result to db", r.log, err2, map[string]interface{}{"cid": cid, "app": app})
+				// r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
 		}
 	}()
@@ -602,17 +617,20 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 	tcs, err := r.mockFS.Read(ctx, path, id, false)
 	reqType := ctx.Value("reqType").(models.Kind)
 	if err != nil {
-		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
-		return err
+		return pkg.LogError("failed to read testcase from yaml", r.log, err, map[string]interface{}{"id": id, "path": path})
+		// r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
+		// return err
 	}
 	if len(tcs) == 0 {
-		r.log.Error("no testcase exists with", zap.String("id", id), zap.String("at path", path), zap.Error(err))
-		return err
+		return pkg.LogError("no testcase exists with", r.log, fmt.Errorf("no testcase to be denoised"), map[string]interface{}{"id": id, "at path": path})
+		// r.log.Error("no testcase exists with", zap.String("id", id), zap.String("at path", path), zap.Error(err))
+		// return err
 	}
 	docs, err := grpcMock.Decode(tcs)
 	if err != nil {
-		r.log.Error(err.Error())
-		return err
+		return pkg.LogError("", r.log, err)
+		// r.log.Error(err.Error())
+		// return err
 	}
 	tc := docs[0]
 	var oldResp map[string][]string
@@ -620,16 +638,18 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 	case models.HTTP:
 		oldResp, err = pkg.FlattenHttpResponse(utils.GetStringMap(tc.Spec.Res.Header), tc.Spec.Res.Body)
 		if err != nil {
-			r.log.Error("failed to flatten response", zap.Error(err))
-			return err
+			return pkg.LogError("failed to flatten response", r.log, err)
+			// r.log.Error("failed to flatten response", zap.Error(err))
+			// return err
 		}
 
 	case models.GRPC_EXPORT:
 		oldResp = map[string][]string{}
 		err := pkg.AddHttpBodyToMap(tc.Spec.GrpcResp.Body, oldResp)
 		if err != nil {
-			r.log.Error("failed to flatten response", zap.Error(err))
-			return err
+			return pkg.LogError("failed to flatten response", r.log, err)
+			// r.log.Error("failed to flatten response", zap.Error(err))
+			// return err
 		}
 	}
 
@@ -639,15 +659,18 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 		case models.HTTP:
 			newResp, err = pkg.FlattenHttpResponse(h, body)
 			if err != nil {
-				r.log.Error("failed to flatten response", zap.Error(err))
+				pkg.LogError("failed to flatten response", r.log, err)
 				return false
+				// r.log.Error("failed to flatten response", zap.Error(err))
+				// return false
 			}
 
 		case models.GRPC_EXPORT:
 			newResp = map[string][]string{}
 			err := pkg.AddHttpBodyToMap(body, newResp)
 			if err != nil {
-				r.log.Error("failed to flatten response", zap.Error(err))
+				pkg.LogError("failed to flatten response", r.log, err)
+				// r.log.Error("failed to flatten response", zap.Error(err))
 				return false
 			}
 		}
@@ -666,18 +689,21 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 	tc.Spec.Assertions["noise"] = utils.ToStrArr(noise)
 	doc, err := grpcMock.Encode(tc)
 	if err != nil {
-		r.log.Error(err.Error())
-		return err
+		return pkg.LogError("", r.log, err)
+		// r.log.Error(err.Error())
+		// return err
 	}
 	enc := doc
 	d, err := yaml.Marshal(enc)
 	if err != nil {
-		r.log.Error("failed to marshal document to yaml", zap.Any("error", err))
-		return err
+		return pkg.LogError("failed to marshal document to yaml", r.log, err)
+		// r.log.Error("failed to marshal document to yaml", zap.Any("error", err))
+		// return err
 	}
 	err = os.WriteFile(filepath.Join(path, id+".yaml"), d, os.ModePerm)
 	if err != nil {
-		r.log.Error("failed to write test to yaml file", zap.String("id", id), zap.String("path", path), zap.Error(err))
+		return pkg.LogError("failed to write test to yaml file", r.log, err)
+		// r.log.Error("failed to write test to yaml file", zap.String("id", id), zap.String("path", path), zap.Error(err))
 	}
 
 	return nil
@@ -699,8 +725,9 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 		tcRespBody = tc.GrpcResp.Body
 	}
 	if err != nil {
-		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-		return err
+		return pkg.LogError("failed to get testcase from DB", r.log, err, map[string]interface{}{"id": id, "cid": cid, "appID": app})
+		// r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		// return err
 	}
 
 	a, b := map[string][]string{}, map[string][]string{}
@@ -718,14 +745,16 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 
 	err = pkg.AddHttpBodyToMap(tcRespBody, a)
 	if err != nil {
-		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-		return err
+		return pkg.LogError("failed to parse response body", r.log, err, map[string]interface{}{"id": id, "cid": cid, "appID": app})
+		// r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		// return err
 	}
 
 	err = pkg.AddHttpBodyToMap(body, b)
 	if err != nil {
-		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-		return err
+		return pkg.LogError("failed to parse response body", r.log, err, map[string]interface{}{"id": id, "cid": cid, "appID": app})
+		// r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		// return err
 	}
 	// r.log.Debug("denoise between",zap.Any("stored object",a),zap.Any("coming object",b))
 	var noise []string
@@ -743,8 +772,9 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 	tc.Noise = noise
 	err = r.tdb.Upsert(ctx, tc)
 	if err != nil {
-		r.log.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
-		return err
+		return pkg.LogError("failed to update noise fields for testcase", r.log, err, map[string]interface{}{"id": id, "cid": cid, "appID": app})
+		// r.log.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		// return err
 	}
 	return nil
 }
@@ -752,19 +782,22 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 func (r *Regression) Normalize(ctx context.Context, cid, id string) error {
 	t, err := r.rdb.ReadTest(ctx, id)
 	if err != nil {
-		r.log.Error("failed to fetch test from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		pkg.LogError("failed to fetch test from db", r.log, err, map[string]interface{}{"cid": cid, "id": id})
+		// r.log.Error("failed to fetch test from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("test not found")
 	}
 	tc, err := r.tdb.Get(ctx, cid, t.TestCaseID)
 	if err != nil {
-		r.log.Error("failed to fetch testcase from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		pkg.LogError("failed to fetch testcase from db", r.log, err, map[string]interface{}{"cid": cid, "id": id})
+		// r.log.Error("failed to fetch testcase from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("testcase not found")
 	}
 	// update the responses
 	tc.HttpResp = t.Resp
 	err = r.tdb.Upsert(ctx, tc)
 	if err != nil {
-		r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		pkg.LogError("failed to update testcase from db", r.log, err, map[string]interface{}{"cid": cid, "id": id})
+		// r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("could not update testcase")
 	}
 	r.tele.Normalize(r.client, ctx)
@@ -781,7 +814,8 @@ func (r *Regression) GetTestRun(ctx context.Context, summary bool, cid string, u
 	}
 	res, err := r.rdb.Read(ctx, cid, user, app, id, from, to, off, lim)
 	if err != nil {
-		r.log.Error("failed to read test runs from DB", zap.String("cid", cid), zap.Any("user", user), zap.Any("app", app), zap.Any("id", id), zap.Any("from", from), zap.Any("to", to), zap.Error(err))
+		pkg.LogError("failed to read test runs from DB", r.log, err, map[string]interface{}{"cid": cid, "user": user, "app": app, "id": id, "from": from, "to": to})
+		// r.log.Error("failed to read test runs from DB", zap.String("cid", cid), zap.Any("user", user), zap.Any("app", app), zap.Any("id", id), zap.Any("from", from), zap.Any("to", to), zap.Error(err))
 		return nil, errors.New("failed getting test runs")
 	}
 	err = r.updateStatus(ctx, res)
@@ -798,9 +832,11 @@ func (r *Regression) GetTestRun(ctx context.Context, summary bool, cid string, u
 	for _, v := range res {
 		tests, err1 := r.rdb.ReadTests(ctx, v.ID)
 		if err1 != nil {
-			msg := "failed getting tests from DB"
-			r.log.Error(msg, zap.String("cid", cid), zap.String("test run id", v.ID), zap.Error(err1))
-			return nil, errors.New(msg)
+
+			// msg := "failed getting tests from DB"
+			pkg.LogError("failed getting tests from DB", r.log, err1, map[string]interface{}{"test run id": v.ID})
+			// r.log.Error(msg, zap.String("cid", cid), zap.String("test run id", v.ID), zap.Error(err1))
+			return nil, errors.New("failed getting tests from DB")
 		}
 		v.Tests = tests
 	}
@@ -820,9 +856,11 @@ func (r *Regression) updateStatus(ctx context.Context, trs []*models.TestRun) er
 		tests, err1 := r.rdb.ReadTests(ctx, tr.ID)
 
 		if err1 != nil {
-			msg := "failed getting tests from DB"
-			r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err1))
-			return errors.New(msg)
+			pkg.LogError("failed getting tests from DB", r.log, err1, map[string]interface{}{"test run id": tr.ID})
+
+			// msg := "failed getting tests from DB"
+			// r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err1))
+			return errors.New("failed getting tests from DB")
 		}
 		if len(tests) == 0 {
 
@@ -869,9 +907,11 @@ func (r *Regression) failOldTestRuns(ctx context.Context, ts int64, tr *models.T
 	tr.Status = models.TestRunStatusFailed
 	err2 := r.rdb.Upsert(ctx, *tr)
 	if err2 != nil {
-		msg := "failed validating and updating test run status"
-		r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err2))
-		return errors.New(msg)
+		// msg := "failed validating and updating test run status"
+		pkg.LogError("failed validating and updating test run status", r.log, err2, map[string]interface{}{"test run id": tr.ID, "cid": tr.CID})
+
+		// r.log.Error("failed validating and updating test run status", zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err2))
+		return errors.New("failed validating and updating test run status")
 	}
 	return nil
 
@@ -912,8 +952,9 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			failure = res.Failure
 		}
 		if err != nil {
-			r.log.Error("failed to load testrun for logging test summary", zap.Error(err))
-			return err
+			return pkg.LogError("failed to load testrun for logging test summary", r.log, err)
+			// r.log.Error("failed to load testrun for logging test summary", zap.Error(err))
+			// return err
 		}
 		if run.Status == models.TestRunStatusFailed {
 			pp.SetColorScheme(models.FailingColorScheme)

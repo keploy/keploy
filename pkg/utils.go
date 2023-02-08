@@ -282,7 +282,8 @@ func FilterFields(r interface{}, filter []string, logger *zap.Logger) interface{
 	for _, v := range filter {
 		fields := strings.Split(v, ".")
 		if len(fields) < 3 {
-			logger.Error(fmt.Sprintf("failed to filter a tcs field `%v` due to invalid format. Format should be `<req_OR_resp_OR_all>.<header_OR_body>.<FIELD_NAME>`", v))
+			LogError(fmt.Sprintf("failed to filter a tcs field `%v` due to invalid format. Format should be `<req_OR_resp_OR_all>.<header_OR_body>.<FIELD_NAME>`", v), logger, nil)
+			// logger.Error(fmt.Sprintf("failed to filter a tcs field `%v` due to invalid format. Format should be `<req_OR_resp_OR_all>.<header_OR_body>.<FIELD_NAME>`", v))
 			continue
 		}
 		fieldType := fields[0]  //req, resp, all
@@ -350,8 +351,9 @@ func FilterFields(r interface{}, filter []string, logger *zap.Logger) interface{
 func replaceUrlDomain(urlStr string, domain string, logger *zap.Logger) (*url.URL, error) {
 	replaceUrl, err := url.Parse(urlStr)
 	if err != nil {
-		logger.Error("failed to replace http.Request domain field due to error while parsing url", zap.Error(err))
-		return replaceUrl, err
+		return replaceUrl, LogError("failed to replace http.Request domain field due to error while parsing url", logger, err)
+		// logger.Error("failed to replace http.Request domain field due to error while parsing url", zap.Error(err))
+		// return replaceUrl, err
 	}
 	replaceUrl.Host = domain // changes the Domain of parsed url
 	return replaceUrl, nil
@@ -374,7 +376,8 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 					i.Req.Header[fields[1]] = utils.ToStrArr(newHeader)
 				}
 			} else {
-				logger.Error("failed to replace http.Request header field due to no header key provided. The format should be `map[string]string{'header.Accept': 'val1 | val2 | val3'}`")
+				LogError("failed to replace http.Request header field due to no header key provided. The format should be `map[string]string{'header.Accept': 'val1 | val2 | val3'}`", logger, nil)
+				// logger.Error("failed to replace http.Request header field due to no header key provided. The format should be `map[string]string{'header.Accept': 'val1 | val2 | val3'}`")
 			}
 		case "domain":
 			switch i := r.(type) {
@@ -399,7 +402,8 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 		case "proto_major":
 			protomajor, err := strconv.Atoi(v)
 			if err != nil {
-				logger.Error("failed to replace http.Request proto_major field", zap.Error(err))
+				LogError("failed to replace http.Request proto_major field", logger, err)
+				// logger.Error("failed to replace http.Request proto_major field", zap.Error(err))
 			}
 			switch i := r.(type) {
 			case models.TestCase:
@@ -410,7 +414,8 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 		case "proto_minor":
 			protominor, err := strconv.Atoi(v)
 			if err != nil {
-				logger.Error("failed to replace http.Request proto_minor field", zap.Error(err))
+				LogError("failed to replace http.Request proto_minor field", logger, err)
+				// logger.Error("failed to replace http.Request proto_minor field", zap.Error(err))
 			}
 			switch i := r.(type) {
 			case models.TestCase:
@@ -419,8 +424,24 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 				i.Req.ProtoMinor = int64(protominor)
 			}
 		default:
-			logger.Error("Invlaid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`")
+			LogError("Invlaid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`", logger, nil)
+			// logger.Error("Invlaid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`")
 		}
 	}
 	return r
+}
+
+func LogError(message string, logger *zap.Logger, err error, params ...map[string]interface{}) error {
+	var zapFields []zap.Field = []zap.Field{zap.Error(err)}
+	for _, m := range params {
+		for k, v := range m {
+			sanitisedOutput := v
+			if val, ok := v.(string); ok {
+				sanitisedOutput = SanitiseInput(val)
+			}
+			zapFields = append(zapFields, zap.Any(k, sanitisedOutput))
+		}
+	}
+	logger.Error(message, zapFields...)
+	return err
 }
