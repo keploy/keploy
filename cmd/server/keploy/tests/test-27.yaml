@@ -1,0 +1,25 @@
+version: api.keploy.io/v1beta2
+kind: gRPC
+name: test-27
+spec:
+    metadata: {}
+    grpc_req:
+        body: '{"id":"ba2a5d23-0222-42ec-b746-fbf8eacb9d6f","app":"sample-node-fetch"}'
+        method: services.RegressionService.GetTC
+    grpc_resp:
+        body: '{"id":"ba2a5d23-0222-42ec-b746-fbf8eacb9d6f","created":1674625360,"updated":1674625360,"captured":1674625360107,"CID":"default_company","appID":"sample-node-fetch","URI":"/getData","HttpReq":{"Method":"GET","URL":"/getData","Header":{"accept":{"Value":["*/*"]},"host":{"Value":["localhost:8080"]},"user-agent":{"Value":["curl/7.85.0"]}},"Body":"{}"},"HttpResp":{"StatusCode":200,"Header":{"access-control-allow-origin":{"Value":["*"]},"content-length":{"Value":["280"]},"content-type":{"Value":["text/html; charset=utf-8"]},"etag":{"Value":["W/\"118-pbdwwFo9SKNhD3Lx5iHJyngpq00\""]},"x-powered-by":{"Value":["Express"]}},"Body":"{\"data\":{\"id\":2,\"email\":\"janet.weaver@reqres.in\",\"first_name\":\"Janet\",\"last_name\":\"Weaver\",\"avatar\":\"https://reqres.in/img/faces/2-image.jpg\"},\"support\":{\"url\":\"https://reqres.in/#support-heading\",\"text\":\"To keep ReqRes free, contributions towards server costs are appreciated!\"}}"},"Deps":[{"Name":"node-fetch","Type":"HTTP_CLIENT","Meta":{"name":"node-fetch","options":"undefined","type":"HTTP_CLIENT","url":"https://reqres.in/api/users/2"},"Data":[{"Bin":"W3sidHlwZSI6IkJ1ZmZlciIsImRhdGEiOlsxMjMsMzQsMTAwLDk3LDExNiw5NywzNCw1OCwxMjMsMzQsMTA1LDEwMCwzNCw1OCw1MCw0NCwzNCwxMDEsMTA5LDk3LDEwNSwxMDgsMzQsNTgsMzQsMTA2LDk3LDExMCwxMDEsMTE2LDQ2LDExOSwxMDEsOTcsMTE4LDEwMSwxMTQsNjQsMTE0LDEwMSwxMTMsMTE0LDEwMSwxMTUsNDYsMTA1LDExMCwzNCw0NCwzNCwxMDIsMTA1LDExNCwxMTUsMTE2LDk1LDExMCw5NywxMDksMTAxLDM0LDU4LDM0LDc0LDk3LDExMCwxMDEsMTE2LDM0LDQ0LDM0LDEwOCw5NywxMTUsMTE2LDk1LDExMCw5NywxMDksMTAxLDM0LDU4LDM0LDg3LDEwMSw5NywxMTgsMTAxLDExNCwzNCw0NCwzNCw5NywxMTgsOTcsMTE2LDk3LDExNCwzNCw1OCwzNCwxMDQsMTE2LDExNiwxMTIsMTE1LDU4LDQ3LDQ3LDExNCwxMDEsMTEzLDExNCwxMDEsMTE1LDQ2LDEwNSwxMTAsNDcsMTA1LDEwOSwxMDMsNDcsMTAyLDk3LDk5LDEwMSwxMTUsNDcsNTAsNDUsMTA1LDEwOSw5NywxMDMsMTAxLDQ2LDEwNiwxMTIsMTAzLDM0LDEyNSw0NCwzNCwxMTUsMTE3LDExMiwxMTIsMTExLDExNCwxMTYsMzQsNTgsMTIzLDM0LDExNywxMTQsMTA4LDM0LDU4LDM0LDEwNCwxMTYsMTE2LDExMiwxMTUsNTgsNDcsNDcsMTE0LDEwMSwxMTMsMTE0LDEwMSwxMTUsNDYsMTA1LDExMCw0NywzNSwxMTUsMTE3LDExMiwxMTIsMTExLDExNCwxMTYsNDUsMTA0LDEwMSw5NywxMDAsMTA1LDExMCwxMDMsMzQsNDQsMzQsMTE2LDEwMSwxMjAsMTE2LDM0LDU4LDM0LDg0LDExMSwzMiwxMDcsMTAxLDEwMSwxMTIsMzIsODIsMTAxLDExMyw4MiwxMDEsMTE1LDMyLDEwMiwxMTQsMTAxLDEwMSw0NCwzMiw5OSwxMTEsMTEwLDExNiwxMTQsMTA1LDk4LDExNywxMTYsMTA1LDExMSwxMTAsMTE1LDMyLDExNiwxMTEsMTE5LDk3LDExNCwxMDAsMTE1LDMyLDExNSwxMDEsMTE0LDExOCwxMDEsMTE0LDMyLDk5LDExMSwxMTUsMTE2LDExNSwzMiw5NywxMTQsMTAxLDMyLDk3LDExMiwxMTIsMTE0LDEwMSw5OSwxMDUsOTcsMTE2LDEwMSwxMDAsMzMsMzQsMTI1LDEyNV19XQ=="},{"Bin":"eyJoZWFkZXJzIjp7ImRhdGUiOiJXZWQsIDI1IEphbiAyMDIzIDA1OjQyOjQwIEdNVCIsImNvbnRlbnQtdHlwZSI6ImFwcGxpY2F0aW9uL2pzb247IGNoYXJzZXQ9dXRmLTgiLCJ0cmFuc2Zlci1lbmNvZGluZyI6ImNodW5rZWQiLCJjb25uZWN0aW9uIjoiY2xvc2UiLCJ4LXBvd2VyZWQtYnkiOiJFeHByZXNzIiwiYWNjZXNzLWNvbnRyb2wtYWxsb3ctb3JpZ2luIjoiKiIsImV0YWciOiJXL1wiMTE4LXBiZHd3Rm85U0tOaEQzTHg1aUhKeW5ncHEwMFwiIiwidmlhIjoiMS4xIHZlZ3VyIiwiY2FjaGUtY29udHJvbCI6Im1heC1hZ2U9MTQ0MDAiLCJjZi1jYWNoZS1zdGF0dXMiOiJISVQiLCJhZ2UiOiIzMDMxIiwicmVwb3J0LXRvIjoie1wiZW5kcG9pbnRzXCI6W3tcInVybFwiOlwiaHR0cHM6XFwvXFwvYS5uZWwuY2xvdWRmbGFyZS5jb21cXC9yZXBvcnRcXC92Mz9zPVBqbkRraWtHRTZtNWplQlFBJTJGTG0wNU1Yd1ZzJTJCNUkxbFk0UVc1QjlQeXBZalM4U1Y4ZEpOUEFLb0JrWmxqbW1OUEFxaWxvQTJ2JTJCSUxJRSUyRllXWkNFbGRMRzBLY0w3bWthdnRidEI2OThyMTVXa0o0QiUyQkRJN2FTenNhZyUzRCUzRFwifV0sXCJncm91cFwiOlwiY2YtbmVsXCIsXCJtYXhfYWdlXCI6NjA0ODAwfSIsIm5lbCI6IntcInN1Y2Nlc3NfZnJhY3Rpb25cIjowLFwicmVwb3J0X3RvXCI6XCJjZi1uZWxcIixcIm1heF9hZ2VcIjo2MDQ4MDB9IiwidmFyeSI6IkFjY2VwdC1FbmNvZGluZyIsInNlcnZlciI6ImNsb3VkZmxhcmUiLCJjZi1yYXkiOiI3OGVlYWZkNWFjZDE2ZWUzLUJPTSIsImNvbnRlbnQtZW5jb2RpbmciOiJnemlwIn0sInN0YXR1cyI6MjAwLCJzdGF0dXNUZXh0IjoiT0sifQ=="}]}]}'
+        error: nil
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA//IwKfZ0hAL9cldHxwB9fUcEsAUEAAD///Skc6kgAAAA
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+        - type: error
+          data: ""
+    mocks:
+        - mock-27-0
+    assertions:
+        noise: []
+    created: 1674641780

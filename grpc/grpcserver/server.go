@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/keploy/go-sdk/integrations/kgrpcserver"
+	"github.com/keploy/go-sdk/keploy"
 	"go.keploy.io/server/graph"
 	grpcMock "go.keploy.io/server/grpc/mock"
 	proto "go.keploy.io/server/grpc/regression"
@@ -33,10 +35,10 @@ type Server struct {
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
+func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
 
 	// create an instance for grpc server
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(kgrpcserver.UnaryInterceptor(k))
 	proto.RegisterRegressionServiceServer(srv, &Server{
 		logger:         logger,
 		svc:            svc,
@@ -64,7 +66,7 @@ func (srv *Server) StartMocking(ctx context.Context, request *proto.StartMockReq
 }
 
 func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*proto.PutMockResp, error) {
-	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata)
+	err := srv.mock.Put(ctx, request.Path, request.Mock, request.Mock.Spec.Metadata, request.Remove, request.Replace)
 	if err != nil {
 		return nil, err
 	}
@@ -258,14 +260,6 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 	return &proto.GetTCSResponse{Tcs: ptcs, Eof: eof}, nil
 }
 
-func GetHttpHeader(m map[string]*proto.StrArr) map[string][]string {
-	res := map[string][]string{}
-	for k, v := range m {
-		res[k] = v.Value
-	}
-	return res
-}
-
 func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*proto.PostTCResponse, error) {
 	// find noisy fields
 	m, err := pkg.FlattenHttpResponse(utils.GetHttpHeader(request.HttpResp.Header), request.HttpResp.Body)
@@ -300,7 +294,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		})
 	}
 	now := time.Now().UTC().Unix()
-	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{{
+	tc := models.TestCase{
 		ID:       uuid.New().String(),
 		Created:  now,
 		Updated:  now,
@@ -329,7 +323,22 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		Deps:  deps,
 		Noise: noise,
 		Mocks: request.Mocks,
-	}}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY)
+		Type:  request.Type,
+	}
+
+	if request.GrpcReq != nil {
+		tc.GrpcReq = models.GrpcReq{
+			Body:   request.GrpcReq.Body,
+			Method: request.GrpcReq.Method,
+		}
+	}
+	if request.GrpcResp != nil {
+		tc.GrpcResp = models.GrpcResp{
+			Body: request.GrpcResp.Body,
+			Err:  request.GrpcResp.Err,
+		}
+	}
+	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.Remove, request.Replace)
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err
@@ -344,7 +353,15 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 }
 
 func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.DeNoiseResponse, error) {
-	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, request.Resp.Body, utils.GetStringMap(request.Resp.Header), request.TestCasePath)
+	ctx = context.WithValue(ctx, "reqType", models.Kind(request.Type))
+	var body string
+	switch request.Type {
+	case string(models.HTTP):
+		body = request.Resp.Body
+	case string(models.GRPC_EXPORT):
+		body = request.GrpcResp.Body
+	}
+	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, body, utils.GetStringMap(request.Resp.Header), request.TestCasePath)
 	if err != nil {
 		return &proto.DeNoiseResponse{Message: err.Error()}, nil
 	}
@@ -352,14 +369,37 @@ func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.
 }
 
 func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.TestResponse, error) {
-	pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath, models.HttpResp{
-		StatusCode:    int(request.Resp.StatusCode),
-		Header:        utils.GetStringMap(request.Resp.Header),
-		Body:          request.Resp.Body,
-		StatusMessage: request.Resp.StatusMessage,
-		ProtoMajor:    int(request.Resp.ProtoMajor),
-		ProtoMinor:    int(request.Resp.ProtoMinor),
-	})
+
+	ctx = context.WithValue(ctx, "reqType", models.Kind(request.Type))
+	var (
+		pass bool
+		err  error
+	)
+	switch request.Type {
+	case string(models.HTTP):
+		pass, err = srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath, models.HttpResp{
+			StatusCode:    int(request.Resp.StatusCode),
+			Header:        utils.GetStringMap(request.Resp.Header),
+			Body:          request.Resp.Body,
+			StatusMessage: request.Resp.StatusMessage,
+			ProtoMajor:    int(request.Resp.ProtoMajor),
+			ProtoMinor:    int(request.Resp.ProtoMinor),
+		})
+	case string(models.GRPC_EXPORT):
+		pass, err = srv.svc.TestGrpc(ctx, models.GrpcResp{
+			Body: request.GrpcResp.Body,
+			Err:  request.GrpcResp.Err,
+		}, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath)
+	}
+
+	// pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath, models.HttpResp{
+	// 	StatusCode:    int(request.Resp.StatusCode),
+	// 	Header:        utils.GetStringMap(request.Resp.Header),
+	// 	Body:          request.Resp.Body,
+	// 	StatusMessage: request.Resp.StatusMessage,
+	// 	ProtoMajor:    int(request.Resp.ProtoMajor),
+	// 	ProtoMinor:    int(request.Resp.ProtoMinor),
+	// })
 	if err != nil {
 		return nil, err
 	}

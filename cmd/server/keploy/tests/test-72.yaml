@@ -1,0 +1,145 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-72
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/testcase
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: "3600"
+            Content-Type: application/json
+            Postman-Token: 35707399-3a5d-42ee-be2b-19b868cd9620
+            User-Agent: PostmanRuntime/7.30.0
+        body: |-
+            {
+                "captured": 1674725096,
+                "app_id": "sample-url-shortener",
+                "uri": "/url",
+                "remove": ["all.header.Content-Type"],
+                "replace": {
+                    "method": "DELETE",
+                    "proto_major": "0",
+                    "proto_minor":"0",
+                    "header.User-Agent": "foo-bar",
+                    "domain": "google.com"
+                },
+                "http_req": {
+                    "method": "POST",
+                    "proto_major": 1,
+                    "proto_minor": 1,
+                    "url": "/url",
+                    "url_params": {},
+                    "header": {
+                        "Accept": [
+                            "*/*"
+                        ],
+                        "Content-Length": [
+                            "33"
+                        ],
+                        "Content-Type": [
+                            "application/json"
+                        ],
+                        "User-Agent": [
+                            "curl/7.85.0"
+                        ]
+                    },
+                    "body": "{\n  \"url\": \"https://google.com\"\n}",
+                    "binary": "",
+                    "form": null
+                },
+                "http_resp": {
+                    "status_code": 200,
+                    "header": {
+                        "Content-Type": [
+                            "application/json; charset=utf-8"
+                        ]
+                    },
+                    "body": "{\"ts\":1674725096837339000,\"url\":\"http://localhost:8080/Lhr4BWAi\"}",
+                    "status_message": "",
+                    "proto_major": 0,
+                    "proto_minor": 0,
+                    "binary": ""
+                },
+                "grpc_req": {
+                    "body": "",
+                    "method": ""
+                },
+                "grpc_resp": {
+                    "body": "",
+                    "error": ""
+                },
+                "deps": [
+                    {
+                        "name": "mongodb",
+                        "type": "NO_SQL_DB",
+                        "meta": {
+                            "UpdateOptions": "[{\u003cnil\u003e \u003cnil\u003e \u003cnil\u003e \u003cnil\u003e 0x14000632748}]",
+                            "filter": "map[_id:Lhr4BWAi]",
+                            "name": "mongodb",
+                            "operation": "UpdateOne",
+                            "type": "NO_SQL_DB",
+                            "update": "[{$set {Lhr4BWAi 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 https://google.com}}]"
+                        },
+                        "data": [
+                            "Xv+BAwEBDFVwZGF0ZVJlc3VsdAH/ggABBAEMTWF0Y2hlZENvdW50AQQAAQ1Nb2RpZmllZENvdW50AQQAAQ1VcHNlcnRlZENvdW50AQQAAQpVcHNlcnRlZElEARAAAAAH/4IBAgECAA==",
+                            "Cv+DBQEC/4YAAAAF/4QAAQE="
+                        ]
+                    }
+                ],
+                "test_case_path": "/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-go/gin-mongo/keploy/tests",
+                "mock_path": "/Users/ritikjain/Desktop/go-practice/skp-workspace/samples-go/gin-mongo/keploy/mocks",
+                "mocks": [
+                    {
+                        "Version": "api.keploy.io/v1beta2",
+                        "Kind": "Generic",
+                        "Spec": {
+                            "Metadata": {
+                                "UpdateOptions": "[{\u003cnil\u003e \u003cnil\u003e \u003cnil\u003e \u003cnil\u003e 0x14000632748}]",
+                                "filter": "map[_id:Lhr4BWAi]",
+                                "name": "mongodb",
+                                "operation": "UpdateOne",
+                                "type": "NO_SQL_DB",
+                                "update": "[{$set {Lhr4BWAi 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 2023-01-26 14:54:56.829485 +0530 IST m=+2.309309876 https://google.com}}]"
+                            },
+                            "Objects": [
+                                {
+                                    "Type": "*mongo.UpdateResult",
+                                    "Data": "Xv+BAwEBDFVwZGF0ZVJlc3VsdAH/ggABBAEMTWF0Y2hlZENvdW50AQQAAQ1Nb2RpZmllZENvdW50AQQAAQ1VcHNlcnRlZENvdW50AQQAAQpVcHNlcnRlZElEARAAAAAH/4IBAgECAA=="
+                                },
+                                {
+                                    "Type": "*keploy.KError",
+                                    "Data": "Cv+DBQEC/4YAAAAF/4QAAQE="
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "type": "Http"
+            }
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"id":"8bb569cb-197c-4646-8237-ff6dec1654e0"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-72-0
+    assertions:
+        noise:
+            - body.id
+    created: 1675766517

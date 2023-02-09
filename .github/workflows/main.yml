@@ -27,22 +27,14 @@ jobs:
 
       - name: Test
         run: |
-          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
+          export PORT=6790
+          curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/keploy /usr/local/bin && export KEPLOY_MODE=off && keploy &
+          export PORT=6789 && export ENABLE_TEST_EXPORT=false && go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
           cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
         env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-          ENABLE_DEDUP: false
-          ENABLE_TEST_EXPORT: false
-          
-      - name: Test-withDeDupEnabled
-        run: |
-          go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
-          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
-        env:
-          KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
           ENABLE_DEDUP: true
-          ENABLE_TEST_EXPORT: false
-
+          ENABLE_TELEMETRY: false
 
 
 

@@ -16,10 +16,15 @@ type TestCaseReq struct {
 	URI          string              `json:"uri" bson:"uri"`
 	HttpReq      models.HttpReq      `json:"http_req" bson:"http_req"`
 	HttpResp     models.HttpResp     `json:"http_resp" bson:"http_resp"`
+	GrpcReq      models.GrpcReq      `json:"grpc_req" bson:"grpc_req"`
+	GrpcResp     models.GrpcResp     `json:"grpc_resp" bson:"grpc_resp"`
 	Deps         []models.Dependency `json:"deps" bson:"deps"`
 	TestCasePath string              `json:"test_case_path" bson:"test_case_path"`
 	MockPath     string              `json:"mock_path" bson:"mock_path"`
 	Mocks        []*proto.Mock       `json:"mocks" bson:"mocks"`
+	Type         models.Kind         `json:"type" bson:"type"`
+	Remove       []string            `json:"remove" bson:"remove"`
+	Replace      map[string]string   `json:"replace" bson:"replace"`
 }
 
 func (req *TestCaseReq) Bind(r *http.Request) error {
@@ -42,8 +47,10 @@ type TestReq struct {
 	AppID        string          `json:"app_id" bson:"app_id"`
 	RunID        string          `json:"run_id" bson:"run_id"`
 	Resp         models.HttpResp `json:"resp" bson:"resp"`
+	GrpcResp     models.GrpcResp `json:"grpc_resp" bson:"grpc_resp"`
 	TestCasePath string          `json:"test_case_path" bson:"test_case_path"`
 	MockPath     string          `json:"mock_path" bson:"mock_path"`
+	Type         models.Kind     `json:"type" bson:"type"`
 }
 
 func (req *TestReq) Bind(r *http.Request) error {

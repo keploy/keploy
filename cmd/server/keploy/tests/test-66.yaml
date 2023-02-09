@@ -1,0 +1,44 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-66
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/deps
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: "59"
+            Content-Type: application/json
+            Postman-Token: 8aa09456-c8e8-474b-95fc-6aa3d009ca20
+            User-Agent: PostmanRuntime/7.30.0
+        body: |-
+            {
+                "app_id": "sample-mocks",
+                "test_name": "test-1"
+            }
+        body_type: utf-8
+    resp:
+        status_code: 400
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"status":"Invalid request.","error":"write exception: write errors: [The argument to $each in $push must be an array but it was of type: null]"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-66-0
+        - mock-66-1
+    assertions:
+        noise: []
+    created: 1674760382
