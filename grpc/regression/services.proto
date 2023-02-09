@@ -24,6 +24,11 @@ message TestCaseReq {
   string TestCasePath = 7;
   string MockPath = 8;
   repeated Mock Mocks = 9;
+  repeated string Remove = 10;
+  map<string, string> Replace = 11;
+  string Type = 12;
+  GrpcReq GrpcReq = 13;
+  GrpcResp GrpcResp = 14;
 }
 
 
@@ -34,6 +39,8 @@ message TestReq {
   HttpResp Resp = 4;
   string TestCasePath = 5;
   string MockPath = 6;
+  string Type = 7;
+  GrpcResp GrpcResp = 8;
 }
 
 message TestCase {
@@ -135,6 +142,14 @@ message deNoiseResponse {
 message testResponse{
   map<string, bool> pass = 1;
 }
+message GrpcReq {
+  string Body = 1;
+  string Method = 2;
+}
+message GrpcResp {
+  string Body = 1;
+  string Err = 2;
+}
 
 message Mock {
   message Request {
@@ -164,8 +179,10 @@ message Mock {
     // for sql
     string Type = 8;
     optional Table Table = 9;
-    int64 Int = 10; // change it to rows commited 
+    int64 Int = 10; // change it to rows commited
     repeated string Err = 11;
+    GrpcReq GrpcRequest = 12;
+    GrpcResp GrpcResp = 13;
   }
   SpecSchema Spec = 4;
 }
@@ -186,6 +203,8 @@ message SqlCol  {
 message PutMockReq {
   Mock Mock = 1;
   string Path = 2;
+  repeated string Remove = 3;
+  map<string, string> Replace = 4;
 }
 
 message PutMockResp {

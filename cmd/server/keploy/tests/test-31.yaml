@@ -1,0 +1,37 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-31
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/testcase
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: "8"
+            Content-Type: application/json
+            Postman-Token: 6f17b706-7e71-4a25-83c3-34a1db83676f
+            User-Agent: PostmanRuntime/7.30.0
+        body: "{\n    \n}"
+        body_type: utf-8
+    resp:
+        status_code: 400
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"status":"Invalid request.","error":"captured timestamp cant be empty"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise: []
+    created: 1674642642

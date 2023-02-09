@@ -1,0 +1,53 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-18
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-GB,en
+            Authorization: BEARER
+            Connection: keep-alive
+            Content-Length: "96"
+            Content-Type: application/json
+            Cookie: connect.sid=s%3AdxWsE0jhYYsXQwFQKZJhtK_5Jli7MPB1.Wjbj0YQ3J7yJE1Zx21NQAWPtrz1f8i73j9FAnlvbrSg
+            Origin: http://localhost:6790
+            Referer: http://localhost:6790/testlist
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36
+        body: '{"operationName":"getApps","variables":{},"query":"query getApps {\n  apps {\n    id\n  }\n}\n"}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Credentials: "true"
+            Access-Control-Allow-Origin: '*'
+            Access-Control-Expose-Headers: Link
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"apps":[{"id":"Keploy-Test-App"},{"id":"demo-WebGo-V6-App"},{"id":"grpc-nested-app"},{"id":"listmonk-app"},{"id":"listmonk-app-2"},{"id":"listmonk-app-4"},{"id":"my-app"},{"id":"myApp"},{"id":"sample-node-fetch"},{"id":"sample-url-shortener"},{"id":"typescript-sdk"}]}}'
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-18-0
+    assertions:
+        noise:
+            - header.Access-Control-Allow-Origin
+            - header.Access-Control-Expose-Headers
+            - body.data.apps.id
+            - header.Access-Control-Allow-Credentials
+    created: 1674628831
