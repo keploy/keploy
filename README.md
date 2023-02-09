@@ -246,7 +246,7 @@ export KEPLOY_MODE="test"
 
 Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 
-## Try Quickstart on GitPod
+## Quickstart on GitPod
 The fastest way to start with Keploy is the Gitpod-hosted version. When you're ready, you can install locally or host yourself.
 
 One-click deploy sample URL Shortener application sample with Keploy using Gitpod

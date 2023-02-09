@@ -90,7 +90,7 @@ Please refer to [Keploy Docs Contributing Guide](https://github.com/keploy/docs/
 
 Keploy provides stable support for ``Go``, ``Java``  and ``Ts`` language based applications. 
 
-- [x] [Go SDKP](https://github.com/keploy/go-sdk)
+- [x] [Go SDK](https://github.com/keploy/go-sdk)
 - [x] [Java SDK](https://github.com/keploy/java-sdk)
 - [x] [TypeScript SDK](https://github.com/keploy/typescript-sdk)
 
