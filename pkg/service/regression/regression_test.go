@@ -11,6 +11,7 @@ import (
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
 	mockPlatform "go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 )
@@ -127,7 +128,8 @@ func TestMain(m *testing.M) {
 
 	mockFS = mockPlatform.NewMockExportFS(false)
 	testReportFS = mockPlatform.NewTestReportFS(false)
-	rSvc = New(nil, nil, testReportFS, nil, http.Client{}, logger, true, mockFS)
+	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+	rSvc = New(nil, nil, testReportFS, analyticsConfig, http.Client{}, logger, true, mockFS)
 	m.Run()
 }
 
