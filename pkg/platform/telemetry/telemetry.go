@@ -113,6 +113,16 @@ func (ac *Telemetry) Testrun(success int, failure int, client http.Client, ctx c
 	ac.SendTelemetry("TestRun", client, ctx, map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
 }
 
+// Telemetry event for the tests and mocks that are recorded
+func (ac *Telemetry) RecordedTests(testCaseCount int, mockCount int, client http.Client, ctx context.Context) {
+	ac.SendTelemetry("RecordedTestsAndMocks", client, ctx, map[string]interface{}{"Test-Case-Count": testCaseCount, "Mock-Count": mockCount})
+}
+
+// Telemetry event for the mocks that are recorded in the mocking feature
+func (ac *Telemetry) RecordedMocks(mockCount int, client http.Client, ctx context.Context) {
+	ac.SendTelemetry("RecordedMocks", client, ctx, map[string]interface{}{"Mock-Count": mockCount})
+}
+
 func (ac *Telemetry) GetApps(apps int, client http.Client, ctx context.Context) {
 	ac.SendTelemetry("GetApps", client, ctx, map[string]interface{}{"Apps": apps})
 }
