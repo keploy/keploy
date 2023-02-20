@@ -1,0 +1,41 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-37
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/test
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: "37"
+            Content-Type: application/json
+            Postman-Token: 4de4b94b-8440-4a2b-8536-1c7e8556d2ea
+            User-Agent: PostmanRuntime/7.30.0
+        body: |-
+            {
+                "id": "123",
+                "app_id": ""
+            }
+        body_type: utf-8
+    resp:
+        status_code: 400
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"status":"Invalid request.","error":"app id is required"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise: []
+    created: 1674712927

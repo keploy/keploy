@@ -1,0 +1,113 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-20
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/query
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-GB,en
+            Authorization: BEARER
+            Connection: keep-alive
+            Content-Length: "361"
+            Content-Type: application/json
+            Cookie: connect.sid=s%3AdxWsE0jhYYsXQwFQKZJhtK_5Jli7MPB1.Wjbj0YQ3J7yJE1Zx21NQAWPtrz1f8i73j9FAnlvbrSg
+            Origin: http://localhost:6790
+            Referer: http://localhost:6790/testlist
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36
+        body: '{"operationName":"getTc","variables":{"app":"Keploy-Test-App"},"query":"query getTc($app: String!) {\n  testCase(app: $app) {\n    id\n    created\n    updated\n    captured\n    uri\n    httpReq {\n      protoMajor\n      protoMinor\n      method\n      url\n    }\n    httpResp {\n      statusCode\n    }\n    deps {\n      name\n      type\n    }\n  }\n}\n"}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Credentials: "true"
+            Access-Control-Allow-Origin: '*'
+            Access-Control-Expose-Headers: Link
+            Content-Type: application/json
+            Vary: Origin
+        body: '{"data":{"testCase":[{"id":"e5cc04db-37be-4a50-b76a-cbbbe04c3820","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"83fac442-efc1-418c-a7c0-4fd7e7b9a5bb","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"87b3bbf4-c376-4494-b935-74290b0c520b","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"9d57662c-9de2-4be9-99a2-aeb19bfcab29","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/denoise","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/denoise"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"},{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"374b4e42-22dd-4b79-ba45-162ab2ef73fc","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/denoise","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/denoise"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"},{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"c3f979bc-0e4c-49df-b5a0-1d8a51a7bf40","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"37b24603-e4b8-41ee-9a9e-521455dd15ae","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"750707e1-a79a-4df7-8748-099fef6449ed","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/denoise","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/denoise"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"},{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"3051e426-661c-4cf6-8ab7-3a5d331d4115","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"cd731904-0154-4b6c-9e2a-83ea073a5f11","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"13e8d0ba-d7a4-461e-9672-128a88a449b5","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"5c30fa10-0fe2-4724-ac2b-ad4fe06dd1f7","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"1394eb85-2e84-483b-ba9c-10cb75004d8a","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"9db7c072-a966-46e6-bcce-63df74c11e1f","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"fc991093-bc2b-4d1f-a617-8887575991a0","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/denoise","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/denoise"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"},{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"b2af78f1-5b46-453d-932a-dc5696586324","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"571ab84f-9e0c-470b-82fc-4d95a9b74d08","created":"2022-11-30T14:40:39Z","updated":"2022-11-30T14:40:39Z","captured":"2022-11-30T14:40:39Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"e51a20bd-fcfa-4937-b5e0-25e7ee4953f8","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"6904694a-54df-4b3c-b00e-2058188f9df9","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"0c0394b5-d170-4356-b11f-b67f9e4292bd","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"19261dbe-651c-4686-a4d3-bb72706b904a","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"e3e4049a-60ed-4d43-9f31-31df8946f874","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"e7d626bc-80fb-42d1-a1c3-33b5d2ab64c3","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"95fc371e-c11b-4238-88ab-a0400ada4fc0","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/testcase","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/testcase"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"}]},{"id":"dd4e4001-820a-4762-9e27-3b704b33cf2c","created":"2022-11-30T14:40:38Z","updated":"2022-11-30T14:40:38Z","captured":"2022-11-30T14:40:38Z","uri":"/api/regression/denoise","httpReq":{"protoMajor":1,"protoMinor":1,"method":"POST","url":"/api/regression/denoise"},"httpResp":{"statusCode":200},"deps":[{"name":"mongodb","type":"NO_SQL_DB"},{"name":"mongodb","type":"NO_SQL_DB"}]}]}}'
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-20-0
+        - mock-20-1
+        - mock-20-2
+        - mock-20-3
+        - mock-20-4
+        - mock-20-5
+        - mock-20-6
+        - mock-20-7
+        - mock-20-8
+        - mock-20-9
+        - mock-20-10
+        - mock-20-11
+        - mock-20-12
+        - mock-20-13
+        - mock-20-14
+        - mock-20-15
+        - mock-20-16
+        - mock-20-17
+        - mock-20-18
+        - mock-20-19
+        - mock-20-20
+        - mock-20-21
+        - mock-20-22
+        - mock-20-23
+        - mock-20-24
+        - mock-20-25
+        - mock-20-26
+        - mock-20-27
+        - mock-20-28
+        - mock-20-29
+        - mock-20-30
+        - mock-20-31
+        - mock-20-32
+        - mock-20-33
+        - mock-20-34
+        - mock-20-35
+        - mock-20-36
+        - mock-20-37
+        - mock-20-38
+        - mock-20-39
+        - mock-20-40
+        - mock-20-41
+        - mock-20-42
+        - mock-20-43
+        - mock-20-44
+        - mock-20-45
+        - mock-20-46
+        - mock-20-47
+        - mock-20-48
+        - mock-20-49
+        - mock-20-50
+        - mock-20-51
+        - mock-20-52
+    assertions:
+        noise:
+            - body.data.testCase.httpReq.protoMajor
+            - body.data.testCase.updated
+            - body.data.testCase.deps.name
+            - body.data.testCase.deps.type
+            - body.data.testCase.httpReq.method
+            - body.data.testCase.captured
+            - body.data.testCase.uri
+            - body.data.testCase.httpReq.protoMinor
+            - body.data.testCase.id
+            - body.data.testCase.httpReq.url
+            - body.data.testCase.created
+            - body.data.testCase.httpResp.statusCode
+    created: 1674628831

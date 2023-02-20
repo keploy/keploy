@@ -3,19 +3,10 @@ package pkg
 import (
 	"encoding/json"
 	"errors"
-	"go.uber.org/zap"
 	"reflect"
+
+	"go.uber.org/zap"
 )
-
-// mapClone returns a copy of given src map.
-func mapClone(src map[string][]string) map[string][]string {
-
-	clone := make(map[string][]string, len(src))
-	for k, v := range src {
-		clone[k] = v
-	}
-	return clone
-}
 
 // unmarshallJson returns unmarshalled JSON object.
 func unmarshallJson(s string, log *zap.Logger) (interface{}, error) {
