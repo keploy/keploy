@@ -920,6 +920,10 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 		} else {
 			pp.SetColorScheme(models.PassingColorScheme)
 		}
+
+		// sending Testrun Telemetry event to Telemetry service.
+		r.tele.Testrun(success, failure, r.client, ctx)
+
 		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
 	}
 	if !testExport {
