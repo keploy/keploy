@@ -30,19 +30,20 @@ jobs:
 
       - name: Setup java Sample project
         run: |
-          git clone https://github.com/charankamarapu/Sample-Redis_Keploy.git &&
-          curl 'https://repo1.maven.org/maven2/io/keploy/agent/1.2.7/agent-1.2.7.jar' --compressed --output Sample-Redis_Keploy/agent.jar -slient
+          git clone https://github.com/keploy/samples-java.git &&
+          curl 'https://repo1.maven.org/maven2/io/keploy/agent/1.2.6/agent-1.2.6.jar' --compressed --output samples-java/agent.jar -slient
 
       - name: Run Keploy and java project
         run: |
           go run ./cmd/server/main.go &
           sudo apt update &&
           sudo apt install maven -y &&
-          cd Sample-Redis_Keploy &&
-          mvn clean install &&
+          cd samples-java &&
           export KEPLOY_MODE=test &&
-          count=5
+          export JAVA_TOOL_OPTIONS=-javaagent:${PWD}/agent.jar &&
+          count=1
           for i in $(seq $count); do
-            java -javaagent:${PWD}/agent.jar -jar target/SpringBoot-Redis-Example-0.0.1-SNAPSHOT.jar
+            mvn spring-boot:run
           done
+          echo installation-id &&
           cat /root/keploy-config/installation-id.yaml
