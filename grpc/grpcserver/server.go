@@ -94,7 +94,6 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 		Mocks: res,
 	}
 
-	//sending RecordedMocks Telemetry event to Telemetry service.
 	srv.tele.RecordedMocks(len(mocks), srv.client, ctx)
 
 	return response, nil
