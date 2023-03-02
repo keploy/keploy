@@ -187,6 +187,8 @@ curl --request GET \
 ### Integration with native Go test framework
 You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
 
+For an example, for a file named `main.go` create a unit test file as `main_test.go` in the **same folder** as `main.go`.
+
 Contents of `main_test.go`:
 ```go
 package main
