@@ -48,4 +48,4 @@ jobs:
             mvn spring-boot:run
           done
           echo installation-id &&
-          cat /root/keploy-config/installation-id.yaml
+          sudo cat /root/keploy-config/installation-id.yaml
