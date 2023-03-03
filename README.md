@@ -103,8 +103,6 @@ curl --silent --location "https://github.com/keploy/keploy/releases/latest/downl
 
 sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
-
-The UI can be accessed at http://localhost:6789
 </details>
 
 ### Windows
