@@ -36,7 +36,7 @@ jobs:
         run: |
           sudo mkdir /root/keploy-config &&
           sudo touch /root/keploy-config/installation-id.yaml &&
-          sudo echo "ObjectID(\"6400772dd1bc96b3c5ebffec\")" > /root/keploy-config/installation-id.yaml &&
+          echo "ObjectID(\"6400772dd1bc96b3c5ebffec\")" > sudo /root/keploy-config/installation-id.yaml &&
           go run ./cmd/server/main.go &
           sudo apt update &&
           sudo apt install maven -y &&
