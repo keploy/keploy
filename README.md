@@ -160,7 +160,7 @@ To genereate testcases we just need to make some API calls. You can use [Postman
 
 > Note : KTests are exported as files in the current directory(.) by default
 
-#### 1. Generate shortned url
+#### 1. Generate shortened url
 ```shell
 curl --request POST \
   --url http://localhost:8082/url \
