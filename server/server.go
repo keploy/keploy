@@ -201,7 +201,7 @@ func Server(ver string) *chi.Mux {
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath)
+		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
 	})
 
 	g.Go(func() error {
