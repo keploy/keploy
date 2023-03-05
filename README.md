@@ -264,7 +264,7 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 
 🕵️‍️ [Why Keploy](https://docs.keploy.io/docs/keploy-explained/why-keploy)
 
-⚙️ [Installation Guide](https://docs.keploy.io/docs/server/introduction)
+⚙️ [Installation Guide](https://docs.keploy.io/docs/server/server-installation)
 
 📖 [Contribution Guide](https://docs.keploy.io/docs/devtools/server-contrib-guide/)
 
