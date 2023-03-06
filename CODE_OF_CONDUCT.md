@@ -1,4 +1,4 @@
-# Contributor Covenant Code of Conduct
+# Contributor Code of Conduct for Keploy
 
 ## Our Pledge
 
@@ -12,45 +12,47 @@ and orientation.
 We pledge to act and interact in ways that contribute to an open, welcoming,
 diverse, inclusive, and healthy community.
 
-## Our Standards
+## Expected Behavior
 
-Examples of behaviour that contributes to a positive environment for our
-community include:
+The following behaviors are expected and requested of all community members:
 
-* Demonstrating empathy and kindness toward other people
-* Being respectful of differing opinions, viewpoints, and experiences
-* Giving and gracefully accepting constructive feedback
-* Accepting responsibility and apologizing to those affected by our mistakes,
-  and learning from the experience
-* Focusing on what is best not just for us as individuals, but for the
-  overall community
+ * Act authentically and participate actively in the community to help maintain a positive and productive environment.
+ * Show consideration and respect in all your actions and speech. Avoid any behavior that is demeaning, discriminatory, or harassing.
+ * Seek collaboration as an initial step instead of conflict.
+ * Refrain from demeaning, discriminatory, or harassing behavior and speech.
+ * Report any unsafe situations, distress or violations of the code of conduct to the maintainers through [Slack](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA).
+* Practice empathy and kindness towards other community members.
+* Respect diverse opinions, perspectives, and experiences.
+* Give and receive constructive feedback in a gracious manner.
+* Take responsibility for your actions and apologize for mistakes. Use them as learning opportunities.
+* Prioritize the well-being and success of the community as a whole over individual gain.
 
 Examples of unacceptable behavior include:
 
-* The use of sexualized language or imagery, and sexual attention or
-  advances of any kind
-* Trolling, insulting or derogatory comments, and personal or political attacks
-* Public or private harassment
-* Publishing others' private information, such as a physical or email
-  address, without their explicit permission
-* Other conduct which could reasonably be considered inappropriate in a
-  professional setting
+* Violence, threats of violence or any language that incites violence towards any individual or group is prohibited.
+ * Discriminatory jokes and language, such as those based on gender, race, sexual orientation, religion, ability, or any other characteristic, is strictly forbidden.
+ * Displaying or sharing sexually explicit or violent content is prohibited.
+ * Any form of harassment, including but not limited to "doxing" (posting or threatening to post other people's personally identifying information) is prohibited.
+ * Personal insults, particularly those related to gender, sexual orientation, race, religion, or disability.
+* Publishing any personal information of others without their explicit consent is strictly forbidden.
+* Using sexualized language or imagery, or making any sexual advances towards another person is prohibited.
+* Harassment, whether it be public or private, will not be tolerated.
 
 ## Enforcement Responsibilities
 
-Community leaders are responsible for clarifying and enforcing our standards of
+Organizations' maintainers are responsible for clarifying and enforcing our standards of
 acceptable behavior and will take appropriate and fair corrective action in
 response to any behavior that they deem inappropriate, threatening, offensive,
 or harmful.
 
-Community leaders have the right and responsibility to remove, edit, or reject
+They have the right and responsibility to remove, edit, or reject
 comments, commits, code, wiki edits, issues, and other contributions that are
 not aligned to this Code of Conduct, and will communicate reasons for moderation
 decisions when appropriate.
 
 ## Scope
 
-This Code of Conduct applies within all community spaces, and also applies when
+This Code of Conduct applies within all community spaces related to Keploy, and also applies when
 an individual is officially representing the community in public spaces.
 Examples of representing our community include using an official e-mail address,
 posting via an official social media account, or acting as an appointed
@@ -112,17 +114,13 @@ individual, or aggression toward or disparagement of classes of individuals.
 **Consequence**: A permanent ban from any sort of public interaction within
 the community.
 
-## Attribution
+## Contact info
 
-This Code of Conduct is adapted from the [Contributor Covenant][homepage],
-version 2.0, available at
-https://www.contributor-covenant.org/version/2/0/code_of_conduct.html.
+* [Slack](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
+* [Mail](hello@keploy.io)
 
-Community Impact Guidelines were inspired by [Mozilla's code of conduct
-enforcement ladder](https://github.com/mozilla/diversity).
+## Support 🙏 
 
-[homepage]: https://www.contributor-covenant.org
+This project needs a ⭐️ from you. Don't forget to leave a star ⭐️
 
-For answers to common questions about this code of conduct, see the FAQ at
-https://www.contributor-covenant.org/faq. Translations are available at
-https://www.contributor-covenant.org/translations.
+## Happy Contributions !!
