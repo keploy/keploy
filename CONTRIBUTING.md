@@ -58,6 +58,37 @@ _~/.gitconfig_
   commit = commit -s
 ```
 
+# How to contribute ?
+
+We encourage contributions from the community.
+
+**Create a [GitHub issue](https://github.com/keploy/keploy/issues) for any changes beyond typos and small fixes.**
+
+We review GitHub issues and PRs on a regular schedule.
+
+To ensure that each change is relevant and properly peer reviewed, please adhere to best practices for open-source contributions.
+This means that if you are outside the Keploy organization, you must fork the repository and create PRs from branches on your own fork.
+The README in GitHub's [first-contributions repo](https://github.com/firstcontributions/first-contributions) provides an example.
+
+## ## How to set up the docs website locally?
+
+1. Fork the repository
+
+<br/>
+
+2. Clone the repository with the following command. Replace the <GITHUB_USERNAME> with your username
+
+```sh
+git clone https://github.com/<GITHUB_USERNAME>/keploy.git
+```
+
+<br/>
+
+3. Go into the directory containing the project and edit the changes.
+
+
+When we merge your PR, a new build automatically occurs and your changes publish to [https://keploy.io](https://github.com/keploy/keploy).
+
 ## <a name="contributing-keploy">Keploy Contribution Flow</a>
 
 Keploy is written in `Go` (Golang) and leverages Go Modules. Relevant coding style guidelines are the [Go Code Review Comments](https://code.google.com/p/go-wiki/wiki/CodeReviewComments) and the _Formatting and style_ section of Peter Bourgon's [Go: Best
