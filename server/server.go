@@ -33,6 +33,7 @@ import (
 	"go.keploy.io/server/pkg/service/testCase"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -86,7 +87,26 @@ func Server(ver string) *chi.Mux {
 		logger.Error("failed to read/process configuration", zap.Error(err))
 	}
 
-	
+	// check if logPath is provided, if yes, create a log file and write logs to it
+	if conf.LogPath != "" {
+		logPath := fmt.Sprintf("%s.log", conf.LogPath)
+		logFile, err := os.Create(logPath)
+		if err != nil {
+			logger.Error("failed to create log file", zap.Error(err))
+		}
+		defer logFile.Close()
+
+		fileSyncer := zapcore.AddSync(logFile)
+
+		core := zapcore.NewCore(
+			zapcore.NewConsoleEncoder(logConf.EncoderConfig),
+			fileSyncer,
+			logConf.Level,
+		)
+
+		logger = zap.New(core)
+
+	}
 
 	// default resultPath is current directory from which keploy binary is running
 	if conf.ReportPath == "" {
