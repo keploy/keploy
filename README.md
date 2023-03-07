@@ -147,7 +147,7 @@ go mod download
 
 #### Start PostgreSQL instance
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 #### Run the application
