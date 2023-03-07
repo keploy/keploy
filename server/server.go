@@ -66,6 +66,7 @@ type config struct {
 	Port             string `envconfig:"PORT" default:"6789"`
 	ReportPath       string `envconfig:"REPORT_PATH" default:""`
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
+	LogPath          string `envconfig:"LOG_PATH"`
 }
 
 func Server(ver string) *chi.Mux {
@@ -84,6 +85,9 @@ func Server(ver string) *chi.Mux {
 	if err != nil {
 		logger.Error("failed to read/process configuration", zap.Error(err))
 	}
+
+	
+
 	// default resultPath is current directory from which keploy binary is running
 	if conf.ReportPath == "" {
 		curr, err := os.Getwd()
