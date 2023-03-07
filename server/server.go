@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"go.uber.org/zap/zapcore"
 	"math/rand"
 	"net"
 	"net/http"
@@ -34,6 +35,7 @@ import (
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // const defaultPort = "8080"
@@ -66,6 +68,7 @@ type config struct {
 	Port             string `envconfig:"PORT" default:"6789"`
 	ReportPath       string `envconfig:"REPORT_PATH" default:""`
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
+	LogPath          string `envconfig:"LOG_PATH" default:"logfile"`
 }
 
 func Server(ver string) *chi.Mux {
@@ -84,6 +87,31 @@ func Server(ver string) *chi.Mux {
 	if err != nil {
 		logger.Error("failed to read/process configuration", zap.Error(err))
 	}
+	if conf.LogPath != "" {
+		fmt.Println(conf.LogPath)
+
+		// Configure log rotation
+		encoder := zap.NewDevelopmentEncoderConfig()
+		encoder.EncodeTime = zapcore.ISO8601TimeEncoder
+
+		rotate := zapcore.AddSync(&lumberjack.Logger{
+			Filename:   conf.LogPath,
+			MaxSize:    10, // 10 megabytes
+			MaxBackups: 3,  // keep 3 backups
+			MaxAge:     28, // keep 28 days
+		})
+
+		core := zapcore.NewCore(
+			zapcore.NewConsoleEncoder(encoder),
+			rotate,
+			logConf.Level,
+		)
+
+		// Create logger with rotated file output
+		logger = zap.New(core)
+
+	}
+
 	// default resultPath is current directory from which keploy binary is running
 	if conf.ReportPath == "" {
 		curr, err := os.Getwd()

@@ -2,7 +2,6 @@ module go.keploy.io/server
 
 go 1.17
 
-
 require (
 	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
 	github.com/go-chi/chi v1.5.4
@@ -21,6 +20,7 @@ require (
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/k0kubun/pp/v3 v3.1.0
 	github.com/wI2L/jsondiff v0.2.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (
