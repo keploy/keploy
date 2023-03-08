@@ -160,7 +160,7 @@ To genereate testcases we just need to make some API calls. You can use [Postman
 
 > Note : KTests are exported as files in the current directory(.) by default
 
-#### 1. Generate shortned url
+#### 1. Generate shortened url
 ```shell
 curl --request POST \
   --url http://localhost:8082/url \
@@ -184,6 +184,8 @@ curl --request GET \
 
 ### Integration with native Go test framework
 You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
+
+For an example, for a file named `main.go` create a unit test file as `main_test.go` in the **same folder** as `main.go`.
 
 Contents of `main_test.go`:
 ```go
@@ -262,7 +264,7 @@ One-click deploy sample URL Shortener application sample with Keploy using Gitpo
 
 🕵️‍️ [Why Keploy](https://docs.keploy.io/docs/keploy-explained/why-keploy)
 
-⚙️ [Installation Guide](https://docs.keploy.io/docs/server/introduction)
+⚙️ [Installation Guide](https://docs.keploy.io/docs/server/server-installation)
 
 📖 [Contribution Guide](https://docs.keploy.io/docs/devtools/server-contrib-guide/)
 
