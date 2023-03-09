@@ -76,6 +76,7 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 	if err != nil {
 		return nil, err
 	}
+	srv.tele.RecordedMock(srv.client, ctx)
 	return &proto.PutMockResp{Inserted: 1}, nil
 }
 
@@ -93,9 +94,6 @@ func (srv *Server) GetMocks(ctx context.Context, request *proto.GetMockReq) (*pr
 	response := &proto.GetMockResp{
 		Mocks: res,
 	}
-
-	srv.tele.RecordedMocks(len(mocks), srv.client, ctx)
-
 	return response, nil
 }
 

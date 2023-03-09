@@ -212,7 +212,8 @@ func TestDeNoise(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		tcSvc := testCase.New(nil, logger, false, nil, http.Client{}, true, mockFS)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
 		// update the tcs yaml with noised fields
@@ -370,7 +371,8 @@ func TestTestGrpc(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		tcSvc := testCase.New(nil, logger, false, nil, http.Client{}, true, mockFS)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
 		// Start Testrun
@@ -546,7 +548,8 @@ func TestTest(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		tcSvc := testCase.New(nil, logger, false, nil, http.Client{}, true, mockFS)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
 		// Start Testrun
