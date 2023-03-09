@@ -120,8 +120,7 @@ func (ac *Telemetry) RecordedTest(client http.Client, ctx context.Context) {
 
 // Telemetry event for the mocks that are recorded in the mocking feature
 func (ac *Telemetry) RecordedMock(client http.Client, ctx context.Context) {
-	ac.SendTelemetry("RecordedMock", client, ctx)
-}
+	ac.SendTelemetry("RecordedMock", client, ctx)}
 
 func (ac *Telemetry) GetApps(apps int, client http.Client, ctx context.Context) {
 	ac.SendTelemetry("GetApps", client, ctx, map[string]interface{}{"Apps": apps})
