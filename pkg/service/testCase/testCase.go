@@ -128,18 +128,6 @@ func (r *TestCase) readTCS(ctx context.Context, testCasePath, mockPath string) (
 		r.log.Info(fmt.Sprintf("no testcases found in %s directory.", pkg.SanitiseInput(testCasePath)))
 		return nil, err
 	}
-
-	// go routine got sending telemetry event
-	go func ()  {
-		testCaseCount := len(res)
-		mockCount := 0
-		for _,testCase := range res {
-			mockCount += len(testCase.Mocks)
-		}
-		// sending RecordedTest Telemetry event to Telemetry service.
-		r.tele.RecordedTests(testCaseCount, mockCount, r.client, ctx)
-	}()
-	
 	return res, err
 }
 
@@ -367,6 +355,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				return nil, err
 			}
 			inserted = append(inserted, insertedIds...)
+			r.tele.RecordedTest(r.client, ctx)
 			continue
 		}
 
