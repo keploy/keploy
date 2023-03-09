@@ -67,7 +67,7 @@ type config struct {
 	Port             string `envconfig:"PORT" default:"6789"`
 	ReportPath       string `envconfig:"REPORT_PATH" default:""`
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
-	LogPath          string `envconfig:"LOG_PATH"`
+	LogPath          string `envconfig:"LOG_PATH"` // eg. value: test, to create a log file named test.log
 }
 
 func Server(ver string) *chi.Mux {
