@@ -90,7 +90,7 @@ func Server(ver string) *chi.Mux {
 	// check if logPath is provided, if yes, create a log file and write logs to it
 	if conf.LogPath != "" {
 		logPath := fmt.Sprintf("%s.log", conf.LogPath)
-		logFile, err := os.Create(logPath)
+		logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			logger.Error("failed to create log file", zap.Error(err))
 		}
