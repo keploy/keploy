@@ -1,0 +1,37 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-75-0
+spec:
+    metadata:
+        Header: map[Content-Type:[application/json; charset=utf-8]]
+        Proto: HTTP/1.1
+        ProtoMajor: "1"
+        ProtoMinor: "1"
+        URL: https://telemetry.keploy.io/analytics
+        name: http-client
+        operation: POST
+        type: HTTP_CLIENT
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: https://telemetry.keploy.io/analytics
+        header:
+            Content-Type: application/json; charset=utf-8
+        body: '{"installationId":"ObjectID(\"640b5ea617f963e9968b1821\")","eventType":"RecordedTestAndMocks","meta":null,"createdAt":1678484978,"tele_check":false}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "90"
+            Content-Type: text/plain; charset=utf-8
+            Date: Fri, 10 Mar 2023 21:49:38 GMT
+            Strict-Transport-Security: max-age=15724800; includeSubDomains
+        body: '{"InstallationID":"ObjectID(\"640b5ea617f963e9968b1821\")","message":"Captured analytics"}'
+        body_type: utf-8
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=

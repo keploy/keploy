@@ -1,0 +1,37 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-75
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/testcase
+        header:
+            Accept-Encoding: gzip
+            Content-Length: "2420"
+            Content-Type: application/json
+            User-Agent: Go-http-client/1.1
+        body: '{"captured":1678484978,"app_id":"sample-url-shortener","uri":"/:param","http_req":{"method":"GET","proto_major":1,"proto_minor":1,"url":"/GuwHCgoQ","url_params":{"param":"GuwHCgoQ"},"header":{"Accept":["*/*"],"User-Agent":["curl/7.88.1"]},"body":"","binary":"","form":null},"http_resp":{"status_code":404,"header":{},"body":"Invalid URL ID.","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"grpc_req":{"body":"","method":""},"grpc_resp":{"body":"","error":""},"deps":[{"name":"SQL","type":"SQL_DB","meta":{"name":"SQL","operation":"Ping","type":"SQL_DB"},"data":["Cv+BBQEC/4QAAAAF/4IAAQE="]},{"name":"SQL","type":"SQL_DB","meta":{"arguments":"[{ 1 GuwHCgoQ}]","name":"SQL","operation":"QueryContext","query":"\"\n\t\tSELECT * \n\t\tFROM url_map\n\t\tWHERE id = $1\n\t\"","type":"SQL_DB"},"data":["Cv+BBQEC/4QAAAAF/4IAAQE="]},{"name":"SQL","type":"SQL_DB","meta":{"name":"SQL","operation":"QueryContext.Columns","type":"SQL_DB"},"data":["DP+FAgEC/4YAAQwAACr/hgAEAmlkDHJlZGlyZWN0X3VybApjcmVhdGVkX2F0CnVwZGF0ZWRfYXQ="]},{"name":"SQL","type":"SQL_DB","meta":{"name":"SQL","operation":"QueryContext.Next","type":"SQL_DB"},"data":["Cv+BBQEC/4QAAAAI/4IABAFFT0Y=","Cv+HBQEC/4oAAAAM/4sCAQL/jAABEAAAMf+IAC1bIkIyNTFiR3c9IiwiQjI1MWJHdz0iLCJCMjUxYkd3PSIsIkIyNTFiR3c9Il0="]},{"name":"SQL","type":"SQL_DB","meta":{"name":"SQL","operation":"QueryContext.Close","type":"SQL_DB"},"data":["Cv+BBQEC/4QAAAAF/4IAAQE="]}],"test_case_path":"/home/cassio/src/echo-sql/keploy/tests","mock_path":"/home/cassio/src/echo-sql/keploy/mocks","mocks":[{"Version":"api.keploy.io/v1beta2","Kind":"SQL","Spec":{"Metadata":{"name":"SQL","operation":"Ping","type":"SQL_DB"},"Type":"error","Err":["nil"]}},{"Version":"api.keploy.io/v1beta2","Kind":"SQL","Spec":{"Metadata":{"arguments":"[{ 1 GuwHCgoQ}]","name":"SQL","operation":"QueryContext","query":"\"\n\t\tSELECT * \n\t\tFROM url_map\n\t\tWHERE id = $1\n\t\"","type":"SQL_DB"},"Type":"error","Err":["nil"]}},{"Version":"api.keploy.io/v1beta2","Kind":"SQL","Spec":{"Metadata":{"name":"SQL","operation":"QueryContext.Close","type":"SQL_DB"},"Type":"table","Table":{"Cols":[{"Name":"id","Type":"\u003cnil\u003e"},{"Name":"redirect_url","Type":"\u003cnil\u003e"},{"Name":"created_at","Type":"\u003cnil\u003e"},{"Name":"updated_at","Type":"\u003cnil\u003e"}],"Rows":["[`\u003cnil\u003e` | `\u003cnil\u003e` | `\u003cnil\u003e` | `\u003cnil\u003e` | ]"]},"Err":["EOF","nil"]}}],"type":"Http"}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"id":"test-3"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    mocks:
+        - mock-75-0
+    assertions:
+        noise:
+            - body.id
+    created: 1678484978
