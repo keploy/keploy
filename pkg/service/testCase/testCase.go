@@ -254,7 +254,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 		if r.testExport {
 			r.nextYamlIndex.mu.Lock()
 			// defer r.nextYamlIndex.mu.Unlock()
-			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
+			lastIndex, ok := r.nextYamlIndex.tcsCount[testCasePath]
 			if !ok {
 				tcs, err := r.GetAll(ctx, v.CID, v.AppID, nil, nil, testCasePath, mockPath)
 				if len(tcs) > 0 && err == nil {
@@ -269,7 +269,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 					}
 				}
 			}
-			r.nextYamlIndex.tcsCount[v.AppID] = lastIndex + 1
+			r.nextYamlIndex.tcsCount[testCasePath] = lastIndex + 1
 			var (
 				id = fmt.Sprintf("test-%v", lastIndex+1)
 
