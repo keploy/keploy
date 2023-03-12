@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-95
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/start?app=sample-url-shortener&total=18&testCasePath=/home/cassio/src/samples-go/echo-sql/keploy/tests&mockPath=/home/cassio/src/samples-go/echo-sql/keploy/mocks
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"id":"1286a96d-e6cb-405a-b129-f0d28a8c52c7"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise: []
+    created: 1678664139

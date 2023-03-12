@@ -1,0 +1,33 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-94
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/testcase?app=sample-url-shortener&offset=0&limit=25&testCasePath=/home/cassio/src/samples-go/echo-sql/keploy/tests&mockPath=/home/cassio/src/samples-go/echo-sql/keploy/mocks&reqType=gRPC
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json; charset=utf-8
+            Eof: "true"
+            Vary: Origin
+        body: |
+            null
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise: []
+    created: 1678664139

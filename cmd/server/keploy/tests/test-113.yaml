@@ -1,0 +1,34 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-113
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/test
+        header:
+            Accept-Encoding: gzip
+            Content-Length: "423"
+            Content-Type: application/json
+            User-Agent: Go-http-client/1.1
+        body: '{"id":"test-2","app_id":"sample-url-shortener","run_id":"1286a96d-e6cb-405a-b129-f0d28a8c52c7","resp":{"status_code":308,"header":{"Location":["https://google.com"]},"body":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"grpc_resp":{"body":"","error":""},"test_case_path":"/home/cassio/src/samples-go/echo-sql/keploy/tests","mock_path":"/home/cassio/src/samples-go/echo-sql/keploy/mocks","type":"Http"}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"pass":true}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise: []
+    created: 1678664140
