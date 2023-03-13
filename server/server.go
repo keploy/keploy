@@ -106,6 +106,12 @@ func Server(ver string) *chi.Mux {
 
 		logger = zap.New(core)
 
+		// add a separator between each run
+		_, err = logFile.Write([]byte("--------\n"))
+		if err != nil {
+			panic(err)
+		}
+
 	}
 
 	// default resultPath is current directory from which keploy binary is running
