@@ -58,6 +58,9 @@ message TestCase {
   map<string, StrArr> anchors = 12;
   repeated string noise = 13;
   repeated Mock Mocks = 14;
+  GrpcReq GrpcReq = 15;
+  GrpcResp GrpcResp = 16;
+  string Type = 17;
 }
 
 message Method {
