@@ -63,7 +63,7 @@ type config struct {
 	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
 	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
 	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
-	Port             string `envconfig:"PORT" default:"6789"`
+	Port             string `envconfig:"KPORT" default:"6789"`
 	ReportPath       string `envconfig:"REPORT_PATH" default:""`
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
 }
