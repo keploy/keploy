@@ -1,0 +1,35 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-98
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: /api/regression/testcase
+        header:
+            Accept-Encoding: gzip
+            Content-Length: "652"
+            Content-Type: application/json
+            User-Agent: Go-http-client/1.1
+        body: '{"captured":1678805989,"app_id":"sample-url-shortener","uri":"/:param","http_req":{"method":"GET","proto_major":1,"proto_minor":1,"url":"/ba","url_params":{"param":"ba"},"header":{"Accept":["*/*"],"User-Agent":["curl/7.88.1"]},"body":"","binary":"","form":null},"http_resp":{"status_code":500,"header":{},"body":"Could not connect to Postgres.","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"grpc_req":{"body":"","method":""},"grpc_resp":{"body":"","error":""},"deps":null,"test_case_path":"/home/cassio/src/samples-go/echo-sql/keploy/tests","mock_path":"/home/cassio/src/samples-go/echo-sql/keploy/mocks","mocks":null,"type":"Http"}'
+        body_type: utf-8
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json; charset=utf-8
+            Vary: Origin
+        body: |
+            {"id":"test-19"}
+        body_type: utf-8
+        status_message: ""
+        proto_major: 1
+        proto_minor: 1
+    objects:
+        - type: error
+          data: H4sIAAAAAAAA/wEAAP//AAAAAAAAAAA=
+    assertions:
+        noise:
+            - body.id
+    created: 1678805989
