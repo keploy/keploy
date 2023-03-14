@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-104
+name: test-82
 spec:
     metadata: {}
     req:
