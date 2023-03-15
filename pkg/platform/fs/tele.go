@@ -14,24 +14,30 @@ import (
 // telemetry provides interface for create-read installationID for self-hosted keploy
 type telemetry struct{}
 
-func UserHomeDir() string {
+func UserHomeDir(isNewConfigPath bool) string {
+
+	var configFolder = "/keploy-config"
+	if isNewConfigPath {
+		configFolder = "/.keploy-config"
+	}
+
 	if runtime.GOOS == "windows" {
 		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
 		if home == "" {
 			home = os.Getenv("USERPROFILE")
 		}
-		return home + "/keploy-config"
+		return home + configFolder
 	}
-	return os.Getenv("HOME") + "/keploy-config"
+	return os.Getenv("HOME") + configFolder
 }
 
 func NewTeleFS() *telemetry {
 	return &telemetry{}
 }
 
-func (fs *telemetry) Get() (string, error) {
+func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
 	var (
-		path = UserHomeDir()
+		path = UserHomeDir(isNewConfigPath)
 		id   = ""
 	)
 
@@ -53,7 +59,7 @@ func (fs *telemetry) Get() (string, error) {
 }
 
 func (fs *telemetry) Set(id string) error {
-	path := UserHomeDir()
+	path := UserHomeDir(true)
 	createMockFile(path, "installation-id")
 
 	data := []byte{}
