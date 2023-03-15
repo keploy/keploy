@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
 	tcSvc "go.keploy.io/server/pkg/service/testCase"
@@ -32,10 +34,12 @@ type Server struct {
 	svc            regression2.Service
 	tcSvc          tcSvc.Service
 	mock           mock.Service
+	tele           telemetry.Service
+	client         http.Client
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string) error {
+func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string, telemetry telemetry.Service, cl http.Client) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer(kgrpcserver.UnaryInterceptor(k))
@@ -46,6 +50,8 @@ func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.S
 		testExport:     testExport,
 		testReportPath: testReportPath,
 		tcSvc:          tc,
+		tele:           telemetry,
+		client:         cl,
 	})
 	reflection.Register(srv)
 	err := srv.Serve(listener)
@@ -70,6 +76,7 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 	if err != nil {
 		return nil, err
 	}
+	srv.tele.RecordedMock(srv.client, ctx, request.Mock.Kind)
 	return &proto.PutMockResp{Inserted: 1}, nil
 }
 

@@ -48,10 +48,12 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 		for {
 			var count int64
 			var err error
+			var id string
 
 			if ac.Enabled && !isTestMode {
 				if ac.testExport {
-					id, _ := ac.store.Get()
+					// Checking if id is present in hidden keploy-config folder
+					id, _ = ac.store.Get(true)
 					count = int64(len(id))
 				} else {
 					count, err = ac.db.Count()
@@ -68,19 +70,27 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			}
 
 			if count == 0 {
-				bin, err := marshalEvent(event, ac.logger)
-				if err != nil {
-					break
+				if ac.testExport{
+					// Checking if id is present in old keploy-config folder
+					id, _ = ac.store.Get(false)
+					count = int64(len(id))
 				}
-				resp, err := http.Post("https://telemetry.keploy.io/analytics", "application/json", bytes.NewBuffer(bin))
-				if err != nil {
-					ac.logger.Debug("failed to send request for analytics", zap.Error(err))
-					break
-				}
+				if count == 0 {
+					bin, err := marshalEvent(event, ac.logger)
+					if err != nil {
+						break
+					}
+					resp, err := http.Post("https://telemetry.keploy.io/analytics", "application/json", bytes.NewBuffer(bin))
+					if err != nil {
+						ac.logger.Debug("failed to send request for analytics", zap.Error(err))
+						break
+					}
 
-				id, err := unmarshalResp(resp, ac.logger)
-				if err != nil {
-					break
+					installation_id, err := unmarshalResp(resp, ac.logger)
+					if err != nil {
+						break
+					}
+					id = installation_id
 				}
 				ac.InstallationID = id
 				if ac.testExport {
@@ -113,6 +123,21 @@ func (ac *Telemetry) Testrun(success int, failure int, client http.Client, ctx c
 	ac.SendTelemetry("TestRun", client, ctx, map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
 }
 
+// Telemetry event for the Mocking feature test run
+func (ac *Telemetry) MockTestRun(success int, failure int, client http.Client, ctx context.Context) {
+	ac.SendTelemetry("MockTestRun", client, ctx, map[string]interface{}{"Passed-Mocks": success, "Failed-Mocks": failure})
+}
+
+// Telemetry event for the tests and mocks that are recorded
+func (ac *Telemetry) RecordedTest(client http.Client, ctx context.Context, mockCount int, mockType []string) {
+	ac.SendTelemetry("RecordedTestAndMocks", client, ctx, map[string]interface{}{"mockCount": mockCount, "mockType": mockType})
+}
+
+// Telemetry event for the mocks that are recorded in the mocking feature
+func (ac *Telemetry) RecordedMock(client http.Client, ctx context.Context, mockType string) {
+	ac.SendTelemetry("RecordedMock", client, ctx, map[string]interface{}{"mockType": mockType})
+}
+
 func (ac *Telemetry) GetApps(apps int, client http.Client, ctx context.Context) {
 	ac.SendTelemetry("GetApps", client, ctx, map[string]interface{}{"Apps": apps})
 }
@@ -130,7 +155,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 		if ac.InstallationID == "" {
 			id := ""
 			if ac.testExport {
-				id, _ = ac.store.Get()
+				id, _ = ac.store.Get(true)
 			} else {
 				id = ac.db.Find()
 			}

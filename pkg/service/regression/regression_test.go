@@ -11,6 +11,7 @@ import (
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg/models"
 	mockPlatform "go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/testCase"
 	"go.uber.org/zap"
 )
@@ -127,7 +128,8 @@ func TestMain(m *testing.M) {
 
 	mockFS = mockPlatform.NewMockExportFS(false)
 	testReportFS = mockPlatform.NewTestReportFS(false)
-	rSvc = New(nil, nil, testReportFS, nil, http.Client{}, logger, true, mockFS)
+	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+	rSvc = New(nil, nil, testReportFS, analyticsConfig, http.Client{}, logger, true, mockFS)
 	m.Run()
 }
 
@@ -210,7 +212,8 @@ func TestDeNoise(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		tcSvc := testCase.New(nil, logger, false, nil, http.Client{}, true, mockFS)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
 		// update the tcs yaml with noised fields
@@ -368,7 +371,8 @@ func TestTestGrpc(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		tcSvc := testCase.New(nil, logger, false, nil, http.Client{}, true, mockFS)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
 		// Start Testrun
@@ -544,7 +548,8 @@ func TestTest(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		tcSvc := testCase.New(nil, logger, false, nil, http.Client{}, true, mockFS)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
 		// Start Testrun
