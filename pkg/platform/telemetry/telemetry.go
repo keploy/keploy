@@ -48,10 +48,12 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 		for {
 			var count int64
 			var err error
+			var id string
 
 			if ac.Enabled && !isTestMode {
 				if ac.testExport {
-					id, _ := ac.store.Get(true)
+					// Checking if id is present in hidden keploy-config folder
+					id, _ = ac.store.Get(true)
 					count = int64(len(id))
 				} else {
 					count, err = ac.db.Count()
@@ -68,8 +70,12 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			}
 
 			if count == 0 {
-				id, _ := ac.store.Get(false)
-				if int64(len(id)) == 0 {
+				if ac.testExport{
+					// Checking if id is present in old keploy-config folder
+					id, _ = ac.store.Get(false)
+					count = int64(len(id))
+				}
+				if count == 0 {
 					bin, err := marshalEvent(event, ac.logger)
 					if err != nil {
 						break
