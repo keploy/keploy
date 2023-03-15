@@ -1,0 +1,16 @@
+# Examples for Random Generation:
+
+```
+Testing callAPI("276525@example.com", "223553")...
+Response: {token123}
+Testing callAPI("832857@example.com", "979550")...
+Response: {token456}
+Testing callAPI("609771@example.com", "997016")...
+Response: {token789}
+Testing callAPI("642509@example.com", "107380")...
+Response: {token123}
+Testing callAPI("773956@example.com", "896287")...
+Response: {token456}
+```
+
+### These test cases are randomly generated email and password pairs that are passed to the callAPI function, which returns a response containing a token if the credentials are valid.

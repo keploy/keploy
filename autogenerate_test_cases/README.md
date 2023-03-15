@@ -1,6 +1,6 @@
-Ways to generate new testcases from given API schema and response-
+## Ways to generate new testcases from given API schema and response-
 
-1. Boundary Values Testing: testing API with inputs that are at boundary of allowed range, may be useful for identifying issues with input validation.
-2. Random Testing: generating random inputs and testing over API, can explore unexpected behavior in API.
-3. Combinational Testing: generating possible combinations of input parameters.
-4. ML model: we can create a ML model for generating test cases.
+### 1. Boundary Values Testing: This technique involves testing the API with inputs that are at the boundaries of the allowed range. It can help identify issues with input validation and ensure that the API behaves correctly when handling edge cases.
+### 2. Random Testing: This approach involves generating random inputs and testing the API with them. It can be useful for exploring unexpected behavior in the API that might not be apparent with a more structured testing approach.
+### 3. Combinational Testing: This technique involves generating possible combinations of input parameters to test the API. It can be particularly useful when testing APIs with many input parameters, as it helps ensure that all combinations of inputs have been tested.
+### 4. ML model: Machine learning can be used to create a model for generating test cases. The model can be trained on existing test cases and can then generate new test cases based on the API schema and response. This approach can be particularly useful for generating large numbers of test cases quickly and efficiently.
