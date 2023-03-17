@@ -1,28 +1,24 @@
-name: Feature request
+name: Features
 description: Suggest a feature to improve Keploy
 title: "[feature]: "
 labels: [feature]
+
 body:
-- type: markdown
-  attributes:
-    value: |
-      Thank you for taking the time to request a feature for Keploy
 - type: checkboxes
   attributes:
-    label: Is there an existing feature request for this?
-    description: Please search to see if an issue related to this feature request/feature request already exists
+    label: Is there an existing issue for this?
+    description: Please search to see if an issue already exists for the you encountered
     options:
     - label: I have searched the existing issues
       required: true
 - type: textarea
   attributes:
-    label: Summary
-    description: One paragraph description of the feature
-  validations:
-    required: true
-- type: textarea
-  attributes:
-    label: Why should this be worked on?
-    description: A concise description of the problems or use cases for this feature request
+    label: Issue Submission
+    description: Please Submit your Issue on Keploy Repository
+    placeholder: |
+      1. Go to [Issue Submission](https://github.com/keploy/keploy/issues/new?assignees=&labels=feature&template=--gsoc-issue.yaml&title=%5Bgsoc%5D%3A+)
+      2. Fill in the Details
+      3. Select the Repository from Dropdown, for which you are making the Issue.
+      4. Add appropriate labels to the issue.
   validations:
     required: true
