@@ -76,7 +76,7 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 	if err != nil {
 		return nil, err
 	}
-	srv.tele.RecordedMock(srv.client, ctx, request.Mock.Kind)
+	srv.tele.RecordedMock(srv.client, ctx)
 	return &proto.PutMockResp{Inserted: 1}, nil
 }
 

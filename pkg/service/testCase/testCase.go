@@ -355,15 +355,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				return nil, err
 			}
 			inserted = append(inserted, insertedIds...)
-
-			go func() {
-				var mockTypes []string
-				for _, mockElement := range tc[1:] {
-					mockTypes = append(mockTypes, string(mockElement.Kind))
-				} 
-				r.tele.RecordedTest(r.client, ctx, len(tc)-1, mockTypes)
-			} ()
-
+			r.tele.RecordedTest(r.client, ctx)
 			continue
 		}
 
