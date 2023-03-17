@@ -27,7 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS, logFile *os.File) *Regression {
 	return &Regression{
 		yamlTcs:      sync.Map{},
 		tele:         adb,
@@ -38,6 +38,7 @@ func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb te
 		testReportFS: testReportFS,
 		mockFS:       mFS,
 		testExport:   TestExport,
+		logFile:      logFile,
 	}
 }
 
@@ -53,6 +54,7 @@ type Regression struct {
 	mockFS       models.MockFS
 	testExport   bool
 	log          *zap.Logger
+	logFile      *os.File
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
@@ -218,6 +220,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	if !pass {
 		logger := pp.New()
+		r.CheckAndSetForLogPath(logger)
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
@@ -285,6 +288,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		logger.Printf(logs)
 	} else {
 		logger := pp.New()
+		r.CheckAndSetForLogPath(logger)
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
@@ -384,6 +388,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 
 	if !pass {
 		logger := pp.New()
+		r.CheckAndSetForLogPath(logger)
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
@@ -430,6 +435,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		logger.Printf(logs)
 	} else {
 		logger := pp.New()
+		r.CheckAndSetForLogPath(logger)
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
@@ -438,6 +444,12 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 
 	}
 	return pass, res, &tc, nil
+}
+
+func (r *Regression) CheckAndSetForLogPath(logger *pp.PrettyPrinter) {
+	if r.logFile != nil {
+		logger.SetOutput(r.logFile)
+	}
 }
 
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
@@ -878,6 +890,8 @@ func (r *Regression) failOldTestRuns(ctx context.Context, ts int64, tr *models.T
 }
 
 func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport bool, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
+	logger := pp.New()
+	r.CheckAndSetForLogPath(logger)
 	if run.Status == models.TestRunStatusRunning {
 		if testExport {
 			err := r.startTestRun(ctx, runId, testCasePath, mockPath, testReportPath, totalTcs)
@@ -885,8 +899,8 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 				return err
 			}
 		}
-		pp.SetColorScheme(models.PassingColorScheme)
-		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
+		logger.SetColorScheme(models.PassingColorScheme)
+		logger.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
 	} else {
 		var (
 			total   int
@@ -916,15 +930,15 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			return err
 		}
 		if run.Status == models.TestRunStatusFailed {
-			pp.SetColorScheme(models.FailingColorScheme)
+			logger.SetColorScheme(models.FailingColorScheme)
 		} else {
-			pp.SetColorScheme(models.PassingColorScheme)
+			logger.SetColorScheme(models.PassingColorScheme)
 		}
 
 		// sending Testrun Telemetry event to Telemetry service.
 		r.tele.Testrun(success, failure, r.client, ctx)
 
-		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
+		logger.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
 	}
 	if !testExport {
 		return r.rdb.Upsert(ctx, run)

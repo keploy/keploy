@@ -68,7 +68,7 @@ type config struct {
 	Port             string `envconfig:"PORT" default:"6789"`
 	ReportPath       string `envconfig:"REPORT_PATH" default:""`
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
-	LogPath          string `envconfig:"LOG_PATH" default:"logfile"`
+	LogPath          string `envconfig:"LOG_PATH"`
 }
 
 func Server(ver string) *chi.Mux {
@@ -87,15 +87,20 @@ func Server(ver string) *chi.Mux {
 	if err != nil {
 		logger.Error("failed to read/process configuration", zap.Error(err))
 	}
+	var logFile *os.File = nil
 	if conf.LogPath != "" {
-		fmt.Println(conf.LogPath)
+		logFile, err = os.OpenFile(conf.LogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			logger.Error("failed to create log file", zap.Error(err))
+		}
+		defer logFile.Close()
 
 		// Configure log rotation
 		encoder := zap.NewDevelopmentEncoderConfig()
 		encoder.EncodeTime = zapcore.ISO8601TimeEncoder
 
 		rotate := zapcore.AddSync(&lumberjack.Logger{
-			Filename:   conf.LogPath,
+			Filename:   logFile.Name(),
 			MaxSize:    10, // 10 megabytes
 			MaxBackups: 3,  // keep 3 backups
 			MaxAge:     28, // keep 28 days
@@ -157,7 +162,8 @@ func Server(ver string) *chi.Mux {
 
 	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
-	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
+	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS, logFile)
+
 	mockSrv := mock.NewMockService(mockFS, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
@@ -240,6 +246,9 @@ func Server(ver string) *chi.Mux {
 	g.Go(func() error { return m.Serve() })
 	fmt.Println(logo, " ")
 	fmt.Printf("keploy %v\n\n.", ver)
+	if logFile != nil {
+		fmt.Println("Logs are written to " + logFile.Name() + " ............")
+	}
 	logger.Info("keploy started at port " + port)
 	g.Wait()
 
