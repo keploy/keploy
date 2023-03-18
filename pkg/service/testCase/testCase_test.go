@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 
 	proto "go.keploy.io/server/grpc/regression"
@@ -115,7 +116,7 @@ func TestMain(m *testing.M) {
 	mockPath = tcsPath + "/mocks"
 	tcsPath += "/tests"
 
-	mockFS := mockPlatform.NewMockExportFS(false)
+	mockFS := mockPlatform.NewMockExportFS(false, sync.Map{})
 	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "")
 	tcSvc = New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 

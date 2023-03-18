@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,7 +127,7 @@ func TestMain(m *testing.M) {
 	mockPath = testReportPath + "/mocks"
 	testReportPath += "/reports"
 
-	mockFS = mockPlatform.NewMockExportFS(false)
+	mockFS = mockPlatform.NewMockExportFS(false, sync.Map{})
 	testReportFS = mockPlatform.NewTestReportFS(false)
 	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "")
 	rSvc = New(nil, nil, testReportFS, analyticsConfig, http.Client{}, logger, true, mockFS)

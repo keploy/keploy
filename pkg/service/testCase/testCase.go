@@ -107,8 +107,7 @@ func (r *TestCase) GetApps(ctx context.Context, cid string) ([]string, error) {
 // Note: During testcase-export, generated testcase will not be displayed in ui currently. Because path is not provided by the ui graphQL query.
 func (r *TestCase) Get(ctx context.Context, cid, appID, id, testCasePath, mockPath string) (models.TestCase, error) {
 	if r.testExport {
-		// TODO(Aerowisca) : Complete this.
-		return models.TestCase{}, nil
+		return r.mockFS.ReadByID(ctx, id, testCasePath, mockPath)
 	}
 	tcs, err := r.tdb.Get(ctx, cid, id)
 	if err != nil {

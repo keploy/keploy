@@ -2,7 +2,6 @@ package models
 
 import (
 	"context"
-
 	"gopkg.in/yaml.v3"
 )
 
@@ -131,6 +130,7 @@ const (
 )
 
 type MockFS interface {
+	ReadByID(ctx context.Context, id string, testCasePath, mockPath string) (TestCase, error)
 	ReadAll(ctx context.Context, testCasePath, mockPath, tcsType string) ([]TestCase, error)
 	Read(ctx context.Context, path, name string, libMode bool) ([]Mock, error)
 	Write(ctx context.Context, path string, doc Mock) error

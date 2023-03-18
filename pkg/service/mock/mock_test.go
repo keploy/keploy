@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestMain(m *testing.M) {
 	}
 	path += "/mocks"
 
-	mockFS := mockPlatform.NewMockExportFS(false)
+	mockFS := mockPlatform.NewMockExportFS(false, sync.Map{})
 	mockSrv = NewMockService(mockFS, logger)
 	m.Run()
 	tearDown()

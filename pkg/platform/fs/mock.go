@@ -25,10 +25,15 @@ type mockExport struct {
 	tests      sync.Map
 }
 
-func NewMockExportFS(isTestMode bool) *mockExport {
+const (
+	KeyForDummyDataForRead = "dummy-data-for-read-call"
+)
+
+func NewMockExportFS(isTestMode bool, tests sync.Map) *mockExport {
+
 	return &mockExport{
 		isTestMode: isTestMode,
-		tests:      sync.Map{},
+		tests:      tests,
 	}
 }
 
@@ -61,12 +66,12 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath, tcsTy
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		tcs, err := read(testCasePath, name, false)
+		tcs, err := fe.read(testCasePath, name, false)
 		if err != nil {
 			return nil, err
 		}
 
-		tests, err := toTestCase(tcs, name, mockPath)
+		tests, err := fe.toTestCase(tcs, name, mockPath)
 		if err != nil {
 			return nil, err
 		}
@@ -84,8 +89,23 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath, tcsTy
 	return res, nil
 }
 
+func (fe *mockExport) ReadByID(ctx context.Context, id string, testCasePath, mockPath string) (models.TestCase, error) {
+	name := "test-" + id
+	tcs, err := fe.read(testCasePath, name, false)
+	if err != nil {
+		return models.TestCase{}, err
+	}
+
+	tests, err := fe.toTestCase(tcs, name, mockPath)
+	if err != nil {
+		return models.TestCase{}, err
+	}
+
+	return tests[0], nil
+}
+
 func (fe *mockExport) Read(ctx context.Context, path, name string, libMode bool) ([]models.Mock, error) {
-	return read(path, name, libMode)
+	return fe.read(path, name, libMode)
 }
 
 func (fe *mockExport) Write(ctx context.Context, path string, doc models.Mock) error {
@@ -153,7 +173,7 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 	return nil
 }
 
-func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
+func (fe *mockExport) toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
 	res := []models.TestCase{}
 	for _, j := range tcs {
 		var (
@@ -181,7 +201,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				} else {
 					mockName = fileName
 				}
-				yamlDocs, err := read(mockPath, mockName, false)
+				yamlDocs, err := fe.read(mockPath, mockName, false)
 				if err != nil {
 					return nil, err
 				}
@@ -230,7 +250,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				} else {
 					mockName = fileName
 				}
-				yamlDocs, err := read(mockPath, mockName, false)
+				yamlDocs, err := fe.read(mockPath, mockName, false)
 				if err != nil {
 					return nil, err
 				}
@@ -257,7 +277,19 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 	return res, nil
 }
 
-func read(path, name string, libMode bool) ([]models.Mock, error) {
+func (fe *mockExport) read(path, name string, libMode bool) ([]models.Mock, error) {
+	if fe.isTestMode {
+		val, ok := fe.tests.Load(KeyForDummyDataForRead)
+		if !ok {
+			return nil, fmt.Errorf("dummy data for testing was not passed")
+		}
+		mock, ok := val.([]models.Mock)
+		if !ok {
+			return nil, fmt.Errorf("dummy data for testing is of incorrect data type")
+		}
+		return mock, nil
+	}
+
 	if !pkg.IsValidPath(path) {
 		return nil, fmt.Errorf("file path should be absolute. got path: %s", pkg.SanitiseInput(path))
 	}
