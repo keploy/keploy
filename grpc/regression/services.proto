@@ -122,8 +122,22 @@ message startResponse {
 }
 
 message getTCRequest {
+  // If ENABLE_TEST_EXPORT is set to true, this represents the UID
+  // of the testcase in MongoDB.
+  // If ENABLE_TEST_EXPORT is set to false, this starts behaving as the
+  // suffix of the testcase filename. To allow for flexibility in naming
+  // convention, we do not restrict this to an integer. However, the
+  // current implementation does expect it to be an integer.
   string id = 1;
   string app = 2;
+
+  // The absolute path of the folder which contains the testcases.
+  // This is not needed if ENABLE_TEST_EXPORT is set to false.
+  string TestCasePath = 3;
+
+  // The absolute path of the folder which contains the mocks.
+  // This is not needed if ENABLE_TEST_EXPORT is set to false.
+  string MockPath = 4;
 }
 message getTCSRequest{
   string app = 1;
@@ -181,7 +195,7 @@ message Mock {
     int64 Created = 7;
     // for sql
     string Type = 8;
-    optional Table Table = 9;
+    Table Table = 9;
     int64 Int = 10; // change it to rows commited
     repeated string Err = 11;
     GrpcReq GrpcRequest = 12;
