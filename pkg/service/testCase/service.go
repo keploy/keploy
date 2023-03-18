@@ -7,7 +7,7 @@ import (
 )
 
 type Service interface {
-	Get(ctx context.Context, cid, appID, id string) (models.TestCase, error)
+	Get(ctx context.Context, cid, appID, id, testCasePath, mockPath string) (models.TestCase, error)
 	GetAll(ctx context.Context, cid, appID string, offset *int, limit *int, testCasePath, mockPath, tcsType string) ([]models.TestCase, error)
 	GetApps(ctx context.Context, cid string) ([]string, error)
 	Update(ctx context.Context, t []models.TestCase) error

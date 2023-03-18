@@ -213,8 +213,10 @@ func getProtoTC(tcs models.TestCase) (*proto.TestCase, error) {
 func (srv *Server) GetTC(ctx context.Context, request *proto.GetTCRequest) (*proto.TestCase, error) {
 	id := request.Id
 	app := request.App
+	testCasePath := request.TestCasePath
+	mockPath := request.MockPath
 	// print(tcs)
-	tcs, err := srv.tcSvc.Get(ctx, graph.DEFAULT_COMPANY, app, id)
+	tcs, err := srv.tcSvc.Get(ctx, graph.DEFAULT_COMPANY, app, id, testCasePath, mockPath)
 	if err != nil {
 		return nil, err
 	}

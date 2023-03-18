@@ -118,7 +118,9 @@ func (rg *regression) Start(w http.ResponseWriter, r *http.Request) {
 func (rg *regression) GetTC(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	app := rg.getMeta(w, r, false)
-	tcs, err := rg.tcSvc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id)
+	testCasePath := r.URL.Query().Get("testCasePath")
+	mockPath := r.URL.Query().Get("mockPath")
+	tcs, err := rg.tcSvc.Get(r.Context(), graph.DEFAULT_COMPANY, app, id, testCasePath, mockPath)
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
 		return

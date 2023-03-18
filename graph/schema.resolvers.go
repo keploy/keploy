@@ -146,7 +146,8 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, o
 	}
 
 	if id != nil {
-		tc, err := r.tcSvc.Get(ctx, DEFAULT_COMPANY, a, *id)
+		// TODO(Aerowisca) : How to correctly populate these values?
+		tc, err := r.tcSvc.Get(ctx, DEFAULT_COMPANY, a, *id, "", "")
 		if err != nil {
 			return nil, err
 		}
