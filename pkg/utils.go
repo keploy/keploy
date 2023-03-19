@@ -419,8 +419,52 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 				i.Req.ProtoMinor = int64(protominor)
 			}
 		default:
-			logger.Error("Invlaid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`")
+			logger.Error("Invalid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`")
 		}
 	}
 	return r
+}
+
+/*
+ * given str1 and str2 it will color with purple the difference between those two strings
+ */
+func ColoredDiff(str1, str2 string) (string, string) {
+	i, diff := diff(str1, str2)
+
+	if diff {
+		cs := insColor(str1, "\033[35m", i)
+		cs2 := insColor(str2, "\033[35m", i)
+		return cs, cs2
+	}
+	return str1, str2
+}
+
+/*
+ * Insert color at given index
+ */
+func insColor(str, ascii_code string, index int) string {
+	return str[:index] + ascii_code + str[index:] + "\033[0m"
+}
+
+/* Find the diff between two strings returning index where
+ * the difference begin
+ */
+func diff(s1 string, s2 string) (int, bool) {
+	diff := false
+	i := -1
+
+	if len(s1) < len(s2) {
+		i = len(s1)
+		diff = true
+	} else if len(s2) < len(s1) {
+		diff = true
+		i = len(s2)
+	}
+
+	for i := 0; i < len(s1) && i < len(s2); i++ {
+		if s1[i] != s2[i] {
+			return i, diff
+		}
+	}
+	return i, diff
 }

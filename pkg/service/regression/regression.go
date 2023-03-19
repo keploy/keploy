@@ -223,6 +223,9 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
 
+		// We will need to separete diffs from logs as we need better diff visualization
+		var diffs = ""
+
 		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
 			"Test Result:\n"+
 			"\tInput Http Request: %+v\n\n"+
@@ -230,10 +233,15 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			"%+v\n\n"+"\tActual Response: "+
 			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
 
-		if !res.StatusCode.Normal {
-			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+		//		if !res.StatusCode.Normal {
+		//			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+		//
+		//		}
 
+		if !res.StatusCode.Normal {
+			diffs += fmt.Sprintf("\tExpected StatusCode: %v"+"\n\tActual StatusCode: %v\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
 		}
+
 		var (
 			actualHeader   = map[string][]string{}
 			expectedHeader = map[string][]string{}
@@ -248,16 +256,26 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 
+		//if !unmatched {
+		//	logs += "\t Response Headers: {\n"
+		//	for i, j := range expectedHeader {
+		//		logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
+		//	}
+		//	logs += "\t}\n"
+		//}
+
 		if !unmatched {
-			logs += "\t Response Headers: {\n"
+			diffs += "\t Response Headers: {\n"
 			for i, j := range expectedHeader {
-				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
+				expect, actual := pkg.ColoredDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]))
+				diffs += fmt.Sprintf("\t\t\033[31m%s\033[0m"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, expect, actual)
 			}
 			logs += "\t}\n"
 		}
+
 		// TODO: cleanup the logging related code. this is a mess
 		if !res.BodyResult[0].Normal {
-			logs += "\tResponse body: {\n"
+			diffs += "\tResponse body: {\n"
 			if json.Valid([]byte(resp.Body)) {
 				// compute and log body's json diff
 				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
@@ -273,17 +291,21 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+					expect, actual := pkg.ColoredDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value))
+					diffs += fmt.Sprintf("\t\t\033[31m%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, expect, actual)
 				}
-				logs += "\t}\n"
+				diffs += "\t}\n"
 			} else {
-				// just log both the bodies as plain text without really computing the diff
-				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
+				// compute the diff
+				expect, actual := pkg.ColoredDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body))
+				diffs += fmt.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", expect, actual)
 
 			}
 		}
 		logs += "--------------------------------------------------------------------\n\n"
+		diffs += "--------------------------------------------------------------------\n\n"
 		logger.Printf(logs)
+		fmt.Println(diffs)
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
