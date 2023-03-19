@@ -256,6 +256,33 @@ export KEPLOY_MODE="record"
 export KEPLOY_MODE="test"
 ```
 
+## Logging Behaviour
+Keploy support 3 types of logging behaviour, which is easily configurable via **Environment Variables**.
+
+1. **Console**
+```bash
+export KEPLOY_LOG_LOCATION=console
+```
+This is the default logging behaviour. When this option is selected, the logs would be printed on console only.
+
+2. **File**
+```bash
+export KEPLOY_LOG_LOCATION=file
+export LOG_FILE_LOCATION="/tmp/keploy.log"
+```
+This behaviour can be used when you want to redirect the logs to a file.
+
+3. **Pipe**
+```bash
+export KEPLOY_LOG_LOCATION=pipe
+export LOG_FILE_LOCATION="/tmp/keploy.log"
+```
+
+If the nested directories/file for logs do not exist, it will be created for you.
+
+This logging behaviour is most useful for developers who want to preserve application logs, while viewing the logs at the terminal.
+This method writes to the console as well as the user defined file.
+
 Need another language support? Please raise an [issue](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) or discuss on our [slack channel](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 
 ## Quickstart on GitPod

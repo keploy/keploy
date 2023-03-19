@@ -27,32 +27,65 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
-	return &Regression{
-		yamlTcs:      sync.Map{},
-		tele:         adb,
-		tdb:          tdb,
-		log:          log,
-		client:       cl,
-		rdb:          rdb,
-		testReportFS: testReportFS,
-		mockFS:       mFS,
-		testExport:   TestExport,
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS,
+	logLocation models.LogLocation, logFileLocation string) (*Regression, error) {
+	var logFile *os.File
+
+	// Open a file for writing only if we have to pipe or redirect the logs.
+	if logLocation != models.Console {
+		var err error
+		logFile, err = os.OpenFile(logFileLocation, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+		if err != nil {
+			return nil, err
+		}
 	}
+	return &Regression{
+		yamlTcs:         sync.Map{},
+		tele:            adb,
+		tdb:             tdb,
+		log:             log,
+		client:          cl,
+		rdb:             rdb,
+		testReportFS:    testReportFS,
+		mockFS:          mFS,
+		testExport:      TestExport,
+		logLocation:     logLocation,
+		logFileLocation: logFileLocation,
+		logFile:         logFile,
+	}, nil
 }
 
 type Regression struct {
 	yamlTcs  sync.Map
 	runCount int
 
-	tdb          models.TestCaseDB
-	client       http.Client
-	testReportFS TestReportFS
-	rdb          TestRunDB
-	tele         telemetry.Service
-	mockFS       models.MockFS
-	testExport   bool
-	log          *zap.Logger
+	tdb             models.TestCaseDB
+	client          http.Client
+	testReportFS    TestReportFS
+	rdb             TestRunDB
+	tele            telemetry.Service
+	mockFS          models.MockFS
+	testExport      bool
+	log             *zap.Logger
+	logLocation     models.LogLocation
+	logFileLocation string
+	logFile         *os.File
+}
+
+func (r *Regression) prettyPrintToSharedLogger(prettyPrinter *pp.PrettyPrinter, data string, fields ...interface{}) {
+	switch r.logLocation {
+	case models.Console:
+		prettyPrinter.Fprintf(os.Stderr, data, fields...)
+	case models.File:
+		if r.logFile != nil {
+			prettyPrinter.Fprintf(r.logFile, data, fields...)
+		}
+	case models.Pipe:
+		prettyPrinter.Fprintf(os.Stderr, data, fields...)
+		if r.logFile != nil {
+			prettyPrinter.Fprintf(r.logFile, data, fields...)
+		}
+	}
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
@@ -282,15 +315,14 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
+		r.prettyPrintToSharedLogger(logger, logs)
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
-		logger.Printf(log2)
-
+		r.prettyPrintToSharedLogger(logger, log2)
 	}
 	return pass, res, &tc, nil
 }
@@ -427,15 +459,14 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 			logs += logger.Sprintf("\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t}\n", tc.GrpcResp.Err, resp.Err)
 		}
 		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
+		r.prettyPrintToSharedLogger(logger, logs)
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
-		logger.Printf(log2)
-
+		r.prettyPrintToSharedLogger(logger, log2)
 	}
 	return pass, res, &tc, nil
 }
@@ -877,6 +908,7 @@ func (r *Regression) failOldTestRuns(ctx context.Context, ts int64, tr *models.T
 }
 
 func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport bool, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
+	printer := pp.New()
 	if run.Status == models.TestRunStatusRunning {
 		if testExport {
 			err := r.startTestRun(ctx, runId, testCasePath, mockPath, testReportPath, totalTcs)
@@ -884,8 +916,8 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 				return err
 			}
 		}
-		pp.SetColorScheme(models.PassingColorScheme)
-		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
+		printer.SetColorScheme(models.PassingColorScheme)
+		r.prettyPrintToSharedLogger(printer, "\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
 	} else {
 		var (
 			total   int
@@ -915,9 +947,9 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			return err
 		}
 		if run.Status == models.TestRunStatusFailed {
-			pp.SetColorScheme(models.FailingColorScheme)
+			printer.SetColorScheme(models.FailingColorScheme)
 		} else {
-			pp.SetColorScheme(models.PassingColorScheme)
+			printer.SetColorScheme(models.PassingColorScheme)
 		}
 
 		// if testCasePath is empty that means PutTest is triggered by mocking feature
@@ -929,7 +961,7 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			r.tele.Testrun(success, failure, r.client, ctx)
 		}
 
-		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
+		r.prettyPrintToSharedLogger(printer, "\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
 	}
 	if !testExport {
 		return r.rdb.Upsert(ctx, run)

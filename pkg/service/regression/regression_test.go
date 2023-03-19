@@ -129,7 +129,7 @@ func TestMain(m *testing.M) {
 	mockFS = mockPlatform.NewMockExportFS(false)
 	testReportFS = mockPlatform.NewTestReportFS(false)
 	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "")
-	rSvc = New(nil, nil, testReportFS, analyticsConfig, http.Client{}, logger, true, mockFS)
+	rSvc, _ = New(nil, nil, testReportFS, analyticsConfig, http.Client{}, logger, true, mockFS, models.Console, "dummy-file.log")
 	m.Run()
 }
 

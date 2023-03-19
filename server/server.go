@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"go.keploy.io/server/pkg/models"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -66,24 +68,60 @@ type config struct {
 	Port             string `envconfig:"PORT" default:"6789"`
 	ReportPath       string `envconfig:"REPORT_PATH" default:""`
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
+
+	// Use this option to tune the behaviour of the path where the logs would be written.
+	LogLocation models.LogLocation `envconfig:"LOG_LOCATION" default:"console"`
+
+	// The absolute or relative filepath of the files to store the logs in.
+	// This is platform agnostic, so forward and backward slashes both are fine.
+	// If the file doesn't exists, one will be created for you.
+	LogFileLocation string `envconfig:"LOG_FILE_LOCATION" default:"/tmp/keploy.log"`
 }
 
 func Server(ver string) *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
 
+	// Parse the config before creating the logger to figure out whether we need
+	// to pipe the logs or not.
+	var conf config
+	err := envconfig.Process("keploy", &conf)
+	if err != nil {
+		log.Fatalf("failed to read/process configuration with error %v", err)
+	}
+
+	// Convert the separators in the filepath to a platform agnostic version.
+	// For example, if user passed in "/C/Downloads", it'd be converted to
+	// "\C\Downloads" in Windows.
+	conf.LogFileLocation = filepath.FromSlash(conf.LogFileLocation)
+
+	// If we need to pipe or redirect the logs, create the relevant directories.
+	if conf.LogLocation != models.Console {
+		err := CreateNestedDirectoriesIfNotExists(conf.LogFileLocation)
+		if err != nil {
+			log.Fatalf("Could not create nested directories for filepath due to error %v", err)
+		}
+	}
+
 	logConf := zap.NewDevelopmentConfig()
 	logConf.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+
+	// If the user has requested to the pipe the logs in a file,
+	// modify the internal config for zap which supports multiple syncers.
+	switch conf.LogLocation {
+	case models.Console:
+		logConf.OutputPaths = []string{"stderr"}
+	case models.File:
+		logConf.OutputPaths = []string{conf.LogFileLocation}
+	case models.Pipe:
+		logConf.OutputPaths = []string{"stderr", conf.LogFileLocation}
+	}
+
 	logger, err := logConf.Build()
 	if err != nil {
 		panic(err)
 	}
 	defer logger.Sync() // flushes buffer, if any
 
-	var conf config
-	err = envconfig.Process("keploy", &conf)
-	if err != nil {
-		logger.Error("failed to read/process configuration", zap.Error(err))
-	}
 	// default resultPath is current directory from which keploy binary is running
 	if conf.ReportPath == "" {
 		curr, err := os.Getwd()
@@ -129,7 +167,10 @@ func Server(ver string) *chi.Mux {
 
 	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
-	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
+	regSrv, err := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS, conf.LogLocation, conf.LogFileLocation)
+	if err != nil {
+		logger.Fatal("Could not create regression service due to error %s" + err.Error())
+	}
 	mockSrv := mock.NewMockService(mockFS, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
@@ -216,4 +257,12 @@ func Server(ver string) *chi.Mux {
 	g.Wait()
 
 	return r
+}
+
+func CreateNestedDirectoriesIfNotExists(filePath string) error {
+	// Remove the filename to get the path for the directory
+	directoryPath := filepath.Dir(filePath)
+
+	// Create the nested directories if they don't exist.
+	return os.MkdirAll(directoryPath, os.ModePerm)
 }
