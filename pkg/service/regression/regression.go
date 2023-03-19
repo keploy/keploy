@@ -273,7 +273,18 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+
+					lhs := op.OldValue.(string)
+					rhs := op.Value.(string)
+					prettifiedDiff, diffError := pkg.ComputePrettifiedJSONDiff(lhs, rhs)
+					// To make our code robust against external libray failures, we failback to the default diff in
+					// case of errors.
+					if diffError != nil {
+						r.log.Error("Could not diff lhs and rhs with error " + err.Error())
+						logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+					} else {
+						logs += prettifiedDiff
+					}
 				}
 				logs += "\t}\n"
 			} else {
@@ -414,7 +425,18 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+
+					lhs := op.OldValue.(string)
+					rhs := op.Value.(string)
+					prettifiedDiff, diffError := pkg.ComputePrettifiedJSONDiff(lhs, rhs)
+					// To make our code robust against external libray failures, we failback to the default diff in
+					// case of errors.
+					if diffError != nil {
+						r.log.Error("Could not diff lhs and rhs with error " + err.Error())
+						logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+					} else {
+						logs += prettifiedDiff
+					}
 				}
 				logs += "\t}\n"
 			} else {

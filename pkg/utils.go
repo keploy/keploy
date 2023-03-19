@@ -16,7 +16,22 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
+
+	diff "github.com/yudai/gojsondiff"
+	"github.com/yudai/gojsondiff/formatter"
 )
+
+const (
+	AsciiSame    = " "
+	AsciiAdded   = "+"
+	AsciiDeleted = "-"
+)
+
+// These parameters can be tuned in case more customizations in diffs are needed in future.
+var AsciiStyles = map[string]string{
+	AsciiAdded:   "30;42",
+	AsciiDeleted: "30;41",
+}
 
 func IsTime(stringDate string) bool {
 	s := strings.TrimSpace(stringDate)
@@ -423,4 +438,34 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 		}
 	}
 	return r
+}
+
+// ComputePrettifiedJSONDiff computes the diff of two JSON in a human readable, colorful format.
+func ComputePrettifiedJSONDiff(lhs, rhs string) (string, error) {
+	differ := diff.New()
+	d, err := differ.Compare([]byte(lhs), []byte(rhs))
+	if err != nil {
+		return "", nil
+	}
+
+	var lhsJSON map[string]interface{}
+	if err := json.Unmarshal([]byte(lhs), &lhsJSON); err != nil {
+		return "", err
+	}
+	config := formatter.AsciiFormatterConfig{
+		ShowArrayIndex: true,
+		Coloring:       true,
+	}
+
+	diffFormatter := formatter.NewAsciiFormatter(lhsJSON, config)
+	diffString, err := diffFormatter.Format(d)
+	if err != nil {
+		return "", err
+	}
+
+	style, _ := AsciiStyles[AsciiAdded]
+	diffString = strings.ReplaceAll(diffString, fmt.Sprintf("\n\x1b[%s", style),
+		fmt.Sprintf(" \x1b[%s", style))
+
+	return diffString, nil
 }
