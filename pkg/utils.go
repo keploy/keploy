@@ -463,7 +463,7 @@ func diff(s1 string, s2 string) (int, bool) {
 
 	for i := 0; i < len(s1) && i < len(s2); i++ {
 		if s1[i] != s2[i] {
-			return i, diff
+			return i, true
 		}
 	}
 	return i, diff

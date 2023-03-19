@@ -292,7 +292,12 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 						keyStr = keyStr[1:]
 					}
 					expect, actual := pkg.ColoredDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value))
-					diffs += fmt.Sprintf("\t\t\033[31m%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, expect, actual)
+					if keyStr != "" {
+						diffs += fmt.Sprintf("\t\t\033[31m%s\033[0m"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, expect, actual)
+					} else {
+						diffs += fmt.Sprintf("\t \n\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t", expect, actual)
+					}
+
 				}
 				diffs += "\t}\n"
 			} else {
