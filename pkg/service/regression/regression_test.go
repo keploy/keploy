@@ -128,7 +128,7 @@ func TestMain(m *testing.M) {
 
 	mockFS = mockPlatform.NewMockExportFS(false)
 	testReportFS = mockPlatform.NewTestReportFS(false)
-	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "")
 	rSvc = New(nil, nil, testReportFS, analyticsConfig, http.Client{}, logger, true, mockFS)
 	m.Run()
 }
@@ -212,7 +212,7 @@ func TestDeNoise(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "")
 		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
@@ -371,7 +371,7 @@ func TestTestGrpc(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "")
 		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
@@ -548,7 +548,7 @@ func TestTest(t *testing.T) {
 		},
 	} {
 		// setup. Write the tcs yaml which is to be tested
-		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger)
+		analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "")
 		tcSvc := testCase.New(nil, logger, false, analyticsConfig, http.Client{}, true, mockFS)
 		tcSvc.Insert(context.Background(), tt.input.tcs, tcsPath, mockPath, defaultCompany, []string{}, map[string]string{})
 
