@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Delta456/box-cli-maker/v2"
 	"github.com/go-test/deep"
 	"github.com/wI2L/jsondiff"
 
@@ -223,23 +224,17 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
 
-		// We will need to separete diffs from logs as we need better diff visualization
-		var diffs = ""
-
 		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
 			"Test Result:\n"+
 			"\tInput Http Request: %+v\n\n"+
 			"\tExpected Response: "+
 			"%+v\n\n"+"\tActual Response: "+
-			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
+			"%+v\n\n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
 
-		//		if !res.StatusCode.Normal {
-		//			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
-		//
-		//		}
-
+		// ------------ DIFFS RELATED CODE -----------
+		expSCode, actSCode := "", ""
 		if !res.StatusCode.Normal {
-			diffs += fmt.Sprintf("\tExpected StatusCode: %v"+"\n\tActual StatusCode: %v\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+			expSCode, actSCode = fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Expected, res.StatusCode.Actual)
 		}
 
 		var (
@@ -256,32 +251,17 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 
-		//if !unmatched {
-		//	logs += "\t Response Headers: {\n"
-		//	for i, j := range expectedHeader {
-		//		logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
-		//	}
-		//	logs += "\t}\n"
-		//}
-
+		var headerExp, headerAct, hType = "", "", ""
 		if !unmatched {
-			diffs += "\t Response Headers: {\n"
 			for i, j := range expectedHeader {
-				expect, actual := pkg.ColoredDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]))
-				diffs += fmt.Sprintf("\t\t\033[31m%s\033[0m"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, expect, actual)
+				headerExp, headerAct, hType = fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i
 			}
-			logs += "\t}\n"
 		}
 
-		// TODO: cleanup the logging related code. this is a mess
+		var bodyExp, bodyAct = "", ""
 		if !res.BodyResult[0].Normal {
-			diffs += "\tResponse body: {\n"
-			if json.Valid([]byte(resp.Body)) {
-				// compute and log body's json diff
-				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
-				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
-				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 
+			if json.Valid([]byte(resp.Body)) {
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
 					r.log.Warn("failed to compute json diff", zap.Error(err))
@@ -291,26 +271,24 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					expect, actual := pkg.ColoredDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value))
-					if keyStr != "" {
-						diffs += fmt.Sprintf("\t\t\033[31m%s\033[0m"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, expect, actual)
-					} else {
-						diffs += fmt.Sprintf("\t \n\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t", expect, actual)
-					}
+					bodyExp, bodyAct = pkg.ColoredDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value))
 
 				}
-				diffs += "\t}\n"
 			} else {
-				// compute the diff
-				expect, actual := pkg.ColoredDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body))
-				diffs += fmt.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", expect, actual)
-
+				bodyExp, bodyAct = fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body)
 			}
+			if expSCode != "" || actSCode != "" {
+				DiffBox("Diff status", expSCode, actSCode)
+			}
+			if headerExp != "" || headerAct != "" || hType != "" {
+				DiffHeaderBox("Diff header", hType, headerExp, headerAct)
+			}
+			if bodyExp != "" || bodyAct != "" {
+				DiffBox("Diff status", bodyExp, bodyAct)
+			}
+
 		}
-		logs += "--------------------------------------------------------------------\n\n"
-		diffs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
-		fmt.Println(diffs)
+
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
@@ -321,6 +299,19 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 	}
 	return pass, res, &tc, nil
+}
+
+/* Will print beautiful diff box
+ * title: Body diff, request diff...
+ */
+func DiffBox(title, expect, actual string) {
+	ce, ca := pkg.ColoredDiff(expect, actual)
+	box.New(box.Config{}).Print("\033[1;31m"+title+"\033[0m", "Expect: "+ce+"\nActual: "+ca)
+}
+
+func DiffHeaderBox(title, kind, expect, actual string) {
+	ce, ca := pkg.ColoredDiff(expect, actual)
+	box.New(box.Config{}).Print("\033[1;31m"+title+"\033[0m", kind+":"+"\n\tExpect: "+ce+"\n\tActual: "+ca)
 }
 
 func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp models.GrpcResp) (bool, *models.Result, *models.TestCase, error) {
