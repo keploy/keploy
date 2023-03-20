@@ -258,10 +258,6 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 
 func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
 	filter := bson.M{"cid": cid, "app_id": app}
-	reqType := ctx.Value("reqType")
-	if reqType != nil && reqType != "" {
-		filter["type"] = reqType
-	}
 	findOptions := options.Find()
 	if !anchors {
 		findOptions.SetProjection(bson.M{"anchors": 0, "all_keys": 0})
