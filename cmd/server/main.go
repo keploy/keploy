@@ -4,16 +4,22 @@ import (
 	"os/exec"
 	"strings"
 
+	"fmt"
+
 	"go.keploy.io/server/server"
 )
 
 // version is the version of the server and will be injected during build by ldflags
 // see https://goreleaser.com/customization/build/
 
-var version = getKeployVersion()
+var version string
 
 func main() {
 	// main method to start Keploy server
+	if version == "" {
+		version = getKeployVersion()
+	}		
+	fmt.Println(version)
 	server.Server(version)
 }
 
