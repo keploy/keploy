@@ -153,7 +153,6 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		err    error
 		tcs    []models.TestCase
 		eof    bool = rg.testExport
-		ctx    context.Context
 	)
 	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
@@ -169,7 +168,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// fetch all types of testcase
-	tcs, err = rg.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
+	tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
 
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -238,7 +237,6 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 	var (
 		err     error
 		body    string
-		ctx     context.Context
 		tcsType string = string(models.HTTP)
 	)
 	if err = render.Bind(r, data); err != nil {
@@ -256,7 +254,7 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 		tcsType = string(models.HTTP)
 	}
 
-	err = rg.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, data.ID, data.AppID, body, data.Resp.Header, data.TestCasePath, tcsType)
+	err = rg.svc.DeNoise(r.Context(), graph.DEFAULT_COMPANY, data.ID, data.AppID, body, data.Resp.Header, data.TestCasePath, tcsType)
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))

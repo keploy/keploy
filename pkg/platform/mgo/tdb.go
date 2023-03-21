@@ -219,6 +219,7 @@ func (t *testCaseDB) Get(ctx context.Context, cid, id string) (models.TestCase, 
 	}
 
 	var tc models.TestCase
+
 	err := t.c.FindOne(ctx, filter).Decode(&tc)
 	if err != nil {
 		return tc, err

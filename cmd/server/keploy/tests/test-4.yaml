@@ -7,7 +7,7 @@ spec:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: /api/regression/testcase?app=grpc-nested-app&offset=0&limit=25&testCasePath=/Users/ritikjain/Desktop/go-practice/skp-workspace/go/grpc-example-app/keploy/tests&mockPath=/Users/ritikjain/Desktop/go-practice/skp-workspace/go/grpc-example-app/keploy/mocks&reqType=gRPC
+        url: /api/regression/testcase?app=grpc-nested-app&offset=0&limit=25&testCasePath=/Users/ritikjain/Desktop/go-practice/skp-workspace/go/grpc-example-app/keploy/tests&mockPath=/Users/ritikjain/Desktop/go-practice/skp-workspace/go/grpc-example-app/keploy/mocks
         header:
             Accept-Encoding: gzip
             User-Agent: Go-http-client/1.1
