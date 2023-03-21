@@ -4,8 +4,6 @@ import (
 	"os/exec"
 	"strings"
 
-	"fmt"
-
 	"go.keploy.io/server/server"
 )
 
@@ -18,8 +16,7 @@ func main() {
 	// main method to start Keploy server
 	if version == "" {
 		version = getKeployVersion()
-	}		
-	fmt.Println(version)
+	}
 	server.Server(version)
 }
 
