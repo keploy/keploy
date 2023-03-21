@@ -360,15 +360,19 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 }
 
 func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.DeNoiseResponse, error) {
-	ctx = context.WithValue(ctx, "reqType", models.Kind(request.Type))
+
 	var body string
+	// Http is the default type of testcase
+	if request.Type == "" {
+		request.Type = string(models.HTTP)
+	}
 	switch request.Type {
 	case string(models.HTTP):
 		body = request.Resp.Body
 	case string(models.GRPC_EXPORT):
 		body = request.GrpcResp.Body
 	}
-	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, body, utils.GetStringMap(request.Resp.Header), request.TestCasePath)
+	err := srv.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, request.ID, request.AppID, body, utils.GetStringMap(request.Resp.Header), request.TestCasePath, request.Type)
 	if err != nil {
 		return &proto.DeNoiseResponse{Message: err.Error()}, nil
 	}
@@ -377,11 +381,14 @@ func (srv *Server) DeNoise(ctx context.Context, request *proto.TestReq) (*proto.
 
 func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.TestResponse, error) {
 
-	ctx = context.WithValue(ctx, "reqType", models.Kind(request.Type))
 	var (
 		pass bool
 		err  error
 	)
+	// default value for tcsType is Http
+	if request.Type == "" {
+		request.Type = string(models.HTTP)
+	}
 	switch request.Type {
 	case string(models.HTTP):
 		pass, err = srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath, models.HttpResp{
@@ -399,14 +406,6 @@ func (srv *Server) Test(ctx context.Context, request *proto.TestReq) (*proto.Tes
 		}, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath)
 	}
 
-	// pass, err := srv.svc.Test(ctx, graph.DEFAULT_COMPANY, request.AppID, request.RunID, request.ID, request.TestCasePath, request.MockPath, models.HttpResp{
-	// 	StatusCode:    int(request.Resp.StatusCode),
-	// 	Header:        utils.GetStringMap(request.Resp.Header),
-	// 	Body:          request.Resp.Body,
-	// 	StatusMessage: request.Resp.StatusMessage,
-	// 	ProtoMajor:    int(request.Resp.ProtoMajor),
-	// 	ProtoMinor:    int(request.Resp.ProtoMinor),
-	// })
 	if err != nil {
 		return nil, err
 	}

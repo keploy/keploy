@@ -598,9 +598,8 @@ func (r *Regression) saveResult(ctx context.Context, t *models.Test) error {
 	return nil
 }
 
-func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h http.Header) error {
+func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body, tcsType string, h http.Header) error {
 	tcs, err := r.mockFS.Read(ctx, path, id, false)
-	reqType := ctx.Value("reqType").(models.Kind)
 	if err != nil {
 		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
 		return err
@@ -616,17 +615,17 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 	}
 	tc := docs[0]
 	var oldResp map[string][]string
-	switch reqType {
-	case models.HTTP:
-		oldResp, err = pkg.FlattenHttpResponse(utils.GetStringMap(tc.Spec.Res.Header), tc.Spec.Res.Body)
+	switch tcsType {
+	case string(models.GRPC_EXPORT):
+		oldResp = map[string][]string{}
+		err := pkg.AddHttpBodyToMap(tc.Spec.GrpcResp.Body, oldResp)
 		if err != nil {
 			r.log.Error("failed to flatten response", zap.Error(err))
 			return err
 		}
-
-	case models.GRPC_EXPORT:
-		oldResp = map[string][]string{}
-		err := pkg.AddHttpBodyToMap(tc.Spec.GrpcResp.Body, oldResp)
+	default:
+		// tcsType is Http by default
+		oldResp, err = pkg.FlattenHttpResponse(utils.GetStringMap(tc.Spec.Res.Header), tc.Spec.Res.Body)
 		if err != nil {
 			r.log.Error("failed to flatten response", zap.Error(err))
 			return err
@@ -635,17 +634,17 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 
 	noise := pkg.FindNoisyFields(oldResp, func(k string, v []string) bool {
 		var newResp map[string][]string
-		switch reqType {
-		case models.HTTP:
-			newResp, err = pkg.FlattenHttpResponse(h, body)
+		switch tcsType {
+		case string(models.GRPC_EXPORT):
+			newResp = map[string][]string{}
+			err := pkg.AddHttpBodyToMap(body, newResp)
 			if err != nil {
 				r.log.Error("failed to flatten response", zap.Error(err))
 				return false
 			}
-
-		case models.GRPC_EXPORT:
-			newResp = map[string][]string{}
-			err := pkg.AddHttpBodyToMap(body, newResp)
+		default:
+			// tcsType is Http by default
+			newResp, err = pkg.FlattenHttpResponse(h, body)
 			if err != nil {
 				r.log.Error("failed to flatten response", zap.Error(err))
 				return false
@@ -683,20 +682,20 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body string, h h
 	return nil
 }
 
-func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path string) error {
+func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path, tcsType string) error {
 
 	if r.testExport {
-		return r.deNoiseYaml(ctx, id, path, body, h)
+		return r.deNoiseYaml(ctx, id, path, body, tcsType, h)
 	}
 	tc, err := r.tdb.Get(ctx, cid, id)
-	reqType := ctx.Value("reqType").(models.Kind)
 	var tcRespBody string
-	switch reqType {
-	case models.HTTP:
-		tcRespBody = tc.HttpResp.Body
-
-	case models.GRPC_EXPORT:
+	switch tcsType {
+	case string(models.GRPC_EXPORT):
 		tcRespBody = tc.GrpcResp.Body
+	default:
+		// tcsType is Http by default
+		tcRespBody = tc.HttpResp.Body
+		tcsType = string(models.HTTP)
 	}
 	if err != nil {
 		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
@@ -705,7 +704,7 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 
 	a, b := map[string][]string{}, map[string][]string{}
 
-	if reqType == models.HTTP {
+	if models.Kind(tcsType) == models.HTTP {
 		// add headers
 		for k, v := range tc.HttpResp.Header {
 			a["header."+k] = []string{strings.Join(v, "")}
@@ -922,9 +921,9 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 		}
 
 		// if testCasePath is empty that means PutTest is triggered by mocking feature
-		if (testExport && testCasePath == "") {
+		if testExport && testCasePath == "" {
 			// sending MockTestRun Telemetry event to Telemetry service.
-			r.tele.MockTestRun(success, failure, r.client, ctx)	
+			r.tele.MockTestRun(success, failure, r.client, ctx)
 		} else {
 			// sending Testrun Telemetry event to Telemetry service.
 			r.tele.Testrun(success, failure, r.client, ctx)
