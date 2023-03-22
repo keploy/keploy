@@ -432,7 +432,7 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
  * if theres no field just let it empty and the function
  * will take care of appropriate tabulation.
  */
-func DiffBox(title, field, expect, actual string) {
+func DiffBox(title, field, expect, actual string) string {
 	ce, ca, _ := ColoredDiff(expect, actual)
 	ce = "Expected: " + ce
 	ca = "\nActual: " + ca
@@ -442,12 +442,12 @@ func DiffBox(title, field, expect, actual string) {
 	}
 
 	if field == "" {
-		box().Println("\033[1;31m"+title+"\033[0m", ce+ca)
+		return box().String("\033[1;31m"+title+"\033[0m", ce+ca)
 	} else {
 		ce = "\tExpected: " + ce
 		ca = "\n\tActual: " + ca
 
-		box().Println("\033[1;31m"+title+"\033[0m", field+":\n"+ce+ca)
+		return box().String("\033[1;31m"+title+"\033[0m", field+":\n"+ce+ca)
 	}
 }
 

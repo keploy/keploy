@@ -276,20 +276,20 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			} else {
 				bodyExp, bodyAct = fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body)
 			}
-
 		}
-		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
 
 		if expSCode != "" || actSCode != "" {
-			pkg.DiffBox("Diff status: "+tc.ID, "", expSCode, actSCode)
+			logs += pkg.DiffBox("Diff status: "+tc.ID, "", expSCode, actSCode)
 		}
 		if headerExp != "" || headerAct != "" {
-			pkg.DiffBox("Diff header: "+tc.ID, hType, headerExp, headerAct)
+			logs += pkg.DiffBox("Diff header: "+tc.ID, hType, headerExp, headerAct)
 		}
 		if bodyExp != "" || bodyAct != "" {
-			pkg.DiffBox("Diff body: "+tc.ID, field, bodyExp, bodyAct)
+			logs += pkg.DiffBox("Diff body: "+tc.ID, field, bodyExp, bodyAct)
 		}
+
+		logs += "--------------------------------------------------------------------\n\n"
+		logger.Printf(logs)
 
 	} else {
 		logger := pp.New()
@@ -431,15 +431,16 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		if !res.BodyResult[1].Normal {
 			bodyExp2, bodyAct2 = tc.GrpcResp.Err, resp.Err
 		}
-		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
 
 		if bodyExp != "" || bodyAct != "" {
-			pkg.DiffBox("Diff grpc body: "+tc.ID, field, bodyExp, bodyAct)
+			logs += pkg.DiffBox("Diff grpc body: "+tc.ID, field, bodyExp, bodyAct)
 		}
 		if bodyExp2 != "" || bodyAct2 != "" {
-			pkg.DiffBox("Diff grpc body: "+tc.ID, "", bodyExp2, bodyAct2)
+			logs += pkg.DiffBox("Diff grpc body: "+tc.ID, "", bodyExp2, bodyAct2)
 		}
+		logs += "--------------------------------------------------------------------\n\n"
+
+		logger.Printf(logs)
 
 	} else {
 		logger := pp.New()
