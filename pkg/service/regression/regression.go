@@ -233,7 +233,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		// ------------ DIFFS RELATED CODE -----------
 		expSCode, actSCode := "", ""
 		if !res.StatusCode.Normal {
-			expSCode, actSCode = fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Expected, res.StatusCode.Actual)
+			expSCode, actSCode = fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual)
 		}
 
 		var (
@@ -257,7 +257,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 
-		var bodyExp, bodyAct = "", ""
+		field, bodyExp, bodyAct := "", "", ""
 		if !res.BodyResult[0].Normal {
 
 			if json.Valid([]byte(resp.Body)) {
@@ -270,22 +270,25 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					bodyExp, bodyAct = fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
+					field, bodyExp, bodyAct = keyStr, fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
 
 				}
 			} else {
 				bodyExp, bodyAct = fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body)
 			}
-			if expSCode != "" || actSCode != "" {
-				pkg.DiffBox("Diff status", "", expSCode, actSCode)
-			}
-			if headerExp != "" || headerAct != "" || hType != "" {
-				pkg.DiffBox("Diff header", hType, headerExp, headerAct)
-			}
-			if bodyExp != "" || bodyAct != "" {
-				pkg.DiffBox("Diff body", "", bodyExp, bodyAct)
-			}
 
+		}
+		logs += "--------------------------------------------------------------------\n\n"
+		logger.Printf(logs)
+
+		if expSCode != "" || actSCode != "" {
+			pkg.DiffBox("Diff status: "+tc.ID, "", expSCode, actSCode)
+		}
+		if headerExp != "" || headerAct != "" {
+			pkg.DiffBox("Diff header: "+tc.ID, hType, headerExp, headerAct)
+		}
+		if bodyExp != "" || bodyAct != "" {
+			pkg.DiffBox("Diff body: "+tc.ID, field, bodyExp, bodyAct)
 		}
 
 	} else {
@@ -398,16 +401,14 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 			"\tInput Grpc Request: %+v\n\n"+
 			"\tExpected Response: "+
 			"%+v\n\n"+"\tActual Response: "+
-			"%+v\n\n"+"DIFF: \n", tc.ID, tc.GrpcReq, tc.GrpcResp, resp)
+			"%+v\n\n", tc.ID, tc.GrpcReq, tc.GrpcResp, resp)
 
-		// TODO: cleanup the logging related code. this is a mess
+		// ------------ DIFFS RELATED CODE --------------
+
+		bodyExp, bodyAct, field := "", "", ""
 		if !res.BodyResult[0].Normal {
-			logs += "\tResponse body: {\n"
+
 			if json.Valid([]byte(resp.Body)) {
-				// compute and log body's json diff
-				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
-				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
-				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
@@ -418,21 +419,28 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+					bodyExp, bodyAct, field = keyStr, fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
 				}
-				logs += "\t}\n"
 			} else {
-				// just log both the bodies as plain text without really computing the diff
-				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.GrpcResp, resp)
-
+				bodyExp, bodyAct = fmt.Sprint(tc.GrpcResp), fmt.Sprint(resp)
 			}
+
 		}
+
+		bodyExp2, bodyAct2 := "", ""
 		if !res.BodyResult[1].Normal {
-			logs += "\tResponse error: {\n"
-			logs += logger.Sprintf("\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t}\n", tc.GrpcResp.Err, resp.Err)
+			bodyExp2, bodyAct2 = tc.GrpcResp.Err, resp.Err
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 		logger.Printf(logs)
+
+		if bodyExp != "" || bodyAct != "" {
+			pkg.DiffBox("Diff grpc body: "+tc.ID, field, bodyExp, bodyAct)
+		}
+		if bodyExp2 != "" || bodyAct2 != "" {
+			pkg.DiffBox("Diff grpc body: "+tc.ID, "", bodyExp2, bodyAct2)
+		}
+
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
