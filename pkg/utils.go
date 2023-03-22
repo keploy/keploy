@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Delta456/box-cli-maker/v2"
 	"github.com/araddon/dateparse"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
@@ -426,23 +427,44 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 }
 
 /*
- * given str1 and str2 it will color with purple the difference between those two strings
+ * Till print a nice diff box
+ * rHeader: if its inside of an field, e.g: Content-type
+ * if its not just let it empty
  */
-func ColoredDiff(str1, str2 string) (string, string) {
-	i, diff := diff(str1, str2)
+func DiffBox(title, iField, expect, actual string) {
+	ce, ca, _ := ColoredDiff(expect, actual)
+	ce = "Expected: " + ce
+	ca = "\nActual: " + ca
 
-	if diff {
-		cs := insColor(str1, "\033[35m", i)
-		cs2 := insColor(str2, "\033[35m", i)
-		return cs, cs2
+	box := func() box.Box {
+		return box.New(box.Config{WrappingLimit: 60, AllowWrapping: true, Type: "Hidden"})
 	}
-	return str1, str2
+
+	if iField == "" {
+		box().Println("\033[1;31m"+title+"\033[0m", ce+ca)
+	} else {
+		box().Println("\033[1;31m"+title+"\033[0m", iField+":\n\t"+ce+"\t"+ca)
+	}
 }
 
 /*
- * Insert color at given index
+ * given str1 and str2 it will color with purple the difference between those two strings
  */
-func insColor(str, ascii_code string, index int) string {
+func ColoredDiff(str1, str2 string) (string, string, int) {
+	i, diff := diff(str1, str2)
+
+	if diff {
+		cs := insRed(str1, "\033[35m", i)
+		cs2 := insRed(str2, "\033[35m", i)
+		return cs, cs2, i
+	}
+	return str1, str2, i
+}
+
+/*
+ * Insert color at given index and resets at end
+ */
+func insRed(str, ascii_code string, index int) string {
 	return str[:index] + ascii_code + str[index:] + "\033[0m"
 }
 
@@ -453,6 +475,7 @@ func diff(s1 string, s2 string) (int, bool) {
 	diff := false
 	i := -1
 
+	// Check if one string is smaller than another, if so theres a diff
 	if len(s1) < len(s2) {
 		i = len(s1)
 		diff = true
@@ -461,10 +484,12 @@ func diff(s1 string, s2 string) (int, bool) {
 		i = len(s2)
 	}
 
+	// Check for unmatched characters
 	for i := 0; i < len(s1) && i < len(s2); i++ {
 		if s1[i] != s2[i] {
 			return i, true
 		}
 	}
+
 	return i, diff
 }

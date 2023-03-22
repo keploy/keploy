@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Delta456/box-cli-maker/v2"
 	"github.com/go-test/deep"
 	"github.com/wI2L/jsondiff"
 
@@ -271,20 +270,20 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					bodyExp, bodyAct = pkg.ColoredDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value))
+					bodyExp, bodyAct = fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
 
 				}
 			} else {
 				bodyExp, bodyAct = fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body)
 			}
 			if expSCode != "" || actSCode != "" {
-				DiffBox("Diff status", expSCode, actSCode)
+				pkg.DiffBox("Diff status", "", expSCode, actSCode)
 			}
 			if headerExp != "" || headerAct != "" || hType != "" {
-				DiffHeaderBox("Diff header", hType, headerExp, headerAct)
+				pkg.DiffBox("Diff header", hType, headerExp, headerAct)
 			}
 			if bodyExp != "" || bodyAct != "" {
-				DiffBox("Diff status", bodyExp, bodyAct)
+				pkg.DiffBox("Diff body", "", bodyExp, bodyAct)
 			}
 
 		}
@@ -299,19 +298,6 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 	}
 	return pass, res, &tc, nil
-}
-
-/* Will print beautiful diff box
- * title: Body diff, request diff...
- */
-func DiffBox(title, expect, actual string) {
-	ce, ca := pkg.ColoredDiff(expect, actual)
-	box.New(box.Config{}).Print("\033[1;31m"+title+"\033[0m", "Expect: "+ce+"\nActual: "+ca)
-}
-
-func DiffHeaderBox(title, kind, expect, actual string) {
-	ce, ca := pkg.ColoredDiff(expect, actual)
-	box.New(box.Config{}).Print("\033[1;31m"+title+"\033[0m", kind+":"+"\n\tExpect: "+ce+"\n\tActual: "+ca)
 }
 
 func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp models.GrpcResp) (bool, *models.Result, *models.TestCase, error) {
