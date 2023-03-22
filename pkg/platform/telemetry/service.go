@@ -18,7 +18,7 @@ type DB interface {
 }
 
 type FS interface {
-	Get() (string, error)
+	Get(bool) (string, error)
 	Set(string) error
 }
 
@@ -27,8 +27,9 @@ type Service interface {
 	Normalize(http.Client, context.Context)
 	EditTc(http.Client, context.Context)
 	Testrun(int, int, http.Client, context.Context)
-	RecordedTest(http.Client, context.Context)
-	RecordedMock(http.Client, context.Context)
+	MockTestRun(int, int, http.Client, context.Context)
+	RecordedTest(http.Client, context.Context, int, []string)
+	RecordedMock(http.Client, context.Context, string)
 	DeleteTc(http.Client, context.Context)
 	GetApps(int, http.Client, context.Context)
 }
