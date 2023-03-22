@@ -36,6 +36,11 @@ body:
       - Samples-Java
       - Typescript-SDK
       - Samples-Typescript
-      - Samples-Go
+      - Docs
+      - Website
+      - UI
+      - Python-SDK
+      - GO-SDK
+      - Samples-go
   validations:
     required: true
