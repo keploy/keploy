@@ -444,8 +444,8 @@ func DiffBox(title, field, expect, actual string) string {
 	if field == "" {
 		return box().String("\033[1;31m"+title+"\033[0m", ce+ca)
 	} else {
-		ce = "\tExpected: " + ce
-		ca = "\n\tActual: " + ca
+		ce = "\t" + ce
+		ca = "\t" + ca
 
 		return box().String("\033[1;31m"+title+"\033[0m", field+":\n"+ce+ca)
 	}
