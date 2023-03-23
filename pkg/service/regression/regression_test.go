@@ -218,8 +218,8 @@ func TestDeNoise(t *testing.T) {
 
 		// update the tcs yaml with noised fields
 		ctx := context.Background()
-		ctx = context.WithValue(ctx, "reqType", tt.input.kind)
-		actErr := rSvc.DeNoise(ctx, defaultCompany, tt.input.id, tt.input.app, tt.input.body, tt.input.h, tt.input.path)
+		// ctx = context.WithValue(ctx, "reqType", tt.input.kind)
+		actErr := rSvc.DeNoise(ctx, defaultCompany, tt.input.id, tt.input.app, tt.input.body, tt.input.h, tt.input.path, string(tt.input.kind))
 		if (actErr == nil && tt.result != nil) || (actErr != nil && tt.result == nil) || (actErr != nil && tt.result != nil && actErr.Error() != tt.result.Error()) {
 			t.Fatal("Actual output from DeNoise does not matches with expected.", "Expected", tt.result, "Actual", actErr)
 		}

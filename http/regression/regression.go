@@ -147,14 +147,12 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	mockPath := r.URL.Query().Get("mockPath")
 	offsetStr := r.URL.Query().Get("offset")
 	limitStr := r.URL.Query().Get("limit")
-	reqType := r.URL.Query().Get("reqType")
 	var (
 		offset int
 		limit  int
 		err    error
 		tcs    []models.TestCase
 		eof    bool = rg.testExport
-		ctx    context.Context
 	)
 	if offsetStr != "" {
 		offset, err = strconv.Atoi(offsetStr)
@@ -169,15 +167,8 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// switch rg.testExport {
-	// case false:
-	ctx = r.Context()
-	ctx = context.WithValue(ctx, "reqType", reqType)
-	tcs, err = rg.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
-	if rg.testExport && testCasePath != "" && mockPath != "" {
-		filteredTcs := ReqTypeFilter(tcs, reqType)
-		tcs = filteredTcs
-	}
+	// fetch all types of testcase
+	tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
 
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -244,26 +235,26 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 
 	data := &TestReq{}
 	var (
-		err  error
-		body string
-		ctx  context.Context
+		err     error
+		body    string
+		tcsType string = string(models.HTTP)
 	)
 	if err = render.Bind(r, data); err != nil {
 		rg.logger.Error("error parsing request", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
 		return
 	}
-	ctx = r.Context()
-	ctx = context.WithValue(ctx, "reqType", data.Type)
 	switch data.Type {
-	case models.HTTP:
-		body = data.Resp.Body
-
 	case models.GRPC_EXPORT:
 		body = data.GrpcResp.Body
+		tcsType = string(models.GRPC_EXPORT)
+	default:
+		// default tcsType is Http.
+		body = data.Resp.Body
+		tcsType = string(models.HTTP)
 	}
 
-	err = rg.svc.DeNoise(ctx, graph.DEFAULT_COMPANY, data.ID, data.AppID, body, data.Resp.Header, data.TestCasePath)
+	err = rg.svc.DeNoise(r.Context(), graph.DEFAULT_COMPANY, data.ID, data.AppID, body, data.Resp.Header, data.TestCasePath, tcsType)
 	if err != nil {
 		rg.logger.Error("error putting testcase", zap.Error(err))
 		render.Render(w, r, ErrInvalidRequest(err))
@@ -288,13 +279,12 @@ func (rg *regression) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx = r.Context()
-	ctx = context.WithValue(ctx, "reqType", data.Type)
 	switch data.Type {
-	case models.HTTP:
-		pass, err = rg.svc.Test(ctx, graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.TestCasePath, data.MockPath, data.Resp)
-
 	case models.GRPC_EXPORT:
 		pass, err = rg.svc.TestGrpc(ctx, data.GrpcResp, graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.TestCasePath, data.MockPath)
+	default:
+		// default tcsType is Http.
+		pass, err = rg.svc.Test(ctx, graph.DEFAULT_COMPANY, data.AppID, data.RunID, data.ID, data.TestCasePath, data.MockPath, data.Resp)
 	}
 
 	if err != nil {
