@@ -1,9 +1,7 @@
 package main
 
 import (
-	"os/exec"
-	"strings"
-
+	"github.com/go-git/go-git/v5"
 	"go.keploy.io/server/server"
 )
 
@@ -21,12 +19,23 @@ func main() {
 }
 
 func getKeployVersion() string {
-	cmd := exec.Command("git", "describe", "--tags")
-	out, err := cmd.Output()
+
+	repo, err := git.PlainOpen(".")
 	if err != nil {
 		return "0.1.0-dev"
 	}
-	version := strings.TrimSpace(string(out))
-	version = version[0:6] + "-dev"
-	return version
+
+	tagIter, err := repo.Tags()
+	if err != nil {
+		return "0.1.0-dev"
+	}
+
+	tagRef, err := tagIter.Next()
+	if err != nil {
+		return "0.1.0-dev"
+	}
+
+	tag := tagRef.Name().Short()
+
+	return tag + "-dev"
 }
