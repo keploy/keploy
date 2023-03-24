@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/go-chi/render"
-	"go.keploy.io/server/pkg/models"
 )
 
 func ErrInvalidRequest(err error) render.Renderer {
