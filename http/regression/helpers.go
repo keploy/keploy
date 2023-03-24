@@ -16,16 +16,6 @@ func ErrInvalidRequest(err error) render.Renderer {
 	}
 }
 
-func ReqTypeFilter(tcs []models.TestCase, reqType string) []models.TestCase {
-	var result []models.TestCase
-	for i := 0; i < len(tcs); i++ {
-		if tcs[i].Type == reqType {
-			result = append(result, tcs[i])
-		}
-	}
-	return result
-}
-
 type ErrResponse struct {
 	Err            error `json:"-"` // low-level runtime error
 	HTTPStatusCode int   `json:"-"` // http response status code
