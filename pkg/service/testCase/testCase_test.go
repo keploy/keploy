@@ -324,7 +324,7 @@ func TestGetAll(t *testing.T) {
 	} {
 		tcSvc.Insert(context.Background(), tt.result.tcs, tt.input.testCasePath, tt.input.mockPath, defaultCompany, []string{}, map[string]string{})
 
-		actTcs, actErr := tcSvc.GetAll(context.Background(), defaultCompany, "", nil, nil, tt.input.testCasePath, tt.input.mockPath)
+		actTcs, actErr := tcSvc.GetAll(context.Background(), defaultCompany, "", nil, nil, tt.input.testCasePath, tt.input.mockPath, "")
 		if (actErr == nil && tt.result.err != nil) || (actErr != nil && tt.result.err == nil) || (actErr != nil && tt.result.err != nil && actErr.Error() != tt.result.err.Error()) {
 			t.Fatal("Err from GetAll does not matches", "Expected", tt.result.err, "Actual", actErr)
 		}

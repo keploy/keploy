@@ -2,7 +2,6 @@ module go.keploy.io/server
 
 go 1.17
 
-
 require (
 	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
 	github.com/go-chi/chi v1.5.4
@@ -30,7 +29,7 @@ require (
 )
 
 require (
-	github.com/keploy/go-sdk v0.7.9
+	github.com/keploy/go-sdk v0.8.2
 	github.com/soheilhy/cmux v0.1.5
 	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c

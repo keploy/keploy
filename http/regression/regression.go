@@ -147,6 +147,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	mockPath := r.URL.Query().Get("mockPath")
 	offsetStr := r.URL.Query().Get("offset")
 	limitStr := r.URL.Query().Get("limit")
+	tcsType := r.URL.Query().Get("reqType")
 	var (
 		offset int
 		limit  int
@@ -168,7 +169,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// fetch all types of testcase
-	tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath)
+	tcs, err = rg.tcSvc.GetAll(r.Context(), graph.DEFAULT_COMPANY, app, &offset, &limit, testCasePath, mockPath, tcsType)
 
 	if err != nil {
 		render.Render(w, r, ErrInvalidRequest(err))

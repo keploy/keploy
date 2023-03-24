@@ -39,7 +39,7 @@ func (fe *mockExport) Exists(ctx context.Context, path string) bool {
 	return true
 }
 
-func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string) ([]models.TestCase, error) {
+func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath, tcsType string) ([]models.TestCase, error) {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
@@ -75,6 +75,11 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath string
 	sort.Slice(res, func(i, j int) bool {
 		return res[i].Captured < res[j].Captured
 	})
+
+	if tcsType != "" {
+		filteredTcs := reqTypeFilter(res, tcsType)
+		res = filteredTcs
+	}
 
 	return res, nil
 }
@@ -155,7 +160,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 			// spec  = models.HttpSpec{}
 			mocks = []*proto.Mock{}
 		)
-    
+
 		switch j.Kind {
 		case models.HTTP:
 			spec := models.HttpSpec{}
@@ -295,4 +300,14 @@ func createMockFile(path string, fileName string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func reqTypeFilter(tcs []models.TestCase, reqType string) []models.TestCase {
+	var result []models.TestCase
+	for i := 0; i < len(tcs); i++ {
+		if tcs[i].Type == reqType {
+			result = append(result, tcs[i])
+		}
+	}
+	return result
 }
