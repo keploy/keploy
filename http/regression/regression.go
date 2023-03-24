@@ -148,6 +148,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	offsetStr := r.URL.Query().Get("offset")
 	limitStr := r.URL.Query().Get("limit")
 	tcsType := r.URL.Query().Get("reqType")
+
 	var (
 		offset int
 		limit  int
