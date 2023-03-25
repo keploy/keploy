@@ -9,7 +9,9 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
-// TestCaseReq
+// TestCaseReq is shifted to "pkg/models" pkg. This struct is not removed from
+// "http/regression" package because of backward compatibilty. Since, earlier versions
+// before v0.8.3 of go-sdk depends on regression package
 type TestCaseReq struct {
 	Captured     int64               `json:"captured" bson:"captured"`
 	AppID        string              `json:"app_id" bson:"app_id"`
@@ -42,6 +44,9 @@ func (req *TestCaseReq) Bind(r *http.Request) error {
 	return nil
 }
 
+// TestReq is shifted to "pkg/models" pkg. This struct is not removed from
+// "http/regression" package because of backward compatibilty. Since, earlier versions
+// before v0.8.3 of go-sdk depends on regression package
 type TestReq struct {
 	ID           string          `json:"id" bson:"_id"`
 	AppID        string          `json:"app_id" bson:"app_id"`
