@@ -34,47 +34,4 @@ export KEPLOY_MODE="autogeneratetestcases"
 #### These techniques can be used in combination to generate automated tests for an application.
 
 ## If we get a json object instead of string how do you deal with that-
-We can use the github.com/xeipuuv/gojsonschema library in GO to validate the input JSON and save this schema to further generate test cases from it  
-```
-// Load the JSON Schema from file
-schemaFile, err := ioutil.ReadFile("person_schema.json")
-if err != nil {
-    // Handle error
-}
-
-var schema interface{}
-err = json.Unmarshal(schemaFile, &schema)
-if err != nil {
-    // Handle error
-}
-
-loader := gojsonschema.NewGoLoader(schema)
-schemaDocument, err := gojsonschema.NewSchema(loader)
-if err != nil {
-    // Handle error
-}
-
-// Validate an input JSON object against the schema
-inputJSON := []byte(`
-// Example JSON   
-`)
-
-inputLoader := gojsonschema.NewBytesLoader(inputJSON)
-result, err := schemaDocument.Validate(inputLoader)
-if err != nil {
-    // Handle error
-}
-
-if result.Valid() {
-    // Input JSON is valid
-} else {
-    // Input JSON is not valid
-    for _, desc := range result.Errors() {
-        // Handle error description
-    }
-}
-```
-
-
-
-
+We can use the github.com/xeipuuv/gojsonschema library in GO to validate the input JSON and save this JSON object and extract feilds from it to further generate test cases from it  
