@@ -55,3 +55,21 @@ body:
       - Local
   validations:
     required: true
+- type: dropdown
+  id: repository
+  attributes:
+    label: Repository
+    options:
+      - Keploy
+      - Java-SDK
+      - Samples-Java
+      - Typescript-SDK
+      - Samples-Typescript
+      - Docs
+      - Website
+      - UI
+      - Python-SDK
+      - GO-SDK
+      - Samples-go
+  validations:
+    required: true
