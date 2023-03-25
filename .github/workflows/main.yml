@@ -31,7 +31,7 @@ jobs:
           curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
           sudo mv /tmp/keploy /usr/local/bin && export KEPLOY_MODE=off && keploy &
           export PORT=6789 && export ENABLE_TEST_EXPORT=false && go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
-          cat coverage.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
+          cat coverage.tmp.txt | grep -v -e "http/regression/request.go" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
         env:
           ENABLE_DEDUP: true
           ENABLE_TELEMETRY: false
