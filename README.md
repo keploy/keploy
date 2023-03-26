@@ -91,7 +91,7 @@ Filters noisy fields in API responses like (timestamps, random values) to ensure
 ```shell
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
 
-sudo mv /tmp/keploy /usr/local/bin && keploy
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 
 ### Linux
@@ -102,7 +102,7 @@ sudo mv /tmp/keploy /usr/local/bin && keploy
 ```shell
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
-sudo mv /tmp/keploy /usr/local/bin && keploy
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 </details>
 
@@ -112,7 +112,7 @@ sudo mv /tmp/keploy /usr/local/bin && keploy
 ```shell
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
-sudo mv /tmp/keploy /usr/local/bin && keploy
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 </details>
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"runtime"
 	"time"
 
 	// "go.mongodb.org/mongo-driver/bson"
@@ -19,9 +20,10 @@ type Telemetry struct {
 	InstallationID string
 	store          FS
 	testExport     bool
+	KeployVersion  string
 }
 
-func NewTelemetry(col DB, enabled, offMode, testExport bool, store FS, logger *zap.Logger) *Telemetry {
+func NewTelemetry(col DB, enabled, offMode, testExport bool, store FS, logger *zap.Logger, KeployVersion string) *Telemetry {
 
 	tele := Telemetry{
 		Enabled:    enabled,
@@ -30,6 +32,7 @@ func NewTelemetry(col DB, enabled, offMode, testExport bool, store FS, logger *z
 		db:         col,
 		store:      store,
 		testExport: testExport,
+		KeployVersion: KeployVersion,
 	}
 	return &tele
 
@@ -162,7 +165,8 @@ func (ac *Telemetry) SendTelemetry(eventType string, client http.Client, ctx con
 			ac.InstallationID = id
 		}
 		event.InstallationID = ac.InstallationID
-
+		event.OS = runtime.GOOS
+		event.KeployVersion = ac.KeployVersion
 		bin, err := marshalEvent(event, ac.logger)
 		if err != nil {
 			ac.logger.Debug("failed to marshal event", zap.Error(err))

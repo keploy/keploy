@@ -151,7 +151,7 @@ func Server(ver string) *chi.Mux {
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
 	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger)
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver)
 
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
