@@ -44,7 +44,7 @@ body:
       - samples-go
   validations:
     required: true
-  - type: markdown
-    attributes:
-      value: |
-        Please add the respective Label to the Issue
+- type: markdown
+  attributes:
+    value: |
+      Please add the respective Label to the Issue
