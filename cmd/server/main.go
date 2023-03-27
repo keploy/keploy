@@ -1,7 +1,10 @@
 package main
 
 import (
+	v "github.com/hashicorp/go-version"
+
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"go.keploy.io/server/server"
 )
 
@@ -22,20 +25,32 @@ func getKeployVersion() string {
 
 	repo, err := git.PlainOpen(".")
 	if err != nil {
-		return "0.1.0-dev"
+		return "v0.1.0-dev"
 	}
 
 	tagIter, err := repo.Tags()
 	if err != nil {
-		return "0.1.0-dev"
+		return "v0.1.0-dev"
 	}
 
-	tagRef, err := tagIter.Next()
+	var latestTag string
+	var latestTagVersion *v.Version
+
+	err = tagIter.ForEach(func(tagRef *plumbing.Reference) error {
+		tagName := tagRef.Name().Short()
+		tagVersion, err := v.NewVersion(tagName)
+		if err == nil {
+			if latestTagVersion == nil || latestTagVersion.LessThan(tagVersion) {
+				latestTagVersion = tagVersion
+				latestTag = tagName
+			}
+		}
+		return nil
+	})
+
 	if err != nil {
-		return "0.1.0-dev"
+		return "v0.1.0-dev"
 	}
 
-	tag := tagRef.Name().Short()
-
-	return tag + "-dev"
+	return latestTag + "-dev"
 }
