@@ -9,7 +9,7 @@ import (
 )
 
 type Service interface {
-	DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path string) error
+	DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path, tcsType string) error
 	Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error)
 	// For Grpc
 	TestGrpc(ctx context.Context, resp models.GrpcResp, cid, app, runID, id, testCasePath, mockPath string) (bool, error)

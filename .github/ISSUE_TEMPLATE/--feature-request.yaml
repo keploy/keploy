@@ -26,3 +26,25 @@ body:
     description: A concise description of the problems or use cases for this feature request
   validations:
     required: true
+- type: dropdown
+  id: repository
+  attributes:
+    label: Repository
+    options:
+      - keploy
+      - java-sdk
+      - samples-java
+      - typescript-sdk
+      - samples-typescript
+      - docs
+      - website
+      - ui
+      - python-sdk
+      - go-sdk
+      - samples-go
+  validations:
+    required: true
+- type: markdown
+  attributes:
+    value: |
+      Please add the respective Label to the Issue
