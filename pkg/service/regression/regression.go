@@ -282,15 +282,15 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
+		r.log.Info(logger.Sprint(logs))
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
-		logger.Printf(log2)
-
+		r.log.Info(logger.Sprint(log2))
+		
 	}
 	return pass, res, &tc, nil
 }
@@ -427,14 +427,14 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 			logs += logger.Sprintf("\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t}\n", tc.GrpcResp.Err, resp.Err)
 		}
 		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
+		r.log.Info(logger.Sprint(logs))
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
-		logger.Printf(log2)
+		r.log.Info(logger.Sprint(log2))
 
 	}
 	return pass, res, &tc, nil
