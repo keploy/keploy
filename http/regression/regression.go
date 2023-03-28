@@ -148,6 +148,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 	offsetStr := r.URL.Query().Get("offset")
 	limitStr := r.URL.Query().Get("limit")
 	tcsType := r.URL.Query().Get("reqType")
+
 	var (
 		offset int
 		limit  int
@@ -183,7 +184,7 @@ func (rg *regression) GetTCS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rg *regression) PostTC(w http.ResponseWriter, r *http.Request) {
-	data := &TestCaseReq{}
+	data := &models.TestCaseReq{}
 	var (
 		inserted []string
 		err      error
@@ -234,7 +235,7 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 	// 	return
 	// }
 
-	data := &TestReq{}
+	data := &models.TestReq{}
 	var (
 		err     error
 		body    string
@@ -268,7 +269,7 @@ func (rg *regression) DeNoise(w http.ResponseWriter, r *http.Request) {
 
 func (rg *regression) Test(w http.ResponseWriter, r *http.Request) {
 
-	data := &TestReq{}
+	data := &models.TestReq{}
 	var (
 		pass bool
 		err  error
