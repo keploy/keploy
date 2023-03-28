@@ -15,22 +15,25 @@ body:
     attributes:
       label: Where is this stated?
       description: "Please explain why the statement needs to be updated. This can be because it is confusing, incorrect, spelling/grammatical errors, etc."
-- type: dropdown
-  id: repository
-  attributes:
-    label: Repository
-    options:
-      - Keploy
-      - Java-SDK
-      - Samples-Java
-      - Typescript-SDK
-      - Samples-Typescript
-      - Docs
-      - Website
-      - UI
-      - Python-SDK
-      - GO-SDK
-      - Samples-go
-  validations:
-    required: true
-     
+  - type: dropdown
+    id: repository
+    attributes:
+      label: Repository
+      options:
+      - keploy
+      - java-sdk
+      - samples-java
+      - typescript-sdk
+      - samples-typescript
+      - docs
+      - website
+      - ui
+      - python-sdk
+      - go-sdk
+      - samples-go
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        Please add the respective Label to the Issue
