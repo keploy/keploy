@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/go-chi/render"
-	"go.keploy.io/server/pkg/models"
 )
 
 func ErrInvalidRequest(err error) render.Renderer {
@@ -14,16 +13,6 @@ func ErrInvalidRequest(err error) render.Renderer {
 		StatusText:     "Invalid request.",
 		ErrorText:      err.Error(),
 	}
-}
-
-func ReqTypeFilter(tcs []models.TestCase, reqType string) []models.TestCase {
-	var result []models.TestCase
-	for i := 0; i < len(tcs); i++ {
-		if tcs[i].Type == reqType {
-			result = append(result, tcs[i])
-		}
-	}
-	return result
 }
 
 type ErrResponse struct {
