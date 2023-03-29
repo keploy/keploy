@@ -153,7 +153,9 @@ func (r *queryResolver) TestCase(ctx context.Context, app *string, id *string, o
 		return []*model.TestCase{ConvertTestCase(tc)}, nil
 	}
 
-	tcs, err := r.tcSvc.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit, "", "")
+	// Currently, ui graphQl query for mongoDB stored testcases.
+	// Empty tcsType returns testcases of all types.
+	tcs, err := r.tcSvc.GetAll(ctx, DEFAULT_COMPANY, a, offset, limit, "", "", "")
 	if err != nil {
 		return nil, err
 	}

@@ -30,7 +30,7 @@ require (
 )
 
 require (
-	github.com/keploy/go-sdk v0.7.9
+	github.com/keploy/go-sdk v0.8.2
 	github.com/soheilhy/cmux v0.1.5
 	golang.org/x/net v0.8.0 // indirect
 	golang.org/x/sync v0.1.0

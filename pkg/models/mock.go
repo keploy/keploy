@@ -131,7 +131,7 @@ const (
 )
 
 type MockFS interface {
-	ReadAll(ctx context.Context, testCasePath, mockPath string) ([]TestCase, error)
+	ReadAll(ctx context.Context, testCasePath, mockPath, tcsType string) ([]TestCase, error)
 	Read(ctx context.Context, path, name string, libMode bool) ([]Mock, error)
 	Write(ctx context.Context, path string, doc Mock) error
 	WriteAll(ctx context.Context, path, fileName string, docs []Mock) error
