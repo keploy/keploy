@@ -257,8 +257,11 @@ func (t *testCaseDB) getAll(ctx context.Context, filter bson.M, findOptions *opt
 	return tcs, nil
 }
 
-func (t *testCaseDB) GetAll(ctx context.Context, cid, app string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
+func (t *testCaseDB) GetAll(ctx context.Context, cid, app, tcsType string, anchors bool, offset int, limit int) ([]models.TestCase, error) {
 	filter := bson.M{"cid": cid, "app_id": app}
+	if tcsType != "" {
+		filter["type"] = tcsType
+	}
 	findOptions := options.Find()
 	if !anchors {
 		findOptions.SetProjection(bson.M{"anchors": 0, "all_keys": 0})
