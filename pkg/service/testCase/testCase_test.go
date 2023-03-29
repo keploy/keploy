@@ -207,6 +207,7 @@ func TestGetAll(t *testing.T) {
 		input struct {
 			testCasePath string
 			mockPath     string
+			tcsType      string
 		}
 		result struct {
 			tcs []models.TestCase
@@ -217,9 +218,11 @@ func TestGetAll(t *testing.T) {
 			input: struct {
 				testCasePath string
 				mockPath     string
+				tcsType      string
 			}{
 				testCasePath: tcsPath,
 				mockPath:     mockPath,
+				tcsType:      string(models.HTTP),
 			},
 			result: struct {
 				tcs []models.TestCase
@@ -274,9 +277,11 @@ func TestGetAll(t *testing.T) {
 			input: struct {
 				testCasePath string
 				mockPath     string
+				tcsType      string
 			}{
 				testCasePath: tcsPath,
 				mockPath:     mockPath,
+				tcsType:      string(models.GRPC_EXPORT),
 			},
 			result: struct {
 				tcs []models.TestCase
@@ -324,7 +329,7 @@ func TestGetAll(t *testing.T) {
 	} {
 		tcSvc.Insert(context.Background(), tt.result.tcs, tt.input.testCasePath, tt.input.mockPath, defaultCompany, []string{}, map[string]string{})
 
-		actTcs, actErr := tcSvc.GetAll(context.Background(), defaultCompany, "", nil, nil, tt.input.testCasePath, tt.input.mockPath)
+		actTcs, actErr := tcSvc.GetAll(context.Background(), defaultCompany, "", nil, nil, tt.input.testCasePath, tt.input.mockPath, tt.input.tcsType)
 		if (actErr == nil && tt.result.err != nil) || (actErr != nil && tt.result.err == nil) || (actErr != nil && tt.result.err != nil && actErr.Error() != tt.result.err.Error()) {
 			t.Fatal("Err from GetAll does not matches", "Expected", tt.result.err, "Actual", actErr)
 		}
