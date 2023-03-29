@@ -19,22 +19,11 @@ func CLI(version string, conf *config.Config, kServices *service.KServices, logg
 	var rootCmd = &cobra.Command{
 		Use:   "keploy",
 		Short: "Keploy CLI",
-	}
-
-	// start the keploy server
-	var startKeploy = &cobra.Command{
-		Use:   "start [port]",
-		Short: "run the keploy API server",
 		Run: func(cmd *cobra.Command, args []string) {
-			if len(args) == 1 && args[0] != "" {
-				conf.Port = args[0]
-			}
 			server.Server(version, kServices, conf, logger)
 			// server.Server(version)
 		},
 	}
-
-	rootCmd.AddCommand(startKeploy)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
