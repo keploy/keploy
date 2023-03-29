@@ -252,7 +252,8 @@ func (srv *Server) GetTCS(ctx context.Context, request *proto.GetTCSRequest) (*p
 		}
 	}
 
-	tcs, err = srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, request.TestCasePath, request.MockPath)
+	// fetches all testcases for the user application.
+	tcs, err = srv.tcSvc.GetAll(ctx, graph.DEFAULT_COMPANY, app, &offset, &limit, request.TestCasePath, request.MockPath, "")
 	if err != nil {
 		return nil, err
 	}

@@ -60,7 +60,8 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 		r.log.Error("file path should be absolute to read and write testcases and their mocks")
 		return fmt.Errorf("file path should be absolute")
 	}
-	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath)
+	// all types of tcs should be stored to be tested. Empty tcsType returns all keploy tcs
+	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath, "")
 	if err != nil {
 		r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)), zap.Error(err))
 		return err
