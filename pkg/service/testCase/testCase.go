@@ -140,17 +140,24 @@ func (r *TestCase) GetAll(ctx context.Context, cid, appID string, offset *int, l
 		lim = *limit
 	}
 
+	var (
+		tcs     []models.TestCase
+		err     error
+		errMeta = []zap.Field{zap.String("cid", cid)} // meta to log when an error occurs
+	)
 	if r.testExport {
-		return r.readTCS(ctx, testCasePath, mockPath)
+		tcs, err = r.readTCS(ctx, testCasePath, mockPath)
+		errMeta = append(errMeta, zap.String("testcase format", "yaml docs"), zap.String("tests at path", pkg.SanitiseInput(testCasePath)), zap.Error(err))
+	} else {
+		tcs, err = r.tdb.GetAll(ctx, cid, appID, false, off, lim)
+		errMeta = append(errMeta, zap.String("testcase format", "mongo docs"), zap.String("tests with appId", pkg.SanitiseInput(appID)), zap.Error(err))
 	}
-
-	tcs, err := r.tdb.GetAll(ctx, cid, appID, false, off, lim)
 
 	if err != nil {
-		sanitizedAppID := pkg.SanitiseInput(appID)
-		r.log.Error("failed to get testcases from the DB", zap.String("cid", cid), zap.String("appID", sanitizedAppID), zap.Error(err))
+		r.log.Error("failed to fetch testcases", errMeta...)
 		return nil, errors.New("internal failure")
 	}
+
 	return tcs, nil
 }
 

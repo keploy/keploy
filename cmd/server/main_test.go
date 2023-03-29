@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/keploy/go-sdk/keploy"
+	"go.keploy.io/server/server"
 	"go.uber.org/zap"
 )
 
@@ -43,7 +44,15 @@ func MakeFunctionRunOnRootFolder() {
 
 func TestKeploy(t *testing.T) {
 	MakeFunctionRunOnRootFolder()
+	// setup
 	keploy.SetTestMode()
-	go main()
+
+	// test the server
+	if version == "" {
+		version = getKeployVersion()
+	}
+	go server.Server(version)
+
+	// teardown
 	keploy.AssertTests(t)
 }

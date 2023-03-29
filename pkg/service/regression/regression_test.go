@@ -28,7 +28,7 @@ var (
 	mockPath       string
 	err            error
 	logger         *zap.Logger
-	rSvc           *Regression
+	rSvc           Service
 	testReportFS   TestReportFS
 	mockFS         models.MockFS
 )

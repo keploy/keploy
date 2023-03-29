@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -13,30 +14,30 @@ import (
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/cors"
-	"github.com/kelseyhightower/envconfig"
+	// "github.com/kelseyhightower/envconfig"
 	"github.com/keploy/go-sdk/integrations/kchi"
-	"github.com/keploy/go-sdk/integrations/khttpclient"
-	"github.com/keploy/go-sdk/integrations/kmongo"
+	// "github.com/keploy/go-sdk/integrations/khttpclient"
+	// "github.com/keploy/go-sdk/integrations/kmongo"
 	"github.com/keploy/go-sdk/keploy"
 	"github.com/soheilhy/cmux"
+	"go.keploy.io/server/config"
 	"go.keploy.io/server/graph"
 	"go.keploy.io/server/graph/generated"
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
-	mockPlatform "go.keploy.io/server/pkg/platform/fs"
-	"go.keploy.io/server/pkg/platform/mgo"
-	"go.keploy.io/server/pkg/platform/telemetry"
-	mock2 "go.keploy.io/server/pkg/service/browserMock"
-	"go.keploy.io/server/pkg/service/mock"
-	regression2 "go.keploy.io/server/pkg/service/regression"
-	"go.keploy.io/server/pkg/service/testCase"
+	"go.keploy.io/server/pkg/service"
+	// mockPlatform "go.keploy.io/server/pkg/platform/fs"
+	// "go.keploy.io/server/pkg/platform/mgo"
+	// "go.keploy.io/server/pkg/platform/telemetry"
+	// mock2 "go.keploy.io/server/pkg/service/browserMock"
+	// "go.keploy.io/server/pkg/service/mock"
+	// regression2 "go.keploy.io/server/pkg/service/regression"
+	// "go.keploy.io/server/pkg/service/testCase"
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
-
-// const defaultPort = "8080"
 
 const logo string = `
        ▓██▓▄
@@ -50,40 +51,51 @@ const logo string = `
         ▓
 `
 
-type config struct {
-	MongoURI         string `envconfig:"MONGO_URI" default:"mongodb://localhost:27017"`
-	DB               string `envconfig:"DB" default:"keploy"`
-	TestCaseTable    string `envconfig:"TEST_CASE_TABLE" default:"test-cases"`
-	TestRunTable     string `envconfig:"TEST_RUN_TABLE" default:"test-runs"`
-	TestTable        string `envconfig:"TEST_TABLE" default:"tests"`
-	TelemetryTable   string `envconfig:"TELEMETRY_TABLE" default:"telemetry"`
-	APIKey           string `envconfig:"API_KEY"`
-	EnableDeDup      bool   `envconfig:"ENABLE_DEDUP" default:"false"`
-	EnableTelemetry  bool   `envconfig:"ENABLE_TELEMETRY" default:"true"`
-	EnableDebugger   bool   `envconfig:"ENABLE_DEBUG" default:"false"`
-	EnableTestExport bool   `envconfig:"ENABLE_TEST_EXPORT" default:"true"`
-	KeployApp        string `envconfig:"APP_NAME" default:"Keploy-Test-App"`
-	Port             string `envconfig:"PORT" default:"6789"`
-	ReportPath       string `envconfig:"REPORT_PATH" default:""`
-	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
-}
-
-func Server(ver string) *chi.Mux {
+// starts the keploy API server for Http and gRPC calls
+func Server(args ...interface{}) *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	logConf := zap.NewDevelopmentConfig()
-	logConf.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	logger, err := logConf.Build()
-	if err != nil {
-		panic(err)
+	var (
+		conf      *config.Config
+		ver       string
+		logger    *zap.Logger
+		kServices *service.KServices
+		err       error
+	)
+	// check if conf/logger is passed as arguments.
+	for _, arg := range args {
+		switch v := arg.(type) {
+		case *config.Config:
+			conf = v
+		case string:
+			ver = v
+		case *zap.Logger:
+			logger = v
+		case *service.KServices:
+			kServices = v
+		}
+	}
+
+	// If config is not provided, use default values or create a default config
+	if conf == nil {
+		conf = config.NewConfig()
+	}
+
+	// If logger is not provided, use default values or create a default logger
+	if logger == nil {
+		logConf := zap.NewDevelopmentConfig()
+		logConf.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+		logger, err = logConf.Build()
+		if err != nil {
+			log.Fatalf("failed to initialize logger. error: %v", err)
+		}
+
+		if conf.EnableDebugger {
+			logConf.Level.SetLevel(zap.DebugLevel)
+		}
 	}
 	defer logger.Sync() // flushes buffer, if any
 
-	var conf config
-	err = envconfig.Process("keploy", &conf)
-	if err != nil {
-		logger.Error("failed to read/process configuration", zap.Error(err))
-	}
 	// default resultPath is current directory from which keploy binary is running
 	if conf.ReportPath == "" {
 		curr, err := os.Getwd()
@@ -100,41 +112,13 @@ func Server(ver string) *chi.Mux {
 	}
 	conf.ReportPath += "/test-reports"
 
-	if conf.EnableDebugger {
-		logConf.Level.SetLevel(zap.DebugLevel)
+	if kServices == nil {
+		kServices = service.NewServices(ver, conf, logger)
 	}
 
-	cl, err := mgo.New(conf.MongoURI)
-	if err != nil {
-		logger.Fatal("failed to create mgo db client", zap.Error(err))
-	}
+	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, kServices.RegressionSrv, kServices.TestcaseSrv)}))
 
-	db := cl.Database(conf.DB)
-
-	tdb := mgo.NewTestCase(kmongo.NewCollection(db.Collection(conf.TestCaseTable)), logger)
-
-	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
-
-	mockFS := mockPlatform.NewMockExportFS(keploy.GetMode() == keploy.MODE_TEST)
-	testReportFS := mockPlatform.NewTestReportFS(keploy.GetMode() == keploy.MODE_TEST)
-	teleFS := mockPlatform.NewTeleFS()
-	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
-	browserMockSrv := mock2.NewBrMockService(mdb, logger)
-	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver)
-
-	client := http.Client{
-		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
-	}
-
-	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
-	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
-	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
-	mockSrv := mock.NewMockService(mockFS, logger)
-
-	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
-
-	// initialize the client serveri
+	// initialize the routers servers
 	r := chi.NewRouter()
 
 	port := conf.Port
@@ -177,14 +161,14 @@ func Server(ver string) *chi.Mux {
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
-		regression.New(r, logger, regSrv, tcSvc, conf.EnableTestExport, conf.ReportPath)
-		browserMock.New(r, logger, browserMockSrv)
+		regression.New(r, logger, kServices.RegressionSrv, kServices.TestcaseSrv, conf.EnableTestExport, conf.ReportPath)
+		browserMock.New(r, logger, kServices.BrowserMockSrv)
 
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
 	})
-
-	analyticsConfig.Ping(keploy.GetMode() == keploy.MODE_TEST)
+	fmt.Println(kServices)
+	kServices.TelemetrySrv.Ping(keploy.GetMode() == keploy.MODE_TEST)
 
 	listener, err := net.Listen("tcp", ":"+port)
 
@@ -201,7 +185,7 @@ func Server(ver string) *chi.Mux {
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
+		return grpcserver.New(k, logger, kServices.RegressionSrv, kServices.MockSrv, kServices.TestcaseSrv, grpcListener, conf.EnableTestExport, conf.ReportPath, kServices.TelemetrySrv, kServices.TelemetryClient)
 	})
 
 	g.Go(func() error {

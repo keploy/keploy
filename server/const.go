@@ -1,5 +1,5 @@
 package server
 
-const(
+const (
 	DefaultVersion = "0.1.0-dev"
 )

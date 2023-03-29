@@ -18,6 +18,7 @@ require (
 
 require (
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
+	github.com/hashicorp/go-version v1.6.0
 	github.com/k0kubun/pp/v3 v3.1.0
 	github.com/spf13/cobra v1.6.1
 	github.com/wI2L/jsondiff v0.2.0
@@ -44,7 +45,7 @@ require (
 )
 
 require (
-	github.com/keploy/go-sdk v0.8.1
+	github.com/keploy/go-sdk v0.8.3
 	github.com/soheilhy/cmux v0.1.5
 	golang.org/x/net v0.8.0 // indirect
 	golang.org/x/sync v0.1.0
@@ -65,11 +66,10 @@ require (
 	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
-	github.com/hashicorp/go-version v1.6.0
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jhump/protoreflect v1.14.0 // indirect
-	github.com/klauspost/compress v1.15.1 // indirect
+	github.com/klauspost/compress v1.16.3 // indirect
 	github.com/leodido/go-urn v1.2.1 // indirect
 	github.com/matryer/moq v0.2.5 // indirect
 	github.com/mitchellh/mapstructure v1.4.3 // indirect
