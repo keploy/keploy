@@ -26,12 +26,12 @@ type Telemetry struct {
 func NewTelemetry(col DB, enabled, offMode, testExport bool, store FS, logger *zap.Logger, KeployVersion string) *Telemetry {
 
 	tele := Telemetry{
-		Enabled:    enabled,
-		OffMode:    offMode,
-		logger:     logger,
-		db:         col,
-		store:      store,
-		testExport: testExport,
+		Enabled:       enabled,
+		OffMode:       offMode,
+		logger:        logger,
+		db:            col,
+		store:         store,
+		testExport:    testExport,
 		KeployVersion: KeployVersion,
 	}
 	return &tele
@@ -73,7 +73,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			}
 
 			if count == 0 {
-				if ac.testExport{
+				if ac.testExport {
 					// Checking if id is present in old keploy-config folder
 					id, _ = ac.store.Get(false)
 					count = int64(len(id))
