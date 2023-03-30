@@ -21,6 +21,7 @@
 .idea/
 web/public/*
 !web/public/README.md
+!web/public/index.html
 
 
 .vscode

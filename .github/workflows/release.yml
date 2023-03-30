@@ -8,45 +8,45 @@ permissions:
   contents: write
 
 jobs:
-  build-ui:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
+#  build-ui:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v2
+#        with:
+#          fetch-depth: 0
+#
+#      - name: Set up Go
+#        uses: actions/setup-go@v2
+#        with:
+#          go-version: 1.17
 
-      - name: Set up Go
-        uses: actions/setup-go@v2
-        with:
-          go-version: 1.17
-
-      - name: Checkout UI
-        uses: actions/checkout@v2
-        with:
-          repository: keploy/ui
-          path: ui
-      
-      - name: Cache UI
-        id: cache-ui
-        uses: actions/cache@v3
-        with:
-          path: web
-          key: ${{ hashFiles('ui/src') }}
-
-      - name: Set up Node
-        if: steps.cache-ui.outputs.cache-hit != 'true'
-        uses: actions/setup-node@v3
-        with:
-          node-version: '14'
-
-      - name: Build web app
-        if: steps.cache-ui.outputs.cache-hit != 'true'
-        run: |
-          cd $GITHUB_WORKSPACE/ui
-          npm install
-          npm run build
-          cp -r public $GITHUB_WORKSPACE/web
-          rm -rf $GITHUB_WORKSPACE/ui
+#      - name: Checkout UI
+#        uses: actions/checkout@v2
+#        with:
+#          repository: keploy/ui
+#          path: ui
+#
+#      - name: Cache UI
+#        id: cache-ui
+#        uses: actions/cache@v3
+#        with:
+#          path: web
+#          key: ${{ hashFiles('ui/src') }}
+#
+#      - name: Set up Node
+#        if: steps.cache-ui.outputs.cache-hit != 'true'
+#        uses: actions/setup-node@v3
+#        with:
+#          node-version: '14'
+#
+#      - name: Build web app
+#        if: steps.cache-ui.outputs.cache-hit != 'true'
+#        run: |
+#          cd $GITHUB_WORKSPACE/ui
+#          npm install
+#          npm run build
+#          cp -r public $GITHUB_WORKSPACE/web
+#          rm -rf $GITHUB_WORKSPACE/ui
 
   build-go:
     runs-on: macos-latest
@@ -60,18 +60,18 @@ jobs:
         with:
           go-version: 1.17
 
-      - name: Checkout UI
-        uses: actions/checkout@v2
-        with:
-          repository: keploy/ui
-          path: ui
-      
-      - name: Cache UI
-        id: cache-ui
-        uses: actions/cache@v3
-        with:
-          path: web
-          key: ${{ hashFiles('ui/src') }}
+#      - name: Checkout UI
+#        uses: actions/checkout@v2
+#        with:
+#          repository: keploy/ui
+#          path: ui
+#
+#      - name: Cache UI
+#        id: cache-ui
+#        uses: actions/cache@v3
+#        with:
+#          path: web
+#          key: ${{ hashFiles('ui/src') }}
       - name: Import Code-Signing Certificates
         uses: Apple-Actions/import-codesign-certs@v1
         with:
