@@ -1,19 +1,19 @@
-# build ui
-FROM --platform=${BUILDPLATFORM} node:18-bullseye as ui-builder
-
-#RUN apt-get update && apt-get install libvips-dev -y
-
-RUN npm install -g gatsby-cli
-
-RUN git clone https://github.com/keploy/ui
-
-WORKDIR /ui
-
-RUN npm install --legacy-peer-deps
-
-ARG KEPLOY_PATH_PREFIX='/'
-
-RUN PATH_PREFIX="$KEPLOY_PATH_PREFIX" gatsby build --prefix-paths
+## build ui
+#FROM --platform=${BUILDPLATFORM} node:18-bullseye as ui-builder
+#
+##RUN apt-get update && apt-get install libvips-dev -y
+#
+#RUN npm install -g gatsby-cli
+#
+#RUN git clone https://github.com/keploy/ui
+#
+#WORKDIR /ui
+#
+#RUN npm install --legacy-peer-deps
+#
+#ARG KEPLOY_PATH_PREFIX='/'
+#
+#RUN PATH_PREFIX="$KEPLOY_PATH_PREFIX" gatsby build --prefix-paths
 
 # build stage
 FROM --platform=${BUILDPLATFORM} golang:alpine as go-builder
@@ -34,7 +34,7 @@ RUN go mod download
 
 COPY . .
 
-COPY --from=ui-builder /ui/public /app/web/public
+#COPY --from=ui-builder /ui/public /app/web/public
 
 #RUN CGO_ENABLED=0 GOOS=linux go build -o health cmd/health/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -o keploy cmd/server/main.go
