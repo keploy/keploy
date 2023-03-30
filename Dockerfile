@@ -32,7 +32,7 @@ COPY go.sum .
 
 RUN go mod download
 
-COPY . .x
+COPY . .
 
 #COPY --from=ui-builder /ui/public /app/web/public
 
