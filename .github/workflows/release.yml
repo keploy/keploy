@@ -50,7 +50,7 @@ jobs:
 
   build-go:
     runs-on: macos-latest
-    needs: build-ui
+#    needs: build-ui
     steps:
       - uses: actions/checkout@v2
         with:
