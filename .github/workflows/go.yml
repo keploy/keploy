@@ -21,7 +21,7 @@ jobs:
 #        uses: wagoid/commitlint-github-action@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
           go-version: 1.17
 
