@@ -27,7 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS, logExportIO models.LogExportIO) *Regression {
 	return &Regression{
 		yamlTcs:      sync.Map{},
 		tele:         adb,
@@ -38,6 +38,7 @@ func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb te
 		testReportFS: testReportFS,
 		mockFS:       mFS,
 		testExport:   TestExport,
+		logExportIO:  logExportIO,
 	}
 }
 
@@ -53,6 +54,7 @@ type Regression struct {
 	mockFS       models.MockFS
 	testExport   bool
 	log          *zap.Logger
+	logExportIO  models.LogExportIO
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
@@ -71,6 +73,12 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 		tcsMap.Store(j.ID, j)
 	}
 	r.yamlTcs.Store(runId, tcsMap)
+
+	if r.logExportIO != nil {
+		// Will open the file and allow us to write whatever we wants without
+		// close or have to open it again
+		r.logExportIO.OpenStream()
+	}
 	err = r.testReportFS.Write(ctx, testReportPath, models.TestReport{
 		Version: models.V1Beta1,
 		Name:    runId,
@@ -223,7 +231,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
 
-		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
+		logs = logs + fmt.Sprintf("Testrun failed for testcase with id: %s\n"+
 			"Test Result:\n"+
 			"\tInput Http Request: %+v\n\n"+
 			"\tExpected Response: "+

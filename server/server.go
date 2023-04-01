@@ -66,6 +66,7 @@ type config struct {
 	Port             string `envconfig:"PORT" default:"6789"`
 	ReportPath       string `envconfig:"REPORT_PATH" default:""`
 	PathPrefix       string `envconfig:"KEPLOY_PATH_PREFIX" default:"/"`
+	ExportLogFile    string `envconfig:"EXPORT_LOG_FILE" default:""`
 }
 
 func Server(ver string) *chi.Mux {
@@ -84,6 +85,7 @@ func Server(ver string) *chi.Mux {
 	if err != nil {
 		logger.Error("failed to read/process configuration", zap.Error(err))
 	}
+
 	// default resultPath is current directory from which keploy binary is running
 	if conf.ReportPath == "" {
 		curr, err := os.Getwd()
@@ -129,7 +131,12 @@ func Server(ver string) *chi.Mux {
 
 	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
-	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
+
+	var logExportIO *mockPlatform.LogExportIO
+	if conf.ExportLogFile != "" {
+		logExportIO = mockPlatform.NewLogExportIO(conf.ExportLogFile)
+	}
+	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS, logExportIO)
 	mockSrv := mock.NewMockService(mockFS, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))

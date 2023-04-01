@@ -109,6 +109,9 @@ func (fe *mockExport) Write(ctx context.Context, path string, doc models.Mock) e
 	if err != nil {
 		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
 	}
+
+	// bem aqui dá para ser realizado um append // KMOCK
+
 	data = append(data, d...)
 
 	_, err = file.Write(data)
