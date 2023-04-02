@@ -289,7 +289,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				if j.Spec != nil && j.Spec.Req != nil {
 					j.Spec = pkg.FilterFields(j.Spec, fieldFilters, r.log).(*proto.Mock_SpecSchema)
 				}
-				// pega o objeto e faz tipo um marshaling
+
 				doc, err := grpcMock.Encode(j)
 				if err != nil {
 					r.log.Error(err.Error())
