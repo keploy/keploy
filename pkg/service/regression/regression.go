@@ -22,12 +22,13 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	keployFS "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS, logExportIO models.LogExportIO) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS, logExportIO *keployFS.LogExportIO) *Regression {
 	return &Regression{
 		yamlTcs:      sync.Map{},
 		tele:         adb,
@@ -54,7 +55,7 @@ type Regression struct {
 	mockFS       models.MockFS
 	testExport   bool
 	log          *zap.Logger
-	logExportIO  models.LogExportIO
+	logExportIO  *keployFS.LogExportIO
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
@@ -226,9 +227,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		pass = false
 	}
 	if !pass {
-		logger := pp.New()
-		logger.WithLineInfo = false
-		logger.SetColorScheme(models.FailingColorScheme)
+
 		var logs = ""
 
 		logs = logs + fmt.Sprintf("Testrun failed for testcase with id: %s\n"+
@@ -239,7 +238,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
 
 		if !res.StatusCode.Normal {
-			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+			logs += fmt.Sprintf("\tExpected StatusCode: %v"+"\n\tActual StatusCode: %v\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
 
 		}
 		var (
@@ -259,7 +258,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		if !unmatched {
 			logs += "\t Response Headers: {\n"
 			for i, j := range expectedHeader {
-				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
+				logs += fmt.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
 			}
 			logs += "\t}\n"
 		}
@@ -281,24 +280,38 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+					logs += fmt.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
 				}
 				logs += "\t}\n"
 			} else {
 				// just log both the bodies as plain text without really computing the diff
-				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
+				logs += fmt.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
 
 			}
 		}
 		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
+
+		if r.logExportIO != nil {
+			r.logExportIO.Write(logs) // so it will redirect its output to a file
+		} else {
+			logger := pp.New()
+			logger.WithLineInfo = false
+			logger.SetColorScheme(models.FailingColorScheme)
+			logger.Printf(logs)
+		}
 	} else {
-		logger := pp.New()
-		logger.WithLineInfo = false
-		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
-		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
-		logger.Printf(log2)
+		log2 += fmt.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+
+		if r.logExportIO != nil {
+			r.logExportIO.Write(log2)
+		} else {
+			logger := pp.New()
+			logger.WithLineInfo = false
+			logger.SetColorScheme(models.PassingColorScheme)
+
+			logger.Printf(log2)
+		}
 
 	}
 	return pass, res, &tc, nil
@@ -392,12 +405,10 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	}
 
 	if !pass {
-		logger := pp.New()
-		logger.WithLineInfo = false
-		logger.SetColorScheme(models.FailingColorScheme)
+
 		var logs = ""
 
-		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
+		logs = logs + fmt.Sprintf("Testrun failed for testcase with id: %s\n"+
 			"Test Result:\n"+
 			"\tInput Grpc Request: %+v\n\n"+
 			"\tExpected Response: "+
@@ -422,28 +433,42 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+					logs += fmt.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
 				}
 				logs += "\t}\n"
 			} else {
 				// just log both the bodies as plain text without really computing the diff
-				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.GrpcResp, resp)
+				logs += fmt.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.GrpcResp, resp)
 
 			}
 		}
 		if !res.BodyResult[1].Normal {
 			logs += "\tResponse error: {\n"
-			logs += logger.Sprintf("\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t}\n", tc.GrpcResp.Err, resp.Err)
+			logs += fmt.Sprintf("\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t}\n", tc.GrpcResp.Err, resp.Err)
 		}
 		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
+
+		if r.logExportIO != nil {
+			r.logExportIO.Write(logs)
+		} else {
+			logger := pp.New()
+			logger.WithLineInfo = false
+			logger.SetColorScheme(models.FailingColorScheme)
+			logger.Printf(logs)
+		}
+
 	} else {
-		logger := pp.New()
-		logger.WithLineInfo = false
-		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
-		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
-		logger.Printf(log2)
+		log2 += fmt.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+
+		if r.logExportIO != nil {
+			r.logExportIO.Write(log2)
+		} else {
+			logger := pp.New()
+			logger.WithLineInfo = false
+			logger.SetColorScheme(models.PassingColorScheme)
+			logger.Printf(log2)
+		}
 
 	}
 	return pass, res, &tc, nil
@@ -893,8 +918,18 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 				return err
 			}
 		}
+
+		if r.logExportIO != nil {
+			r.log.Info("Being piped to file: " + r.logExportIO.FileName())
+		}
+
 		pp.SetColorScheme(models.PassingColorScheme)
-		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", run.ID, run.App, run.Total)
+		log := fmt.Sprintf("\n <=========================================> \n  TESTRUN STARTED with id: %v\n"+"\tFor App: %v\n"+"\tTotal tests: %v\n <=========================================> \n\n", run.ID, run.App, run.Total)
+		if r.logExportIO != nil {
+			r.logExportIO.Write(log)
+		} else {
+			pp.Printf(log)
+		}
 	} else {
 		var (
 			total   int
@@ -937,8 +972,13 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			// sending Testrun Telemetry event to Telemetry service.
 			r.tele.Testrun(success, failure, r.client, ctx)
 		}
-
-		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
+		log := fmt.Sprintf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %v\n"+"\tTotal tests: %v\n"+"\tTotal test passed: %v\n"+"\tTotal test failed: %v\n <=========================================> \n\n", run.ID, total, success, failure)
+		if r.logExportIO != nil {
+			r.logExportIO.Write(log)
+		} else {
+			pp.Printf(log)
+		}
+		r.logExportIO.Close()
 	}
 	if !testExport {
 		return r.rdb.Upsert(ctx, run)
