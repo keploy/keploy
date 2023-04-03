@@ -125,6 +125,13 @@ message getTCRequest {
   string id = 1;
   string app = 2;
 }
+
+message getTCRequestYaml {
+  string id = 1;
+  string app = 2;
+  string testCasePath = 3;
+}
+
 message getTCSRequest{
   string app = 1;
   string offset = 2;
@@ -238,6 +245,7 @@ service RegressionService{
   rpc End (endRequest) returns (endResponse);
   rpc Start (startRequest) returns (startResponse);
   rpc GetTC (getTCRequest) returns (TestCase);
+  rpc GetTCYaml (getTCRequestYaml) returns (TestCase);
   rpc GetTCS (getTCSRequest) returns (getTCSResponse);
   rpc PostTC (TestCaseReq) returns (postTCResponse);
   rpc DeNoise (TestReq) returns(deNoiseResponse);
