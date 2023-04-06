@@ -444,6 +444,8 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *models.Test
 	started := time.Now().UTC()
+	// for test here I can call my history 
+	
 	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp)
 	if tc != nil {
 		t = &models.Test{

@@ -256,6 +256,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 		// store testcase in yaml file
 		if r.testExport {
 			r.nextYamlIndex.mu.Lock()
+			// for record I can call my history file from here - 
 			// defer r.nextYamlIndex.mu.Unlock()
 			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
 			if !ok {

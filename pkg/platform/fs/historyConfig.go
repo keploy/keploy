@@ -14,37 +14,44 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type testReport struct {
-	isTestMode bool
-	tests      map[string][]models.TestResult
-	m          sync.Mutex
+type HistoryConfig struct {
+	app_path        string       `json:"app_path" yaml:"app_path"`
+	test_case_paths []string     `json:"test_case_paths" yaml:"test_case_paths"`
+	mocks_paths     []string     `json:"mocks_paths" yaml:"mocks_paths"`
+	test_runs       []AppTestRun `json:"test_runs" yaml:"test_runs"`
+	m               sync.Mutex
+}
+type AppTestRun struct {
+	test_run_path string
+	test_run_id   string
 }
 
-func NewTestReportFS(isTestMode bool) *testReport {
-	return &testReport{
-		isTestMode: isTestMode,
-		tests:      map[string][]models.TestResult{},
-		m:          sync.Mutex{},
+func NewHistoryConfigFS(isTestMode bool) *HistoryConfig {
+	return &HistoryConfig{
+		app_path:        "",
+		test_case_paths: []string{},
+		mocks_paths:     []string{},
+		test_runs:       []AppTestRun{},
+		m:               sync.Mutex{},
 	}
 }
 
-func (fe *testReport) Lock() {
-	fe.m.Lock()
-}
+// func (hc *HistoryConfig) Lock() {
+// 	fe.m.Lock()
+// }
 
-func (fe *testReport) Unlock() {
-	fe.m.Unlock()
-}
+// func (hc *HistoryConfig) Unlock() {
+// 	fe.m.Unlock()
+// }
 
-func (fe *testReport) SetResult(runId string, test models.TestResult) {
-	// TODO: send runId to the historyConfig
-	tests, _ := fe.tests[runId]
-	tests = append(tests, test)
-	fe.tests[runId] = tests
-	fe.m.Unlock()
-}
+// func (hc *HistoryConfig) SetResult(runId string, test models.TestResult) {
+// 	tests, _ := fe.tests[runId]
+// 	tests = append(tests, test)
+// 	fe.tests[runId] = tests
+// 	fe.m.Unlock()
+// }
 
-func (fe *testReport) GetResults(runId string) ([]models.TestResult, error) {
+func (hc *HistoryConfig) GetResults(runId string) ([]models.TestResult, error) {
 	val, ok := fe.tests[runId]
 	if !ok {
 		return nil, fmt.Errorf("found no test results for test report with id: %v", runId)
@@ -52,7 +59,7 @@ func (fe *testReport) GetResults(runId string) ([]models.TestResult, error) {
 	return val, nil
 }
 
-func (fe *testReport) Read(ctx context.Context, path, name string) (models.TestReport, error) {
+func (hc *HistoryConfig) Read(ctx context.Context, path, name string) (models.TestReport, error) {
 	if !pkg.IsValidPath(path) {
 		return models.TestReport{}, fmt.Errorf("file path should be absolute. got test report path: %s and its name: %s", pkg.SanitiseInput(path), pkg.SanitiseInput(name))
 	}
@@ -73,10 +80,8 @@ func (fe *testReport) Read(ctx context.Context, path, name string) (models.TestR
 	return doc, nil
 }
 
-func (fe *testReport) Write(ctx context.Context, path string, doc models.TestReport) error {
-	if fe.isTestMode {
-		return nil
-	}
+func (hc *HistoryConfig) Write(ctx context.Context, ) error {
+	
 	if strings.Contains(doc.Name, "/") || !pkg.IsValidPath(doc.Name) {
 		return errors.New("invalid name for test-report. It should not include any slashes")
 	}
