@@ -37,70 +37,107 @@ func TestMain(m *testing.M) {
 	tearDown()
 }
 func TestReplaceHttpFields(t *testing.T) {
-	input := &proto.Mock{
-		Kind: string(models.HTTP),
-		Spec: &proto.Mock_SpecSchema{
-			Req: &proto.HttpReq{
-				Header:     map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"OldAgent"}}},
-				URL:        "www.google.com",
-				Method:     "GET",
-				ProtoMajor: 3,
-				ProtoMinor: 3,
-			},
-		},
-	}
-
-	replaceRequest := map[string]string{
-		"req.header.User-Agent": "NewAgent",
-		"req.domain":            "www.example.com",
-		"req.method":            "PUT",
-		"req.proto_major":       "2",
-		"req.proto_minor":       "1",
-	}
-	replaceMeta := map[string]string{
-		"meta.header.User-Agent": "NewAgent2",
-		"meta.domain":            "keploy.io",
-		"meta.method":            "POST",
-		"meta.proto_major":       "1",
-		"meta.proto_minor":       "2",
-	}
-
-	// Our final output should be those two object expectRequest and expectMeta */
-	expectRequest := input
-	expectRequest.Spec.Req.Header = map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"NewAgent"}}}
-	expectRequest.Spec.Req.URL = "www.example.com"
-	expectRequest.Spec.Req.Method = "PUT"
-	expectRequest.Spec.Req.ProtoMajor = 2
-	expectRequest.Spec.Req.ProtoMinor = 1
-
-	expectMeta := input
-	expectMeta.Spec.Req.Header = map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"NewAgent2"}}}
-	expectMeta.Spec.Req.URL = "keploy.io"
-	expectMeta.Spec.Req.Method = "POST"
-	expectMeta.Spec.Req.ProtoMajor = 1
-	expectMeta.Spec.Req.ProtoMinor = 2
-
-	actualRequest := input
-	actualMeta := input
-
-	replaceHttpFields(actualRequest, replaceRequest)
-	replaceHttpFields(actualMeta, replaceMeta)
-
 	// Will ignore private fields
-	var ignoreUnexported = cmpopts.IgnoreUnexported(
+	ignoreUnexported := cmpopts.IgnoreUnexported(
 		proto.Mock{},
 		proto.Mock_SpecSchema{},
 		proto.HttpReq{},
 		proto.StrArr{},
 	)
 
-	// Now we already have both expectRequest x actualRequest and expectMeta x actualMeta
-	// so we just need to check if they match
-	if !cmp.Equal(actualRequest, expectRequest, ignoreUnexported) {
-		t.Errorf("replaceHttpFields() mismatch (-actual +expected):\n%s", cmp.Diff(actualRequest, expectRequest, ignoreUnexported))
-	}
-	if !cmp.Equal(actualMeta, expectMeta, ignoreUnexported) {
-		t.Errorf("replaceHttpFields() mismatch (-actual +expected):\n%s", cmp.Diff(actualRequest, expectRequest, ignoreUnexported))
+	for _, tt := range []struct {
+		input struct {
+			mock    *proto.Mock
+			replace map[string]string
+		}
+		expected *proto.Mock
+	}{
+		{
+			input: struct {
+				mock    *proto.Mock
+				replace map[string]string
+			}{
+				mock: &proto.Mock{
+					Kind: string(models.HTTP),
+					Spec: &proto.Mock_SpecSchema{
+						Req: &proto.HttpReq{
+							Header:     map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"OldAgent"}}},
+							URL:        "www.google.com",
+							Method:     "GET",
+							ProtoMajor: 3,
+							ProtoMinor: 3,
+						},
+					},
+				},
+				replace: map[string]string{
+					"req.header.User-Agent": "NewAgent",
+					"req.domain":            "www.example.com",
+					"req.method":            "PUT",
+					"req.proto_major":       "2",
+					"req.proto_minor":       "1",
+				},
+			},
+			expected: &proto.Mock{
+				Kind: string(models.HTTP),
+				Spec: &proto.Mock_SpecSchema{
+					Req: &proto.HttpReq{
+						Header:     map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"NewAgent"}}},
+						URL:        "www.example.com",
+						Method:     "PUT",
+						ProtoMajor: 2,
+						ProtoMinor: 1,
+					},
+				},
+			},
+		},
+		{
+			input: struct {
+				mock    *proto.Mock
+				replace map[string]string
+			}{
+				mock: &proto.Mock{
+					Kind: string(models.HTTP),
+					Spec: &proto.Mock_SpecSchema{
+						Req: &proto.HttpReq{
+							Header:     map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"OldAgent"}}},
+							URL:        "www.google.com",
+							Method:     "GET",
+							ProtoMajor: 3,
+							ProtoMinor: 3,
+						},
+					},
+				},
+				replace: map[string]string{
+					"meta.header.User-Agent": "NewAgent2",
+					"meta.domain":            "keploy.io",
+					"meta.method":            "POST",
+					"meta.proto_major":       "1",
+					"meta.proto_minor":       "2",
+				},
+			},
+			expected: &proto.Mock{
+				Kind: string(models.HTTP),
+				Spec: &proto.Mock_SpecSchema{
+					Req: &proto.HttpReq{
+						Header:     map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"NewAgent2"}}},
+						URL:        "keploy.io",
+						Method:     "POST",
+						ProtoMajor: 1,
+						ProtoMinor: 2,
+					},
+				},
+			},
+		},
+	} {
+		actual := tt.input.mock
+
+		replaceHttpFields(tt.input.mock, tt.input.replace)
+
+		// Now we already have both expectRequest x actualRequest and expectMeta x actualMeta
+		// so we just need to check if they match
+		if !cmp.Equal(actual, tt.expected, ignoreUnexported) {
+			t.Errorf("replaceHttpFields() mismatch (-actual +expected):\n%s", cmp.Diff(actual, tt.expected, ignoreUnexported))
+		}
 	}
 }
 
