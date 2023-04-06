@@ -65,6 +65,9 @@ func (m *Mock) FileExists(ctx context.Context, path string, overWrite bool) (boo
 	return exists, nil
 }
 
+/*
+ * will replace fields if the user wants so like body or header
+ */
 func replaceHttpFields(doc *proto.Mock, replace map[string]string) {
 	if doc.Kind == string(models.HTTP) {
 		for k, v := range replace {
@@ -81,7 +84,8 @@ func replaceHttpFields(doc *proto.Mock, replace map[string]string) {
 						fmt.Println("Error while parsing url", err)
 					}
 					url.Host = v
-					doc.Spec.Req.URL = "something"
+					/*I've changed from something to url.String(), informate it in commit*/
+					doc.Spec.Req.URL = url.String()
 				case "method":
 					doc.Spec.Req.Method = v
 				case "proto_major":
@@ -110,7 +114,8 @@ func replaceHttpFields(doc *proto.Mock, replace map[string]string) {
 						fmt.Println("Error while parsing url", err)
 					}
 					url.Host = v
-					doc.Spec.Req.URL = "something"
+					/*I've changed from something to url.String(), informate it in commit*/
+					doc.Spec.Req.URL = url.String()
 				case "method":
 					doc.Spec.Req.Method = v
 				case "proto_major":
