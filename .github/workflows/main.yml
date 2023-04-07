@@ -2,7 +2,7 @@ name: Go
 
 on:
   push:
-    branches: [ improving_coverage ]
+    branches: [ main ]
 
 jobs:
 
