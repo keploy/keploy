@@ -29,6 +29,27 @@ require (
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.22.0
 	golang.org/x/mod v0.6.0-dev // indirect
+	google.golang.org/protobuf v1.28.1
+)
+
+require (
+	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
+	github.com/go-git/go-git/v5 v5.6.1
+	github.com/k0kubun/pp/v3 v3.1.0
+	github.com/wI2L/jsondiff v0.2.0
+)
+
+require (
+	github.com/golang/protobuf v1.5.2 // indirect
+	github.com/google/go-cmp v0.5.9 // indirect
+	github.com/mattn/go-colorable v0.1.12 // indirect
+	github.com/mattn/go-isatty v0.0.14 // indirect
+)
+
+require (
+	github.com/keploy/go-sdk v0.8.2
+	github.com/soheilhy/cmux v0.1.5
+	golang.org/x/net v0.8.0 // indirect
 	golang.org/x/sync v0.1.0
 	google.golang.org/grpc v1.48.0
 	google.golang.org/protobuf v1.28.1
