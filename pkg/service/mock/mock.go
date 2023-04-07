@@ -65,41 +65,46 @@ func (m *Mock) FileExists(ctx context.Context, path string, overWrite bool) (boo
 	return exists, nil
 }
 
-/*
- * will replace fields if the user wants so like body or header
- */
+// Will replace fields like header or domain...
 func replaceHttpFields(doc *proto.Mock, replace map[string]string) {
 	if doc.Kind == string(models.HTTP) {
 		for k, v := range replace {
+
 			fieldType := strings.Split(k, ".")[0]  //req, resp, all
 			fieldValue := strings.Split(k, ".")[1] //header, body, proto_major, proto_minor, method, url
+
 			if fieldType == "req" || fieldType == "all" {
 				switch fieldValue {
+
 				case "header":
 					newHeader := strings.Split(v, "|") //The value of the header is a string of the form "value1|value2"
 					doc.Spec.Req.Header[strings.Split(k, ".")[2]] = utils.ToStrArr(newHeader)
+
 				case "domain":
 					url, err := url.Parse(doc.Spec.Req.URL)
 					if err != nil {
 						fmt.Println("Error while parsing url", err)
 					}
 					url.Host = v
-					/*I've changed from something to url.String(), informate it in commit*/
-					doc.Spec.Req.URL = url.String()
+					doc.Spec.Req.URL = url.Host
+
 				case "method":
 					doc.Spec.Req.Method = v
+
 				case "proto_major":
 					protomajor, err := strconv.Atoi(v)
 					if err != nil {
 						fmt.Println("Error while converting proto_major to int", err)
 					}
 					doc.Spec.Req.ProtoMajor = int64(protomajor)
+
 				case "proto_minor":
 					protominor, err := strconv.Atoi(v)
 					if err != nil {
 						fmt.Println("Error while converting proto_minor to int", err)
 					}
 					doc.Spec.Req.ProtoMinor = int64(protominor)
+
 				}
 			}
 			if fieldType == "meta" || fieldType == "all" {
@@ -108,32 +113,35 @@ func replaceHttpFields(doc *proto.Mock, replace map[string]string) {
 				case "header":
 					newHeader := strings.Split(v, "|") //The value of the header is a string of the form "value1|value2"
 					doc.Spec.Req.Header[strings.Split(k, ".")[2]] = utils.ToStrArr(newHeader)
+
 				case "domain":
 					url, err := url.Parse(doc.Spec.Req.URL)
 					if err != nil {
 						fmt.Println("Error while parsing url", err)
 					}
 					url.Host = v
-					/*I've changed from something to url.String(), informate it in commit*/
-					doc.Spec.Req.URL = url.String()
+					doc.Spec.Req.URL = url.Host
+
 				case "method":
 					doc.Spec.Req.Method = v
+
 				case "proto_major":
 					protomajor, err := strconv.Atoi(v)
 					if err != nil {
 						fmt.Println("Error while converting proto_major to int", err)
 					}
 					doc.Spec.Req.ProtoMajor = int64(protomajor)
+
 				case "proto_minor":
 					protominor, err := strconv.Atoi(v)
 					if err != nil {
 						fmt.Println("Error while converting proto_minor to int", err)
 					}
 					doc.Spec.Req.ProtoMinor = int64(protominor)
+
 				}
 			}
 		}
-
 	}
 }
 

@@ -36,8 +36,10 @@ func TestMain(m *testing.M) {
 	m.Run()
 	tearDown()
 }
+
 func TestReplaceHttpFields(t *testing.T) {
-	// Will ignore private fields
+
+	// Will ignore private fields of the following structs
 	ignoreUnexported := cmpopts.IgnoreUnexported(
 		proto.Mock{},
 		proto.Mock_SpecSchema{},
@@ -46,6 +48,9 @@ func TestReplaceHttpFields(t *testing.T) {
 	)
 
 	for _, tt := range []struct {
+
+		// The replaceHttpFields function expects two arguments,
+		// proto mock object and the replace map. Lets create it
 		input struct {
 			mock    *proto.Mock
 			replace map[string]string
@@ -60,6 +65,9 @@ func TestReplaceHttpFields(t *testing.T) {
 				mock: &proto.Mock{
 					Kind: string(models.HTTP),
 					Spec: &proto.Mock_SpecSchema{
+
+						// Here is the important part because its where the replaceHttpFunction
+						// will change the fields
 						Req: &proto.HttpReq{
 							Header:     map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"OldAgent"}}},
 							URL:        "www.google.com",
@@ -81,6 +89,7 @@ func TestReplaceHttpFields(t *testing.T) {
 				Kind: string(models.HTTP),
 				Spec: &proto.Mock_SpecSchema{
 					Req: &proto.HttpReq{
+						// Here the fields must to match the values of the replace map above
 						Header:     map[string]*proto.StrArr{"User-Agent": &proto.StrArr{Value: []string{"NewAgent"}}},
 						URL:        "www.example.com",
 						Method:     "PUT",
