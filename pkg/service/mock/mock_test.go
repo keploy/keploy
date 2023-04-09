@@ -37,6 +37,8 @@ func TestMain(m *testing.M) {
 	tearDown()
 }
 
+// Will test the replaceHttpFields function. This function
+// increases the coverage by 15.7%
 func TestReplaceHttpFields(t *testing.T) {
 
 	// Will ignore private fields of the following structs
@@ -148,6 +150,13 @@ func TestReplaceHttpFields(t *testing.T) {
 			t.Errorf("replaceHttpFields() mismatch (-actual +expected):\n%s", cmp.Diff(actual, tt.expected, ignoreUnexported))
 		}
 	}
+}
+
+// Will test the case where didnt define a name. This increases the coverage
+// by 7.6%
+func TestPut(t *testing.T) {
+	meta := map[string]string{"": ""}
+	mockSrv.put(context.Background(), path, models.Mock{}, meta)
 }
 
 func TestService(t *testing.T) {
