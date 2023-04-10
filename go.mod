@@ -24,9 +24,17 @@ require (
 )
 
 require (
+	github.com/fatih/color v1.15.0 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/mattn/go-colorable v0.1.12 // indirect
-	github.com/mattn/go-isatty v0.0.14 // indirect
+	github.com/gookit/color v1.5.2 // indirect
+	github.com/huandu/xstrings v1.3.2 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-isatty v0.0.17 // indirect
+	github.com/muesli/reflow v0.3.0 // indirect
+	github.com/olekukonko/tablewriter v0.0.5 // indirect
+	github.com/yudai/gojsondiff v1.0.0 // indirect
+	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
+	golang.org/x/term v0.6.0 // indirect
 )
 
 require (
@@ -40,10 +48,10 @@ require (
 )
 
 require (
+	github.com/Delta456/box-cli-maker/v2 v2.3.0
 	github.com/Microsoft/go-winio v0.6.0 // indirect
 	github.com/ProtonMail/go-crypto v0.0.0-20230321155629-9a39f2531310 // indirect
 	github.com/acomagu/bufpipe v1.0.4 // indirect
-	github.com/Delta456/box-cli-maker/v2 v2.3.0 // indirect
 	github.com/agnivade/levenshtein v1.1.1 // indirect
 	github.com/cloudflare/circl v1.3.2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.1 // indirect
@@ -75,7 +83,6 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/sergi/go-diff v1.3.1 // indirect
 	github.com/skeema/knownhosts v1.1.0 // indirect
-	github.com/stretchr/testify v1.7.1 // indirect
 	github.com/tidwall/gjson v1.14.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect

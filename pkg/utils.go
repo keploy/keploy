@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -11,8 +12,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Delta456/box-cli-maker/v2"
 	"github.com/araddon/dateparse"
+	"github.com/fatih/color"
+	"github.com/olekukonko/tablewriter"
+	"github.com/yudai/gojsondiff"
+	"github.com/yudai/gojsondiff/formatter"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
@@ -427,55 +431,41 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 }
 
 /*
- * Prints a nice diff box.
- * field: if its inside of an field, e.g: Content-type
- * if theres no field just let it empty and the function
- * will take care of appropriate tabulation.
+ * Prints a nice diff table where the left is the expect and the right is the
+ * actual. Its called generic because it works with whatever string. For
+ * JSON-based diffs use JSONDiff
  */
-func DiffBox(title, field, expect, actual string) string {
-	ce, ca, _ := ColoredDiff(expect, actual)
-	ce = "Expected: " + ce
-	ca = "\nActual: " + ca
+func GenericDiff(expect, actual string) string {
 
-	box := func() box.Box {
-		return box.New(box.Config{WrappingLimit: 60, AllowWrapping: true, Type: "Hidden"})
-	}
+	// Offset will be where the string start to unmatch
+	offset, _ := diffStr(expect, actual)
 
-	if field == "" {
-		return box().String("\033[1;31m"+title+"\033[0m", ce+ca)
-	} else {
-		ce = "\t" + ce
-		ca = "\t" + ca
+	// Color of the unmatch, can be changed
+	c := color.FgMagenta
 
-		return box().String("\033[1;31m"+title+"\033[0m", field+":\n"+ce+ca)
-	}
+	exp := breakLineWithColor(expect, &c, offset)
+	act := breakLineWithColor(actual, &c, offset)
+
+	return expectActualTable(exp, act)
 }
 
-/*
- * given str1 and str2 it will color with purple the difference between those two strings
+/* This will return the json diffs in a beautifull way. It will in fact
+ * create a colorized table-based expect-response string and print it.
+ * on the left-side there'll be the expect and on the right the actual
+ * response. Its important to mention the inputs must to be a json. If
+ * the body isnt in the rest-api formats (what means it is not json-based)
+ * its better to use a generic diff output as the DiffOutput I've made.
  */
-func ColoredDiff(str1, str2 string) (string, string, int) {
-	i, diff := diff(str1, str2)
-
-	if diff {
-		cs := insRed(str1, "\033[35m", i)
-		cs2 := insRed(str2, "\033[35m", i)
-		return cs, cs2, i
-	}
-	return str1, str2, i
+func JSONDiff(json1 []byte, json2 []byte) string {
+	diffString := calculateDiffs(json1, json2)
+	expect, actual := separateAndColorize(diffString)
+	result := expectActualTable(expect, actual)
+	return result
 }
 
-/*
- * Insert color at given index and resets at end
- */
-func insRed(str, ascii_code string, index int) string {
-	return str[:index] + ascii_code + str[index:] + "\033[0m"
-}
-
-/* Find the diff between two strings returning index where
- * the difference begin
- */
-func diff(s1 string, s2 string) (int, bool) {
+// Find the diff between two strings returning index where
+// the difference begin
+func diffStr(s1, s2 string) (int, bool) {
 	diff := false
 	i := -1
 
@@ -496,4 +486,98 @@ func diff(s1 string, s2 string) (int, bool) {
 	}
 
 	return i, diff
+}
+
+// Declarated here so at each new test we dont need to recreate it again
+var diff = gojsondiff.New()
+
+// Will perform the calculation of the diffs, returning a string that
+// containes the lines that does not match represented by either a
+// minus or add symbol followed by the respective line. OBS: For jsons
+func calculateDiffs(json1 []byte, json2 []byte) string {
+	dObj, _ := diff.Compare(json1, json2)
+
+	var jsonObject map[string]interface{}
+	json.Unmarshal([]byte(json1), &jsonObject)
+
+	diffString, _ := formatter.NewAsciiFormatter(jsonObject, formatter.AsciiFormatterConfig{
+		ShowArrayIndex: true,
+		Coloring:       false,
+	}).Format(dObj)
+
+	return diffString
+}
+
+// Will receive a string that has the differences represented
+// by a plus or a minus sign and separate it. Just works with json
+func separateAndColorize(diffStr string) (string, string) {
+	expect, actual := "", ""
+
+	diffLines := strings.Split(diffStr, "\n")
+
+	for _, line := range diffLines {
+		if len(line) > 0 {
+			if line[0] == '-' {
+				c := color.FgRed
+				expect += breakLineWithColor(line, &c, 0)
+			} else if line[0] == '+' {
+				c := color.FgGreen
+				actual += breakLineWithColor(line, &c, 0)
+			} else {
+				expect += breakLineWithColor(line, nil, 0)
+				actual += breakLineWithColor(line, nil, 0)
+			}
+		}
+	}
+	return expect, actual
+}
+
+// Will colorize the line and do the job of break it if it pass maxLength,
+// always respecting the reset of ascii colors before the break line to dont
+func breakLineWithColor(input string, c *color.Attribute, offset int) string {
+	var output []string
+	var paint func(a ...interface{}) string
+	colorize := false
+	maxLength := 55
+
+	if c != nil {
+		colorize = true
+		paint = color.New(*c).SprintFunc()
+	}
+
+	for i := 0; i < len(input); i += maxLength {
+		end := i + maxLength
+
+		if end > len(input) {
+			end = len(input)
+		}
+
+		if colorize && i+maxLength > offset {
+			paintedStart := i
+			if paintedStart < offset {
+				paintedStart = offset
+			}
+			prePaint := input[i:paintedStart]
+			postPaint := paint(input[paintedStart:end])
+			substr := prePaint + postPaint + "\n"
+			output = append(output, substr)
+		} else {
+			substr := input[i:end] + "\n"
+			output = append(output, substr)
+		}
+	}
+	return strings.Join(output, "")
+}
+
+// Will return a string in a two columns table where the left
+// side is the expected string and the right is the actual
+func expectActualTable(exp string, act string) string {
+	buf := &bytes.Buffer{}
+	table := tablewriter.NewWriter(buf)
+
+	table.SetHeader([]string{"Expect", "Actual"})
+	table.SetAutoWrapText(false)
+	table.Append([]string{exp, act})
+	table.Render()
+	return buf.String()
 }

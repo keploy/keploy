@@ -250,14 +250,14 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 
-		var headerExp, headerAct, hType = "", "", ""
+		var headerExp, headerAct = "", ""
 		if !unmatched {
 			for i, j := range expectedHeader {
-				headerExp, headerAct, hType = fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i
+				headerExp, headerAct = fmt.Sprint(j), fmt.Sprint(actualHeader[i])
 			}
 		}
 
-		field, bodyExp, bodyAct := "", "", ""
+		bodyExp, bodyAct := "", ""
 		if !res.BodyResult[0].Normal {
 
 			if json.Valid([]byte(resp.Body)) {
@@ -270,7 +270,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					field, bodyExp, bodyAct = keyStr, fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
+					bodyExp, bodyAct = fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
 
 				}
 			} else {
@@ -279,13 +279,22 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 
 		if expSCode != "" || actSCode != "" {
-			logs += pkg.DiffBox("Diff status: "+tc.ID, "", expSCode, actSCode)
+			logs += pkg.GenericDiff(expSCode, actSCode)
 		}
 		if headerExp != "" || headerAct != "" {
-			logs += pkg.DiffBox("Diff header: "+tc.ID, hType, headerExp, headerAct)
+			logs += pkg.GenericDiff(headerExp, headerAct)
 		}
 		if bodyExp != "" || bodyAct != "" {
-			logs += pkg.DiffBox("Diff body: "+tc.ID, field, bodyExp, bodyAct)
+			// Important part: check if it is a valid json so it can use
+			// in the ColorizedJSONDiffs as its a more properly function
+			// for this case
+			if isJSON(bodyExp) && isJSON(bodyAct) {
+				logs += pkg.JSONDiff([]byte(bodyExp), []byte(bodyAct))
+			} else {
+				// If not so use a generic way that's still very beautiful and
+				// readable
+				logs += pkg.GenericDiff(bodyExp, bodyAct)
+			}
 		}
 
 		logs += "--------------------------------------------------------------------\n\n"
@@ -302,7 +311,11 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	return pass, res, &tc, nil
 }
-
+func isJSON(s string) bool {
+	var js interface{}
+	err := json.Unmarshal([]byte(s), &js)
+	return err == nil
+}
 func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp models.GrpcResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
@@ -405,7 +418,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 
 		// ------------ DIFFS RELATED CODE --------------
 
-		bodyExp, bodyAct, field := "", "", ""
+		bodyExp, bodyAct := "", ""
 		if !res.BodyResult[0].Normal {
 
 			if json.Valid([]byte(resp.Body)) {
@@ -419,7 +432,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					bodyExp, bodyAct, field = keyStr, fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
+					bodyExp, bodyAct = keyStr, fmt.Sprint(op.OldValue)
 				}
 			} else {
 				bodyExp, bodyAct = fmt.Sprint(tc.GrpcResp), fmt.Sprint(resp)
@@ -433,10 +446,10 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		}
 
 		if bodyExp != "" || bodyAct != "" {
-			logs += pkg.DiffBox("Diff grpc body: "+tc.ID, field, bodyExp, bodyAct)
+			logs += pkg.GenericDiff(bodyExp, bodyAct)
 		}
 		if bodyExp2 != "" || bodyAct2 != "" {
-			logs += pkg.DiffBox("Diff grpc body: "+tc.ID, "", bodyExp2, bodyAct2)
+			logs += pkg.GenericDiff(bodyExp2, bodyAct2)
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 
