@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	historyConfig "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -54,11 +55,18 @@ type Regression struct {
 	testExport   bool
 	log          *zap.Logger
 }
+var cnt int = 0
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		r.log.Error("file path should be absolute to read and write testcases and their mocks")
 		return fmt.Errorf("file path should be absolute")
+	}
+	hs := historyConfig.NewHistoryConfigFS()
+	// we can display the error in UI as well why test run was not started
+	err := hs.CaptureTestsEvent(testCasePath, mockPath, testReportPath, runId)
+	if err != nil {
+		r.log.Error("failed to capture test run event", zap.Error(err))
 	}
 	// all types of tcs should be stored to be tested. Empty tcsType returns all keploy tcs
 	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath, "")
@@ -444,8 +452,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *models.Test
 	started := time.Now().UTC()
-	// for test here I can call my history 
-	
+
 	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp)
 	if tc != nil {
 		t = &models.Test{

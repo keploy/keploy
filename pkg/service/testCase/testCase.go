@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	historyConfig "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
 )
@@ -256,7 +257,8 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 		// store testcase in yaml file
 		if r.testExport {
 			r.nextYamlIndex.mu.Lock()
-			// for record I can call my history file from here - 
+			history := historyConfig.NewHistoryConfigFS()
+			history.CapturedRecordEvents(testCasePath, mockPath)
 			// defer r.nextYamlIndex.mu.Unlock()
 			lastIndex, ok := r.nextYamlIndex.tcsCount[v.AppID]
 			if !ok {
