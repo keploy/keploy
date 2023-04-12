@@ -55,7 +55,6 @@ type Regression struct {
 	testExport   bool
 	log          *zap.Logger
 }
-var cnt int = 0
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
@@ -63,7 +62,6 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 		return fmt.Errorf("file path should be absolute")
 	}
 	hs := historyConfig.NewHistoryConfigFS()
-	// we can display the error in UI as well why test run was not started
 	err := hs.CaptureTestsEvent(testCasePath, mockPath, testReportPath, runId)
 	if err != nil {
 		r.log.Error("failed to capture test run event", zap.Error(err))
