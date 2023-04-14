@@ -16,6 +16,7 @@ import (
 	"github.com/go-test/deep"
 	"github.com/wI2L/jsondiff"
 
+	"github.com/Delta456/box-cli-maker/v2"
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
 	grpcMock "go.keploy.io/server/grpc/mock"
@@ -218,6 +219,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		pass = false
 	}
 	if !pass {
+		Box := box.New(box.Config{Py: 1, Px: 2, Type: "Round", TitlePos: "Top", Color: "Red", AllowWrapping: true})
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
@@ -282,16 +284,15 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 			}
 		}
-		logs += "--------------------------------------------------------------------\n\n"
-		logger.Printf(logs)
+		Box.Println(tc.ID, logs)
 	} else {
+		Box := box.New(box.Config{Py: 1, Px: 2, Type: "Round", TitlePos: "Top", Color: "Green", AllowWrapping: true})
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
-		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
-		logger.Printf(log2)
-
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s", tc.ID)
+		Box.Println(tc.ID, log2)
 	}
 	return pass, res, &tc, nil
 }
