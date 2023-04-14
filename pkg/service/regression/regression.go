@@ -220,20 +220,29 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	if !pass {
 		Box := box.New(box.Config{Py: 1, Px: 2, Type: "Round", TitlePos: "Top", Color: "Red", AllowWrapping: true})
+		stb := strings.Builder{}
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
 
-		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
-			"Test Result:\n"+
-			"\tInput Http Request: %+v\n\n"+
-			"\tExpected Response: "+
-			"%+v\n\n"+"\tActual Response: "+
-			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
+		stb.WriteString(logger.Sprintf("Testrun failed for testcase with id: %s\n", tc.ID))
+		stb.WriteString(logger.Sprintf("Test Result:\n"))
+		stb.WriteString(logger.Sprintf("\tInput Http Request: %+v\n\n", tc.HttpReq))
+		stb.WriteString(logger.Sprintf("\tExpected Response: %+v\n\n", tc.HttpResp))
+		stb.WriteString(logger.Sprintf("\tActual Response: %+v\n\n", resp))
+		stb.WriteString(logger.Sprintf("DIFF: \n"))
+
+		// logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
+		// 	"Test Result:\n"+
+		// 	"\tInput Http Request: %+v\n\n"+
+		// 	"\tExpected Response: "+
+		// 	"%+v\n\n"+"\tActual Response: "+
+		// 	"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
 
 		if !res.StatusCode.Normal {
-			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+			// logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
+			stb.WriteString(logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual))
 
 		}
 		var (
@@ -251,15 +260,19 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 
 		if !unmatched {
-			logs += "\t Response Headers: {\n"
+			// logs += "\t Response Headers: {\n"
+			stb.WriteString("\t Response Headers: {\n")
 			for i, j := range expectedHeader {
-				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
+				// logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
+				stb.WriteString(logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i])))
 			}
-			logs += "\t}\n"
+			// logs += "\t}\n"
+			stb.WriteString("\t}\n")
 		}
 		// TODO: cleanup the logging related code. this is a mess
 		if !res.BodyResult[0].Normal {
-			logs += "\tResponse body: {\n"
+			// logs += "\tResponse body: {\n"
+			stb.WriteString("\tResponse body: {\n")
 			if json.Valid([]byte(resp.Body)) {
 				// compute and log body's json diff
 				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
@@ -276,17 +289,23 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 						keyStr = keyStr[1:]
 					}
 					// logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
-					logs += keyStr
-                    logs += "\t\t" + pkg.GetDiff(cleanExp, cleanAct)
-                    logs += "\n"    
+					// logs += keyStr
+                    // logs += "\t\t" + pkg.GetDiff(cleanExp, cleanAct)
+                    // logs += "\n"    
+					stb.WriteString(keyStr)
+					stb.WriteString("\t\t" + pkg.GetDiff(cleanExp, cleanAct))
+					stb.WriteString("\n")
                 }
-                logs += "\t" + "}"
+                // logs += "\t" + "}"
+				stb.WriteString("\t" + "}")
 			} else {
 				// just log both the bodies as plain text without really computing the diff
-				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
+				// logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
+				stb.WriteString(logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body))
 
 			}
 		}
+		logs = stb.String()
 		Box.Println(tc.ID, logs)
 	} else {
 		Box := box.New(box.Config{Py: 1, Px: 2, Type: "Round", TitlePos: "Top", Color: "Green", AllowWrapping: true})
