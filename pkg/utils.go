@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/araddon/dateparse"
+	"github.com/sergi/go-diff/diffmatchpatch"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
@@ -423,4 +424,56 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 		}
 	}
 	return r
+}
+
+func diffGen(a, b string) (red, green string) {
+	dmp := diffmatchpatch.New()
+
+	diffs := dmp.DiffMain(a, b, false)
+
+	red = ""
+	green = ""
+
+	for _, diff := range diffs {
+		switch diff.Type {
+		case diffmatchpatch.DiffDelete:
+			red += fmt.Sprintf("\033[31m%s\033[0m", diff.Text)
+		case diffmatchpatch.DiffInsert:
+			green += fmt.Sprintf("\033[32m%s\033[0m", diff.Text)
+		case diffmatchpatch.DiffEqual:
+			red += diff.Text
+			green += diff.Text
+		}
+	}
+
+	return
+}
+
+func jsonSideBySide(red, green string) string {
+	lines1 := strings.Split(red, ",")
+	lines2 := strings.Split(green, ",")
+
+	var res string
+
+	// Can print the two JSON strings side by side, nut we will add it in a sinle string variable
+	for i := 0; i < len(lines1) || i < len(lines2); i++ {
+		if i < len(lines1) {
+			res += "\t\t" + fmt.Sprintf("%-75s", lines1[i])
+		} else {
+			res += "\t\t" + fmt.Sprintf("%-75s", "")
+		}
+
+		if i < len(lines2) {
+			res += "\t\t" + fmt.Sprintln(lines2[i])
+		} else {
+			res += "\t\t" + fmt.Sprintln("")
+		}
+	}
+
+	return res
+}
+
+func GetDiff(a, b string) string {
+	red, green := diffGen(a, b)
+	return jsonSideBySide(red, green)
 }
