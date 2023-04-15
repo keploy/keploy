@@ -193,6 +193,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	cleanExp, cleanAct := "", ""
 
 	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
+
 		cleanExp, cleanAct, pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 		if err != nil {
 			return false, res, &tc, err
@@ -206,7 +207,6 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	res.BodyResult[0].Normal = pass
 
 	if !pkg.CompareHeaders(tc.HttpResp.Header, grpcMock.ToHttpHeader(grpcMock.ToMockHeader(resp.Header)), hRes, headerNoise) {
-
 		pass = false
 	}
 
@@ -218,6 +218,8 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		pass = false
 	}
 	if !pass {
+		logDiffs := NewDiffsPrinter(tc.ID)
+
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
@@ -231,9 +233,8 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			"%+v\n\n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
 
 		// ------------ DIFFS RELATED CODE -----------
-		expSCode, actSCode := "", ""
 		if !res.StatusCode.Normal {
-			expSCode, actSCode = fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual)
+			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
 		}
 
 		var (
@@ -250,14 +251,12 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 
-		var headerExp, headerAct = "", ""
 		if !unmatched {
 			for i, j := range expectedHeader {
-				headerExp, headerAct = fmt.Sprint(j), fmt.Sprint(actualHeader[i])
+				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), headerNoise)
 			}
 		}
 
-		bodyExp, bodyAct := "", ""
 		if !res.BodyResult[0].Normal {
 
 			if json.Valid([]byte(resp.Body)) {
@@ -270,35 +269,17 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					bodyExp, bodyAct = fmt.Sprint(op.OldValue), fmt.Sprint(op.Value)
+					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 
 				}
 			} else {
-				bodyExp, bodyAct = fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body)
+				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body), bodyNoise)
 			}
 		}
-
-		if expSCode != "" || actSCode != "" {
-			logs += pkg.GenericDiff(expSCode, actSCode)
-		}
-		if headerExp != "" || headerAct != "" {
-			logs += pkg.GenericDiff(headerExp, headerAct)
-		}
-		if bodyExp != "" || bodyAct != "" {
-			// Important part: check if it is a valid json so it can use
-			// in the ColorizedJSONDiffs as its a more properly function
-			// for this case
-			if isJSON(bodyExp) && isJSON(bodyAct) {
-				logs += pkg.JSONDiff([]byte(bodyExp), []byte(bodyAct))
-			} else {
-				// If not so use a generic way that's still very beautiful and
-				// readable
-				logs += pkg.GenericDiff(bodyExp, bodyAct)
-			}
-		}
-
-		logs += "--------------------------------------------------------------------\n\n"
 		logger.Printf(logs)
+
+		logDiffs.Render()
+		time.Sleep(time.Millisecond * 500) // race condition bugging and mixing outputs
 
 	} else {
 		logger := pp.New()
@@ -311,11 +292,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	}
 	return pass, res, &tc, nil
 }
-func isJSON(s string) bool {
-	var js interface{}
-	err := json.Unmarshal([]byte(s), &js)
-	return err == nil
-}
+
 func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp models.GrpcResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
@@ -404,6 +381,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	}
 
 	if !pass {
+		logDiff := NewDiffsPrinter(tc.ID)
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
@@ -418,7 +396,6 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 
 		// ------------ DIFFS RELATED CODE --------------
 
-		bodyExp, bodyAct := "", ""
 		if !res.BodyResult[0].Normal {
 
 			if json.Valid([]byte(resp.Body)) {
@@ -432,29 +409,20 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					bodyExp, bodyAct = keyStr, fmt.Sprint(op.OldValue)
+					logDiff.PushBodyDiff(keyStr, fmt.Sprint(op.OldValue), bodyNoise)
 				}
 			} else {
-				bodyExp, bodyAct = fmt.Sprint(tc.GrpcResp), fmt.Sprint(resp)
+				logDiff.PushBodyDiff(fmt.Sprint(tc.GrpcResp), fmt.Sprint(resp), bodyNoise)
 			}
 
 		}
 
-		bodyExp2, bodyAct2 := "", ""
 		if !res.BodyResult[1].Normal {
-			bodyExp2, bodyAct2 = tc.GrpcResp.Err, resp.Err
+			logDiff.PushBodyDiff(fmt.Sprint(tc.GrpcResp.Err), fmt.Sprint(resp.Err), bodyNoise)
 		}
-
-		if bodyExp != "" || bodyAct != "" {
-			logs += pkg.GenericDiff(bodyExp, bodyAct)
-		}
-		if bodyExp2 != "" || bodyAct2 != "" {
-			logs += pkg.GenericDiff(bodyExp2, bodyAct2)
-		}
-		logs += "--------------------------------------------------------------------\n\n"
 
 		logger.Printf(logs)
-
+		logDiff.Render()
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false

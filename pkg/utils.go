@@ -1,7 +1,6 @@
 package pkg
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -13,10 +12,6 @@ import (
 	"strings"
 
 	"github.com/araddon/dateparse"
-	"github.com/fatih/color"
-	"github.com/olekukonko/tablewriter"
-	"github.com/yudai/gojsondiff"
-	"github.com/yudai/gojsondiff/formatter"
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg/models"
@@ -428,156 +423,4 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 		}
 	}
 	return r
-}
-
-/*
- * Prints a nice diff table where the left is the expect and the right is the
- * actual. Its called generic because it works with whatever string. For
- * JSON-based diffs use JSONDiff
- */
-func GenericDiff(expect, actual string) string {
-
-	// Offset will be where the string start to unmatch
-	offset, _ := diffStr(expect, actual)
-
-	// Color of the unmatch, can be changed
-	c := color.FgMagenta
-
-	exp := breakLineWithColor(expect, &c, offset)
-	act := breakLineWithColor(actual, &c, offset)
-
-	return expectActualTable(exp, act)
-}
-
-/* This will return the json diffs in a beautifull way. It will in fact
- * create a colorized table-based expect-response string and print it.
- * on the left-side there'll be the expect and on the right the actual
- * response. Its important to mention the inputs must to be a json. If
- * the body isnt in the rest-api formats (what means it is not json-based)
- * its better to use a generic diff output as the DiffOutput I've made.
- */
-func JSONDiff(json1 []byte, json2 []byte) string {
-	diffString := calculateDiffs(json1, json2)
-	expect, actual := separateAndColorize(diffString)
-	result := expectActualTable(expect, actual)
-	return result
-}
-
-// Find the diff between two strings returning index where
-// the difference begin
-func diffStr(s1, s2 string) (int, bool) {
-	diff := false
-	i := -1
-
-	// Check if one string is smaller than another, if so theres a diff
-	if len(s1) < len(s2) {
-		i = len(s1)
-		diff = true
-	} else if len(s2) < len(s1) {
-		diff = true
-		i = len(s2)
-	}
-
-	// Check for unmatched characters
-	for i := 0; i < len(s1) && i < len(s2); i++ {
-		if s1[i] != s2[i] {
-			return i, true
-		}
-	}
-
-	return i, diff
-}
-
-// Declarated here so at each new test we dont need to recreate it again
-var diff = gojsondiff.New()
-
-// Will perform the calculation of the diffs, returning a string that
-// containes the lines that does not match represented by either a
-// minus or add symbol followed by the respective line. OBS: For jsons
-func calculateDiffs(json1 []byte, json2 []byte) string {
-	dObj, _ := diff.Compare(json1, json2)
-
-	var jsonObject map[string]interface{}
-	json.Unmarshal([]byte(json1), &jsonObject)
-
-	diffString, _ := formatter.NewAsciiFormatter(jsonObject, formatter.AsciiFormatterConfig{
-		ShowArrayIndex: true,
-		Coloring:       false,
-	}).Format(dObj)
-
-	return diffString
-}
-
-// Will receive a string that has the differences represented
-// by a plus or a minus sign and separate it. Just works with json
-func separateAndColorize(diffStr string) (string, string) {
-	expect, actual := "", ""
-
-	diffLines := strings.Split(diffStr, "\n")
-
-	for _, line := range diffLines {
-		if len(line) > 0 {
-			if line[0] == '-' {
-				c := color.FgRed
-				expect += breakLineWithColor(line, &c, 0)
-			} else if line[0] == '+' {
-				c := color.FgGreen
-				actual += breakLineWithColor(line, &c, 0)
-			} else {
-				expect += breakLineWithColor(line, nil, 0)
-				actual += breakLineWithColor(line, nil, 0)
-			}
-		}
-	}
-	return expect, actual
-}
-
-// Will colorize the line and do the job of break it if it pass maxLength,
-// always respecting the reset of ascii colors before the break line to dont
-func breakLineWithColor(input string, c *color.Attribute, offset int) string {
-	var output []string
-	var paint func(a ...interface{}) string
-	colorize := false
-	maxLength := 55
-
-	if c != nil {
-		colorize = true
-		paint = color.New(*c).SprintFunc()
-	}
-
-	for i := 0; i < len(input); i += maxLength {
-		end := i + maxLength
-
-		if end > len(input) {
-			end = len(input)
-		}
-
-		if colorize && i+maxLength > offset {
-			paintedStart := i
-			if paintedStart < offset {
-				paintedStart = offset
-			}
-			prePaint := input[i:paintedStart]
-			postPaint := paint(input[paintedStart:end])
-			substr := prePaint + postPaint + "\n"
-			output = append(output, substr)
-		} else {
-			substr := input[i:end] + "\n"
-			output = append(output, substr)
-		}
-	}
-	return strings.Join(output, "")
-}
-
-// Will return a string in a two columns table where the left
-// side is the expected string and the right is the actual
-func expectActualTable(exp string, act string) string {
-	buf := &bytes.Buffer{}
-	table := tablewriter.NewWriter(buf)
-
-	table.SetHeader([]string{"Expect", "Actual"})
-	table.SetAutoWrapText(false)
-	table.Append([]string{exp, act})
-	table.Render()
-	return buf.String()
 }
