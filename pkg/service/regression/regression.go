@@ -119,6 +119,7 @@ func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath stri
 	return nil
 }
 
+var delay = 0 // We need a delay to dont mess the entire output
 func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
@@ -277,9 +278,9 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 			}
 		}
 		logger.Printf(logs)
-
+		delay += 1
+		time.Sleep(time.Second * time.Duration(delay)) // race condition bugging and mixing outputs
 		logDiffs.Render()
-		time.Sleep(time.Millisecond * 500) // race condition bugging and mixing outputs
 
 	} else {
 		logger := pp.New()
@@ -290,6 +291,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		logger.Printf(log2)
 
 	}
+
 	return pass, res, &tc, nil
 }
 
