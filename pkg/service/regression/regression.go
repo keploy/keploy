@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/server"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,13 +23,12 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
-	keployFS "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS, logExportIO *keployFS.LogExportIO) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log server.Output, TestExport bool, mFS models.MockFS) *Regression {
 	return &Regression{
 		yamlTcs:      sync.Map{},
 		tele:         adb,
@@ -39,7 +39,6 @@ func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb te
 		testReportFS: testReportFS,
 		mockFS:       mFS,
 		testExport:   TestExport,
-		logExportIO:  logExportIO,
 	}
 }
 
@@ -54,8 +53,7 @@ type Regression struct {
 	tele         telemetry.Service
 	mockFS       models.MockFS
 	testExport   bool
-	log          *zap.Logger
-	logExportIO  *keployFS.LogExportIO
+	log          server.Output
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
@@ -75,11 +73,6 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 	}
 	r.yamlTcs.Store(runId, tcsMap)
 
-	if r.logExportIO != nil {
-		// Will open the file and allow us to write whatever we wants without
-		// close or have to open it again
-		r.logExportIO.OpenStream()
-	}
 	err = r.testReportFS.Write(ctx, testReportPath, models.TestReport{
 		Version: models.V1Beta1,
 		Name:    runId,
@@ -202,7 +195,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	cleanExp, cleanAct := "", ""
 
 	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+		cleanExp, cleanAct, pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log.Logger)
 		if err != nil {
 			return false, res, &tc, err
 		}
@@ -239,8 +232,8 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 		if !res.StatusCode.Normal {
 			logs += fmt.Sprintf("\tExpected StatusCode: %v"+"\n\tActual StatusCode: %v\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
-
 		}
+
 		var (
 			actualHeader   = map[string][]string{}
 			expectedHeader = map[string][]string{}
@@ -291,8 +284,8 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 
-		if r.logExportIO != nil {
-			r.logExportIO.Write(logs) // so it will redirect its output to a file
+		if r.log.ExportPath() != "" {
+			r.log.Write(logs) // so it will redirect its output to a file
 		} else {
 			logger := pp.New()
 			logger.WithLineInfo = false
@@ -303,8 +296,8 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		var log2 = ""
 		log2 += fmt.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
 
-		if r.logExportIO != nil {
-			r.logExportIO.Write(log2)
+		if r.log.ExportPath() != "" {
+			r.log.Write(log2)
 		} else {
 			logger := pp.New()
 			logger.WithLineInfo = false
@@ -388,7 +381,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	cleanExp, cleanAct := "", ""
 
 	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, err = pkg.Match(tc.GrpcResp.Body, resp.Body, bodyNoise, r.log)
+		cleanExp, cleanAct, pass, err = pkg.Match(tc.GrpcResp.Body, resp.Body, bodyNoise, r.log.Logger)
 		if err != nil {
 			return false, res, &tc, err
 		}
@@ -448,8 +441,8 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 
-		if r.logExportIO != nil {
-			r.logExportIO.Write(logs)
+		if r.log.ExportPath() != "" {
+			r.log.Write(logs)
 		} else {
 			logger := pp.New()
 			logger.WithLineInfo = false
@@ -461,8 +454,8 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		var log2 = ""
 		log2 += fmt.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
 
-		if r.logExportIO != nil {
-			r.logExportIO.Write(log2)
+		if r.log.ExportPath() != "" {
+			r.log.Write(log2)
 		} else {
 			logger := pp.New()
 			logger.WithLineInfo = false
@@ -919,14 +912,10 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			}
 		}
 
-		if r.logExportIO != nil {
-			r.log.Info("Being piped to file: " + r.logExportIO.FileName())
-		}
-
 		pp.SetColorScheme(models.PassingColorScheme)
 		log := fmt.Sprintf("\n <=========================================> \n  TESTRUN STARTED with id: %v\n"+"\tFor App: %v\n"+"\tTotal tests: %v\n <=========================================> \n\n", run.ID, run.App, run.Total)
-		if r.logExportIO != nil {
-			r.logExportIO.Write(log)
+		if r.log.ExportPath() != "" {
+			r.log.Write(log)
 		} else {
 			pp.Printf(log)
 		}
@@ -973,12 +962,12 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			r.tele.Testrun(success, failure, r.client, ctx)
 		}
 		log := fmt.Sprintf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %v\n"+"\tTotal tests: %v\n"+"\tTotal test passed: %v\n"+"\tTotal test failed: %v\n <=========================================> \n\n", run.ID, total, success, failure)
-		if r.logExportIO != nil {
-			r.logExportIO.Write(log)
+		if r.log.ExportPath() != "" {
+			r.log.Write(log)
 		} else {
 			pp.Printf(log)
 		}
-		r.logExportIO.Close()
+		r.log.Sync()
 	}
 	if !testExport {
 		return r.rdb.Upsert(ctx, run)
