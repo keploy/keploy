@@ -33,7 +33,7 @@ KTests can be imported as mocks for consumers and vice-versa.
 
 Merge KTests with unit testing libraries(like Go-Test, JUnit..) to track combined test-coverage.
 
-KMocks can also be referenced in existing tests or use anywhere (including any testing framework). KMocks can also be used as tests for the server.   
+KMocks can also be referenced in existing tests or used anywhere (including any testing framework). KMocks can also be used as tests for the server.   
 
 > Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;  without writing many test-cases or data-mocks. 😎
 
@@ -49,9 +49,9 @@ KMocks can also be referenced in existing tests or use anywhere (including any t
 ## How it works?
 #### Safely replays all CRUD operations (including non-idempotent APIs)
 
-Keploy is added as a middleware to your application that captures and replays all network interaction served to application from any source.
+Keploy is added as a middleware to your application that captures and replays all network interaction served to the application from any source.
 
-Visit [https://docs.keploy.io](https://docs.keploy.io/docs/keploy-explained/how-keploy-works) to read more in detail..
+Visit [https://docs.keploy.io](https://docs.keploy.io/docs/keploy-explained/how-keploy-works) to read more in detail.
 
 
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="80%"  alt="Generate Test Case from API call"/>
@@ -80,9 +80,9 @@ Code coverage will be reported with existing plus KTests. It'll also be **integr
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/replay-tc.gif" width="80%"  alt="Generate Test Case from API call"/>
 
 ### 3. Accurate Noise Detection
-Filters noisy fields in API responses like (timestamps, random values) to ensure high quality tests.
+Filters noisy fields in API responses like (timestamps and random values) to ensure high-quality tests.
 
-**WIP** - **Statistical deduplication** ensures that redundant testcases are not generated. WIP (ref [#27](https://github.com/keploy/keploy/issues/27)).
+**WIP** - **Statistical deduplication** ensures that redundant test cases are not generated. WIP (ref [#27](https://github.com/keploy/keploy/issues/27)).
 
 ## Quick Installation
 
