@@ -1,7 +1,7 @@
 name: Feature request
 description: Suggest a feature to improve Keploy
 title: "[feature]: "
-labels: [feature]
+labels: [Enhancement]
 body:
 - type: markdown
   attributes:
