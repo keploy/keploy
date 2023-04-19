@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"go.keploy.io/server/pkg/service"
+	"go.uber.org/zap/zapcore"
 	"math/rand"
 	"net"
 	"net/http"
@@ -71,7 +73,8 @@ type config struct {
 
 func Server(ver string) *chi.Mux {
 	rand.Seed(time.Now().UTC().UnixNano())
-	logger := ZapInit()
+	outSrv := service.OutInit()
+	logger := outSrv.GetZap()
 	defer logger.Sync() // flushes buffer, if any
 
 	var conf config
@@ -80,8 +83,13 @@ func Server(ver string) *chi.Mux {
 		logger.Error("failed to read/process configuration", zap.Error(err))
 	}
 
-	logger.SetExportPath(conf.ExportLogFile)
-
+	if conf.ExportLogFile != "" {
+		// Redirect zaps pointer to a new zap that outputs to file
+		outSrv.ExportOutput(conf.ExportLogFile, zapcore.InfoLevel)
+	}
+	if conf.EnableDebugger {
+		outSrv.SetZapLevel(zapcore.DebugLevel)
+	}
 	// default resultPath is current directory from which keploy binary is running
 	if conf.ReportPath == "" {
 		curr, err := os.Getwd()
@@ -105,31 +113,31 @@ func Server(ver string) *chi.Mux {
 
 	db := cl.Database(conf.DB)
 
-	tdb := mgo.NewTestCase(kmongo.NewCollection(db.Collection(conf.TestCaseTable)), logger.Logger)
+	tdb := mgo.NewTestCase(kmongo.NewCollection(db.Collection(conf.TestCaseTable)), logger)
 
-	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger.Logger)
+	rdb := mgo.NewRun(kmongo.NewCollection(db.Collection(conf.TestRunTable)), kmongo.NewCollection(db.Collection(conf.TestTable)), logger)
 
 	mockFS := mockPlatform.NewMockExportFS(keploy.GetMode() == keploy.MODE_TEST)
 	testReportFS := mockPlatform.NewTestReportFS(keploy.GetMode() == keploy.MODE_TEST)
 	teleFS := mockPlatform.NewTeleFS()
-	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger.Logger)
-	browserMockSrv := mock2.NewBrMockService(mdb, logger.Logger)
+	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
+	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger.Logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger.Logger, ver)
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver)
 
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	tcSvc := testCase.New(tdb, logger.Logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
+	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
 
-	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
-	mockSrv := mock.NewMockService(mockFS, logger.Logger)
+	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, outSrv, conf.EnableTestExport, mockFS)
+	mockSrv := mock.NewMockService(mockFS, logger)
 
-	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger.Logger, regSrv, tcSvc)}))
+	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
 
-	// initialize the client serveri
+	// initialize the client server
 	r := chi.NewRouter()
 
 	port := conf.Port
@@ -172,8 +180,8 @@ func Server(ver string) *chi.Mux {
 
 	// add api routes
 	r.Route("/api", func(r chi.Router) {
-		regression.New(r, logger.Logger, regSrv, tcSvc, conf.EnableTestExport, conf.ReportPath)
-		browserMock.New(r, logger.Logger, browserMockSrv)
+		regression.New(r, logger, regSrv, tcSvc, conf.EnableTestExport, conf.ReportPath)
+		browserMock.New(r, logger, browserMockSrv)
 
 		r.Handle("/", playground.Handler("keploy graphql backend", "/api/query"))
 		r.Handle("/query", srv)
@@ -196,7 +204,7 @@ func Server(ver string) *chi.Mux {
 
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(k, logger.Logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
+		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
 	})
 
 	g.Go(func() error {

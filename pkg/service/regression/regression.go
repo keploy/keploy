@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/server"
+
+	"go.keploy.io/server/pkg/service"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,12 +29,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log server.Output, TestExport bool, mFS models.MockFS) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, outSrv service.Output, TestExport bool, mFS models.MockFS) *Regression {
 	return &Regression{
 		yamlTcs:      sync.Map{},
 		tele:         adb,
 		tdb:          tdb,
-		log:          log,
+		outSrv:       outSrv,
 		client:       cl,
 		rdb:          rdb,
 		testReportFS: testReportFS,
@@ -53,18 +54,19 @@ type Regression struct {
 	tele         telemetry.Service
 	mockFS       models.MockFS
 	testExport   bool
-	log          server.Output
+	outSrv       service.Output
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
+	out := r.outSrv.GetZap()
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
-		r.log.Error("file path should be absolute to read and write testcases and their mocks")
+		out.Error("file path should be absolute to read and write testcases and their mocks")
 		return fmt.Errorf("file path should be absolute")
 	}
 	// all types of tcs should be stored to be tested. Empty tcsType returns all keploy tcs
 	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath, "")
 	if err != nil {
-		r.log.Error("failed to read and cache testcases from ", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)), zap.Error(err))
+		out.Error("failed to read and cache testcases from ", zap.String("testcase path", pkg.SanitiseInput(testCasePath)), zap.String("mock path", pkg.SanitiseInput(mockPath)), zap.Error(err))
 		return err
 	}
 	tcsMap := sync.Map{}
@@ -80,17 +82,19 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 		Status:  string(models.TestRunStatusRunning),
 	})
 	if err != nil {
-		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
+		out.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
 		return err
 	}
 	return nil
 }
 
 func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath string) error {
+	out := r.outSrv.GetZap()
+
 	r.yamlTcs.Delete(runId)
 	testResults, err := r.testReportFS.GetResults(runId)
 	if err != nil {
-		r.log.Error(err.Error())
+		out.Error(err.Error())
 	}
 	var (
 		success = 0
@@ -115,13 +119,14 @@ func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath stri
 		Failure: failure,
 	})
 	if err != nil {
-		r.log.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
+		out.Error("failed to create test report file", zap.String("file path", testReportPath), zap.Error(err))
 		return err
 	}
 	return nil
 }
 
 func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp) (bool, *models.Result, *models.TestCase, error) {
+	out := r.outSrv.GetZap()
 	var (
 		tc  models.TestCase
 		err error
@@ -130,7 +135,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	case false:
 		tc, err = r.tdb.Get(ctx, cid, id)
 		if err != nil {
-			r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+			out.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 			return false, nil, nil, err
 		}
 	case true:
@@ -141,12 +146,12 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 				// tcsMap.Delete(id)
 			} else {
 				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
-				r.log.Error(err.Error())
+				out.Error(err.Error())
 				return false, nil, nil, err
 			}
 		} else {
 			err := fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId))
-			r.log.Error(err.Error())
+			out.Error(err.Error())
 			return false, nil, nil, err
 		}
 	}
@@ -195,7 +200,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	cleanExp, cleanAct := "", ""
 
 	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log.Logger)
+		cleanExp, cleanAct, pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, out)
 		if err != nil {
 			return false, res, &tc, err
 		}
@@ -259,14 +264,14 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		if !res.BodyResult[0].Normal {
 			logs += "\tResponse body: {\n"
 			if json.Valid([]byte(resp.Body)) {
-				// compute and log body's json diff
+				// compute and outSrv body's json diff
 				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
 				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
-				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.outSrv)
 
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
-					r.log.Warn("failed to compute json diff", zap.Error(err))
+					out.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
 					keyStr := op.Path.String()
@@ -277,40 +282,41 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 				}
 				logs += "\t}\n"
 			} else {
-				// just log both the bodies as plain text without really computing the diff
+				// just outSrv both the bodies as plain text without really computing the diff
 				logs += fmt.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
 
 			}
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 
-		if r.log.ExportPath() != "" {
-			r.log.Write(logs) // so it will redirect its output to a file
-		} else {
-			logger := pp.New()
-			logger.WithLineInfo = false
-			logger.SetColorScheme(models.FailingColorScheme)
-			logger.Printf(logs)
+		out := r.outSrv.GetPP()
+		out.WithLineInfo = false
+		out.SetColorScheme(models.FailingColorScheme)
+		_, err := out.Printf(logs)
+
+		if err != nil {
+			r.outSrv.GetZap().Error("Error writing with PP", zap.Error(err))
+			return false, nil, nil, err
 		}
 	} else {
 		var log2 = ""
 		log2 += fmt.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
 
-		if r.log.ExportPath() != "" {
-			r.log.Write(log2)
-		} else {
-			logger := pp.New()
-			logger.WithLineInfo = false
-			logger.SetColorScheme(models.PassingColorScheme)
+		out := r.outSrv.GetPP()
+		out.WithLineInfo = false
+		out.SetColorScheme(models.PassingColorScheme)
+		_, err := out.Printf(log2)
 
-			logger.Printf(log2)
+		if err != nil {
+			r.outSrv.GetZap().Error("Error writing with PP", zap.Error(err))
+			return false, nil, nil, err
 		}
-
 	}
 	return pass, res, &tc, nil
 }
 
 func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp models.GrpcResp) (bool, *models.Result, *models.TestCase, error) {
+	out := r.outSrv.GetZap()
 	var (
 		tc  models.TestCase
 		err error
@@ -319,7 +325,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	case false:
 		tc, err = r.tdb.Get(ctx, cid, id)
 		if err != nil {
-			r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+			out.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 			return false, nil, nil, err
 		}
 	case true:
@@ -330,12 +336,12 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 				// tcsMap.Delete(id)
 			} else {
 				err := fmt.Errorf("failed to load testcase from tcs map coresponding to testcaseId: %s", pkg.SanitiseInput(id))
-				r.log.Error(err.Error())
+				out.Error(err.Error())
 				return false, nil, nil, err
 			}
 		} else {
 			err := fmt.Errorf("failed to load testcases coresponding to runId: %s", pkg.SanitiseInput(runId))
-			r.log.Error(err.Error())
+			out.Error(err.Error())
 			return false, nil, nil, err
 		}
 	}
@@ -381,7 +387,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	cleanExp, cleanAct := "", ""
 
 	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, err = pkg.Match(tc.GrpcResp.Body, resp.Body, bodyNoise, r.log.Logger)
+		cleanExp, cleanAct, pass, err = pkg.Match(tc.GrpcResp.Body, resp.Body, bodyNoise, out)
 		if err != nil {
 			return false, res, &tc, err
 		}
@@ -412,14 +418,14 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		if !res.BodyResult[0].Normal {
 			logs += "\tResponse body: {\n"
 			if json.Valid([]byte(resp.Body)) {
-				// compute and log body's json diff
+				// compute and outSrv body's json diff
 				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
 				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
-				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
+				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.outSrv)
 
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
-					r.log.Warn("failed to compute json diff", zap.Error(err))
+					out.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
 					keyStr := op.Path.String()
@@ -430,7 +436,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 				}
 				logs += "\t}\n"
 			} else {
-				// just log both the bodies as plain text without really computing the diff
+				// just outSrv both the bodies as plain text without really computing the diff
 				logs += fmt.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.GrpcResp, resp)
 
 			}
@@ -441,26 +447,26 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		}
 		logs += "--------------------------------------------------------------------\n\n"
 
-		if r.log.ExportPath() != "" {
-			r.log.Write(logs)
-		} else {
-			logger := pp.New()
-			logger.WithLineInfo = false
-			logger.SetColorScheme(models.FailingColorScheme)
-			logger.Printf(logs)
+		logger := r.outSrv.GetPP()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
+		_, err := logger.Printf(logs)
+		if err != nil {
+			r.outSrv.GetZap().Error("Error writing with PP", zap.Error(err))
+			return false, nil, nil, err
 		}
 
 	} else {
 		var log2 = ""
 		log2 += fmt.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
 
-		if r.log.ExportPath() != "" {
-			r.log.Write(log2)
-		} else {
-			logger := pp.New()
-			logger.WithLineInfo = false
-			logger.SetColorScheme(models.PassingColorScheme)
-			logger.Printf(log2)
+		logger := r.outSrv.GetPP()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		_, err := logger.Printf(log2)
+		if err != nil {
+			r.outSrv.GetZap().Error("Error writing with PP", zap.Error(err))
+			return false, nil, nil, err
 		}
 
 	}
@@ -468,6 +474,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 }
 
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
+	out := r.outSrv.GetZap()
 	var t *models.Test
 	started := time.Now().UTC()
 	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp)
@@ -488,7 +495,7 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 	t.Completed = time.Now().UTC().Unix()
 
 	if err != nil {
-		r.log.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		out.Error("failed to run the testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
 		t.Status = models.TestStatusFailed
 	}
 	t.Status = models.TestStatusFailed
@@ -538,7 +545,7 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 		} else {
 			err2 := r.saveResult(ctx, t)
 			if err2 != nil {
-				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+				out.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
 		}
 	}()
@@ -546,6 +553,7 @@ func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath
 }
 
 func (r *Regression) TestGrpc(ctx context.Context, resp models.GrpcResp, cid, app, runID, id, testCasePath, mockPath string) (bool, error) {
+	out := r.outSrv.GetZap()
 	var t *models.Test
 	started := time.Now().UTC()
 	ok, res, tc, err := r.testGrpc(ctx, cid, runID, id, app, resp)
@@ -566,7 +574,7 @@ func (r *Regression) TestGrpc(ctx context.Context, resp models.GrpcResp, cid, ap
 	t.Completed = time.Now().UTC().Unix()
 
 	if err != nil {
-		r.log.Error("failed to run the grpc testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
+		out.Error("failed to run the grpc testcase", zap.Error(err), zap.String("cid", cid), zap.String("app", app))
 		t.Status = models.TestStatusFailed
 	}
 	t.Status = models.TestStatusFailed
@@ -601,7 +609,7 @@ func (r *Regression) TestGrpc(ctx context.Context, resp models.GrpcResp, cid, ap
 		} else {
 			err2 := r.saveResult(ctx, t)
 			if err2 != nil {
-				r.log.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
+				out.Error("failed test result to db", zap.Error(err2), zap.String("cid", cid), zap.String("app", app))
 			}
 		}
 	}()
@@ -626,18 +634,19 @@ func (r *Regression) saveResult(ctx context.Context, t *models.Test) error {
 }
 
 func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body, tcsType string, h http.Header) error {
+	out := r.outSrv.GetZap()
 	tcs, err := r.mockFS.Read(ctx, path, id, false)
 	if err != nil {
-		r.log.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
+		out.Error("failed to read testcase from yaml", zap.String("id", id), zap.String("path", path), zap.Error(err))
 		return err
 	}
 	if len(tcs) == 0 {
-		r.log.Error("no testcase exists with", zap.String("id", id), zap.String("at path", path), zap.Error(err))
+		out.Error("no testcase exists with", zap.String("id", id), zap.String("at path", path), zap.Error(err))
 		return err
 	}
 	docs, err := grpcMock.Decode(tcs)
 	if err != nil {
-		r.log.Error(err.Error())
+		out.Error(err.Error())
 		return err
 	}
 	tc := docs[0]
@@ -647,14 +656,14 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body, tcsType st
 		oldResp = map[string][]string{}
 		err := pkg.AddHttpBodyToMap(tc.Spec.GrpcResp.Body, oldResp)
 		if err != nil {
-			r.log.Error("failed to flatten response", zap.Error(err))
+			out.Error("failed to flatten response", zap.Error(err))
 			return err
 		}
 	default:
 		// tcsType is Http by default
 		oldResp, err = pkg.FlattenHttpResponse(utils.GetStringMap(tc.Spec.Res.Header), tc.Spec.Res.Body)
 		if err != nil {
-			r.log.Error("failed to flatten response", zap.Error(err))
+			out.Error("failed to flatten response", zap.Error(err))
 			return err
 		}
 	}
@@ -666,14 +675,14 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body, tcsType st
 			newResp = map[string][]string{}
 			err := pkg.AddHttpBodyToMap(body, newResp)
 			if err != nil {
-				r.log.Error("failed to flatten response", zap.Error(err))
+				out.Error("failed to flatten response", zap.Error(err))
 				return false
 			}
 		default:
 			// tcsType is Http by default
 			newResp, err = pkg.FlattenHttpResponse(h, body)
 			if err != nil {
-				r.log.Error("failed to flatten response", zap.Error(err))
+				out.Error("failed to flatten response", zap.Error(err))
 				return false
 			}
 		}
@@ -688,29 +697,29 @@ func (r *Regression) deNoiseYaml(ctx context.Context, id, path, body, tcsType st
 		return false
 
 	})
-	r.log.Debug("Noise Array : ", zap.Any("", noise))
+	out.Debug("Noise Array : ", zap.Any("", noise))
 	tc.Spec.Assertions["noise"] = utils.ToStrArr(noise)
 	doc, err := grpcMock.Encode(tc)
 	if err != nil {
-		r.log.Error(err.Error())
+		out.Error(err.Error())
 		return err
 	}
 	enc := doc
 	d, err := yaml.Marshal(enc)
 	if err != nil {
-		r.log.Error("failed to marshal document to yaml", zap.Any("error", err))
+		out.Error("failed to marshal document to yaml", zap.Any("error", err))
 		return err
 	}
 	err = os.WriteFile(filepath.Join(path, id+".yaml"), d, os.ModePerm)
 	if err != nil {
-		r.log.Error("failed to write test to yaml file", zap.String("id", id), zap.String("path", path), zap.Error(err))
+		out.Error("failed to write test to yaml file", zap.String("id", id), zap.String("path", path), zap.Error(err))
 	}
 
 	return nil
 }
 
 func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h http.Header, path, tcsType string) error {
-
+	out := r.outSrv.GetZap()
 	if r.testExport {
 		return r.deNoiseYaml(ctx, id, path, body, tcsType, h)
 	}
@@ -725,7 +734,7 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 		tcsType = string(models.HTTP)
 	}
 	if err != nil {
-		r.log.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		out.Error("failed to get testcase from DB", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
 	}
 
@@ -744,16 +753,16 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 
 	err = pkg.AddHttpBodyToMap(tcRespBody, a)
 	if err != nil {
-		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		out.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
 	}
 
 	err = pkg.AddHttpBodyToMap(body, b)
 	if err != nil {
-		r.log.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		out.Error("failed to parse response body", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
 	}
-	// r.log.Debug("denoise between",zap.Any("stored object",a),zap.Any("coming object",b))
+	// r.outSrv.Debug("denoise between",zap.Any("stored object",a),zap.Any("coming object",b))
 	var noise []string
 	for k, v := range a {
 		v2, ok := b[k]
@@ -765,32 +774,33 @@ func (r *Regression) DeNoise(ctx context.Context, cid, id, app, body string, h h
 			noise = append(noise, k)
 		}
 	}
-	// r.log.Debug("Noise Array : ",zap.Any("",noise))
+	// r.outSrv.Debug("Noise Array : ",zap.Any("",noise))
 	tc.Noise = noise
 	err = r.tdb.Upsert(ctx, tc)
 	if err != nil {
-		r.log.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
+		out.Error("failed to update noise fields for testcase", zap.String("id", id), zap.String("cid", cid), zap.String("appID", app), zap.Error(err))
 		return err
 	}
 	return nil
 }
 
 func (r *Regression) Normalize(ctx context.Context, cid, id string) error {
+	out := r.outSrv.GetZap()
 	t, err := r.rdb.ReadTest(ctx, id)
 	if err != nil {
-		r.log.Error("failed to fetch test from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		out.Error("failed to fetch test from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("test not found")
 	}
 	tc, err := r.tdb.Get(ctx, cid, t.TestCaseID)
 	if err != nil {
-		r.log.Error("failed to fetch testcase from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		out.Error("failed to fetch testcase from db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("testcase not found")
 	}
 	// update the responses
 	tc.HttpResp = t.Resp
 	err = r.tdb.Upsert(ctx, tc)
 	if err != nil {
-		r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
+		out.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("could not update testcase")
 	}
 	r.tele.Normalize(r.client, ctx)
@@ -798,6 +808,7 @@ func (r *Regression) Normalize(ctx context.Context, cid, id string) error {
 }
 
 func (r *Regression) GetTestRun(ctx context.Context, summary bool, cid string, user, app, id *string, from, to *time.Time, offset *int, limit *int) ([]*models.TestRun, error) {
+	out := r.outSrv.GetZap()
 	off, lim := 0, 25
 	if offset != nil {
 		off = *offset
@@ -807,7 +818,7 @@ func (r *Regression) GetTestRun(ctx context.Context, summary bool, cid string, u
 	}
 	res, err := r.rdb.Read(ctx, cid, user, app, id, from, to, off, lim)
 	if err != nil {
-		r.log.Error("failed to read test runs from DB", zap.String("cid", cid), zap.Any("user", user), zap.Any("app", app), zap.Any("id", id), zap.Any("from", from), zap.Any("to", to), zap.Error(err))
+		out.Error("failed to read test runs from DB", zap.String("cid", cid), zap.Any("user", user), zap.Any("app", app), zap.Any("id", id), zap.Any("from", from), zap.Any("to", to), zap.Error(err))
 		return nil, errors.New("failed getting test runs")
 	}
 	err = r.updateStatus(ctx, res)
@@ -825,7 +836,7 @@ func (r *Regression) GetTestRun(ctx context.Context, summary bool, cid string, u
 		tests, err1 := r.rdb.ReadTests(ctx, v.ID)
 		if err1 != nil {
 			msg := "failed getting tests from DB"
-			r.log.Error(msg, zap.String("cid", cid), zap.String("test run id", v.ID), zap.Error(err1))
+			out.Error(msg, zap.String("cid", cid), zap.String("test run id", v.ID), zap.Error(err1))
 			return nil, errors.New(msg)
 		}
 		v.Tests = tests
@@ -834,6 +845,7 @@ func (r *Regression) GetTestRun(ctx context.Context, summary bool, cid string, u
 }
 
 func (r *Regression) updateStatus(ctx context.Context, trs []*models.TestRun) error {
+	out := r.outSrv.GetZap()
 	tests := 0
 
 	for _, tr := range trs {
@@ -847,7 +859,7 @@ func (r *Regression) updateStatus(ctx context.Context, trs []*models.TestRun) er
 
 		if err1 != nil {
 			msg := "failed getting tests from DB"
-			r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err1))
+			out.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err1))
 			return errors.New(msg)
 		}
 		if len(tests) == 0 {
@@ -888,6 +900,7 @@ func (r *Regression) updateStatus(ctx context.Context, trs []*models.TestRun) er
 }
 
 func (r *Regression) failOldTestRuns(ctx context.Context, ts int64, tr *models.TestRun) error {
+	out := r.outSrv.GetZap()
 	diff := time.Now().UTC().Sub(time.Unix(ts, 0))
 	if diff < 5*time.Minute {
 		return nil
@@ -896,7 +909,7 @@ func (r *Regression) failOldTestRuns(ctx context.Context, ts int64, tr *models.T
 	err2 := r.rdb.Upsert(ctx, *tr)
 	if err2 != nil {
 		msg := "failed validating and updating test run status"
-		r.log.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err2))
+		out.Error(msg, zap.String("cid", tr.CID), zap.String("test run id", tr.ID), zap.Error(err2))
 		return errors.New(msg)
 	}
 	return nil
@@ -904,6 +917,7 @@ func (r *Regression) failOldTestRuns(ctx context.Context, ts int64, tr *models.T
 }
 
 func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport bool, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
+
 	if run.Status == models.TestRunStatusRunning {
 		if testExport {
 			err := r.startTestRun(ctx, runId, testCasePath, mockPath, testReportPath, totalTcs)
@@ -912,14 +926,17 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			}
 		}
 
-		pp.SetColorScheme(models.PassingColorScheme)
+		out := r.outSrv.GetPP()
+		out.SetColorScheme(models.PassingColorScheme)
 		log := fmt.Sprintf("\n <=========================================> \n  TESTRUN STARTED with id: %v\n"+"\tFor App: %v\n"+"\tTotal tests: %v\n <=========================================> \n\n", run.ID, run.App, run.Total)
-		if r.log.ExportPath() != "" {
-			r.log.Write(log)
-		} else {
-			pp.Printf(log)
+		_, err := out.Printf(log)
+		if err != nil {
+			outZap := r.outSrv.GetZap()
+			outZap.Error("Error printing PP", zap.Error(err))
+			return err
 		}
 	} else {
+		out := r.outSrv.GetZap()
 		var (
 			total   int
 			success int
@@ -944,7 +961,7 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			failure = res.Failure
 		}
 		if err != nil {
-			r.log.Error("failed to load testrun for logging test summary", zap.Error(err))
+			out.Error("failed to load testrun for logging test summary", zap.Error(err))
 			return err
 		}
 		if run.Status == models.TestRunStatusFailed {
@@ -961,13 +978,15 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			// sending Testrun Telemetry event to Telemetry service.
 			r.tele.Testrun(success, failure, r.client, ctx)
 		}
+		outPP := r.outSrv.GetPP()
+
 		log := fmt.Sprintf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %v\n"+"\tTotal tests: %v\n"+"\tTotal test passed: %v\n"+"\tTotal test failed: %v\n <=========================================> \n\n", run.ID, total, success, failure)
-		if r.log.ExportPath() != "" {
-			r.log.Write(log)
-		} else {
-			pp.Printf(log)
+		_, err = outPP.Printf(log)
+		if err != nil {
+			out.Error("Error printing PP", zap.Error(err))
+			return err
 		}
-		r.log.Sync()
+		err = out.Sync()
 	}
 	if !testExport {
 		return r.rdb.Upsert(ctx, run)
