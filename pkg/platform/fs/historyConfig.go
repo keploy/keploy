@@ -12,6 +12,7 @@ import (
 type HistoryConfig struct {
 	TestCasesPath string              `json:"test_cases_path" yaml:"test_cases_path"`
 	MocksPath     string              `json:"mocks_path" yaml:"mocks_path"`
+	AppPath       string              `json:"app_path" yaml:"app_path"`
 	TestRuns      map[string][]string `json:"test_runs" yaml:"test_runs"`
 }
 
@@ -19,13 +20,15 @@ func NewHistoryConfigFS() *HistoryConfig {
 	return &HistoryConfig{
 		TestCasesPath: "",
 		MocksPath:     "",
+		AppPath:       "",
 		TestRuns:      map[string][]string{},
 	}
 }
 
-func (hc *HistoryConfig) CaptureTestsEvent(test_cases_path, mocks_path, test_run_path, test_run_id string) error {
+func (hc *HistoryConfig) CaptureTestsEvent(test_cases_path, mocks_path, app_path, test_run_path, test_run_id string) error {
 	historyConfig := HistoryConfig{
 		TestCasesPath: test_cases_path,
+		AppPath:       app_path,
 		MocksPath:     mocks_path,
 		TestRuns: map[string][]string{
 			test_run_path: {test_run_id},
@@ -38,19 +41,24 @@ func (hc *HistoryConfig) CaptureTestsEvent(test_cases_path, mocks_path, test_run
 	return nil
 }
 
-func (hc *HistoryConfig) CapturedRecordEvents(test_cases_path, mocks_path string) error {
+// Todo : optimize this function
+func (hc *HistoryConfig) CapturedRecordEvents(test_cases_path, mocks_path, app_path string) error {
 	historyConfig := HistoryConfig{
 		TestCasesPath: test_cases_path,
 		MocksPath:     mocks_path,
+		AppPath:       app_path,
 	}
-	SetHistory(&historyConfig)
+	err := SetHistory(&historyConfig)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
 func SetHistory(hc *HistoryConfig) error {
 	currentHistory := make(map[string][]HistoryConfig)
 	currentHistory["historyCfg"] = append(currentHistory["historyCfg"], *hc)
-	path := UserHomeDir(false)
+	path := UserHomeDir(true)
 	fileName := "historyCfg.yaml"
 	filePath := filepath.Join(path, fileName)
 
@@ -65,7 +73,6 @@ func SetHistory(hc *HistoryConfig) error {
 	// Read the existing content of the file
 	existingData, err := os.ReadFile(filePath)
 	if len(existingData) == 0 {
-		print("File is empty")
 		Write(filePath, currentHistory)
 		return nil
 	}
@@ -136,13 +143,23 @@ func ParseBytes(data []byte, hc map[string][]HistoryConfig) (map[string][]Histor
 	var flag = false
 	for i, v := range prev {
 		if v.TestCasesPath == current.TestCasesPath && v.MocksPath == current.MocksPath {
+
+			// iterate over all testrun path
+			f := false
 			for j := range prev[i].TestRuns {
-				// print("found same testrun path .... ")
-				prev[i].TestRuns[j] = append(current.TestRuns[j], v.TestRuns[j]...)
+				if _, ok := current.TestRuns[j]; ok {
+					prev[i].TestRuns[j] = append(current.TestRuns[j], v.TestRuns[j]...)
+					f = true
+				}
 			}
-			//for appending after record
+			// test run path is new and not available in history
+			if !f {
+				for k, v := range current.TestRuns {
+					prev[i].TestRuns[k] = v
+				}
+			}
+			//for appending after record for the first time
 			if len(prev[i].TestRuns) == 0 {
-				print("prev[i].TestRuns is nil")
 				prev[i].TestRuns = current.TestRuns
 			}
 			flag = true

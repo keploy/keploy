@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	historyConfig "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
@@ -141,6 +142,11 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	}, srv.testExport, id, request.TestCasePath, request.MockPath, srv.testReportPath, total)
 	if err != nil {
 		return nil, err
+	}
+	hs := historyConfig.NewHistoryConfigFS()
+	err = hs.CaptureTestsEvent(request.TestCasePath, request.MockPath, request.AppPath, srv.testReportPath, id)
+	if err != nil {
+		srv.logger.Error("failed to capture test run event", zap.Error(err))
 	}
 	return &proto.StartResponse{Id: id}, nil
 }
@@ -347,6 +353,12 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		}
 	}
 	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.Remove, request.Replace)
+
+	history := historyConfig.NewHistoryConfigFS()
+	err = history.CapturedRecordEvents(request.TestCasePath, request.MockPath, request.AppPath)
+	if err != nil {
+		return nil, err
+	}
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err
