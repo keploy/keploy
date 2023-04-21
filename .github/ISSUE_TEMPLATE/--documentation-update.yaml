@@ -1,7 +1,7 @@
 name: Documentation Update📄
 description: Suggest an improvement/addition in the Keploy Server Docs.
 title: "[docs]: "
-labels: [docs]
+labels: [Documentation]
 
 body:
   - type: markdown
