@@ -98,16 +98,10 @@ func (hc *HistoryConfig) GetHistory() error {
 	)
 
 	file, err := os.OpenFile(filepath.Join(path, "historyCfg.yaml"), os.O_RDONLY, os.ModePerm)
-	if err != nil {
-		return err
-	}
 	defer file.Close()
 	decoder := yaml.NewDecoder(file)
 	err = decoder.Decode(&history)
 	if errors.Is(err, io.EOF) {
-		return fmt.Errorf("failed to decode the historyCfg yaml. error: %v", err.Error())
-	}
-	if err != nil {
 		return fmt.Errorf("failed to decode the historyCfg yaml. error: %v", err.Error())
 	}
 	return nil
