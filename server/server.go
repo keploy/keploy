@@ -34,6 +34,7 @@ import (
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	historyConfig "go.keploy.io/server/pkg/platform/fs"
 )
 
 // const defaultPort = "8080"
@@ -131,7 +132,7 @@ func Server(ver string) *chi.Mux {
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
 	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
 	mockSrv := mock.NewMockService(mockFS, logger)
-
+	
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
 
 	// initialize the client serveri
@@ -198,10 +199,10 @@ func Server(ver string) *chi.Mux {
 	httpListener := m.Match(cmux.HTTP1Fast())
 
 	//log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
-
+	hs := historyConfig.NewHistoryConfigFS()
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
+		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc,hs, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
 	})
 
 	g.Go(func() error {

@@ -35,12 +35,13 @@ type Server struct {
 	svc            regression2.Service
 	tcSvc          tcSvc.Service
 	mock           mock.Service
+	hs             *historyConfig.HistoryConfig
 	tele           telemetry.Service
 	client         http.Client
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string, telemetry telemetry.Service, cl http.Client) error {
+func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, hs *historyConfig.HistoryConfig, listener net.Listener, testExport bool, testReportPath string, telemetry telemetry.Service, cl http.Client) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer(kgrpcserver.UnaryInterceptor(k))
@@ -143,8 +144,8 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	if err != nil {
 		return nil, err
 	}
-	hs := historyConfig.NewHistoryConfigFS()
-	err = hs.CaptureTestsEvent(request.TestCasePath, request.MockPath, request.AppPath, srv.testReportPath, id)
+
+	err = srv.hs.CaptureTestsEvent(request.TestCasePath, request.MockPath, request.AppPath, srv.testReportPath, id)
 	if err != nil {
 		srv.logger.Error("failed to capture test run event", zap.Error(err))
 	}
@@ -354,8 +355,7 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 	}
 	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.Remove, request.Replace)
 
-	history := historyConfig.NewHistoryConfigFS()
-	err = history.CapturedRecordEvents(request.TestCasePath, request.MockPath, request.AppPath)
+	err = srv.hs.CapturedRecordEvents(request.TestCasePath, request.MockPath, request.AppPath)
 	if err != nil {
 		return nil, err
 	}
