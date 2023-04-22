@@ -199,7 +199,7 @@ func Server(ver string) *chi.Mux {
 	httpListener := m.Match(cmux.HTTP1Fast())
 
 	//log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
-	hs := historyConfig.NewHistoryConfigFS()
+	hs := historyConfig.NewHistCfgFS()
 	g := new(errgroup.Group)
 	g.Go(func() error {
 		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc,hs, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)

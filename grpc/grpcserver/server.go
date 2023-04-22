@@ -35,13 +35,13 @@ type Server struct {
 	svc            regression2.Service
 	tcSvc          tcSvc.Service
 	mock           mock.Service
-	hs             *historyConfig.HistoryConfig
+	hs             *historyConfig.HistCfg
 	tele           telemetry.Service
 	client         http.Client
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, hs *historyConfig.HistoryConfig, listener net.Listener, testExport bool, testReportPath string, telemetry telemetry.Service, cl http.Client) error {
+func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, hs *historyConfig.HistCfg, listener net.Listener, testExport bool, testReportPath string, telemetry telemetry.Service, cl http.Client) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer(kgrpcserver.UnaryInterceptor(k))
