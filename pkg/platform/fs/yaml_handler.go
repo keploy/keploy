@@ -1,21 +1,19 @@
 package fs
 
 import (
-	"errors"
 	"fmt"
 	"gopkg.in/yaml.v3"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 )
 
-type YamlHandler struct{}
+type YamlHandlerImpl struct{}
 
 // Write will use yaml serializer to write a given go obj to the file specified
 // at path field of the struct. It's important to note that if the file is not
 // empty it will append the object on it
-func (yh *YamlHandler) Write(path string, obj interface{}) (bool, error) {
+func (yh *YamlHandlerImpl) Write(path string, obj interface{}) (bool, error) {
 
 	var err error
 	var file *os.File
@@ -49,11 +47,11 @@ func (yh *YamlHandler) Write(path string, obj interface{}) (bool, error) {
 // in the YAML. It's an array of interface because yamls are divided
 // by "---", so it's almost like we have another yaml inside the same.
 // Filter is the condition it must have to be added in the array
-func (yh *YamlHandler) Read(path string, filter func() bool) ([]interface{}, error) {
+func (yh *YamlHandlerImpl) Read(path string, obj interface{}) error {
 
 	file, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	defer func(file *os.File) {
@@ -64,31 +62,46 @@ func (yh *YamlHandler) Read(path string, filter func() bool) ([]interface{}, err
 	}(file)
 
 	decoder := yaml.NewDecoder(file)
-	var arr []interface{}
-	for {
-		var doc interface{}
-		err := decoder.Decode(&doc)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
-		}
-		if filter() {
-			arr = append(arr, doc)
-		}
+
+	err = decoder.Decode(&obj)
+	if err != nil {
+		return fmt.Errorf("failed to decode the yaml file document. error: %v", err.Error())
 	}
-	return arr, nil
+
+	return nil
 }
 
-func (yh *YamlHandler) Exists(path string) bool {
+// ReadDir will read a directory and returns list of os.DirEntry that has the
+// correct .yaml exit
+func (yh *YamlHandlerImpl) ReadDir(path string) ([]os.DirEntry, error) {
+	dir, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+
+	dirInfo, err := dir.ReadDir(0)
+	if err != nil {
+		return nil, err
+	}
+
+	var filtered []os.DirEntry
+	for _, e := range dirInfo {
+		if filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+
+	return dirInfo, nil
+}
+func (yh *YamlHandlerImpl) Exists(path string) bool {
 	if _, err := os.Stat(path); err != nil {
 		return true
 	}
 	return false
 }
 
-func (yh *YamlHandler) createFile(path string) (*os.File, error) {
+func (yh *YamlHandlerImpl) createFile(path string) (*os.File, error) {
 
 	err := os.MkdirAll(filepath.Join(path), os.ModePerm)
 	if err != nil {

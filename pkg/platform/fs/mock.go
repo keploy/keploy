@@ -21,14 +21,16 @@ import (
 )
 
 type mockExport struct {
-	isTestMode bool
-	tests      sync.Map
+	isTestMode  bool
+	tests       sync.Map
+	yamlHandler models.YamlHandler
 }
 
-func NewMockExportFS(isTestMode bool) *mockExport {
+func NewMockExportFS(isTestMode bool, yamlHandler models.YamlHandler) *mockExport {
 	return &mockExport{
-		isTestMode: isTestMode,
-		tests:      sync.Map{},
+		isTestMode:  isTestMode,
+		tests:       sync.Map{},
+		yamlHandler: yamlHandler,
 	}
 }
 
@@ -43,30 +45,23 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath, tcsTy
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		return nil, fmt.Errorf("file path should be absolute. got testcase path: %s and mock path: %s", pkg.SanitiseInput(testCasePath), pkg.SanitiseInput(mockPath))
 	}
-	dir, err := os.OpenFile(testCasePath, os.O_RDONLY, os.ModePerm)
+
+	files, err := fe.yamlHandler.ReadDir(testCasePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open the directory containing testcases yaml files. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
 	}
 
-	var (
-		res = []models.TestCase{}
-	)
-	files, err := dir.ReadDir(0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read the names of testcases yaml files from path directory. path: %s  error: %s", pkg.SanitiseInput(testCasePath), err.Error())
-	}
+	var res []models.TestCase
 	for _, j := range files {
-		if filepath.Ext(j.Name()) != ".yaml" {
-			continue
-		}
-
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		tcs, err := read(testCasePath, name, false)
+
+		tcs, err := fe.read(testCasePath, name, false)
+
 		if err != nil {
 			return nil, err
 		}
 
-		tests, err := toTestCase(tcs, name, mockPath)
+		tests, err := fe.toTestCase(tcs, name, mockPath)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +80,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath, tcsTy
 }
 
 func (fe *mockExport) Read(ctx context.Context, path, name string, libMode bool) ([]models.Mock, error) {
-	return read(path, name, libMode)
+	return fe.read(path, name, libMode)
 }
 
 func (fe *mockExport) Write(ctx context.Context, path string, doc models.Mock) error {
@@ -153,7 +148,7 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 	return nil
 }
 
-func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
+func (fe *mockExport) toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase, error) {
 	res := []models.TestCase{}
 	for _, j := range tcs {
 		var (
@@ -181,7 +176,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				} else {
 					mockName = fileName
 				}
-				yamlDocs, err := read(mockPath, mockName, false)
+				yamlDocs, err := fe.read(mockPath, mockName, false)
 				if err != nil {
 					return nil, err
 				}
@@ -230,7 +225,7 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 				} else {
 					mockName = fileName
 				}
-				yamlDocs, err := read(mockPath, mockName, false)
+				yamlDocs, err := fe.read(mockPath, mockName, false)
 				if err != nil {
 					return nil, err
 				}
@@ -257,20 +252,15 @@ func toTestCase(tcs []models.Mock, fileName, mockPath string) ([]models.TestCase
 	return res, nil
 }
 
-func read(path, name string, libMode bool) ([]models.Mock, error) {
+func (fe *mockExport) read(path, name string, libMode bool) ([]models.Mock, error) {
 	if !pkg.IsValidPath(path) {
 		return nil, fmt.Errorf("file path should be absolute. got path: %s", pkg.SanitiseInput(path))
 	}
-	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	decoder := yaml.NewDecoder(file)
-	arr := []models.Mock{}
+
+	var arr []models.Mock
 	for {
 		var doc models.Mock
-		err := decoder.Decode(&doc)
+		err := fe.yamlHandler.Read(path, doc)
 		if errors.Is(err, io.EOF) {
 			break
 		}
