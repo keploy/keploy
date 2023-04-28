@@ -17,7 +17,6 @@ import (
 	proto "go.keploy.io/server/grpc/regression"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
-	"gopkg.in/yaml.v3"
 )
 
 type mockExport struct {
@@ -55,7 +54,7 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath, tcsTy
 	for _, j := range files {
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
 
-		tcs, err := fe.read(testCasePath, name, false)
+		tcs, err := read(fe.yamlHandler, testCasePath, name, false)
 
 		if err != nil {
 			return nil, err
@@ -80,37 +79,21 @@ func (fe *mockExport) ReadAll(ctx context.Context, testCasePath, mockPath, tcsTy
 }
 
 func (fe *mockExport) Read(ctx context.Context, path, name string, libMode bool) ([]models.Mock, error) {
-	return fe.read(path, name, libMode)
+	return read(fe.yamlHandler, path, name, libMode)
 }
 
 func (fe *mockExport) Write(ctx context.Context, path string, doc models.Mock) error {
 	if fe.isTestMode {
 		return nil
 	}
-	isFileEmpty, err := createMockFile(path, doc.Name)
-	if err != nil {
-		return err
-	}
-	file, err := os.OpenFile(filepath.Join(path, doc.Name+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to open the file. error: %v", err.Error())
-	}
 
-	data := []byte("---\n")
-	if isFileEmpty {
-		data = []byte{}
-	}
-	d, err := yaml.Marshal(&doc)
-	if err != nil {
-		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
-	}
-	data = append(data, d...)
+	path = filepath.Join(path, doc.Name)
 
-	_, err = file.Write(data)
+	err := fe.yamlHandler.Write(path, doc)
 	if err != nil {
 		return fmt.Errorf("failed to embed document into yaml file. error: %s", err.Error())
 	}
-	defer file.Close()
+
 	return nil
 }
 
@@ -118,33 +101,15 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 	if fe.isTestMode {
 		return nil
 	}
-	_, err := createMockFile(path, fileName)
-	if err != nil {
-		return err
-	}
-	file, err := os.OpenFile(filepath.Join(path, fileName+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to open the file. error: %s", err.Error())
-	}
 
-	for i, j := range docs {
-		data := []byte("---\n")
-		if i == 0 {
-			data = []byte{}
-		}
-		d, err := yaml.Marshal(j)
-		if err != nil {
-			return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
-		}
-		data = append(data, d...)
+	for _, j := range docs {
+		err := fe.yamlHandler.Write(path+fileName, j)
 
-		_, err = file.Write(data)
 		if err != nil {
 			return fmt.Errorf("failed to embed document into yaml file. error: %s", err.Error())
 		}
 	}
 
-	defer file.Close()
 	return nil
 }
 
@@ -176,7 +141,7 @@ func (fe *mockExport) toTestCase(tcs []models.Mock, fileName, mockPath string) (
 				} else {
 					mockName = fileName
 				}
-				yamlDocs, err := fe.read(mockPath, mockName, false)
+				yamlDocs, err := read(fe.yamlHandler, mockPath, mockName, false)
 				if err != nil {
 					return nil, err
 				}
@@ -225,7 +190,7 @@ func (fe *mockExport) toTestCase(tcs []models.Mock, fileName, mockPath string) (
 				} else {
 					mockName = fileName
 				}
-				yamlDocs, err := fe.read(mockPath, mockName, false)
+				yamlDocs, err := read(fe.yamlHandler, mockPath, mockName, false)
 				if err != nil {
 					return nil, err
 				}
@@ -252,7 +217,7 @@ func (fe *mockExport) toTestCase(tcs []models.Mock, fileName, mockPath string) (
 	return res, nil
 }
 
-func (fe *mockExport) read(path, name string, libMode bool) ([]models.Mock, error) {
+func read(yamlHandler models.YamlHandler, path, name string, libMode bool) ([]models.Mock, error) {
 	if !pkg.IsValidPath(path) {
 		return nil, fmt.Errorf("file path should be absolute. got path: %s", pkg.SanitiseInput(path))
 	}
@@ -260,15 +225,17 @@ func (fe *mockExport) read(path, name string, libMode bool) ([]models.Mock, erro
 	var arr []models.Mock
 	for {
 		var doc models.Mock
-		err := fe.yamlHandler.Read(path, doc)
+		err := yamlHandler.Read(filepath.Join(path, name), &doc)
+
+		if !libMode || doc.Name == name {
+			arr = append(arr, doc)
+		}
+
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
-		}
-		if !libMode || doc.Name == name {
-			arr = append(arr, doc)
+			return nil, err
 		}
 	}
 	return arr, nil

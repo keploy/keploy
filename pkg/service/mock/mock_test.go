@@ -29,7 +29,8 @@ func TestMain(m *testing.M) {
 	}
 	path += "/mocks"
 
-	mockFS := mockPlatform.NewMockExportFS(false)
+	yh := mockPlatform.NewYamlHandlerImpl()
+	mockFS := mockPlatform.NewMockExportFS(false, yh)
 	mockSrv = NewMockService(mockFS, logger)
 	m.Run()
 	tearDown()
