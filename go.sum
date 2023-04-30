@@ -239,7 +239,6 @@ github.com/keploy/go-sdk v0.5.3/go.mod h1:FrKEdAbypVbeHdboueHZ3icD24pPRSn/jsZ5KL
 github.com/keploy/go-sdk v0.6.6-alpha/go.mod h1:ytWcfOLeqCr9GyZLTRljEARgtSHuuvaKhOpIX20SIps=
 github.com/keploy/go-sdk v0.6.7/go.mod h1:uD1ds3mbVdhQaRVzK33Dch5Nbocc/1LzQ5oda96/Hss=
 github.com/keploy/go-sdk v0.7.4/go.mod h1:TtJIM+Gkq76FzfkD8W9u1F8NDkC9sVY8nYvmbRo1nhg=
-github.com/keploy/go-sdk v0.8.6-0.20230408143434-b5dec5fdc66f h1:pJPyNtfEC1dJi5mtPCYGlQM/1O0Wu4zrhwxAGbMFOOE=
 github.com/keploy/go-sdk v0.8.6-0.20230408143434-b5dec5fdc66f/go.mod h1:j+G9XyqYIXKjO3JC+K0mlvCsCp/M7dbp8+wqzDIkvTU=
 github.com/keploy/go-sdk v0.8.6 h1:MH3vPZmf4cxMsNJ1f8RprlRwStKP6ww1U9znjJAIN3I=
 github.com/keploy/go-sdk v0.8.6/go.mod h1:S1m9bb59u+5dTNdTnH4mIgyRVUH231OmRh4LWXKIfT8=

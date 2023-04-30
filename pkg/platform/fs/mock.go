@@ -92,7 +92,7 @@ func (fe *mockExport) Write(ctx context.Context, path string, doc models.Mock) e
 	if fe.isTestMode {
 		return nil
 	}
-	isFileEmpty, err := createMockFile(path, doc.Name)
+	isFileEmpty, err := CreateMockFile(path, doc.Name)
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 	if fe.isTestMode {
 		return nil
 	}
-	_, err := createMockFile(path, fileName)
+	_, err := CreateMockFile(path, fileName)
 	if err != nil {
 		return err
 	}
@@ -284,7 +284,7 @@ func read(path, name string, libMode bool) ([]models.Mock, error) {
 	return arr, nil
 }
 
-func createMockFile(path string, fileName string) (bool, error) {
+func CreateMockFile(path string, fileName string) (bool, error) {
 	if !pkg.IsValidPath(path) {
 		return false, fmt.Errorf("file path should be absolute. got path: %s", pkg.SanitiseInput(path))
 	}
