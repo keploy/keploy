@@ -58,13 +58,14 @@ func (hc *HistCfg) CapturedRecordEvents(tc_path, mock_path, app_path string) err
 func SetHistory(hc *HistCfg) error {
 	currentHistory := make(map[string][]HistCfg)
 	currentHistory["histCfg"] = append(currentHistory["histCfg"], *hc)
+	
 	path := UserHomeDir(true)
 	fileName := "histCfg.yaml"
 	filePath := filepath.Join(path, fileName)
-
+	
 	// Check if the file exists; if not, create it
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		_, err := os.Create(filePath)
+		_, err := CreateMockFile(path, "histCfg")
 		if err != nil {
 			return fmt.Errorf("failed to create file %s. error: %s", fileName, err.Error())
 		}
@@ -93,7 +94,7 @@ func SetHistory(hc *HistCfg) error {
 // UI can be rendered by fetching this method
 func (hc *HistCfg) GetHistory() error {
 	var (
-		path    = UserHomeDir(false)
+		path    = UserHomeDir(true)
 		history map[string][]HistCfg
 	)
 

@@ -60,7 +60,7 @@ func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
 
 func (fs *telemetry) Set(id string) error {
 	path := UserHomeDir(true)
-	createMockFile(path, "installation-id")
+	CreateMockFile(path, "installation-id")
 
 	data := []byte{}
 

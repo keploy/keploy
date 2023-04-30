@@ -118,11 +118,13 @@ func Server(ver string) *chi.Mux {
 
 	mockFS := mockPlatform.NewMockExportFS(keploy.GetMode() == keploy.MODE_TEST)
 	testReportFS := mockPlatform.NewTestReportFS(keploy.GetMode() == keploy.MODE_TEST)
+	path:=mockPlatform.UserHomeDir(true)
+	_, err = mockPlatform.CreateMockFile(path, "histCfg")
 	teleFS := mockPlatform.NewTeleFS()
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
 	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver,nil)
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver, nil)
 
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
@@ -132,12 +134,11 @@ func Server(ver string) *chi.Mux {
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
 	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, logger, conf.EnableTestExport, mockFS)
 	mockSrv := mock.NewMockService(mockFS, logger)
-	
+
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
 
 	// initialize the client serveri
 	r := chi.NewRouter()
-
 	port := conf.Port
 
 	k := keploy.New(keploy.Config{
