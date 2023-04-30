@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	historyConfig "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/mock"
 	regression2 "go.keploy.io/server/pkg/service/regression"
@@ -34,12 +35,13 @@ type Server struct {
 	svc            regression2.Service
 	tcSvc          tcSvc.Service
 	mock           mock.Service
+	hs             *historyConfig.HistCfg
 	tele           telemetry.Service
 	client         http.Client
 	proto.UnimplementedRegressionServiceServer
 }
 
-func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, listener net.Listener, testExport bool, testReportPath string, telemetry telemetry.Service, cl http.Client) error {
+func New(k *keploy.Keploy, logger *zap.Logger, svc regression2.Service, m mock.Service, tc tcSvc.Service, hs *historyConfig.HistCfg, listener net.Listener, testExport bool, testReportPath string, telemetry telemetry.Service, cl http.Client) error {
 
 	// create an instance for grpc server
 	srv := grpc.NewServer(kgrpcserver.UnaryInterceptor(k))
@@ -76,7 +78,7 @@ func (srv *Server) PutMock(ctx context.Context, request *proto.PutMockReq) (*pro
 	if err != nil {
 		return nil, err
 	}
-	srv.tele.RecordedMock(srv.client, ctx, request.Mock.Kind)
+	srv.tele.RecordedMock(ctx, request.Mock.Kind)
 	return &proto.PutMockResp{Inserted: 1}, nil
 }
 
@@ -141,6 +143,11 @@ func (srv *Server) Start(ctx context.Context, request *proto.StartRequest) (*pro
 	}, srv.testExport, id, request.TestCasePath, request.MockPath, srv.testReportPath, total)
 	if err != nil {
 		return nil, err
+	}
+
+	err = srv.hs.CaptureTestsEvent(request.TestCasePath, request.MockPath, request.AppPath, srv.testReportPath, id)
+	if err != nil {
+		srv.logger.Error("failed to capture test run event", zap.Error(err))
 	}
 	return &proto.StartResponse{Id: id}, nil
 }
@@ -347,6 +354,11 @@ func (srv *Server) PostTC(ctx context.Context, request *proto.TestCaseReq) (*pro
 		}
 	}
 	inserted, err := srv.tcSvc.Insert(ctx, []models.TestCase{tc}, request.TestCasePath, request.MockPath, graph.DEFAULT_COMPANY, request.Remove, request.Replace)
+
+	err = srv.hs.CapturedRecordEvents(request.TestCasePath, request.MockPath, request.AppPath)
+	if err != nil {
+		return nil, err
+	}
 	if err != nil {
 		srv.logger.Error("error putting testcase", zap.Error(err))
 		return nil, err
