@@ -27,13 +27,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
 	return &Regression{
-		yamlTcs:      sync.Map{},
-		tele:         adb,
-		tdb:          tdb,
-		log:          log,
-		client:       cl,
+		yamlTcs: sync.Map{},
+		tele:    adb,
+		tdb:     tdb,
+		log:     log,
+		// client:       cl,
 		rdb:          rdb,
 		testReportFS: testReportFS,
 		mockFS:       mFS,
@@ -769,7 +769,7 @@ func (r *Regression) Normalize(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("could not update testcase")
 	}
-	r.tele.Normalize(r.client, ctx)
+	r.tele.Normalize(ctx)
 	return nil
 }
 
@@ -855,7 +855,7 @@ func (r *Regression) updateStatus(ctx context.Context, trs []*models.TestRun) er
 
 			if tr.Status != models.TestRunStatusRunning {
 
-				r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
+				r.tele.Testrun(tr.Success, tr.Failure, ctx)
 			}
 		}
 		r.runCount = tests
@@ -926,10 +926,10 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 		// if testCasePath is empty that means PutTest is triggered by mocking feature
 		if testExport && testCasePath == "" {
 			// sending MockTestRun Telemetry event to Telemetry service.
-			r.tele.MockTestRun(success, failure, r.client, ctx)
+			r.tele.MockTestRun(success, failure, ctx)
 		} else {
 			// sending Testrun Telemetry event to Telemetry service.
-			r.tele.Testrun(success, failure, r.client, ctx)
+			r.tele.Testrun(success, failure,ctx)
 		}
 
 		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)

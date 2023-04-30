@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
+	historyConfig "go.keploy.io/server/pkg/platform/fs"
 	mockPlatform "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -34,7 +35,6 @@ import (
 	"go.keploy.io/server/web"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-	historyConfig "go.keploy.io/server/pkg/platform/fs"
 )
 
 // const defaultPort = "8080"
@@ -122,15 +122,15 @@ func Server(ver string) *chi.Mux {
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
 	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver)
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver,nil)
 
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
+	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, conf.EnableTestExport, mockFS)
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
-	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
+	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, logger, conf.EnableTestExport, mockFS)
 	mockSrv := mock.NewMockService(mockFS, logger)
 	
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
@@ -202,7 +202,7 @@ func Server(ver string) *chi.Mux {
 	hs := historyConfig.NewHistCfgFS()
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc,hs, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
+		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, hs, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
 	})
 
 	g.Go(func() error {

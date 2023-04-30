@@ -57,9 +57,9 @@ func (hc *HistCfg) CapturedRecordEvents(tc_path, mock_path, app_path string) err
 
 func SetHistory(hc *HistCfg) error {
 	currentHistory := make(map[string][]HistCfg)
-	currentHistory["HistCfg"] = append(currentHistory["HistCfg"], *hc)
+	currentHistory["histCfg"] = append(currentHistory["histCfg"], *hc)
 	path := UserHomeDir(true)
-	fileName := "HistCfg.yaml"
+	fileName := "histCfg.yaml"
 	filePath := filepath.Join(path, fileName)
 
 	// Check if the file exists; if not, create it
@@ -97,7 +97,7 @@ func (hc *HistCfg) GetHistory() error {
 		history map[string][]HistCfg
 	)
 
-	file, err := os.OpenFile(filepath.Join(path, "HistCfg.yaml"), os.O_RDONLY, os.ModePerm)
+	file, err := os.OpenFile(filepath.Join(path, "histCfg.yaml"), os.O_RDONLY, os.ModePerm)
 	defer file.Close()
 	decoder := yaml.NewDecoder(file)
 	err = decoder.Decode(&history)
@@ -114,7 +114,7 @@ func Write(filePath string, data map[string][]HistCfg) error {
 	}
 	err = os.WriteFile(filePath, d, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("failed to write HistCfg in yaml file. Please check the Unix permissions error: %s", err.Error())
+		return fmt.Errorf("failed to write histCfg in yaml file. Please check the Unix permissions error: %s", err.Error())
 	}
 	return nil
 }
@@ -130,8 +130,8 @@ func ParseBytes(data []byte, hc map[string][]HistCfg) (map[string][]HistCfg, err
 		return nil, fmt.Errorf("failed to Unmarshal document to yaml. error: %s", err.Error())
 	}
 
-	var prev = exstingData["HistCfg"]
-	var current = hc["HistCfg"][0]
+	var prev = exstingData["histCfg"]
+	var current = hc["histCfg"][0]
 	var flag = false
 	for i, v := range prev {
 		if v.TcPath == current.TcPath && v.MockPath == current.MockPath {
@@ -162,6 +162,6 @@ func ParseBytes(data []byte, hc map[string][]HistCfg) (map[string][]HistCfg, err
 		prev = append(prev, current)
 	}
 
-	exstingData["HistCfg"] = prev
+	exstingData["histCfg"] = prev
 	return exstingData, nil
 }

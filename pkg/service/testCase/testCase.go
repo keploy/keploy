@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"sort"
 	"strconv"
@@ -21,14 +20,13 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(tdb models.TestCaseDB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, client http.Client, TestExport bool, mFS models.MockFS) *TestCase {
+func New(tdb models.TestCaseDB, log *zap.Logger, EnableDeDup bool, adb telemetry.Service, TestExport bool, mFS models.MockFS) *TestCase {
 	return &TestCase{
 		tdb:           tdb,
 		tele:          adb,
 		log:           log,
 		mockFS:        mFS,
 		testExport:    TestExport,
-		client:        client,
 		mu:            sync.Mutex{},
 		anchors:       map[string][]map[string][]string{},
 		noisyFields:   map[string]map[string]bool{},
@@ -48,7 +46,7 @@ type TestCase struct {
 	tele          telemetry.Service
 	mockFS        models.MockFS
 	testExport    bool
-	client        http.Client
+	// client        http.Client
 	log           *zap.Logger
 	nextYamlIndex yamlTcsIndx
 	mu            sync.Mutex
@@ -89,14 +87,14 @@ func (r *TestCase) Delete(ctx context.Context, cid, id string) error {
 		return errors.New("internal failure")
 	}
 
-	r.tele.DeleteTc(r.client, ctx)
+	r.tele.DeleteTc(ctx)
 	return nil
 }
 
 func (r *TestCase) GetApps(ctx context.Context, cid string) ([]string, error) {
 	apps, err := r.tdb.GetApps(ctx, cid)
 	if apps != nil && len(apps) != r.appCount {
-		r.tele.GetApps(len(apps), r.client, ctx)
+		r.tele.GetApps(len(apps), ctx)
 		r.appCount = len(apps)
 	}
 	return apps, err
@@ -165,7 +163,7 @@ func (r *TestCase) Update(ctx context.Context, t []models.TestCase) error {
 			return errors.New("internal failure")
 		}
 	}
-	r.tele.EditTc(r.client, ctx)
+	r.tele.EditTc(ctx)
 	return nil
 }
 
@@ -366,7 +364,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				for _, mockElement := range tc[1:] {
 					mockTypes = append(mockTypes, string(mockElement.Kind))
 				}
-				r.tele.RecordedTest(r.client, ctx, len(tc)-1, mockTypes)
+				r.tele.RecordedTest(ctx, len(tc)-1, mockTypes)
 			}()
 
 			continue
