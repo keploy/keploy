@@ -29,6 +29,7 @@ message TestCaseReq {
   string Type = 12;
   GrpcReq GrpcReq = 13;
   GrpcResp GrpcResp = 14;
+  string AppPath = 15;
 }
 
 
@@ -115,6 +116,7 @@ message startRequest {
   string app = 2;
   string TestCasePath = 3;
   string MockPath = 4;
+  string AppPath = 5;
 }
 
 message startResponse {
@@ -245,4 +247,5 @@ service RegressionService{
   rpc PutMock (PutMockReq) returns (PutMockResp);
   rpc GetMocks (GetMockReq) returns (getMockResp);
   rpc StartMocking (StartMockReq) returns (StartMockResp);
+  // rpc DeDuplication (TestReq) returns (DedupResponse);
 }

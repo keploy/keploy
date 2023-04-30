@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
+	historyConfig "go.keploy.io/server/pkg/platform/fs"
 	mockPlatform "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -118,26 +119,27 @@ func Server(ver string) *chi.Mux {
 	yh := mockPlatform.NewYamlHandlerImpl()
 	mockFS := mockPlatform.NewMockExportFS(keploy.GetMode() == keploy.MODE_TEST, yh)
 	testReportFS := mockPlatform.NewTestReportFS(keploy.GetMode() == keploy.MODE_TEST)
+	path:=mockPlatform.UserHomeDir(true)
+	_, err = mockPlatform.CreateMockFile(path, "histCfg")
 	teleFS := mockPlatform.NewTeleFS()
 	mdb := mgo.NewBrowserMockDB(kmongo.NewCollection(db.Collection("test-browser-mocks")), logger)
 	browserMockSrv := mock2.NewBrMockService(mdb, logger)
 	enabled := conf.EnableTelemetry
-	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver)
+	analyticsConfig := telemetry.NewTelemetry(mgo.NewTelemetryDB(db, conf.TelemetryTable, enabled, logger), enabled, keploy.GetMode() == keploy.MODE_OFF, conf.EnableTestExport, teleFS, logger, ver, nil)
 
 	client := http.Client{
 		Transport: khttpclient.NewInterceptor(http.DefaultTransport),
 	}
 
-	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, client, conf.EnableTestExport, mockFS)
+	tcSvc := testCase.New(tdb, logger, conf.EnableDeDup, analyticsConfig, conf.EnableTestExport, mockFS)
 	// runSrv := run.New(rdb, tdb, logger, analyticsConfig, client, testReportFS)
-	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, client, logger, conf.EnableTestExport, mockFS)
+	regSrv := regression2.New(tdb, rdb, testReportFS, analyticsConfig, logger, conf.EnableTestExport, mockFS)
 	mockSrv := mock.NewMockService(mockFS, logger)
 
 	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: graph.NewResolver(logger, regSrv, tcSvc)}))
 
 	// initialize the client serveri
 	r := chi.NewRouter()
-
 	port := conf.Port
 
 	k := keploy.New(keploy.Config{
@@ -199,10 +201,10 @@ func Server(ver string) *chi.Mux {
 	httpListener := m.Match(cmux.HTTP1Fast())
 
 	//log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
-
+	hs := historyConfig.NewHistCfgFS()
 	g := new(errgroup.Group)
 	g.Go(func() error {
-		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
+		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, hs, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
 	})
 
 	g.Go(func() error {

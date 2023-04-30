@@ -241,7 +241,17 @@ func read(yamlHandler models.YamlHandler, path, name string, libMode bool) ([]mo
 	return arr, nil
 }
 
-func createMockFile(path string, fileName string) (bool, error) {
+func reqTypeFilter(tcs []models.TestCase, reqType string) []models.TestCase {
+	var result []models.TestCase
+	for i := 0; i < len(tcs); i++ {
+		if tcs[i].Type == reqType {
+			result = append(result, tcs[i])
+		}
+	}
+	return result
+}
+
+func CreateMockFile(path string, fileName string) (bool, error) {
 	if !pkg.IsValidPath(path) {
 		return false, fmt.Errorf("file path should be absolute. got path: %s", pkg.SanitiseInput(path))
 	}
@@ -257,14 +267,4 @@ func createMockFile(path string, fileName string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
-}
-
-func reqTypeFilter(tcs []models.TestCase, reqType string) []models.TestCase {
-	var result []models.TestCase
-	for i := 0; i < len(tcs); i++ {
-		if tcs[i].Type == reqType {
-			result = append(result, tcs[i])
-		}
-	}
-	return result
 }
