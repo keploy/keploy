@@ -20,7 +20,7 @@ require (
 	github.com/soheilhy/cmux v0.1.5
 	github.com/vektah/gqlparser/v2 v2.2.0 // v should b4 less or equal 2.2.0
 	github.com/wI2L/jsondiff v0.3.0
-	go.mongodb.org/mongo-driver v1.8.3
+	go.mongodb.org/mongo-driver v1.11.4
 	go.uber.org/zap v1.22.0
 	golang.org/x/sync v0.1.0
 	google.golang.org/grpc v1.48.0
