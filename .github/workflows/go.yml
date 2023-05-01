@@ -1,8 +1,8 @@
 name: Go
 
 on:
-  push:
-    branches: [ refactoring ]
+#  push:
+#    branches: [ refactoring ]
   pull_request:
     branches: [ main ]
 #   pull_request_target:
