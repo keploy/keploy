@@ -228,12 +228,12 @@ func read(yamlHandler models.YamlHandler, path, name string, libMode bool) ([]mo
 		var doc models.Mock
 		err := yamlHandler.Read(filepath.Join(path, name), &doc)
 
-		if errors.Is(err, io.EOF) {
-			break
+		if doc.Name == name {
+			arr = append(arr, doc)
 		}
 
-		if !libMode || doc.Name == name {
-			arr = append(arr, doc)
+		if errors.Is(err, io.EOF) {
+			break
 		}
 
 		if err != nil {
