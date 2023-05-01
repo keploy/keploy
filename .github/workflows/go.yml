@@ -4,7 +4,7 @@ on:
 #  push:
 #    branches: [ main ]
   pull_request:
-    branches: [ main ]
+    branches: [ refactoring ]
 #   pull_request_target:
 #     types: [assigned, opened, synchronize, reopened]
 

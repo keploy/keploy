@@ -126,7 +126,8 @@ func TestMain(m *testing.M) {
 	mockPath = testReportPath + "/mocks"
 	testReportPath += "/reports"
 
-	mockFS = mockPlatform.NewMockExportFS(false)
+	yh := mockPlatform.NewYamlHandlerImpl()
+	mockFS = mockPlatform.NewMockExportFS(false, yh)
 	testReportFS = mockPlatform.NewTestReportFS(false)
 	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "", nil)
 	rSvc = New(nil, nil, testReportFS, analyticsConfig, logger, true, mockFS)

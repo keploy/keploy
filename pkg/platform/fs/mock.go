@@ -103,7 +103,8 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 	}
 
 	for _, j := range docs {
-		err := fe.yamlHandler.Write(path+fileName, j)
+		path = filepath.Join(path, fileName)
+		err := fe.yamlHandler.Write(path, j)
 
 		if err != nil {
 			return fmt.Errorf("failed to embed document into yaml file. error: %s", err.Error())
@@ -227,13 +228,14 @@ func read(yamlHandler models.YamlHandler, path, name string, libMode bool) ([]mo
 		var doc models.Mock
 		err := yamlHandler.Read(filepath.Join(path, name), &doc)
 
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
 		if !libMode || doc.Name == name {
 			arr = append(arr, doc)
 		}
 
-		if errors.Is(err, io.EOF) {
-			break
-		}
 		if err != nil {
 			return nil, err
 		}

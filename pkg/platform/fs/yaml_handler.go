@@ -82,7 +82,7 @@ func (yh *YamlHandlerImpl) Read(path string, obj interface{}) error {
 		yh.decoderCache = yaml.NewDecoder(file)
 	}
 
-	err = yh.decoderCache.Decode(&obj)
+	err = yh.decoderCache.Decode(obj)
 	if err != nil {
 		yh.decoderCache = nil
 
