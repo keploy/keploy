@@ -103,7 +103,7 @@ func (fe *mockExport) WriteAll(ctx context.Context, path, fileName string, docs 
 	}
 
 	for _, j := range docs {
-		path = filepath.Join(path, fileName)
+		path := filepath.Join(path, fileName)
 		err := fe.yamlHandler.Write(path, j)
 
 		if err != nil {
