@@ -2,7 +2,7 @@ name: Go
 
 on:
 #  push:
-#    branches: [ refactoring ]
+#    branches: [ main ]
   pull_request:
     branches: [ main ]
 #   pull_request_target:
