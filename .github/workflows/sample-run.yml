@@ -1,4 +1,4 @@
-name: Telemetry
+name: sample-run
 
 on:
   push:

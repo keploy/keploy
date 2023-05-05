@@ -37,6 +37,7 @@ func (fe *testReport) Unlock() {
 }
 
 func (fe *testReport) SetResult(runId string, test models.TestResult) {
+	// TODO: send runId to the historyConfig
 	tests, _ := fe.tests[runId]
 	tests = append(tests, test)
 	fe.tests[runId] = tests
@@ -80,7 +81,7 @@ func (fe *testReport) Write(ctx context.Context, path string, doc models.TestRep
 		return errors.New("invalid name for test-report. It should not include any slashes")
 	}
 
-	_, err := createMockFile(path, doc.Name)
+	_, err := CreateMockFile(path, doc.Name)
 	if err != nil {
 		return err
 	}
