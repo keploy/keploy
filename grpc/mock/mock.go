@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/grpc/utils"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 )
 
 func Encode(doc *proto.Mock) (models.Mock, error) {
@@ -23,6 +24,25 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 		Name:    doc.Name,
 	}
 	switch doc.Kind {
+	case string(models.Mongo):
+		spec := models.MongoSpec{
+			Metadata: doc.Spec.Metadata,
+			Message: models.MongoMessage{
+				Header: models.MongoHeader{
+					Length:     doc.Spec.MongoMessage.Header.Length,
+					RequestID:  doc.Spec.MongoMessage.Header.RequestId,
+					ResponseTo: doc.Spec.MongoMessage.Header.ResponseTo,
+					Opcode:     wiremessage.OpCode(doc.Spec.MongoMessage.Header.OpCode),
+				},
+				FlagBits: int(doc.Spec.MongoMessage.FlagBits),
+				Sections: doc.Spec.MongoMessage.Sections,
+				Checksum: int(doc.Spec.MongoMessage.Checksum),
+			},
+		}
+		err := res.Spec.Encode(&spec)
+		if err != nil {
+			return res, fmt.Errorf("failed to encode mongo spec for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
 	case string(models.HTTP):
 		spec := models.HttpSpec{
 			Metadata: doc.Spec.Metadata,
@@ -227,6 +247,26 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 			Kind:    string(j.Kind),
 		}
 		switch j.Kind {
+		case models.Mongo:
+			spec := &models.MongoSpec{}
+			err := j.Spec.Decode(spec)
+			if err != nil {
+				return res, fmt.Errorf("failed to decode the mongo spec of mock with name: %s.  error: %s", j.Name, err.Error())
+			}
+			mock.Spec = &proto.Mock_SpecSchema{
+				Metadata: spec.Metadata,
+				MongoMessage: &proto.MongoMessage{
+					Header: &proto.MongoHeader{
+						Length:     spec.Message.Header.Length,
+						RequestId:  spec.Message.Header.RequestID,
+						ResponseTo: spec.Message.Header.ResponseTo,
+						OpCode:     int32(spec.Message.Header.Opcode),
+					},
+					FlagBits: int64(spec.Message.FlagBits),
+					Sections: spec.Message.Sections,
+					Checksum: int64(spec.Message.Checksum),
+				},
+			}
 		case models.HTTP:
 			spec := &models.HttpSpec{}
 			err := j.Spec.Decode(spec)

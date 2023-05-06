@@ -188,8 +188,23 @@ message Mock {
     repeated string Err = 11;
     GrpcReq GrpcRequest = 12;
     GrpcResp GrpcResp = 13;
+    MongoMessage MongoMessage = 14;
   }
   SpecSchema Spec = 4;
+}
+
+message MongoHeader {
+  int32 Length = 1;
+  int32 RequestId = 2;
+  int32 ResponseTo = 3;
+  int32 OpCode = 4;
+}
+
+message MongoMessage {
+	MongoHeader Header = 1;
+	int64 FlagBits = 2;
+	string Sections = 3;
+	int64 Checksum = 4;
 }
 
 message Table{

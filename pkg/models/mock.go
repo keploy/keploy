@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 
+	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,6 +21,7 @@ const (
 	GENERIC        Kind     = "Generic"
 	SQL            Kind     = "SQL"
 	GRPC_EXPORT    Kind     = "gRPC"
+	Mongo          Kind     = "Mongo"
 	BodyTypeUtf8   BodyType = "utf-8"
 	BodyTypeBinary BodyType = "binary"
 )
@@ -29,6 +31,26 @@ type Mock struct {
 	Kind    Kind      `json:"kind" yaml:"kind"`
 	Name    string    `json:"name" yaml:"name"`
 	Spec    yaml.Node `json:"spec" yaml:"spec"`
+}
+
+type MongoSpec struct {
+	Metadata map[string]string `json:"metadata" yaml:"metadata"`
+	// Header   MongoHeader       `json:"mongo_header" yaml:"mongo_header"`
+	Message MongoMessage `json:"mongo_message" yaml:"mongo_message,omitempty"`
+}
+
+type MongoMessage struct {
+	Header   MongoHeader `json:"mongo_header" yaml:"mongo_header"`
+	FlagBits int         `json:"flagBits" yaml:"flagBits"`
+	Sections string      `json:"sections" yaml:"sections"`
+	Checksum int         `json:"checksum" yaml:"checksum"`
+}
+
+type MongoHeader struct {
+	Length     int32              `json:"length" yaml:"length"`
+	RequestID  int32              `json:"requestId" yaml:"requestId"`
+	ResponseTo int32              `json:"responseTo" yaml:"responseTo"`
+	Opcode     wiremessage.OpCode `json:"Opcode" yaml:"Opcode"`
 }
 
 type GrpcSpec struct {
