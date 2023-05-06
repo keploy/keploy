@@ -27,16 +27,27 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 	case string(models.Mongo):
 		spec := models.MongoSpec{
 			Metadata: doc.Spec.Metadata,
-			Message: models.MongoMessage{
+			RequestMessage: models.MongoMessage{
 				Header: models.MongoHeader{
-					Length:     doc.Spec.MongoMessage.Header.Length,
-					RequestID:  doc.Spec.MongoMessage.Header.RequestId,
-					ResponseTo: doc.Spec.MongoMessage.Header.ResponseTo,
-					Opcode:     wiremessage.OpCode(doc.Spec.MongoMessage.Header.OpCode),
+					Length:     doc.Spec.RequestMongoMessage.Header.Length,
+					RequestID:  doc.Spec.RequestMongoMessage.Header.RequestId,
+					ResponseTo: doc.Spec.RequestMongoMessage.Header.ResponseTo,
+					Opcode:     wiremessage.OpCode(doc.Spec.RequestMongoMessage.Header.OpCode),
 				},
-				FlagBits: int(doc.Spec.MongoMessage.FlagBits),
-				Sections: doc.Spec.MongoMessage.Sections,
-				Checksum: int(doc.Spec.MongoMessage.Checksum),
+				FlagBits: int(doc.Spec.RequestMongoMessage.FlagBits),
+				Sections: doc.Spec.RequestMongoMessage.Sections,
+				Checksum: int(doc.Spec.RequestMongoMessage.Checksum),
+			},
+			ResponseMessage: models.MongoMessage{
+				Header: models.MongoHeader{
+					Length:     doc.Spec.ResponseMongoMessage.Header.Length,
+					RequestID:  doc.Spec.ResponseMongoMessage.Header.RequestId,
+					ResponseTo: doc.Spec.ResponseMongoMessage.Header.ResponseTo,
+					Opcode:     wiremessage.OpCode(doc.Spec.ResponseMongoMessage.Header.OpCode),
+				},
+				FlagBits: int(doc.Spec.ResponseMongoMessage.FlagBits),
+				Sections: doc.Spec.ResponseMongoMessage.Sections,
+				Checksum: int(doc.Spec.ResponseMongoMessage.Checksum),
 			},
 		}
 		err := res.Spec.Encode(&spec)
@@ -255,16 +266,27 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
-				MongoMessage: &proto.MongoMessage{
+				RequestMongoMessage: &proto.MongoMessage{
 					Header: &proto.MongoHeader{
-						Length:     spec.Message.Header.Length,
-						RequestId:  spec.Message.Header.RequestID,
-						ResponseTo: spec.Message.Header.ResponseTo,
-						OpCode:     int32(spec.Message.Header.Opcode),
+						Length:     spec.RequestMessage.Header.Length,
+						RequestId:  spec.RequestMessage.Header.RequestID,
+						ResponseTo: spec.RequestMessage.Header.ResponseTo,
+						OpCode:     int32(spec.RequestMessage.Header.Opcode),
 					},
-					FlagBits: int64(spec.Message.FlagBits),
-					Sections: spec.Message.Sections,
-					Checksum: int64(spec.Message.Checksum),
+					FlagBits: int64(spec.RequestMessage.FlagBits),
+					Sections: spec.RequestMessage.Sections,
+					Checksum: int64(spec.RequestMessage.Checksum),
+				},
+				ResponseMongoMessage: &proto.MongoMessage{
+					Header: &proto.MongoHeader{
+						Length:     spec.ResponseMessage.Header.Length,
+						RequestId:  spec.ResponseMessage.Header.RequestID,
+						ResponseTo: spec.ResponseMessage.Header.ResponseTo,
+						OpCode:     int32(spec.ResponseMessage.Header.Opcode),
+					},
+					FlagBits: int64(spec.ResponseMessage.FlagBits),
+					Sections: spec.ResponseMessage.Sections,
+					Checksum: int64(spec.ResponseMessage.Checksum),
 				},
 			}
 		case models.HTTP:

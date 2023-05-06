@@ -36,7 +36,8 @@ type Mock struct {
 type MongoSpec struct {
 	Metadata map[string]string `json:"metadata" yaml:"metadata"`
 	// Header   MongoHeader       `json:"mongo_header" yaml:"mongo_header"`
-	Message MongoMessage `json:"mongo_message" yaml:"mongo_message,omitempty"`
+	RequestMessage  MongoMessage `json:"request_mongo_message" yaml:"request_mongo_message,omitempty"`
+	ResponseMessage MongoMessage `json:"response_mongo_message" yaml:"response_mongo_message,omitempty"`
 }
 
 type MongoMessage struct {
