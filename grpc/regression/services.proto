@@ -175,21 +175,26 @@ message Mock {
   string Kind = 3;
   message SpecSchema {
     map<string, string> Metadata = 1;
+    // for GenericSpec
     repeated Object Objects = 2;
+    // for HttpSpec
     HttpReq Req = 3;
     HttpResp Res = 4;
     repeated string Mocks = 5;
     map<string, StrArr> Assertions = 6;
     int64 Created = 7;
-    // for sql
+    // for SqlSpec
     string Type = 8;
     optional Table Table = 9;
     int64 Int = 10; // change it to rows commited
     repeated string Err = 11;
+    // for GrpcSpec
     GrpcReq GrpcRequest = 12;
     GrpcResp GrpcResp = 13;
-    MongoMessage RequestMongoMessage = 14;
-    MongoMessage ResponseMongoMessage = 15;
+    // for MongoSpec
+    MongoHeader Header = 14;
+    MongoMessage MongoRequest = 15;
+    MongoMessage MongoResponse = 16;
   }
   SpecSchema Spec = 4;
 }
@@ -202,10 +207,26 @@ message MongoHeader {
 }
 
 message MongoMessage {
-	MongoHeader Header = 1;
+	// MongoHeader Header = 1;
+  // for OpMsg
 	int64 FlagBits = 2;
 	string Sections = 3;
 	int64 Checksum = 4;
+
+  // for OpQuery
+  int32  Flags = 5;         // bit values of query options
+  string   FullCollectionName = 6;    // "dbname.collectionname"
+  int32     NumberToSkip = 7;           // number of documents to skip
+  int32     NumberToReturn = 8;         // number of documents to return in the first OP_REPLY batch
+  string  Query = 9;                  // query object.  See below for details.
+  repeated string  ReturnFieldsSelector = 10;  
+
+  // for OpReply
+  int32     ResponseFlags = 11;  // bit values - see details below
+  int64     CursorID = 12;       // cursor ID if client needs to do get more's
+  int32     StartingFrom = 13;   // where in the cursor this reply is starting
+  int32     NumberReturned = 14; // number of documents in the reply
+  string Documents = 15;      // documents
 }
 
 message Table{
