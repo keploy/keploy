@@ -192,9 +192,10 @@ message Mock {
     GrpcReq GrpcRequest = 12;
     GrpcResp GrpcResp = 13;
     // for MongoSpec
-    MongoHeader Header = 14;
-    MongoMessage MongoRequest = 15;
-    MongoMessage MongoResponse = 16;
+    MongoHeader RequestHeader = 14;
+    MongoHeader ResponseHeader = 15;
+    MongoMessage MongoRequest = 16;
+    MongoMessage MongoResponse = 17;
   }
   SpecSchema Spec = 4;
 }
