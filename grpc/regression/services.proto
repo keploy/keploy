@@ -211,7 +211,7 @@ message MongoMessage {
 	// MongoHeader Header = 1;
   // for OpMsg
 	int64 FlagBits = 2;
-	string Sections = 3;
+	repeated string Sections = 3;
 	int64 Checksum = 4;
 
   // for OpQuery
