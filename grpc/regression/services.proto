@@ -227,7 +227,7 @@ message MongoMessage {
   int64     CursorID = 12;       // cursor ID if client needs to do get more's
   int32     StartingFrom = 13;   // where in the cursor this reply is starting
   int32     NumberReturned = 14; // number of documents in the reply
-  string Documents = 15;      // documents
+  repeated string Documents = 15;      // documents
 }
 
 message Table{

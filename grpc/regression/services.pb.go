@@ -1787,11 +1787,11 @@ type MongoMessage struct {
 	Query                string `protobuf:"bytes,9,opt,name=Query,proto3" json:"Query,omitempty"`                           // query object.  See below for details.
 	ReturnFieldsSelector string `protobuf:"bytes,10,opt,name=ReturnFieldsSelector,proto3" json:"ReturnFieldsSelector,omitempty"`
 	// for OpReply
-	ResponseFlags  int32  `protobuf:"varint,11,opt,name=ResponseFlags,proto3" json:"ResponseFlags,omitempty"`   // bit values - see details below
-	CursorID       int64  `protobuf:"varint,12,opt,name=CursorID,proto3" json:"CursorID,omitempty"`             // cursor ID if client needs to do get more's
-	StartingFrom   int32  `protobuf:"varint,13,opt,name=StartingFrom,proto3" json:"StartingFrom,omitempty"`     // where in the cursor this reply is starting
-	NumberReturned int32  `protobuf:"varint,14,opt,name=NumberReturned,proto3" json:"NumberReturned,omitempty"` // number of documents in the reply
-	Documents      string `protobuf:"bytes,15,opt,name=Documents,proto3" json:"Documents,omitempty"`            // documents
+	ResponseFlags  int32    `protobuf:"varint,11,opt,name=ResponseFlags,proto3" json:"ResponseFlags,omitempty"`   // bit values - see details below
+	CursorID       int64    `protobuf:"varint,12,opt,name=CursorID,proto3" json:"CursorID,omitempty"`             // cursor ID if client needs to do get more's
+	StartingFrom   int32    `protobuf:"varint,13,opt,name=StartingFrom,proto3" json:"StartingFrom,omitempty"`     // where in the cursor this reply is starting
+	NumberReturned int32    `protobuf:"varint,14,opt,name=NumberReturned,proto3" json:"NumberReturned,omitempty"` // number of documents in the reply
+	Documents      []string `protobuf:"bytes,15,rep,name=Documents,proto3" json:"Documents,omitempty"`            // documents
 }
 
 func (x *MongoMessage) Reset() {
@@ -1917,11 +1917,11 @@ func (x *MongoMessage) GetNumberReturned() int32 {
 	return 0
 }
 
-func (x *MongoMessage) GetDocuments() string {
+func (x *MongoMessage) GetDocuments() []string {
 	if x != nil {
 		return x.Documents
 	}
-	return ""
+	return nil
 }
 
 type Table struct {
@@ -3077,7 +3077,7 @@ var file_grpc_regression_services_proto_rawDesc = []byte{
 	0x6f, 0x6d, 0x12, 0x26, 0x0a, 0x0e, 0x4e, 0x75, 0x6d, 0x62, 0x65, 0x72, 0x52, 0x65, 0x74, 0x75,
 	0x72, 0x6e, 0x65, 0x64, 0x18, 0x0e, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0e, 0x4e, 0x75, 0x6d, 0x62,
 	0x65, 0x72, 0x52, 0x65, 0x74, 0x75, 0x72, 0x6e, 0x65, 0x64, 0x12, 0x1c, 0x0a, 0x09, 0x44, 0x6f,
-	0x63, 0x75, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x18, 0x0f, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x44,
+	0x63, 0x75, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x18, 0x0f, 0x20, 0x03, 0x28, 0x09, 0x52, 0x09, 0x44,
 	0x6f, 0x63, 0x75, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x22, 0x41, 0x0a, 0x05, 0x54, 0x61, 0x62, 0x6c,
 	0x65, 0x12, 0x24, 0x0a, 0x04, 0x43, 0x6f, 0x6c, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32,
 	0x10, 0x2e, 0x73, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x73, 0x2e, 0x53, 0x71, 0x6c, 0x43, 0x6f,
