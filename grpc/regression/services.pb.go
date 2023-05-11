@@ -1780,12 +1780,12 @@ type MongoMessage struct {
 	Sections string `protobuf:"bytes,3,opt,name=Sections,proto3" json:"Sections,omitempty"`
 	Checksum int64  `protobuf:"varint,4,opt,name=Checksum,proto3" json:"Checksum,omitempty"`
 	// for OpQuery
-	Flags                int32    `protobuf:"varint,5,opt,name=Flags,proto3" json:"Flags,omitempty"`                          // bit values of query options
-	FullCollectionName   string   `protobuf:"bytes,6,opt,name=FullCollectionName,proto3" json:"FullCollectionName,omitempty"` // "dbname.collectionname"
-	NumberToSkip         int32    `protobuf:"varint,7,opt,name=NumberToSkip,proto3" json:"NumberToSkip,omitempty"`            // number of documents to skip
-	NumberToReturn       int32    `protobuf:"varint,8,opt,name=NumberToReturn,proto3" json:"NumberToReturn,omitempty"`        // number of documents to return in the first OP_REPLY batch
-	Query                string   `protobuf:"bytes,9,opt,name=Query,proto3" json:"Query,omitempty"`                           // query object.  See below for details.
-	ReturnFieldsSelector []string `protobuf:"bytes,10,rep,name=ReturnFieldsSelector,proto3" json:"ReturnFieldsSelector,omitempty"`
+	Flags                int32  `protobuf:"varint,5,opt,name=Flags,proto3" json:"Flags,omitempty"`                          // bit values of query options
+	FullCollectionName   string `protobuf:"bytes,6,opt,name=FullCollectionName,proto3" json:"FullCollectionName,omitempty"` // "dbname.collectionname"
+	NumberToSkip         int32  `protobuf:"varint,7,opt,name=NumberToSkip,proto3" json:"NumberToSkip,omitempty"`            // number of documents to skip
+	NumberToReturn       int32  `protobuf:"varint,8,opt,name=NumberToReturn,proto3" json:"NumberToReturn,omitempty"`        // number of documents to return in the first OP_REPLY batch
+	Query                string `protobuf:"bytes,9,opt,name=Query,proto3" json:"Query,omitempty"`                           // query object.  See below for details.
+	ReturnFieldsSelector string `protobuf:"bytes,10,opt,name=ReturnFieldsSelector,proto3" json:"ReturnFieldsSelector,omitempty"`
 	// for OpReply
 	ResponseFlags  int32  `protobuf:"varint,11,opt,name=ResponseFlags,proto3" json:"ResponseFlags,omitempty"`   // bit values - see details below
 	CursorID       int64  `protobuf:"varint,12,opt,name=CursorID,proto3" json:"CursorID,omitempty"`             // cursor ID if client needs to do get more's
@@ -1882,11 +1882,11 @@ func (x *MongoMessage) GetQuery() string {
 	return ""
 }
 
-func (x *MongoMessage) GetReturnFieldsSelector() []string {
+func (x *MongoMessage) GetReturnFieldsSelector() string {
 	if x != nil {
 		return x.ReturnFieldsSelector
 	}
-	return nil
+	return ""
 }
 
 func (x *MongoMessage) GetResponseFlags() int32 {
@@ -3066,7 +3066,7 @@ var file_grpc_regression_services_proto_rawDesc = []byte{
 	0x72, 0x6e, 0x12, 0x14, 0x0a, 0x05, 0x51, 0x75, 0x65, 0x72, 0x79, 0x18, 0x09, 0x20, 0x01, 0x28,
 	0x09, 0x52, 0x05, 0x51, 0x75, 0x65, 0x72, 0x79, 0x12, 0x32, 0x0a, 0x14, 0x52, 0x65, 0x74, 0x75,
 	0x72, 0x6e, 0x46, 0x69, 0x65, 0x6c, 0x64, 0x73, 0x53, 0x65, 0x6c, 0x65, 0x63, 0x74, 0x6f, 0x72,
-	0x18, 0x0a, 0x20, 0x03, 0x28, 0x09, 0x52, 0x14, 0x52, 0x65, 0x74, 0x75, 0x72, 0x6e, 0x46, 0x69,
+	0x18, 0x0a, 0x20, 0x01, 0x28, 0x09, 0x52, 0x14, 0x52, 0x65, 0x74, 0x75, 0x72, 0x6e, 0x46, 0x69,
 	0x65, 0x6c, 0x64, 0x73, 0x53, 0x65, 0x6c, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x12, 0x24, 0x0a, 0x0d,
 	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x46, 0x6c, 0x61, 0x67, 0x73, 0x18, 0x0b, 0x20,
 	0x01, 0x28, 0x05, 0x52, 0x0d, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x46, 0x6c, 0x61,

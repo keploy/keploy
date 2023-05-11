@@ -220,7 +220,7 @@ message MongoMessage {
   int32     NumberToSkip = 7;           // number of documents to skip
   int32     NumberToReturn = 8;         // number of documents to return in the first OP_REPLY batch
   string  Query = 9;                  // query object.  See below for details.
-  repeated string  ReturnFieldsSelector = 10;  
+  string  ReturnFieldsSelector = 10;  
 
   // for OpReply
   int32     ResponseFlags = 11;  // bit values - see details below
