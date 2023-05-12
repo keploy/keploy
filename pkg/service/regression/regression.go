@@ -27,13 +27,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, cl http.Client, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
+func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb telemetry.Service, log *zap.Logger, TestExport bool, mFS models.MockFS) *Regression {
 	return &Regression{
-		yamlTcs:      sync.Map{},
-		tele:         adb,
-		tdb:          tdb,
-		log:          log,
-		client:       cl,
+		yamlTcs: sync.Map{},
+		tele:    adb,
+		tdb:     tdb,
+		log:     log,
+		// client:       cl,
 		rdb:          rdb,
 		testReportFS: testReportFS,
 		mockFS:       mFS,
@@ -108,6 +108,7 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 		r.log.Error("file path should be absolute to read and write testcases and their mocks")
 		return fmt.Errorf("file path should be absolute")
 	}
+
 	// all types of tcs should be stored to be tested. Empty tcsType returns all keploy tcs
 	tcs, err := r.mockFS.ReadAll(ctx, testCasePath, mockPath, "")
 	if err != nil {
@@ -496,6 +497,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 func (r *Regression) Test(ctx context.Context, cid, app, runID, id, testCasePath, mockPath string, resp models.HttpResp) (bool, error) {
 	var t *models.Test
 	started := time.Now().UTC()
+
 	ok, res, tc, err := r.test(ctx, cid, runID, id, app, resp)
 	if tc != nil {
 		t = &models.Test{
@@ -819,7 +821,7 @@ func (r *Regression) Normalize(ctx context.Context, cid, id string) error {
 		r.log.Error("failed to update testcase in db", zap.String("cid", cid), zap.String("id", id), zap.Error(err))
 		return errors.New("could not update testcase")
 	}
-	r.tele.Normalize(r.client, ctx)
+	r.tele.Normalize(ctx)
 	return nil
 }
 
@@ -905,7 +907,7 @@ func (r *Regression) updateStatus(ctx context.Context, trs []*models.TestRun) er
 
 			if tr.Status != models.TestRunStatusRunning {
 
-				r.tele.Testrun(tr.Success, tr.Failure, r.client, ctx)
+				r.tele.Testrun(tr.Success, tr.Failure, ctx)
 			}
 		}
 		r.runCount = tests
@@ -976,10 +978,10 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 		// if testCasePath is empty that means PutTest is triggered by mocking feature
 		if testExport && testCasePath == "" {
 			// sending MockTestRun Telemetry event to Telemetry service.
-			r.tele.MockTestRun(success, failure, r.client, ctx)
+			r.tele.MockTestRun(success, failure, ctx)
 		} else {
 			// sending Testrun Telemetry event to Telemetry service.
-			r.tele.Testrun(success, failure, r.client, ctx)
+			r.tele.Testrun(success, failure,ctx)
 		}
 
 		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)

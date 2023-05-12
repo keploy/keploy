@@ -60,7 +60,7 @@ func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
 
 func (fs *telemetry) Set(id string) error {
 	path := UserHomeDir(true)
-	createMockFile(path, "installation-id")
+	CreateMockFile(path, "installation-id")
 
 	data := []byte{}
 
@@ -72,7 +72,7 @@ func (fs *telemetry) Set(id string) error {
 
 	err = os.WriteFile(filepath.Join(path, "installation-id.yaml"), data, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("failed to write test report in yaml file. error: %s", err.Error())
+		return fmt.Errorf("failed to write installation id in yaml file. error: %s", err.Error())
 	}
 
 	return nil
