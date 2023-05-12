@@ -496,6 +496,67 @@ func TestTest(t *testing.T) {
 				stopRun  models.TestRun
 			}{
 				startRun: models.TestRun{
+					ID:      "2a6b4382-176d-4c06-921e-36ce6bc0ecb1",
+					Status:  models.TestRunStatusRunning,
+					Created: now.Unix(),
+					Updated: now.Unix(),
+					CID:     defaultCompany,
+					App:     "sample",
+					User:    defaultUser,
+					Total:   1,
+				},
+				runId:    "2a6b4382-176d-4c06-921e-36ce6bc0ecb1",
+				totalTcs: 1,
+				tcs:      httpTcs,
+				resp: models.HttpResp{
+					StatusCode: 200,
+					Header: http.Header{
+						"Pass": []string{"true"},
+					},
+					Body: `{"message": 5}`,
+				},
+				stopRun: models.TestRun{
+					ID:      "2a6b4382-176d-4c06-921e-36ce6bc0ecb1",
+					Updated: now.Unix(),
+					Status:  models.TestRunStatusPassed,
+				},
+			},
+			result: struct {
+				startTestOutput struct{ err error }
+				testOutput      struct {
+					pass bool
+					err  error
+				}
+				stopTestOutput struct {
+					err error
+				}
+			}{
+				startTestOutput: struct{ err error }{
+					err: nil,
+				},
+				testOutput: struct {
+					pass bool
+					err  error
+				}{
+					pass: true,
+					err:  nil,
+				},
+				stopTestOutput: struct{ err error }{
+					err: nil,
+				},
+			},
+		},
+		{
+			input: struct {
+				startRun models.TestRun
+				runId    string
+
+				totalTcs int
+				tcs      []models.TestCase
+				resp     models.HttpResp
+				stopRun  models.TestRun
+			}{
+				startRun: models.TestRun{
 					ID:      "3a6b4382-176d-4c06-921e-36ce6bc0ecb2",
 					Status:  models.TestRunStatusRunning,
 					Created: now.Unix(),

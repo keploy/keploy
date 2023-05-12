@@ -55,6 +55,54 @@ type Regression struct {
 	log          *zap.Logger
 }
 
+func typeChecker(cleanAct, cleanExp string) bool {
+	var (
+		// convert the JSON to a map
+		actual   map[string]interface{}
+		expected map[string]interface{}
+
+		// Containers are needed to get Keys from the JSON
+		expectedContainer map[string]json.RawMessage
+		actualContainer   map[string]json.RawMessage
+	)
+	// unmarshal JSON to map to get the keys value pair
+	json.Unmarshal([]byte(cleanAct), &actual)
+	json.Unmarshal([]byte(cleanExp), &expected)
+
+	// From: https://stackoverflow.com/questions/17452722/how-to-get-the-key-value-from-a-json-string-in-go
+	// Unmarshal JSON to be get all the keys.
+	if e := json.Unmarshal([]byte(cleanAct), &actualContainer); e != nil {
+		panic(e)
+	}
+	if e := json.Unmarshal([]byte(cleanAct), &expectedContainer); e != nil {
+		panic(e)
+	}
+
+	// a slice container to store all the keys
+	expectedKey, actualKey := make([]string, len(expectedContainer)), make([]string, len(actualContainer))
+
+	// adding all the keys to the slice
+	for key := range expectedContainer {
+		expectedKey = append(expectedKey, key)
+	}
+	for key := range actualContainer {
+		actualKey = append(actualKey, key)
+	}
+
+	// use keys from actualKey and expectedKey to get the type of the value
+	for _, key := range expectedKey {
+		if reflect.TypeOf(expected[key]) != reflect.TypeOf(actual[key]) {
+			fmt.Println("----------------------------------------------CHANGES HERE------------------------------------------------------")
+			fmt.Println("----------------------------------------------CHANGES HERE------------------------------------------------------")
+			fmt.Println("Expected type: ", reflect.TypeOf(expected[key]), "Actual type: ", reflect.TypeOf(actual[key]))
+			fmt.Println("----------------------------------------------CHANGES HERE------------------------------------------------------")
+			fmt.Println("----------------------------------------------CHANGES HERE------------------------------------------------------")
+			return false
+		}
+	}
+	return true
+}
+
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
 	if !pkg.IsValidPath(testCasePath) || !pkg.IsValidPath(mockPath) {
 		r.log.Error("file path should be absolute to read and write testcases and their mocks")
@@ -201,6 +249,10 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		if !pkg.Contains(tc.Noise, "body") && tc.HttpResp.Body != resp.Body {
 			pass = false
 		}
+	}
+
+	if typeChecker(cleanAct, cleanExp) {
+		fmt.Println("Type check passed")
 	}
 
 	res.BodyResult[0].Normal = pass
