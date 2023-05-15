@@ -26,14 +26,14 @@
 </p>
 
 # Keploy
-Keploy is a functional testing toolkit for developers. It **generates E2E tests for APIs (KTests)** along with **mocks or stubs(KMocks)** by recording real API calls.
-KTests can be imported as mocks for consumers and vice-versa.
+Keploy is a functional testing toolkit designed specifically for **developers**. It simplifies the process of generating end-to-end (E2E) tests for APIs, known as **KTests**, by recording real API calls. Additionally, Keploy allows developers to create mocks or stubs, called **KMocks**, which can be used as mocks for consumers or even as tests for the server.
 
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/how-keploy-works.gif" width="100%"  alt="Generate Test Case from API call"/>
+One great feature of Keploy is its seamless integration with popular unit testing libraries like **Go-Test and JUnit**. This integration enables developers to track combined test coverage by merging KTests with their existing unit tests.
 
-Merge KTests with unit testing libraries(like Go-Test, JUnit..) to track combined test-coverage.
-
-KMocks can also be referenced in existing tests or use anywhere (including any testing framework). KMocks can also be used as tests for the server.   
+- Keploy provides flexibility as well. 
+- Developers can reference KMocks in their existing tests or use them with any testing framework they prefer.
+- With Keploy, developers can easily ensure the quality and reliability of their APIs through efficient testing and **effective use of mocks and stubs**.
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/how-keploy-works.gif" width="100%"  alt="Generate Test Case from API call"/> 
 
 > Keploy is testing itself with &nbsp;  [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;  without writing many test-cases or data-mocks. 😎
 
@@ -46,26 +46,23 @@ KMocks can also be referenced in existing tests or use anywhere (including any t
 - [ ] ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) : WIP [#58](https://github.com/keploy/keploy/issues/58)
 
 
-## How it works?
+## How does it work?
 #### Safely replays all CRUD operations (including non-idempotent APIs)
 
 Keploy is added as a middleware to your application that captures and replays all network interaction served to application from any source.
 
 Visit [https://docs.keploy.io](https://docs.keploy.io/docs/keploy-explained/how-keploy-works) to read more in detail..
 
-
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="80%"  alt="Generate Test Case from API call"/>
 
 ## Documentation
 
-#### Here you can find the complete [Documentation](https://docs.keploy.io/) which you can reffer 
+#### Here you can find the complete [documentation](https://docs.keploy.io/) which you can refer. 
 
 ## Contributing
-Whether you are a community member or not, we would love your point of view! Feel free to first check out our
-- [contribution guidelines](https://github.com/keploy/keploy/blob/main/CONTRIBUTING.md) 
-- The guide outlines the process for **creating an issue** and **submitting a pull request.**
-- [code of conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
-- By following the guide we've set, your contribution will more likely be accepted if it enhances the project.
+We value your perspective, regardless of whether you are a member of our community or not. Your insights are important to us! 
+
+Before diving in, we encourage you to explore our [Contribution Guidelines](https://github.com/keploy/keploy/blob/main/CONTRIBUTING.md) and [code of conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md). The guide outlines the process for **creating an issue** and **submitting a pull request.** By following the guide we've set, your contribution will more likely be accepted if it enhances the project.
 
 ## Features
 
@@ -167,7 +164,7 @@ export KEPLOY_MODE=record && go run handler.go main.go
 ```
 
 ### Generate testcases
-To genereate testcases we just need to make some API calls. You can use [Postman](https://www.postman.com/), [Hoppscotch](https://hoppscotch.io/), or simply `curl`
+To generate testcases, just need to make some API calls. You can use [Postman](https://www.postman.com/), [Hoppscotch](https://hoppscotch.io/), or simply `curl`
 
 > Note : KTests are exported as files in the current directory(.) by default
 
@@ -194,7 +191,7 @@ curl --request GET \
 ```
 
 ### Integration with native Go test framework
-You just need 3 lines of code in your unit test file and that's it!!🔥🔥🔥
+You just need 3 lines of code in your unit test file and that's it!! 🔥
 
 For an example, for a file named `main.go` create a unit test file as `main_test.go` in the **same folder** as `main.go`.
 
