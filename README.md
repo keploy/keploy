@@ -47,7 +47,7 @@ One great feature of Keploy is its seamless integration with popular unit testin
 
 
 ## How does it work?
-#### Safely replays all CRUD operations (including non-idempotent APIs)
+#### Safely replays all CRUD operations (including non-idempotent APIs).
 
 Keploy is added as a middleware to your application that captures and replays all network interaction served to application from any source.
 
