@@ -38,6 +38,7 @@ func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb te
 		testReportFS: testReportFS,
 		mockFS:       mFS,
 		testExport:   TestExport,
+		mutex:        sync.Mutex{},
 	}
 }
 
@@ -53,6 +54,7 @@ type Regression struct {
 	mockFS       models.MockFS
 	testExport   bool
 	log          *zap.Logger
+	mutex        sync.Mutex
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
@@ -120,7 +122,7 @@ func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath stri
 	return nil
 }
 
-var delay = 0 // We need a delay to dont mess the entire output
+// var delay = 0 // We need a delay to dont mess the entire output
 func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
@@ -219,6 +221,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 		pass = false
 	}
+
 	if !pass {
 		logDiffs := NewDiffsPrinter(tc.ID)
 
@@ -227,12 +230,12 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
 
-		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
-			"Test Result:\n"+
-			"\tInput Http Request: %+v\n\n"+
-			"\tExpected Response: "+
-			"%+v\n\n"+"\tActual Response: "+
-			"%+v\n\n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		// "Test Result:\n"+
+		// "\tInput Http Request: %+v\n\n"+
+		// "\tExpected Response: "+
+		// "%+v\n\n"+"\tActual Response: "+
+		// , tc.ID)
 
 		// ------------ DIFFS RELATED CODE -----------
 		if !res.StatusCode.Normal {
@@ -278,10 +281,11 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body), bodyNoise)
 			}
 		}
+		r.mutex.Lock()
 		logger.Printf(logs)
-		delay += 1
-		time.Sleep(time.Second * time.Duration(delay)) // race condition bugging and mixing outputs
+		// time.Sleep(time.Second * time.Duration(delay)) // race condition bugging and mixing outputs
 		logDiffs.Render()
+		r.mutex.Unlock()
 
 	} else {
 		logger := pp.New()
@@ -289,7 +293,9 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		r.mutex.Lock()
 		logger.Printf(log2)
+		r.mutex.Unlock()
 
 	}
 
@@ -298,8 +304,9 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp models.GrpcResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
-		tc  models.TestCase
-		err error
+		tc    models.TestCase
+		err   error
+		mutex sync.Mutex
 	)
 	switch r.testExport {
 	case false:
@@ -423,16 +430,19 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 		if !res.BodyResult[1].Normal {
 			logDiff.PushBodyDiff(fmt.Sprint(tc.GrpcResp.Err), fmt.Sprint(resp.Err), bodyNoise)
 		}
-
+		mutex.Lock()
 		logger.Printf(logs)
 		logDiff.Render()
+		mutex.Unlock()
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		mutex.Lock()
 		logger.Printf(log2)
+		mutex.Unlock()
 
 	}
 	return pass, res, &tc, nil
@@ -925,7 +935,7 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			r.tele.MockTestRun(success, failure, ctx)
 		} else {
 			// sending Testrun Telemetry event to Telemetry service.
-			r.tele.Testrun(success, failure,ctx)
+			r.tele.Testrun(success, failure, ctx)
 		}
 
 		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
