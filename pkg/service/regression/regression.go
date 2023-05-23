@@ -73,7 +73,7 @@ func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mock
 	}
 	r.yamlTcs.Store(runId, tcsMap)
 	err = r.testReportFS.Write(ctx, testReportPath, models.TestReport{
-		Version: models.V1Beta1,
+		Version: "api.enterprise.keploy.io/v1beta1",
 		Name:    runId,
 		Total:   len(tcs),
 		Status:  string(models.TestRunStatusRunning),
@@ -105,7 +105,7 @@ func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath stri
 		}
 	}
 	err = r.testReportFS.Write(ctx, testReportPath, models.TestReport{
-		Version: models.V1Beta1,
+		Version: "api.enterprise.keploy.io/v1beta1",
 		Name:    runId,
 		Total:   len(testResults),
 		Status:  string(status),

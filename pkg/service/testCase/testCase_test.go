@@ -116,7 +116,7 @@ func TestMain(m *testing.M) {
 	tcsPath += "/tests"
 
 	mockFS := mockPlatform.NewMockExportFS(false)
-	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "",nil)
+	analyticsConfig := telemetry.NewTelemetry(nil, false, false, true, nil, logger, "", nil)
 	tcSvc = New(nil, logger, false, analyticsConfig, true, mockFS)
 
 	m.Run()

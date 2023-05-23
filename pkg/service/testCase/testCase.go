@@ -42,10 +42,10 @@ type yamlTcsIndx struct {
 }
 
 type TestCase struct {
-	tdb           models.TestCaseDB
-	tele          telemetry.Service
-	mockFS        models.MockFS
-	testExport    bool
+	tdb        models.TestCaseDB
+	tele       telemetry.Service
+	mockFS     models.MockFS
+	testExport bool
 	// client        http.Client
 	log           *zap.Logger
 	nextYamlIndex yamlTcsIndx
@@ -273,11 +273,17 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				}
 			}
 			r.nextYamlIndex.tcsCount[v.AppID] = lastIndex + 1
+			yamlVersion:= models.V1Beta2
+			println("cid::::::", cid)
+			if cid != "default_company" {
+				yamlVersion = models.V1Beta3
+			}
+
 			var (
 				id = fmt.Sprintf("test-%v", lastIndex+1)
 
 				tc = []models.Mock{{
-					Version: models.V1Beta2,
+					Version: yamlVersion,
 					Kind:    models.HTTP,
 					Name:    id,
 				}}
@@ -292,6 +298,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 				if err != nil {
 					r.log.Error(err.Error())
 				}
+				doc.Version = yamlVersion
 				tc = append(tc, doc)
 				m := "mock-" + fmt.Sprint(lastIndex+1) + "-" + strconv.Itoa(i)
 				tc[len(tc)-1].Name = m
@@ -299,7 +306,7 @@ func (r *TestCase) Insert(ctx context.Context, t []models.TestCase, testCasePath
 			}
 
 			testcase := &proto.Mock{
-				Version: string(models.V1Beta2),
+				Version: string(yamlVersion),
 				Name:    id,
 				Spec: &proto.Mock_SpecSchema{
 					Objects: []*proto.Mock_Object{{
