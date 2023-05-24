@@ -1,2 +1,5 @@
 # CMD Package Documentation
-The `root` command and its `subcommand` will be defined in this package. This package will be called from the `main` package and it will use the `pkg` services for execution of command.
+
+In this package, the `root` command and its `subcommands` are defined 
+for the CLI. This package, which is called from the main package, utilizes the 
+`pkg` services to execute commands.

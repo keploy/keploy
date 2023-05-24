@@ -1,5 +1,9 @@
 # Replay Package Documentation
 
-This package provides an interface to simulate the recorded ingress request and log the API responses to the user. The function methods will be called from the cmd package.
+This package offers an interface to simulate recorded 
+ingress requests and to log the API responses to the 
+user. Its function methods are invoked from the `cmd` 
+package.
 
-This package uses the paltform interface methods to read the ingress requests.
+For reading the ingress requests, this package utilizes 
+the methods provided by the `platform` interface.

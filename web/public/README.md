@@ -1,1 +1,0 @@
-This directory is embedded into the binary to host the frontend code
