@@ -1,4 +1,6 @@
 # Mongo Package Documentation
 
-Mongo Package contains the parser and mapping logic to read the mongo wiremessage and capture/stub the outputs. This package is used by the `hooks` 
-package to redirect the outgoing calls for recording/stubing the outputs.
+The `mongo` package encompasses the parser and mapping logic required 
+to read MongoDB wire messages and capture or stub the outputs. 
+Utilized by the `hooks` package, it assists in redirecting outgoing 
+calls for the purpose of recording or stubbing the outputs.

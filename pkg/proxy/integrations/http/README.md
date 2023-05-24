@@ -1,6 +1,6 @@
 # Http Package Documentation
 
-Http Package contains the parser and mapping logic to read the http 
-text messages and capture/stub the outputs. This package is used by 
-the `hooks` package to redirect the outgoing calls for 
-recording/stubing the outputs.
+The `http` package encompasses the parser and mapping logic required 
+to read HTTP text messages and capture or stub the outputs. Utilized 
+by the `hooks` package, it aids in redirecting outgoing calls for the 
+purpose of recording or stubbing the outputs.

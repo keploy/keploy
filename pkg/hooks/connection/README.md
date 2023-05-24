@@ -1,4 +1,5 @@
 # Connection Package Documentation
 
-This package contains the events which are trigerred during the ingress call to capture 
-ingress input and output of the user API call.
+This package contains the events that are triggered during the 
+ingress call, capturing both the input and output of the user API 
+call.
