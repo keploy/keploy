@@ -1,0 +1,2 @@
+# CMD Package Documentation
+The `root` command and its `subcommand` will be defined in this package. This package will be called from the `main` package and it will use the `pkg` services for execution of command.
