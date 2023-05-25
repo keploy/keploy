@@ -10,4 +10,4 @@ PRs are welcome, refer to our [contributing guide](https://developers.mattermost
 
 ## Upgrading from `mattermost-docker`
 
-This repository replaces the [deprecated mattermost-docker repository](https://github.com/mattermost/mattermost-docker>). For an in-depth guide to upgrading, please refer to [this document](https://github.com/mattermost/docker/blob/main/scripts/UPGRADE.md).
+This repository replaces the [deprecated mattermost-docker repository](https://github.com/mattermost/mattermost-docker). For an in-depth guide to upgrading, please refer to [this document](https://github.com/mattermost/docker/blob/main/scripts/UPGRADE.md).
