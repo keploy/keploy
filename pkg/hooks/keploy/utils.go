@@ -1,12 +1,5 @@
 package keploy
 
-import (
-	"bufio"
-	"bytes"
-	"fmt"
-	"net/http"
-)
-
 // import (
 // 	"bufio"
 // 	"bytes"
@@ -65,17 +58,17 @@ import (
 // 	})
 // }
 
-func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
+// func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 
-	// Parse the request using the http.ReadRequest function
-	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
-	if err != nil {
-		fmt.Println("[ParseHTTPRequest]:error parsing http request:%v", err)
-		return nil, err
-	}
+// 	// Parse the request using the http.ReadRequest function
+// 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
+// 	if err != nil {
+// 		fmt.Println("[ParseHTTPRequest]:error parsing http request:%v", err)
+// 		return nil, err
+// 	}
 
-	return request, nil
-}
+// 	return request, nil
+// }
 
 // func urlParams(req *http.Request) map[string]string {
 // 	// Retrieve the URL query parameters as a map
@@ -138,12 +131,12 @@ func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 // 	return port, nil
 // }
 
-func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, error) {
-	buffer := bytes.NewBuffer(data)
-	reader := bufio.NewReader(buffer)
-	response, err := http.ReadResponse(reader, request)
-	if err != nil {
-		return nil, err
-	}
-	return response, nil
-}
+// func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, error) {
+// 	buffer := bytes.NewBuffer(data)
+// 	reader := bufio.NewReader(buffer)
+// 	response, err := http.ReadResponse(reader, request)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return response, nil
+// }

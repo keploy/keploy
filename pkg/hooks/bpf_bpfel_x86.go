@@ -67,6 +67,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetClose     *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetRead      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_read"`
 	SyscallProbeRetWrite     *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
+	UprobeEntrySSL_write     *ebpf.ProgramSpec `ebpf:"uprobe_entry_SSL_write"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
@@ -78,11 +79,11 @@ type bpfMapSpecs struct {
 	ActiveReadArgsMap         *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap        *ebpf.MapSpec `ebpf:"active_write_args_map"`
 	ConnInfoMap               *ebpf.MapSpec `ebpf:"conn_info_map"`
+	ProxyPorts                *ebpf.MapSpec `ebpf:"proxy_ports"`
 	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.MapSpec `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.MapSpec `ebpf:"socket_open_events"`
-	VaccantPorts              *ebpf.MapSpec `ebpf:"vaccant_ports"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -109,11 +110,11 @@ type bpfMaps struct {
 	ActiveReadArgsMap         *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap        *ebpf.Map `ebpf:"active_write_args_map"`
 	ConnInfoMap               *ebpf.Map `ebpf:"conn_info_map"`
+	ProxyPorts                *ebpf.Map `ebpf:"proxy_ports"`
 	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.Map `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.Map `ebpf:"socket_open_events"`
-	VaccantPorts              *ebpf.Map `ebpf:"vaccant_ports"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -123,11 +124,11 @@ func (m *bpfMaps) Close() error {
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
 		m.ConnInfoMap,
+		m.ProxyPorts,
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
-		m.VaccantPorts,
 	)
 }
 
@@ -148,6 +149,7 @@ type bpfPrograms struct {
 	SyscallProbeRetClose     *ebpf.Program `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetRead      *ebpf.Program `ebpf:"syscall__probe_ret_read"`
 	SyscallProbeRetWrite     *ebpf.Program `ebpf:"syscall__probe_ret_write"`
+	UprobeEntrySSL_write     *ebpf.Program `ebpf:"uprobe_entry_SSL_write"`
 }
 
 func (p *bpfPrograms) Close() error {
@@ -165,6 +167,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetClose,
 		p.SyscallProbeRetRead,
 		p.SyscallProbeRetWrite,
+		p.UprobeEntrySSL_write,
 	)
 }
 

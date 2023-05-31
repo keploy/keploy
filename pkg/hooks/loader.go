@@ -15,19 +15,16 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-	// "go.keploy.io/server/pkg/hooks/keploy"
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
+	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
+	"go.uber.org/zap"
 )
-
-type Dest_info struct {
-	Dest_ip   uint32
-	Dest_port uint32
-}
 
 type Bpf_spin_lock struct{ Val uint32 }
 
-type Vaccant_port struct {
+type PortState struct {
 	Port      uint32
 	Occupied  uint32
 	Dest_ip   uint32
@@ -35,81 +32,160 @@ type Vaccant_port struct {
 	Lock      Bpf_spin_lock
 }
 
-var objs = bpfObjects{}
+type Hook struct {
+	proxyStateMap      *ebpf.Map
+	db  			platform.TestCaseDB
+	logger 			*zap.Logger
+	proxyPortList 		[]uint32
+	deps 			[]*models.Mock
 
+	// ebpf objects and events
+	stopper 		chan os.Signal
+	connect4 		link.Link
+	connect6 		link.Link
+	gp4 			link.Link
+	accept 			link.Link
+	acceptRet 		link.Link
+	accept4 		link.Link
+	accept4Ret 		link.Link
+	read 			link.Link
+	readRet 		link.Link
+	write 			link.Link
+	writeRet 		link.Link
+	close 			link.Link
+	closeRet 		link.Link
+	objects 		bpfObjects
+}
+
+func NewHook(proxyPorts []uint32, db platform.TestCaseDB, logger *zap.Logger) *Hook {
+	return &Hook{
+		// ProxyPorts: proxyPorts,
+		logger: logger,
+		proxyPortList: proxyPorts,
+		db: db,
+	}
+}
+
+func (h *Hook) AppendDeps(m *models.Mock)  {
+	h.deps = append(h.deps, m)
+}
+
+func (h *Hook) FetchDep (indx int) *models.Mock {
+	return h.deps[indx]
+}
+
+func (h *Hook) GetDeps () []*models.Mock {
+	return h.deps
+}
+func (h *Hook) ResetDeps() int {
+	h.deps = []*models.Mock{}
+	return 1
+}
+
+func (h *Hook) UpdateProxyState (indx uint32, ps *PortState) {
+	err := h.proxyStateMap.Update(uint32(indx), *ps, ebpf.UpdateLock)
+	if err != nil {
+		h.logger.Error("failed to release the occupied proxy", zap.Error(err), zap.Any("proxy port", ps.Port))
+		return
+	}
+}
+
+func (h *Hook) GetProxyState(i uint32) (*PortState, error) {
+	proxyState := PortState{}
+	if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
+		// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
+		return nil, err
+	}
+	return &proxyState, nil
+}
+
+func (h *Hook) Stop () {
+	<-h.stopper
+	log.Println("Received signal, exiting program..")
+
+	// closing all readers.
+	for _, reader := range PerfEventReaders {
+		if err := reader.Close(); err != nil {
+			h.logger.Error("failed to close the eBPF perf reader", zap.Error(err))
+			// log.Fatalf("closing perf reader: %s", err)
+		}
+	}
+	for _, reader := range RingEventReaders {
+		if err := reader.Close(); err != nil {
+			h.logger.Error("failed to close the eBPF ringbuf reader", zap.Error(err))
+			// log.Fatalf("closing ringbuf reader: %s", err)
+		}
+	}
+	
+	// closing all events
+	h.accept.Close()
+	h.acceptRet.Close()
+	h.accept4.Close()
+	h.accept4Ret.Close()
+	h.close.Close()
+	h.closeRet.Close()
+	h.connect4.Close()
+	h.connect6.Close()
+	h.gp4.Close()
+	h.read.Close()
+	h.readRet.Close()
+	h.write.Close()
+	h.writeRet.Close()
+	h.objects.Close()
+}
+
+// LoadHooks is used to attach the eBPF hooks into the linux kernel. Hooks are attached for outgoing and incoming network requests.
+//
+// proxyPorts is used for redirecting outgoing network calls to the unoccupied proxy server.
+//
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I../headers
-func LoadHooks() {
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers
+func (h *Hook) LoadHooks() {
 	// k := keploy.KeployInitializer()
-
+	
 	if err := settings.InitRealTimeOffset(); err != nil {
 		log.Printf("Failed fixing BPF clock, timings will be offseted: %v", err)
+		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 	}
-
+	
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
-
+	
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatal(err)
+		h.logger.Error("failed to lock memory for eBPF resources", zap.Error(err))
+		return
 	}
-
+	
 	// Load pre-compiled programs and maps into the kernel.
-	// objs := bpfObjects{}
+	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
-		log.Fatalf("loading objects: %v", err)
+		h.logger.Error("failed to load eBPF objects", zap.Error(err))
+		return
 	}
-	defer objs.Close()
+	// defer objs.Close()
+	// hook := newHook(objs.ProxyPorts, stopper, db)
+	h.proxyStateMap = objs.ProxyPorts
+	h.stopper = stopper
+	h.objects = objs
 
 	connectionFactory := connection.NewFactory(time.Minute)
 	go func() {
 		for {
-			connectionFactory.HandleReadyConnections(k)
+			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps, h.logger)
 			time.Sleep(1 * time.Second)
 		}
 	}()
-
-	// // Get the first-mounted cgroupv2 path.
-	// cgroupPath, err := detectCgroupPath()
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// // println("cgroup path: ", cgroupPath)
-
-	// // Link the count_egress_packets program to the cgroup.
-	// l, err := link.AttachCgroup(link.CgroupOptions{
-	// 	Path:    cgroupPath,
-	// 	Attach:  ebpf.AttachCGroupInetEgress,
-	// 	Program: objs.CountEgressPackets,
-	// })
-
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer l.Close()
 
 	// ------------ For Egress -------------
 
 	// Get the first-mounted cgroupv2 path.
 	cgroupPath, err := detectCgroupPath()
 	if err != nil {
-		log.Fatal(err)
+		h.logger.Error("failed to detect the cgroup path", zap.Error(err))
+		return
 	}
 
-	println("cgroup path: ", cgroupPath)
-
-	// Link the count_egress_packets program to the cgroup.
-	// l, err := link.AttachCgroup(link.CgroupOptions{
-	// 	Path:    cgroupPath,
-	// 	Attach:  ebpf.AttachCGroupInetEgress,
-	// 	Program: objs.CountEgressPackets,
-	// })
-
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer l.Close()
 
 	c4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -118,9 +194,11 @@ func LoadHooks() {
 	})
 
 	if err != nil {
-		log.Fatal(err)
+		h.logger.Error("failed to attach the connect4 cgroup hook", zap.Error(err))
+		return
 	}
-	defer c4.Close()
+	h.connect4 = c4
+	// defer c4.Close()
 
 	c6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -129,9 +207,11 @@ func LoadHooks() {
 	})
 
 	if err != nil {
-		log.Fatal(err)
+		h.logger.Error("failed to attach the connect6 cgroup hook", zap.Error(err))
+		return
 	}
-	defer c6.Close()
+	h.connect6 = c6
+	// defer c6.Close()
 
 	gp4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -140,214 +220,158 @@ func LoadHooks() {
 	})
 
 	if err != nil {
-		log.Fatal(err)
+		h.logger.Error("faled to attach GetPeername cgroup hook", zap.Error(err))
+		return
 	}
-	defer gp4.Close()
+	h.gp4 = gp4
+	// defer gp4.Close()
 
-	log.Println("Counting packets...")
-
-	// Read loop reporting the total amount of times the kernel
-	// function was entered, once per second.
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
 
 	// objs.PortMapping.Update(uint32(1), Dest_info{Dest_ip: 10, Dest_port: 11}, ebpf.UpdateAny)
-
-	for i, v := range runningPorts {
-		// log.Printf("setting the vPorts at i: %v and port: %v, sizeof(vaccantPorts): %v", i, v, unsafe.Sizeof(Vaccant_port{Port: v})) // Occupied: false
+	// log.Println("the ports on which proxy is running: ", h.proxyPortList)
+	for i, v := range h.proxyPortList {
+		// log.Printf("setting the vPorts at i: %v and port: %v, sizeof(vaccantPorts): %v", i, v, unsafe.Sizeof(PortState{Port: v})) // Occupied: false
 
 		// inf, _ := objs.VaccantPorts.Info()
 
-		err = objs.VaccantPorts.Update(uint32(i), Vaccant_port{Port: v}, // Occupied: false,
-			ebpf.UpdateLock)
-
-		// err := objs.VaccantPorts.Update(uint32(i), []Vaccant_port{{Port: v, Occupied: false}}, ebpf.UpdateAny)
+		err = objs.ProxyPorts.Update(uint32(i), PortState{Port: v}, ebpf.UpdateLock)
+		if err != nil {
+			h.logger.Error("failed to update the proxy state in the ebpf map", zap.Error(err))
+			return
+		}
+		// err := objs.VaccantPorts.Update(uint32(i), []PortState{{Port: v, Occupied: false}}, ebpf.UpdateAny)
 		// ports := []uint32{}
 		// for i := 0; i < runtime.NumCPU(); i++ {
 		// 	ports = append(ports, v)
 		// }
 		// err := objs.VaccantPorts.Put(uint32(i), ports)
 
-		// err := objs.VaccantPorts.Put(uint32(i), []Vaccant_port{{Port: v, Occupied: false}, {Port: v, Occupied: false}})
+		// err := objs.VaccantPorts.Put(uint32(i), []PortState{{Port: v, Occupied: false}, {Port: v, Occupied: false}})
 
-		if err != nil {
-			log.Printf("failed to update the vaccantPorts array at userspace. error: %v", err)
-		}
 		// log.Printf("info about VaccantPorts: %v, flags: %v", inf, objs.VaccantPorts.Flags())
 	}
-	go func() {
-		for range ticker.C {
-			// var value uint64
-			// if err := objs.PktCount.Lookup(uint32(0), &value); err != nil {
-			// 	log.Fatalf("reading map: %v", err)
-			// }
-
-			var port = Vaccant_port{}
-			zero := uint32(0)
-			// var all_cpu_value []uint32
-			// if err := objs.VaccantPorts.Lookup(&zero, &port); err != nil {
-			if err := objs.VaccantPorts.LookupWithFlags(&zero, &port, ebpf.LookupLock); err != nil {
-				log.Fatalf("reading map: %v", err)
-			}
-			// for cpuid, cpuvalue := range all_cpu_value {
-			// 	log.Printf("%s called %d times on CPU%v\n", "connect4", cpuvalue, cpuid)
-			// }
-			// log.Printf("reading map: %v", port)
-
-			// var dest Dest_info
-			// var key uint32 = 1
-
-			// iter := objs.PortMapping.Iterate()
-			// for iter.Next(&key,&dest){
-			// 	log.Printf("Key: %v || Value: %v",key,dest)
-			// }
-
-			// if err := objs.PortMapping.Lookup(key, &dest); err != nil {
-			// 	log.Printf("/proxy: reading Port map: %v", err)
-			// } else {
-			// 	log.Printf("/proxy: Value for key:[%v]: %v", key, dest)
-			// }
-
-			// objs.
-			// log.Printf("number of packets: %d\n", value)
-			// }
-		}
-	}()
-
+	
 	// ------------ For Ingress using Kprobes --------------
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
 	ac, err := link.Kprobe("sys_accept", objs.SyscallProbeEntryAccept, nil)
 	if err != nil {
-		log.Fatalf("opening accept kprobe: %s", err)
+		h.logger.Error("failed to attach the kprobe hook on sys_accept", zap.Error(err))
+		return
 	}
-	defer ac.Close()
+	h.accept = ac
+	// defer ac.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
 	ac_, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, nil)
 	if err != nil {
-		log.Fatalf("opening accept kretprobe: %s", err)
+		h.logger.Error("failed to attach the kretprobe hook on sys_accept", zap.Error(err))
+		return
 	}
-	defer ac_.Close()
+	h.acceptRet = ac_
+	// defer ac_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
 	ac4, err := link.Kprobe("sys_accept4", objs.SyscallProbeEntryAccept4, nil)
 	if err != nil {
-		log.Fatalf("opening accept4 kprobe: %s", err)
+		h.logger.Error("failed to attach the kprobe hook on sys_accept4", zap.Error(err))
+		return
 	}
-	defer ac4.Close()
+	h.accept4 = ac4
+	// defer ac4.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
 	ac4_, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, nil)
 	if err != nil {
-		log.Fatalf("opening accept4 kretprobe: %s", err)
+		h.logger.Error("failed to attach the kretprobe hook on sys_accept4", zap.Error(err))
+		return
 	}
-	defer ac4_.Close()
+	h.accept4Ret = ac4_
+	// defer ac4_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
-		log.Fatalf("opening read kprobe: %s", err)
+		h.logger.Error("failed to attach the kprobe hook on sys_read", zap.Error(err))
+		return
 	}
-	defer rd.Close()
+	h.read = rd
+	// defer rd.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
 	rd_, err := link.Kretprobe("sys_read", objs.SyscallProbeRetRead, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		log.Fatalf("opening read kretprobe: %s", err)
+		h.logger.Error("failed to attach the kretprobe hook on sys_read", zap.Error(err))
+		return
 	}
-	defer rd_.Close()
+	h.readRet = rd_
+	// defer rd_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
 	wt, err := link.Kprobe("sys_write", objs.SyscallProbeEntryWrite, nil)
 	if err != nil {
-		log.Fatalf("opening write kprobe: %s", err)
+		h.logger.Error("failed to attach the kprobe hook on sys_write", zap.Error(err))
+		return
 	}
-	defer wt.Close()
+	h.write = wt
+	// defer wt.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
 	wt_, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, nil)
 	if err != nil {
-		log.Fatalf("opening write kretprobe: %s", err)
+		h.logger.Error("failed to attach the kretprobe hook on sys_write", zap.Error(err))
+		return
 	}
-	defer wt_.Close()
+	h.writeRet = wt_
+	// defer wt_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
 	cl, err := link.Kprobe("sys_close", objs.SyscallProbeEntryClose, nil)
 	if err != nil {
-		log.Fatalf("opening write kprobe: %s", err)
+		h.logger.Error("failed to attach the kprobe hook on sys_close", zap.Error(err))
+		return
 	}
-	defer cl.Close()
+	h.close = cl
+	// defer cl.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
 	cl_, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, nil)
 	if err != nil {
-		log.Fatalf("opening write kretprobe: %s", err)
+		h.logger.Error("failed to attach the kretprobe hook on sys_close", zap.Error(err))
+		return
 	}
-	defer cl_.Close()
+	h.closeRet = cl_
+	// defer cl_.Close()
 
-	//------------------------------------------------------------------------
-	// // Read loop reporting the total amount of times the kernel
-	// // function was entered, once per second.
-	// ticker := time.NewTicker(1 * time.Second)
-	// defer ticker.Stop()
+	LaunchPerfBufferConsumers(objs, connectionFactory, stopper, h.logger)
 
-	// log.Println("Running...")
+	h.logger.Info("keploy initialized and probes added to the kernel.")
 
-	// // objs.PktCount.Update(uint32(0),11,ebpf.UpdateAny)
+	// need to add this stopper in the service function
+	// <-stopper
+	// log.Println("Received signal, exiting program..")
 
-	// // type Dest_info struct {
-	// // 	Dest_ip   uint32
-	// // 	Dest_port uint32
-	// // }
-
-	// // objs.PortMapping.Update(uint32(1), Dest_info{Dest_ip: 10, Dest_port: 11}, ebpf.UpdateAny)
-
-	// for range ticker.C {
-
-	// 	// var dest Dest_info
-	// 	// var key uint32 = 1
-
-	// 	// iter := objs.PortMapping.Iterate()
-	// 	// for iter.Next(&key, &dest) {
-	// 	// 	log.Printf("Key: %v || Value: %v", key, dest)
-	// 	// }
-	// 	// log.Println("waiting for events...")
-
+	// // closing all readers.
+	// for _, reader := range PerfEventReaders {
+	// 	if err := reader.Close(); err != nil {
+	// 		log.Fatalf("closing perf reader: %s", err)
+	// 	}
 	// }
-	//-------------------------------------------------------------------------
-
-	LaunchPerfBufferConsumers(objs, connectionFactory, stopper)
-
-	// k := keploy.KeployInitializer()
-
-	log.Printf("keploy initialized and probes added to the kernel.\n")
-
-	<-stopper
-	log.Println("Received signal, exiting program..")
-
-	// closing all readers.
-	for _, reader := range PerfEventReaders {
-		if err := reader.Close(); err != nil {
-			log.Fatalf("closing perf reader: %s", err)
-		}
-	}
-	for _, reader := range RingEventReaders {
-		if err := reader.Close(); err != nil {
-			log.Fatalf("closing ringbuf reader: %s", err)
-		}
-	}
-
+	// for _, reader := range RingEventReaders {
+	// 	if err := reader.Close(); err != nil {
+	// 		log.Fatalf("closing ringbuf reader: %s", err)
+	// 	}
+	// }
 }
 
 // detectCgroupPath returns the first-found mount point of type cgroup2

@@ -5,47 +5,68 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 
-	// "github.com/cilium/ebpf"
 	"github.com/cloudflare/cfssl/csr"
-	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 	"go.keploy.io/server/pkg/hooks"
-	// "github.com/keploy/go-sdk/mock"
-	// "go.keploy.io/server/pkg/hooks/keploy"
-	// proto "go.keploy.io/server/grpc/regression"
-	// "go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
+	"go.keploy.io/server/pkg/proxy/util"
+	"go.uber.org/zap"
 )
-
-var currentPort uint32 = 5000
 
 const (
 	proxyAddress = "0.0.0.0"
-	response     = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nHello World!"
 )
 
-var runningPorts = []uint32{}
-
-// var Deps = map[string]*proto.Mock{}
-
-// starts a number of proxies on the unused ports
-func bootProxies() {
-	// log.Println("bootProxies is called")
-	for i := 0; i < 50; {
-		if isPortAvailable(currentPort) {
-			go startProxy(currentPort)
-			runningPorts = append(runningPorts, currentPort)
-			i++
-		}
-		currentPort++
-	}
-	// log.Println("runningPorts after booting are: ", runningPorts)
+type ProxySet struct {
+	// PortList is the list of ports on which the keploy proxies are running
+	PortList []uint32
+	hook	*hooks.Hook
+	logger *zap.Logger
 }
 
+func (ps *ProxySet) SetHook(hook	*hooks.Hook)  {
+	ps.hook = hook
+}
+
+
+// BootProxies starts proxy servers on the idle local ports and returns the list of ports on which proxies are running. 
+// 
+// "startingPort" represents the initial port number from which the system sequentially searches for available or idle ports.. Default: 5000
+// 
+// "count" variable represents the number of proxies to be started. Default: 50
+func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
+	// assign default values if not provided
+	if opt.StartingPort == 0 {
+		opt.StartingPort = 5000
+	}
+	if opt.Count == 0 {
+		opt.Count = 50
+	}
+
+	var proxySet = ProxySet{
+		PortList: []uint32{},
+		logger: logger,
+	}
+
+	port := opt.StartingPort
+	for i := 0; i < opt.Count; {
+		if isPortAvailable(port) {
+			go proxySet.startProxy(port)
+			// adds the port number on which proxy has been started
+			proxySet.PortList = append(proxySet.PortList, port)
+			i++
+		}
+		port++
+	}
+
+	return &proxySet
+}
+
+// isPortAvailable function checks whether a local port is occupied and returns a boolean value indicating its availability.
 func isPortAvailable(port uint32) bool {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%v", port))
 	if err != nil {
@@ -116,69 +137,120 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return &serverTlsCert, nil
 }
 
-func startProxy(port uint32) {
+// startProxy function initiates a proxy on the specified port to handle redirected outgoing network calls.
+func (ps *ProxySet) startProxy(port uint32) {
 	// Read the CA certificate and private key from files
-	caCert, err := ioutil.ReadFile(caCertPath)
-	if err != nil {
-		log.Fatalf("Failed to read CA certificate: %v", err)
-	}
+	// caCert, err := ioutil.ReadFile(caCertPath)
+	// if err != nil {
+	// 	log.Fatalf("Failed to read CA certificate: %v", err)
+	// }
 
-	caKey, err := ioutil.ReadFile(caPrivateKeyPath)
-	if err != nil {
-		log.Fatalf("Failed to read CA private key: %v", err)
-	}
-	caPrivKey, err = helpers.ParsePrivateKeyPEM(caKey)
-	if err != nil {
-		log.Fatalf("Failed to parse CA private key: %v", err)
-	}
-	caCertParsed, err = helpers.ParseCertificatePEM(caCert)
-	if err != nil {
-		log.Fatalf("Failed to parse CA certificate: %v", err)
-	}
+	// caKey, err := ioutil.ReadFile(caPrivateKeyPath)
+	// if err != nil {
+	// 	log.Fatalf("Failed to read CA private key: %v", err)
+	// }
+	// caPrivKey, err = helpers.ParsePrivateKeyPEM(caKey)
+	// if err != nil {
+	// 	log.Fatalf("Failed to parse CA private key: %v", err)
+	// }
+	// caCertParsed, err = helpers.ParseCertificatePEM(caCert)
+	// if err != nil {
+	// 	log.Fatalf("Failed to parse CA certificate: %v", err)
+	// }
 	listener, err := net.Listen("tcp", fmt.Sprintf(proxyAddress+":%v", port))
 	if err != nil {
-		log.Fatalf("Error listening on %s: %v", proxyAddress, err)
+		ps.logger.Error(fmt.Sprintf("failed to start proxy on port:%v", port), zap.Error(err))
 	}
 	defer listener.Close()
 
-	log.Printf("Proxy server is listening on %s", fmt.Sprintf(proxyAddress+":%v", port))
-	config := &tls.Config{
-		GetCertificate: certForClient,
-	}
-	listener = tls.NewListener(listener, config)
+
+	ps.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(proxyAddress+":%v", port)))
+	
+	// TODO: integerate method For TLS connections 
+	// config := &tls.Config{
+	// 	GetCertificate: certForClient,
+	// }
+	// listener = tls.NewListener(listener, config)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("Error accepting connection: %v", err)
+			ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
 			continue
 		}
 
-		go handleConnection(conn, port)
+		go ps.handleConnection(conn, port)
 	}
 }
 
-func handleConnection(conn net.Conn, port uint32) {
-	// port := getRemotePort(conn)
 
+// handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
+func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	var (
-	// tmpPort uint32
-	// indx    uint32 = 0
-	)
-	var (
-		tmpPort = hooks.Vaccant_port{}
+		proxyState *hooks.PortState
 		indx    = -1
+		err error
 	)
 
-	for i := 0; i < len(runningPorts); i++ {
+	for i := 0; i < len(ps.PortList); i++ {
 
-		if err := objs.VaccantPorts.Lookup(uint32(i), &tmpPort); err != nil {
-			log.Printf("reading map: %v", err)
+		// if err = ps.hook.ProxyPorts.Lookup(uint32(i), &proxyState); err != nil {
+		// 	ps.logger.Error(fmt.Sprintf("failed to fetch the state of proxy running at port: %v", port), zap.Error(err))
+		// 	break
+		// }
+		proxyState, err =  ps.hook.GetProxyState(uint32(i))
+		if err != nil {
+			ps.logger.Error("failed to lookup the proxy state from map", zap.Error(err))
+			break
 		}
-		if tmpPort.Port == port {
+
+		if proxyState.Port == port {
 			indx = i
-			// log.Printf("Vacant_ports %T, port at index 0: %v", objs.VaccantPorts, tmpPort)
 			break
 		}
 	}
+
+	if indx == -1 {
+		ps.logger.Error("failed to fetch the state of proxy", zap.Any("port", port))
+		return
+	}
+
+	buffer, err := util.ReadBytes(conn)
+	if err != nil {
+		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+		return
+	}
+
+	// dst stores the connection with actual destination for the outgoing network call
+	var (
+		dst net.Conn
+		actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(proxyState.Dest_ip), proxyState.Dest_port)
+	)
+	dst, err = net.Dial("tcp", actualAddress)
+	if err != nil {
+		ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+		conn.Close()
+		return
+	}
+
+
+	switch  {
+	case httpparser.IsOutgoingHTTP(buffer):
+		// capture the otutgoing http text messages]
+		ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// case 
+	default:
+	}	
+
+
+	// releases the occupied proxy
+	proxyState.Occupied = 0
+	proxyState.Dest_ip = 0
+	proxyState.Dest_port = 0
+	ps.hook.UpdateProxyState(uint32(indx), proxyState)
+	// err = ps.hook.ProxyPorts.Update(uint32(indx), proxyState, ebpf.UpdateLock)
+	// if err != nil {
+	// 	ps.logger.Error("failed to release the occupied proxy", zap.Error(err), zap.Any("proxy port", port))
+	// 	return
+	// }
 }

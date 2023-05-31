@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
+	"go.uber.org/zap"
 	_ "golang.org/x/sys/unix"
 )
 
@@ -25,34 +26,36 @@ var PerfEventReaders []*perf.Reader
 var RingEventReaders []*ringbuf.Reader
 
 // LaunchPerfBufferConsumers launches socket events
-func LaunchPerfBufferConsumers(objs bpfObjects, connectionFactory *connection.Factory, stopper chan os.Signal) {
+func LaunchPerfBufferConsumers(objs bpfObjects, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
 
-	launchSocketOpenEvent(objs.SocketOpenEvents, connectionFactory, stopper)
-	launchSocketDataEvent(objs.SocketDataEvents, connectionFactory, stopper)
-	launchSocketCloseEvent(objs.SocketCloseEvents, connectionFactory, stopper)
+	launchSocketOpenEvent(objs.SocketOpenEvents, connectionFactory, stopper, logger)
+	launchSocketDataEvent(objs.SocketDataEvents, connectionFactory, stopper, logger)
+	launchSocketCloseEvent(objs.SocketCloseEvents, connectionFactory, stopper, logger)
 }
 
-func launchSocketOpenEvent(openEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal) {
+func launchSocketOpenEvent(openEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
 
 	// Open a perf event reader from userspace on the PERF_EVENT_ARRAY map
 	// described in the eBPF C program.
 	reader, err := perf.NewReader(openEventMap, os.Getpagesize())
 	if err != nil {
-		log.Fatalf("error creating perf event reader of socketOpenEvent: %s", err)
+		logger.Error("failed to create perf event reader of socketOpenEvent", zap.Error(err))
+		return
 	}
 	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
-	go socketOpenEventCallback(reader, connectionFactory)
+	go socketOpenEventCallback(reader, connectionFactory, logger)
 }
 
-func launchSocketDataEvent(dataEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal) {
+func launchSocketDataEvent(dataEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
 
 	// Open a ringbuf event reader from userspace on the RING_BUF map
 	// described in the eBPF C program.
 	reader, err := ringbuf.NewReader(dataEventMap)
 	if err != nil {
-		log.Fatalf("error creating ring buffer of socketDataEvent: %s", err)
+		logger.Error("failed to create ring buffer of socketDataEvent", zap.Error(err))
+		return
 	}
 	// defer reader.Close()
 	RingEventReaders = append(RingEventReaders, reader)
@@ -61,18 +64,19 @@ func launchSocketDataEvent(dataEventMap *ebpf.Map, connectionFactory *connection
 
 }
 
-func launchSocketCloseEvent(closeEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal) {
+func launchSocketCloseEvent(closeEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
 
 	// Open a perf event reader from userspace on the PERF_EVENT_ARRAY map
 	// described in the eBPF C program.
 	reader, err := perf.NewReader(closeEventMap, os.Getpagesize())
 	if err != nil {
-		log.Fatalf("error creating perf event reader of socketCloseEvent: %s", err)
+		logger.Error("failed to create perf event reader of socketCloseEvent", zap.Error(err))
+		return
 	}
 	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
-	go socketCloseEventCallback(reader, connectionFactory)
+	go socketCloseEventCallback(reader, connectionFactory, logger)
 }
 
 var eventAttributesSize = int(unsafe.Sizeof(structs.SocketDataEvent{}))
@@ -148,7 +152,7 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 	}
 }
 
-func socketOpenEventCallback(reader *perf.Reader, connectionFactory *connection.Factory) {
+func socketOpenEventCallback(reader *perf.Reader, connectionFactory *connection.Factory, logger *zap.Logger) {
 	for {
 
 		record, err := reader.Read()
@@ -178,7 +182,7 @@ func socketOpenEventCallback(reader *perf.Reader, connectionFactory *connection.
 	}
 }
 
-func socketCloseEventCallback(reader *perf.Reader, connectionFactory *connection.Factory) {
+func socketCloseEventCallback(reader *perf.Reader, connectionFactory *connection.Factory, logger *zap.Logger) {
 	for {
 
 		record, err := reader.Read()
@@ -186,23 +190,21 @@ func socketCloseEventCallback(reader *perf.Reader, connectionFactory *connection
 			if errors.Is(err, perf.ErrClosed) {
 				return
 			}
-			log.Printf("reading from perf socketCloseEvent reader: %s", err)
+			logger.Error("reading from perf socketCloseEvent reader", zap.Error(err))
 			continue
 		}
 
 		if record.LostSamples != 0 {
-			log.Printf("perf socketCloseEvent array full, dropped %d samples", record.LostSamples)
+			logger.Debug(fmt.Sprintf("perf socketCloseEvent array full, dropped %d samples", record.LostSamples))
 			continue
 		}
 		data := record.RawSample
 
 		var event structs.SocketCloseEvent
 		if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &event); err != nil {
-			log.Printf("Failed to decode received data: %+v", err)
+			logger.Debug(fmt.Sprintf("Failed to decode received data: %+v", err))
 			continue
 		}
-
-		log.Printf("i got the close event bro:%v", event)
 
 		event.TimestampNano += settings.GetRealTimeOffset()
 		connectionFactory.GetOrCreate(event.ConnID).AddCloseEvent(event)
