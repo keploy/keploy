@@ -1,190 +1,190 @@
 package keploy
 
-import (
-	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
-	"sync"
-	"testing"
-	"time"
+// import (
+// 	"fmt"
+// 	"net/http"
+// 	"os"
+// 	"path/filepath"
+// 	"sync"
+// 	"testing"
+// 	"time"
 
-	"github.com/creasty/defaults"
-	"github.com/go-playground/validator/v10"
+// 	"github.com/creasty/defaults"
+// 	"github.com/go-playground/validator/v10"
 
-	// proto "go.keploy.io/server/grpc/regression"
+// 	// proto "go.keploy.io/server/grpc/regression"
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-)
+// 	"go.uber.org/zap"
+// 	"go.uber.org/zap/zapcore"
+// )
 
-var result = make(chan bool, 1)
+// var result = make(chan bool, 1)
 
-func KeployInitializer() {
-	fmt.Println("keployInitializer function got called.")
+// func KeployInitializer() {
+// 	fmt.Println("keployInitializer function got called.")
 
-	m := Mode(os.Getenv("KEPLOY_MODE"))
-	fmt.Println("KEPLOY_MODE:", m)
-	if m == "" {
-		return
-	}
-	err := SetMode(m)
-	if err != nil {
-		fmt.Println("warning: ", err)
-	}
+// 	m := Mode(os.Getenv("KEPLOY_MODE"))
+// 	fmt.Println("KEPLOY_MODE:", m)
+// 	if m == "" {
+// 		return
+// 	}
+// 	err := SetMode(m)
+// 	if err != nil {
+// 		fmt.Println("warning: ", err)
+// 	}
 
-	if m == MODE_TEST {
+// 	if m == MODE_TEST {
 
-		port := os.Getenv("PORT")
-		fmt.Println("PORT:", port)
-		if port == "" {
-			return
-		}
+// 		port := os.Getenv("PORT")
+// 		fmt.Println("PORT:", port)
+// 		if port == "" {
+// 			return
+// 		}
 
-		host := os.Getenv("HOST")
-		fmt.Println("HOST:", host)
-		if host == "" {
-			return
-		}
-		tPath := os.Getenv("KEPLOY_TEST_PATH")
-		fmt.Println("KEPLOY_TEST_PATH:", tPath)
-		if tPath == "" {
-			return
-		}
+// 		host := os.Getenv("HOST")
+// 		fmt.Println("HOST:", host)
+// 		if host == "" {
+// 			return
+// 		}
+// 		tPath := os.Getenv("KEPLOY_TEST_PATH")
+// 		fmt.Println("KEPLOY_TEST_PATH:", tPath)
+// 		if tPath == "" {
+// 			return
+// 		}
 
-		cfg := Config{
-			App: AppConfig{
-				Port:     port,
-				Host:     host,
-				TestPath: tPath,
-			},
-		}
+// 		cfg := Config{
+// 			App: AppConfig{
+// 				Port:     port,
+// 				Host:     host,
+// 				TestPath: tPath,
+// 			},
+// 		}
 
-		New(cfg)
-		// k.Test()
-	}
-}
+// 		New(cfg)
+// 		// k.Test()
+// 	}
+// }
 
-func AssertTests(t *testing.T) {
-	r := <-result
-	if !r {
-		t.Error("Keploy test suite failed")
-	}
-}
+// func AssertTests(t *testing.T) {
+// 	r := <-result
+// 	if !r {
+// 		t.Error("Keploy test suite failed")
+// 	}
+// }
 
-// NewApp creates and returns an App instance for API testing. It should be called before router
-// and dependency integration. It takes 5 strings as parameters.
-//
-// name parameter should be the name of project app, It should not contain spaces.
-//
-// licenseKey parameter should be the license key for the API testing.
-//
-// keployHost parameter is the keploy's server address. If it is empty, requests are made to the
-// hosted Keploy server.
-//
-// host and port parameters contains the host and port of API to be tested.
+// // NewApp creates and returns an App instance for API testing. It should be called before router
+// // and dependency integration. It takes 5 strings as parameters.
+// //
+// // name parameter should be the name of project app, It should not contain spaces.
+// //
+// // licenseKey parameter should be the license key for the API testing.
+// //
+// // keployHost parameter is the keploy's server address. If it is empty, requests are made to the
+// // hosted Keploy server.
+// //
+// // host and port parameters contains the host and port of API to be tested.
 
-type Config struct {
-	App    AppConfig
-	Server ServerConfig
-}
+// type Config struct {
+// 	App    AppConfig
+// 	Server ServerConfig
+// }
 
-type AppConfig struct {
-	Name     string        `default:"myApp"`
-	Host     string        `default:"0.0.0.0"`
-	Port     string        `validate:"required"`
-	Delay    time.Duration `default:"5s"`
-	Timeout  time.Duration `default:"60s"`
-	Filter   Filter
-	TestPath string `default:""`
-	MockPath string `default:""`
-}
+// type AppConfig struct {
+// 	Name     string        `default:"myApp"`
+// 	Host     string        `default:"0.0.0.0"`
+// 	Port     string        `validate:"required"`
+// 	Delay    time.Duration `default:"5s"`
+// 	Timeout  time.Duration `default:"60s"`
+// 	Filter   Filter
+// 	TestPath string `default:""`
+// 	MockPath string `default:""`
+// }
 
-type Filter struct {
-	AcceptUrlRegex string
-	HeaderRegex    []string
-	RejectUrlRegex []string
-}
+// type Filter struct {
+// 	AcceptUrlRegex string
+// 	HeaderRegex    []string
+// 	RejectUrlRegex []string
+// }
 
-type ServerConfig struct {
-	URL        string `default:"http://localhost:6789/api"`
-	LicenseKey string
-}
+// type ServerConfig struct {
+// 	URL        string `default:"http://localhost:6789/api"`
+// 	LicenseKey string
+// }
 
-func New(cfg Config) *Keploy {
-	zcfg := zap.NewDevelopmentConfig()
-	zcfg.EncoderConfig.CallerKey = zapcore.OmitKey
-	zcfg.EncoderConfig.LevelKey = zapcore.OmitKey
-	zcfg.EncoderConfig.TimeKey = zapcore.OmitKey
+// func New(cfg Config) *Keploy {
+// 	zcfg := zap.NewDevelopmentConfig()
+// 	zcfg.EncoderConfig.CallerKey = zapcore.OmitKey
+// 	zcfg.EncoderConfig.LevelKey = zapcore.OmitKey
+// 	zcfg.EncoderConfig.TimeKey = zapcore.OmitKey
 
-	logger, err := zcfg.Build()
-	defer func() {
-		_ = logger.Sync() // flushes buffer, if any
-	}()
-	if err != nil {
-		panic(err)
-	}
-	// set defaults
-	if err = defaults.Set(&cfg); err != nil {
-		logger.Error("failed to set default values to keploy conf", zap.Error(err))
-	}
+// 	logger, err := zcfg.Build()
+// 	defer func() {
+// 		_ = logger.Sync() // flushes buffer, if any
+// 	}()
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	// set defaults
+// 	if err = defaults.Set(&cfg); err != nil {
+// 		logger.Error("failed to set default values to keploy conf", zap.Error(err))
+// 	}
 
-	validate := validator.New()
-	err = validate.Struct(&cfg)
-	if err != nil {
-		logger.Error("conf missing important field", zap.Error(err))
-	}
+// 	validate := validator.New()
+// 	err = validate.Struct(&cfg)
+// 	if err != nil {
+// 		logger.Error("conf missing important field", zap.Error(err))
+// 	}
 
-	if len(cfg.App.TestPath) > 0 && cfg.App.TestPath[0] != '/' {
-		path, err := filepath.Abs(cfg.App.TestPath)
-		if err != nil {
-			logger.Error("Failed to get the absolute path from relative conf.path", zap.Error(err))
-		}
-		cfg.App.TestPath = path
-	} else if len(cfg.App.TestPath) == 0 {
-		path, err := os.Getwd()
-		if err != nil {
-			logger.Error("Failed to get the path of current directory", zap.Error(err))
-		}
-		cfg.App.TestPath = path + "/keploy/tests"
-	}
-	if len(cfg.App.MockPath) > 0 && cfg.App.MockPath[0] != '/' {
-		path, err := filepath.Abs(cfg.App.MockPath)
-		if err != nil {
-			logger.Error("Failed to get the absolute path from relative conf.path", zap.Error(err))
-		}
-		cfg.App.MockPath = path
-	} else if len(cfg.App.MockPath) == 0 {
-		path, err := os.Getwd()
-		if cfg.App.TestPath == "" {
-			logger.Error("Failed to get the path of current directory", zap.Error(err))
-		}
-		cfg.App.MockPath = path + "/keploy/mocks"
-	}
+// 	if len(cfg.App.TestPath) > 0 && cfg.App.TestPath[0] != '/' {
+// 		path, err := filepath.Abs(cfg.App.TestPath)
+// 		if err != nil {
+// 			logger.Error("Failed to get the absolute path from relative conf.path", zap.Error(err))
+// 		}
+// 		cfg.App.TestPath = path
+// 	} else if len(cfg.App.TestPath) == 0 {
+// 		path, err := os.Getwd()
+// 		if err != nil {
+// 			logger.Error("Failed to get the path of current directory", zap.Error(err))
+// 		}
+// 		cfg.App.TestPath = path + "/keploy/tests"
+// 	}
+// 	if len(cfg.App.MockPath) > 0 && cfg.App.MockPath[0] != '/' {
+// 		path, err := filepath.Abs(cfg.App.MockPath)
+// 		if err != nil {
+// 			logger.Error("Failed to get the absolute path from relative conf.path", zap.Error(err))
+// 		}
+// 		cfg.App.MockPath = path
+// 	} else if len(cfg.App.MockPath) == 0 {
+// 		path, err := os.Getwd()
+// 		if cfg.App.TestPath == "" {
+// 			logger.Error("Failed to get the path of current directory", zap.Error(err))
+// 		}
+// 		cfg.App.MockPath = path + "/keploy/mocks"
+// 	}
 
-	k := &Keploy{
-		cfg: cfg,
-		Log: logger,
-		client: &http.Client{
-			Timeout: cfg.App.Timeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-		mocks:    sync.Map{},
-		mocktime: sync.Map{},
-	}
+// 	k := &Keploy{
+// 		cfg: cfg,
+// 		Log: logger,
+// 		client: &http.Client{
+// 			Timeout: cfg.App.Timeout,
+// 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+// 				return http.ErrUseLastResponse
+// 			},
+// 		},
+// 		mocks:    sync.Map{},
+// 		mocktime: sync.Map{},
+// 	}
 
-	return k
-}
+// 	return k
+// }
 
-type Keploy struct {
-	cfg      Config
-	Log      *zap.Logger
-	client   *http.Client
-	mocktime sync.Map
-	mocks    sync.Map
-}
+// type Keploy struct {
+// 	cfg      Config
+// 	Log      *zap.Logger
+// 	client   *http.Client
+// 	mocktime sync.Map
+// 	mocks    sync.Map
+// }
 
 // func (k *Keploy) GetMocks(id string) []*proto.Mock {
 // 	val, ok := k.mocks.Load(id)
