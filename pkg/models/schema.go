@@ -18,6 +18,7 @@ const (
 	GENERIC        Kind     = "Generic"
 	SQL            Kind     = "SQL"
 	GRPC_EXPORT    Kind     = "gRPC"
+	Mongo          Kind     = "Mongo"
 	BodyTypeUtf8   BodyType = "utf-8"
 	BodyTypeBinary BodyType = "binary"
 	BodyTypePlain  BodyType = "PLAIN"

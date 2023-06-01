@@ -38,3 +38,7 @@ test-reports
 
 #Ignore the test reports
 test-reports
+
+#Ignore the c and header files
+*.c
+*.h

@@ -13,6 +13,7 @@ import (
 	"github.com/cloudflare/cfssl/signer/local"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
+	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
@@ -62,6 +63,8 @@ func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
 		}
 		port++
 	}
+
+	proxySet.logger.Info(fmt.Sprintf("Set of proxies have started at port range [%v:%v]", proxySet.PortList[0], proxySet.PortList[opt.Count-1]))
 
 	return &proxySet
 }
@@ -238,7 +241,11 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
 		ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-		// case 
+	case mongoparser.IsOutgoingMongo(buffer):
+		deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+		for _, v := range deps {
+			ps.hook.AppendDeps(v)
+		}
 	default:
 	}	
 

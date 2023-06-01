@@ -84,6 +84,7 @@ type bpfMapSpecs struct {
 	SocketDataEventBufferHeap *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.MapSpec `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.MapSpec `ebpf:"socket_open_events"`
+	UserPid                   *ebpf.MapSpec `ebpf:"user_pid"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -115,6 +116,7 @@ type bpfMaps struct {
 	SocketDataEventBufferHeap *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.Map `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.Map `ebpf:"socket_open_events"`
+	UserPid                   *ebpf.Map `ebpf:"user_pid"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -129,6 +131,7 @@ func (m *bpfMaps) Close() error {
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
+		m.UserPid,
 	)
 }
 

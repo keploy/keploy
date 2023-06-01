@@ -140,12 +140,12 @@ func (h *Hook) Stop () {
 //
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers
-func (h *Hook) LoadHooks() {
+func (h *Hook) LoadHooks(pid uint32) error {
 	// k := keploy.KeployInitializer()
 	
 	if err := settings.InitRealTimeOffset(); err != nil {
-		log.Printf("Failed fixing BPF clock, timings will be offseted: %v", err)
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
+		return err
 	}
 	
 	stopper := make(chan os.Signal, 1)
@@ -154,17 +154,22 @@ func (h *Hook) LoadHooks() {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		h.logger.Error("failed to lock memory for eBPF resources", zap.Error(err))
-		return
+		return err
 	}
 	
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
 		h.logger.Error("failed to load eBPF objects", zap.Error(err))
-		return
+		return err
 	}
 	// defer objs.Close()
 	// hook := newHook(objs.ProxyPorts, stopper, db)
+	err := objs.UserPid.Update(uint32(0), &pid, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to update the process id of the user application", zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
 	h.proxyStateMap = objs.ProxyPorts
 	h.stopper = stopper
 	h.objects = objs
@@ -183,7 +188,7 @@ func (h *Hook) LoadHooks() {
 	cgroupPath, err := detectCgroupPath()
 	if err != nil {
 		h.logger.Error("failed to detect the cgroup path", zap.Error(err))
-		return
+		return err
 	}
 
 
@@ -195,7 +200,7 @@ func (h *Hook) LoadHooks() {
 
 	if err != nil {
 		h.logger.Error("failed to attach the connect4 cgroup hook", zap.Error(err))
-		return
+		return err
 	}
 	h.connect4 = c4
 	// defer c4.Close()
@@ -208,7 +213,7 @@ func (h *Hook) LoadHooks() {
 
 	if err != nil {
 		h.logger.Error("failed to attach the connect6 cgroup hook", zap.Error(err))
-		return
+		return err
 	}
 	h.connect6 = c6
 	// defer c6.Close()
@@ -221,7 +226,7 @@ func (h *Hook) LoadHooks() {
 
 	if err != nil {
 		h.logger.Error("faled to attach GetPeername cgroup hook", zap.Error(err))
-		return
+		return err
 	}
 	h.gp4 = gp4
 	// defer gp4.Close()
@@ -237,7 +242,7 @@ func (h *Hook) LoadHooks() {
 		err = objs.ProxyPorts.Update(uint32(i), PortState{Port: v}, ebpf.UpdateLock)
 		if err != nil {
 			h.logger.Error("failed to update the proxy state in the ebpf map", zap.Error(err))
-			return
+			return err
 		}
 		// err := objs.VaccantPorts.Update(uint32(i), []PortState{{Port: v, Occupied: false}}, ebpf.UpdateAny)
 		// ports := []uint32{}
@@ -258,7 +263,7 @@ func (h *Hook) LoadHooks() {
 	ac, err := link.Kprobe("sys_accept", objs.SyscallProbeEntryAccept, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kprobe hook on sys_accept", zap.Error(err))
-		return
+		return err
 	}
 	h.accept = ac
 	// defer ac.Close()
@@ -268,7 +273,7 @@ func (h *Hook) LoadHooks() {
 	ac_, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_accept", zap.Error(err))
-		return
+		return err
 	}
 	h.acceptRet = ac_
 	// defer ac_.Close()
@@ -278,7 +283,7 @@ func (h *Hook) LoadHooks() {
 	ac4, err := link.Kprobe("sys_accept4", objs.SyscallProbeEntryAccept4, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kprobe hook on sys_accept4", zap.Error(err))
-		return
+		return err
 	}
 	h.accept4 = ac4
 	// defer ac4.Close()
@@ -288,7 +293,7 @@ func (h *Hook) LoadHooks() {
 	ac4_, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_accept4", zap.Error(err))
-		return
+		return err
 	}
 	h.accept4Ret = ac4_
 	// defer ac4_.Close()
@@ -298,7 +303,7 @@ func (h *Hook) LoadHooks() {
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kprobe hook on sys_read", zap.Error(err))
-		return
+		return err
 	}
 	h.read = rd
 	// defer rd.Close()
@@ -308,7 +313,7 @@ func (h *Hook) LoadHooks() {
 	rd_, err := link.Kretprobe("sys_read", objs.SyscallProbeRetRead, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_read", zap.Error(err))
-		return
+		return err
 	}
 	h.readRet = rd_
 	// defer rd_.Close()
@@ -318,7 +323,7 @@ func (h *Hook) LoadHooks() {
 	wt, err := link.Kprobe("sys_write", objs.SyscallProbeEntryWrite, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kprobe hook on sys_write", zap.Error(err))
-		return
+		return err
 	}
 	h.write = wt
 	// defer wt.Close()
@@ -328,7 +333,7 @@ func (h *Hook) LoadHooks() {
 	wt_, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_write", zap.Error(err))
-		return
+		return err
 	}
 	h.writeRet = wt_
 	// defer wt_.Close()
@@ -338,7 +343,7 @@ func (h *Hook) LoadHooks() {
 	cl, err := link.Kprobe("sys_close", objs.SyscallProbeEntryClose, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kprobe hook on sys_close", zap.Error(err))
-		return
+		return err
 	}
 	h.close = cl
 	// defer cl.Close()
@@ -348,7 +353,7 @@ func (h *Hook) LoadHooks() {
 	cl_, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, nil)
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_close", zap.Error(err))
-		return
+		return err
 	}
 	h.closeRet = cl_
 	// defer cl_.Close()
@@ -372,6 +377,7 @@ func (h *Hook) LoadHooks() {
 	// 		log.Fatalf("closing ringbuf reader: %s", err)
 	// 	}
 	// }
+	return nil
 }
 
 // detectCgroupPath returns the first-found mount point of type cgroup2
