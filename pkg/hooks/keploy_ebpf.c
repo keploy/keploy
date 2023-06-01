@@ -29,7 +29,7 @@
 // load program: argument list too long: 764: (1d) if r1 == r2 goto pc-503     ; frame1: R1_w=258048 R2_w=scalar(umax=4294967295,var_off=(0x0; 0xffffffff)): ; int by (truncated, 854 line(s) omitted)
 #define CHUNK_LIMIT 80
 
-u32 A_PID = 373061;
+// u32 A_PID = 373061;
 
 u16 NEW_PORT = 5000; // Choose the desired port number
 u32 NEW_IP   = 0;    // 192.168.1.23 in hexadecimal forma
@@ -65,6 +65,14 @@ struct {
 	__uint(max_entries, 50);
 } proxy_ports SEC(".maps");
 
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, u32);
+    __type(value, u32);
+    __uint(max_entries, 1);
+} user_pid SEC(".maps");
+
 u32 convert_network_to_host_order(u32 value) {
     u16 high_half = value >> 16;
     u16 low_half = value & 0xFFFF;
@@ -77,9 +85,14 @@ u32 convert_network_to_host_order(u32 value) {
 SEC("cgroup/connect4")
 int k_connect4(struct bpf_sock_addr *ctx) {
 	u64 id  = bpf_get_current_pid_tgid();
-	u32 pid = id >> 32;
+	u32 pid = id >> 32; 
+    u32 indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
 	bpf_printk("connect4 expected pid: %lu, and actual pid: %lu", A_PID, pid);
-	if (pid != A_PID) {
+	if (pid != *A_PID) {
 		return 1;
 	}
 	bpf_printk("connect4 called [PID:%lu], Protocol: %lu\n", pid, ctx->protocol);
@@ -163,9 +176,13 @@ SEC("cgroup/connect6")
 int k_connect6(struct bpf_sock_addr *ctx) {
 
     u64 id  = bpf_get_current_pid_tgid();
-	u32 pid = id >> 32;
+	u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
 	bpf_printk("connect6 expected pid: %lu, and actual pid: %lu", A_PID, pid);
-	if (pid != A_PID) {
+	if (pid != *A_PID) {
 		return 1;
 	}
 	bpf_printk("connect6 called [PID:%lu], Protocol: %lu\n", pid, ctx->protocol);
@@ -181,7 +198,7 @@ int k_getpeername4(struct bpf_sock_addr *ctx) {
     // u64 id  = bpf_get_current_pid_tgid();
 	// u32 pid = id >> 32;
 	// bpf_printk("getpeername4 expected pid: %lu, and calling process pid: %lu", A_PID, pid);
-	// if (pid != A_PID) {
+	// if (pid != *A_PID) {
 	// 	return 1;
 	// }
 	// bpf_printk("getpeername4 called [PID:%lu]\n", pid);
@@ -705,8 +722,12 @@ int syscall__probe_entry_accept(struct pt_regs *ctx)
 {
 
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     struct pt_regs *__ctx = (struct pt_regs *)PT_REGS_PARM1_CORE(ctx);
@@ -731,8 +752,12 @@ SEC("kretprobe/sys_accept")
 int syscall__probe_ret_accept(struct pt_regs *ctx)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
     // bpf_printk("[sys_accept_exit]:called for [PID:%lu]\n", pid);
 
@@ -758,8 +783,12 @@ int syscall__probe_entry_accept4(struct pt_regs *ctx)
 {
 
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     struct pt_regs *__ctx = (struct pt_regs *)PT_REGS_PARM1_CORE(ctx);
@@ -783,8 +812,12 @@ SEC("kretprobe/sys_accept4")
 int syscall__probe_ret_accept4(struct pt_regs *ctx)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
     // bpf_printk("[sys_accept4_exit]:called for [PID:%lu]\n", pid);
 
@@ -809,8 +842,12 @@ SEC("kprobe/sys_read")
 int syscall__probe_entry_read(struct pt_regs *ctx)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     struct pt_regs *__ctx = (struct pt_regs *)PT_REGS_PARM1_CORE(ctx);
@@ -843,8 +880,12 @@ SEC("kretprobe/sys_read")
 int syscall__probe_ret_read(struct pt_regs *ctx)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     // bpf_printk("[sys_read_exit]:called for [PID:%lu]\n", pid);
@@ -879,8 +920,12 @@ SEC("kprobe/sys_write")
 int syscall__probe_entry_write(struct pt_regs *ctx)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     struct pt_regs *__ctx = (struct pt_regs *)PT_REGS_PARM1_CORE(ctx);
@@ -913,8 +958,12 @@ SEC("kretprobe/sys_write")
 int syscall__probe_ret_write(struct pt_regs *ctx)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     // bpf_printk("[sys_write_exit]:called for [PID:%lu]\n", pid);
@@ -950,8 +999,12 @@ SEC("kprobe/sys_close")
 int syscall__probe_entry_close(struct pt_regs *ctx, int fd)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     struct pt_regs *__ctx = (struct pt_regs *)PT_REGS_PARM1_CORE(ctx);
@@ -974,8 +1027,12 @@ SEC("kretprobe/sys_close")
 int syscall__probe_ret_close(struct pt_regs *ctx)
 {
     u64 id = bpf_get_current_pid_tgid();
-    u32 pid = id >> 32;
-    if (pid != A_PID)
+    u32 pid = id >> 32, indx = 0;
+    u32 *A_PID = bpf_map_lookup_elem(&user_pid, &indx);
+    if (A_PID == NULL) {
+        return 1;
+    }
+    if (pid != *A_PID)
         return 0;
 
     // bpf_printk("[sys_close_exit]:called for [PID:%lu]\n", pid);

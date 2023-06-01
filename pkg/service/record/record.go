@@ -18,7 +18,7 @@ func NewRecorder (logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(tcsPath, mockPath string)  {
+func (r *recorder) CaptureTraffic(tcsPath, mockPath string, pid uint32)  {
 	models.SetMode(models.MODE_RECORD)
 
 	ys := yaml.NewYamlStore(tcsPath, mockPath, r.logger)
@@ -26,7 +26,9 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string)  {
 	ps := proxy.BootProxies(r.logger, proxy.Option{})
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks := hooks.NewHook(ps.PortList, ys, r.logger)
-	loadedHooks.LoadHooks()
+	if err := loadedHooks.LoadHooks(pid); err != nil {
+		return 
+	}
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
 
