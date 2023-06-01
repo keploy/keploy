@@ -17,6 +17,173 @@ import (
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 )
 
+func EncodeMongoMessage(spec *models.MongoSpec, doc *proto.Mock) error {
+	
+	// encode mongoRequest into yaml
+	switch spec.RequestHeader.Opcode {
+	case wiremessage.OpReply:
+		err := spec.Request.Encode(models.MongoOpReply{
+			ResponseFlags: doc.Spec.MongoRequest.ResponseFlags,
+			CursorID: doc.Spec.MongoRequest.CursorID,
+			StartingFrom: doc.Spec.MongoRequest.StartingFrom,
+			NumberReturned: doc.Spec.MongoRequest.NumberReturned,
+			Documents: doc.Spec.MongoRequest.Documents,
+		}) 
+		if err!=nil {
+			return fmt.Errorf("failed to encode mongo request of type OpReply for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+	case wiremessage.OpQuery:
+		err := spec.Request.Encode(models.MongoOpQuery{
+			Flags: doc.Spec.MongoRequest.Flags,
+			FullCollectionName: doc.Spec.MongoRequest.FullCollectionName,
+			NumberToSkip: doc.Spec.MongoRequest.NumberToSkip,
+			NumberToReturn: doc.Spec.MongoRequest.NumberToReturn,
+			Query: doc.Spec.MongoRequest.Query,
+			ReturnFieldsSelector: doc.Spec.MongoRequest.ReturnFieldsSelector,
+		})	
+		if err!=nil {
+			return fmt.Errorf("failed to encode mongo request of type OpQuery for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+	case wiremessage.OpMsg:
+		err := spec.Request.Encode(models.MongoOpMessage{
+			FlagBits: int(doc.Spec.MongoRequest.FlagBits),
+			Sections: doc.Spec.MongoRequest.Sections,
+			Checksum: int(doc.Spec.MongoRequest.Checksum),
+		})
+		if err!=nil {
+			return fmt.Errorf("failed to encode mongo request of type OpMsg for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+	}
+
+	// encode mongoResponse into yaml
+	switch spec.ResponseHeader.Opcode {
+	case wiremessage.OpReply:
+		err := spec.Response.Encode(models.MongoOpReply{
+			ResponseFlags: doc.Spec.MongoResponse.ResponseFlags,
+			CursorID: doc.Spec.MongoResponse.CursorID,
+			StartingFrom: doc.Spec.MongoResponse.StartingFrom,
+			NumberReturned: doc.Spec.MongoResponse.NumberReturned,
+			Documents: doc.Spec.MongoResponse.Documents,
+		}) 
+		if err!=nil {
+			return fmt.Errorf("failed to encode mongo response of type OpReply for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+	case wiremessage.OpQuery:
+		err := spec.Response.Encode(models.MongoOpQuery{
+			Flags: doc.Spec.MongoResponse.Flags,
+			FullCollectionName: doc.Spec.MongoResponse.FullCollectionName,
+			NumberToSkip: doc.Spec.MongoResponse.NumberToSkip,
+			NumberToReturn: doc.Spec.MongoResponse.NumberToReturn,
+			Query: doc.Spec.MongoResponse.Query,
+			ReturnFieldsSelector: doc.Spec.MongoResponse.ReturnFieldsSelector,
+		})	
+		if err!=nil {
+			return fmt.Errorf("failed to encode mongo response of type OpQuery for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+	case wiremessage.OpMsg:
+		err := spec.Response.Encode(models.MongoOpMessage{
+			FlagBits: int(doc.Spec.MongoResponse.FlagBits),
+			Sections: doc.Spec.MongoResponse.Sections,
+			Checksum: int(doc.Spec.MongoResponse.Checksum),
+		})
+		if err!=nil {
+			return fmt.Errorf("failed to encode mongo response of type OpMsg for mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+	}
+	return nil
+}
+
+func DecodeMongoMessage (spec *models.MongoSpec, doc *proto.Mock) error {
+	// mongo request
+	switch doc.Spec.RequestHeader.OpCode {
+	case int32(wiremessage.OpMsg):
+		req := &models.MongoOpMessage{}
+		err := spec.Request.Decode(req)
+		if err != nil {
+			return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+		doc.Spec.MongoRequest = &proto.MongoMessage{
+			FlagBits: int64(req.FlagBits),
+			Sections: req.Sections,
+			Checksum: int64(req.Checksum),
+		}
+	case int32(wiremessage.OpReply):
+		req := &models.MongoOpReply{}
+		err := spec.Request.Decode(req)
+		if err != nil {
+			return fmt.Errorf("failed to decode the mongo OpReply of mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+		doc.Spec.MongoRequest = &proto.MongoMessage{
+			ResponseFlags: req.ResponseFlags,
+			CursorID: req.CursorID,
+			StartingFrom: req.StartingFrom,
+			NumberReturned: req.NumberReturned,
+			Documents: req.Documents,
+		}
+	case int32(wiremessage.OpQuery):
+		req := &models.MongoOpQuery{}
+		err := spec.Request.Decode(req)
+		if err != nil {
+			return fmt.Errorf("failed to decode the mongo OpReply of mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+		doc.Spec.MongoRequest = &proto.MongoMessage{
+			Flags: req.Flags,
+			FullCollectionName: req.FullCollectionName,
+			NumberToSkip: req.NumberToSkip,
+			NumberToReturn: req.NumberToReturn,
+			Query: req.Query,
+			ReturnFieldsSelector: req.ReturnFieldsSelector,
+		}
+	default:
+		// TODO
+	}
+
+	// mongo response
+	switch doc.Spec.ResponseHeader.OpCode {
+	case int32(wiremessage.OpMsg):
+		resp := &models.MongoOpMessage{}
+		err := spec.Response.Decode(resp)
+		if err != nil {
+			return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+		doc.Spec.MongoResponse = &proto.MongoMessage{
+			FlagBits: int64(resp.FlagBits),
+			Sections: resp.Sections,
+			Checksum: int64(resp.Checksum),
+		}
+	case int32(wiremessage.OpReply):
+		resp := &models.MongoOpReply{}
+		err := spec.Response.Decode(resp)
+		if err != nil {
+			return fmt.Errorf("failed to decode the mongo OpReply of mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+		doc.Spec.MongoResponse = &proto.MongoMessage{
+			ResponseFlags: resp.ResponseFlags,
+			CursorID: resp.CursorID,
+			StartingFrom: resp.StartingFrom,
+			NumberReturned: resp.NumberReturned,
+			Documents: resp.Documents,
+		}
+	case int32(wiremessage.OpQuery):
+		resp := &models.MongoOpQuery{}
+		err := spec.Response.Decode(resp)
+		if err != nil {
+			return fmt.Errorf("failed to decode the mongo OpReply of mock with name: %s.  error: %s", doc.Name, err.Error())
+		}
+		doc.Spec.MongoResponse = &proto.MongoMessage{
+			Flags: resp.Flags,
+			FullCollectionName: resp.FullCollectionName,
+			NumberToSkip: resp.NumberToSkip,
+			NumberToReturn: resp.NumberToReturn,
+			Query: resp.Query,
+			ReturnFieldsSelector: resp.ReturnFieldsSelector,
+		}
+	default:
+		// TODO
+	}
+	return nil
+}
+
 func Encode(doc *proto.Mock) (models.Mock, error) {
 	res := models.Mock{
 		Version: models.Version(doc.Version),
@@ -25,32 +192,51 @@ func Encode(doc *proto.Mock) (models.Mock, error) {
 	}
 	switch doc.Kind {
 	case string(models.Mongo):
+
 		spec := models.MongoSpec{
 			Metadata: doc.Spec.Metadata,
-			RequestMessage: models.MongoMessage{
-				Header: models.MongoHeader{
-					Length:     doc.Spec.RequestMongoMessage.Header.Length,
-					RequestID:  doc.Spec.RequestMongoMessage.Header.RequestId,
-					ResponseTo: doc.Spec.RequestMongoMessage.Header.ResponseTo,
-					Opcode:     wiremessage.OpCode(doc.Spec.RequestMongoMessage.Header.OpCode),
-				},
-				FlagBits: int(doc.Spec.RequestMongoMessage.FlagBits),
-				Sections: doc.Spec.RequestMongoMessage.Sections,
-				Checksum: int(doc.Spec.RequestMongoMessage.Checksum),
+			RequestHeader: models.MongoHeader{
+				Length: doc.Spec.RequestHeader.Length,
+				RequestID: doc.Spec.RequestHeader.RequestId,
+				ResponseTo: doc.Spec.RequestHeader.ResponseTo,
+				Opcode: wiremessage.OpCode(doc.Spec.RequestHeader.OpCode),
 			},
-			ResponseMessage: models.MongoMessage{
-				Header: models.MongoHeader{
-					Length:     doc.Spec.ResponseMongoMessage.Header.Length,
-					RequestID:  doc.Spec.ResponseMongoMessage.Header.RequestId,
-					ResponseTo: doc.Spec.ResponseMongoMessage.Header.ResponseTo,
-					Opcode:     wiremessage.OpCode(doc.Spec.ResponseMongoMessage.Header.OpCode),
-				},
-				FlagBits: int(doc.Spec.ResponseMongoMessage.FlagBits),
-				Sections: doc.Spec.ResponseMongoMessage.Sections,
-				Checksum: int(doc.Spec.ResponseMongoMessage.Checksum),
+			ResponseHeader: models.MongoHeader{
+				Length: doc.Spec.ResponseHeader.Length,
+				RequestID: doc.Spec.ResponseHeader.RequestId,
+				ResponseTo: doc.Spec.ResponseHeader.ResponseTo,
+				Opcode: wiremessage.OpCode(doc.Spec.ResponseHeader.OpCode),
 			},
+			// Request: ,
+			// RequestMessage: models.MongoMessage{
+			// 	Header: models.MongoHeader{
+			// 		Length:     doc.Spec.RequestMongoMessage.Header.Length,
+			// 		RequestID:  doc.Spec.RequestMongoMessage.Header.RequestId,
+			// 		ResponseTo: doc.Spec.RequestMongoMessage.Header.ResponseTo,
+			// 		Opcode:     wiremessage.OpCode(doc.Spec.RequestMongoMessage.Header.OpCode),
+			// 	},
+			// 	FlagBits: int(doc.Spec.RequestMongoMessage.FlagBits),
+			// 	Sections: doc.Spec.RequestMongoMessage.Sections,
+			// 	Checksum: int(doc.Spec.RequestMongoMessage.Checksum),
+			// },
+			// ResponseMessage: models.MongoMessage{
+			// 	Header: models.MongoHeader{
+			// 		Length:     doc.Spec.ResponseMongoMessage.Header.Length,
+			// 		RequestID:  doc.Spec.ResponseMongoMessage.Header.RequestId,
+			// 		ResponseTo: doc.Spec.ResponseMongoMessage.Header.ResponseTo,
+			// 		Opcode:     wiremessage.OpCode(doc.Spec.ResponseMongoMessage.Header.OpCode),
+			// 	},
+			// 	FlagBits: int(doc.Spec.ResponseMongoMessage.FlagBits),
+			// 	Sections: doc.Spec.ResponseMongoMessage.Sections,
+			// 	Checksum: int(doc.Spec.ResponseMongoMessage.Checksum),
+			// },
 		}
-		err := res.Spec.Encode(&spec)
+
+		err := EncodeMongoMessage(&spec, doc)
+		if err != nil {
+			return res, err
+		}
+		err = res.Spec.Encode(&spec)
 		if err != nil {
 			return res, fmt.Errorf("failed to encode mongo spec for mock with name: %s.  error: %s", doc.Name, err.Error())
 		}
@@ -249,6 +435,8 @@ func toProtoObjects(objs []models.Object) ([]*proto.Mock_Object, error) {
 	return res, nil
 }
 
+
+
 func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 	res := []*proto.Mock{}
 	for _, j := range doc {
@@ -266,28 +454,44 @@ func Decode(doc []models.Mock) ([]*proto.Mock, error) {
 			}
 			mock.Spec = &proto.Mock_SpecSchema{
 				Metadata: spec.Metadata,
-				RequestMongoMessage: &proto.MongoMessage{
-					Header: &proto.MongoHeader{
-						Length:     spec.RequestMessage.Header.Length,
-						RequestId:  spec.RequestMessage.Header.RequestID,
-						ResponseTo: spec.RequestMessage.Header.ResponseTo,
-						OpCode:     int32(spec.RequestMessage.Header.Opcode),
-					},
-					FlagBits: int64(spec.RequestMessage.FlagBits),
-					Sections: spec.RequestMessage.Sections,
-					Checksum: int64(spec.RequestMessage.Checksum),
+				RequestHeader: &proto.MongoHeader{
+					Length: spec.RequestHeader.Length,
+					RequestId: spec.RequestHeader.RequestID,
+					ResponseTo: spec.RequestHeader.ResponseTo,
+					OpCode: int32(spec.RequestHeader.Opcode),
 				},
-				ResponseMongoMessage: &proto.MongoMessage{
-					Header: &proto.MongoHeader{
-						Length:     spec.ResponseMessage.Header.Length,
-						RequestId:  spec.ResponseMessage.Header.RequestID,
-						ResponseTo: spec.ResponseMessage.Header.ResponseTo,
-						OpCode:     int32(spec.ResponseMessage.Header.Opcode),
-					},
-					FlagBits: int64(spec.ResponseMessage.FlagBits),
-					Sections: spec.ResponseMessage.Sections,
-					Checksum: int64(spec.ResponseMessage.Checksum),
+				ResponseHeader: &proto.MongoHeader{
+					Length: spec.ResponseHeader.Length,
+					RequestId: spec.ResponseHeader.RequestID,
+					ResponseTo: spec.ResponseHeader.ResponseTo,
+					OpCode: int32(spec.ResponseHeader.Opcode),
 				},
+				// RequestMongoMessage: &proto.MongoMessage{
+				// 	Header: &proto.MongoHeader{
+				// 		Length:     spec.RequestMessage.Header.Length,
+				// 		RequestId:  spec.RequestMessage.Header.RequestID,
+				// 		ResponseTo: spec.RequestMessage.Header.ResponseTo,
+				// 		OpCode:     int32(spec.RequestMessage.Header.Opcode),
+				// 	},
+				// 	FlagBits: int64(spec.RequestMessage.FlagBits),
+				// 	Sections: spec.RequestMessage.Sections,
+				// 	Checksum: int64(spec.RequestMessage.Checksum),
+				// },
+				// ResponseMongoMessage: &proto.MongoMessage{
+				// 	Header: &proto.MongoHeader{
+				// 		Length:     spec.ResponseMessage.Header.Length,
+				// 		RequestId:  spec.ResponseMessage.Header.RequestID,
+				// 		ResponseTo: spec.ResponseMessage.Header.ResponseTo,
+				// 		OpCode:     int32(spec.ResponseMessage.Header.Opcode),
+				// 	},
+				// 	FlagBits: int64(spec.ResponseMessage.FlagBits),
+				// 	Sections: spec.ResponseMessage.Sections,
+				// 	Checksum: int64(spec.ResponseMessage.Checksum),
+				// },
+			}
+			err = DecodeMongoMessage(spec, mock)
+			if err!=nil {
+				return res, err
 			}
 		case models.HTTP:
 			spec := &models.HttpSpec{}
