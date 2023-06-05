@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/models/spec"
+	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
 
@@ -27,7 +28,7 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 	}
 
 	// read reply message from the mongo server
-	responseBuffer, err := readBytes(destConn)
+	responseBuffer, err := util.ReadBytes(destConn)
 	if err != nil {
 		logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 		return nil
@@ -41,7 +42,7 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 	}
 
 	// read the operation request message from the mongo client
-	msgRequestbuffer, err := readBytes(clientConn)
+	msgRequestbuffer, err := util.ReadBytes(clientConn)
 	if err != nil {
 		logger.Error("failed to read the message from the mongo client", zap.Error(err))
 		return nil
@@ -62,7 +63,7 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 	}
 
 	// read the response message form the mongo server
-	msgResponseBuffer, err := readBytes(destConn)
+	msgResponseBuffer, err := util.ReadBytes(destConn)
 	if err != nil {
 		logger.Error("failed to read the response message from mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 		return nil
@@ -72,6 +73,7 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 	_, err = clientConn.Write(msgResponseBuffer)
 	if err != nil {
 		logger.Error("failed to write the response wiremessage to mongo client", zap.Error(err))
+		return nil
 	}
 
 	// capture if the wiremessage is a mongo operation call
@@ -124,8 +126,6 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 		deps = append(deps, mongoMock)
 
 		meta := map[string]string{
-			"name":      "Mongo",
-			"type":      "Mongo",
 			"operation": opr1.String(),
 		}
 
@@ -163,22 +163,6 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 		mongoMock.Spec.Encode(mongoSpec)
 		deps = append(deps, mongoMock)
 		return deps
-
-
-		// keploy.Deps = append(keploy.Deps, &proto.Mock{
-		// 	Version: string(models.V1Beta2),
-		// 	Kind:    string(models.Mongo),
-		// 	Name:    "",
-		// 	Spec: &proto.Mock_SpecSchema{
-		// 		Metadata: meta,
-		// 		RequestHeader: &requestHeader1,
-		// 		MongoRequest: &mongoRequest1,
-		// 		ResponseHeader: &responseHeader1,
-		// 		MongoResponse: &mongoResp1,
-		// 		// Objects:  protoObjs,
-		// 	},
-		// })
-
 	}
 
 

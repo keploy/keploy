@@ -3,15 +3,9 @@ package connection
 import (
 	"bufio"
 	"bytes"
-	// "fmt"
 	"io"
 	"io/ioutil"
-	"log"
-
-	// "log"
 	"net/http"
-
-	// "os"
 	"sync"
 	"time"
 
@@ -28,18 +22,20 @@ type Factory struct {
 	connections         map[structs.ConnID]*Tracker
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
+	logger *zap.Logger
 }
 
 // NewFactory creates a new instance of the factory.
-func NewFactory(inactivityThreshold time.Duration) *Factory {
+func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory {
 	return &Factory{
 		connections:         make(map[structs.ConnID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
+		logger: logger,
 	}
 }
 // func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
-func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int, logger *zap.Logger) {
+func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
 
 	trackersToDelete := make(map[structs.ConnID]struct{})
 	for connID, tracker := range factory.connections {
@@ -48,88 +44,21 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 			if len(tracker.sentBuf) == 0 && len(tracker.recvBuf) == 0 {
 				continue
 			}
-			// keploy logic------->
+
 			parsedHttpReq, err1 := ParseHTTPRequest(tracker.recvBuf)
 			parsedHttpRes, err2 := ParseHTTPResponse(tracker.sentBuf, parsedHttpReq)
 			if err1 != nil {
-				logger.Error("failed to parse the http request from byte array", zap.Error(err1))
+				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err1))
 				continue
 			}
 			if err2 != nil {
-				logger.Error("failed to parse the http response from byte array", zap.Error(err2))
-				continue
-			}
-			// port, err := keploy.ExtractPortFromHost(parsedHttpReq.Host)
-			// if err != nil {
-			//  fmt.Println(“unable to get port from request:“, err)
-			// }
-
-			// port := os.Getenv("PORT")
-			// fmt.Println("PORT:", port)
-			// if port == "" {
-			// 	return
-			// }
-			// host := os.Getenv("HOST")
-			// fmt.Println("HOST:", host)
-			// if host == "" {
-			// 	return
-			// }
-			// tPath := os.Getenv("KEPLOY_TEST_PATH")
-			// fmt.Println("KEPLOY_TEST_PATH:", tPath)
-			// if tPath == "" {
-			// 	return
-			// }
-
-			// mPath := os.Getenv("KEPLOY_MOCK_PATH")
-			// fmt.Println("KEPLOY_MOCK_PATH:", mPath)
-			// if mPath == "" {
-			// 	return
-			// }
-
-			// cfg := keploy.Config{
-			// 	App: keploy.AppConfig{
-			// 		Port:     port,
-			// 		Host:     host,
-			// 		TestPath: tPath,
-			// 		MockPath: mPath,
-			// 	},
-			// }
-			// k := keploy.New(cfg)
-			// k := keploy.KeployInitializer()
-			if parsedHttpReq.Header.Get("KEPLOY_TEST_ID") != "" && models.GetMode() == models.MODE_TEST {
-				// id := parsedHttpReq.Header.Get("KEPLOY_TEST_ID")
-				// resBody, err2 := models.GetResponseBody(parsedHttpRes)
-
-				// if err2 != nil {
-				// 	fmt.Println("unable to extract response body:", err2)
-				// 	return
-				// }
-				// httpResp := models.HttpResp{
-				// 	StatusCode:    parsedHttpRes.StatusCode,
-				// 	StatusMessage: parsedHttpRes.Status,
-				// 	ProtoMajor:    parsedHttpRes.ProtoMajor,
-				// 	ProtoMinor:    parsedHttpRes.ProtoMinor,
-				// 	Header:        parsedHttpRes.Header,
-				// 	Body:          resBody,
-				// }
-				// k.PutResp(id, httpResp)
-				// fmt.Println("sent a response for simulate before putting to channel", " id: ", id, " resp: ", httpResp)
-				// models.HoldSimulate <- true
-				// println("sent a response for simulate")
+				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err2))
 				continue
 			}
 
-			if models.GetMode() == models.MODE_TEST {
-				continue
-			}
-			// fmt.Println(“Keploy instance ready for capturing test case:“, k)
-			// fmt.Println("Keploy mode in HandleReadyConnections:", models.GetMode())
+			// capture the ingress call for record cmd
 			if models.GetMode() == models.MODE_RECORD {
-				// println("parsed request: ", parsedHttpReq, " and response: ", parsedHttpRes)
-				// keploy.CaptureHttpTC(k, parsedHttpReq, parsedHttpRes)
-
-				capture(db, parsedHttpReq, parsedHttpRes, getDeps, logger)
-
+				capture(db, parsedHttpReq, parsedHttpRes, getDeps, factory.logger)
 				resetDeps()
 			}
 		} else if tracker.Malformed() {
@@ -152,21 +81,15 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	defer factory.mutex.Unlock()
 	tracker, ok := factory.connections[connectionID]
 	if !ok {
-		factory.connections[connectionID] = NewTracker(connectionID)
-		// println(“created new tracker...“)
+		factory.connections[connectionID] = NewTracker(connectionID, factory.logger)
 		return factory.connections[connectionID]
 	}
-	// else {
-	//  println(“tracker already exists...“)
-	// }
 	return tracker
 }
 
 func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, getDeps func() []*models.Mock, logger *zap.Logger) {
 	meta := map[string]string{
-		"name":      "Http",
-		"type":      models.HttpClient,
-		"operation": req.Method,
+		"method": req.Method,
 	}
 	httpMock := &models.Mock{
 		Version: models.V1Beta2,
@@ -215,16 +138,9 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 	// write yaml
 	err = db.Insert(httpMock, getDeps())
 	if err!=nil {
-		log.Printf(err.Error())
+		logger.Error("failed to record the ingress requests", zap.Error(err))
+		return
 	}
-	
-	// write yamls for deps
-	// for _, v := range getDeps() {
-	// 	err := db.Insert(v)
-	// 	if err != nil {
-	// 		log.Panic(err)
-	// 	}
-	// }
 }
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {

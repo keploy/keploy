@@ -50,8 +50,5 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().String("tcsPath", "", "Path to the local directory where generated testcases should be stored")
 	recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
 
-
-	// pid, _ := recordCmd.Flags().GetInt("pid")
-	// r.logger.Info("the pid is: ", zap.Any("", pid))
 	return recordCmd
 }

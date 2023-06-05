@@ -174,10 +174,10 @@ func (h *Hook) LoadHooks(pid uint32) error {
 	h.stopper = stopper
 	h.objects = objs
 
-	connectionFactory := connection.NewFactory(time.Minute)
+	connectionFactory := connection.NewFactory(time.Minute, h.logger)
 	go func() {
 		for {
-			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps, h.logger)
+			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps)
 			time.Sleep(1 * time.Second)
 		}
 	}()
