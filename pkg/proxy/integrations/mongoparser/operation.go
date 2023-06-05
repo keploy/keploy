@@ -4,62 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
-	"math/rand"
-	"strconv"
 	"strings"
-	"time"
 
 	"go.keploy.io/server/pkg/models/spec"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 )
-
-func intToIP(ip uint32) string {
-	// convert the IP address to a 32-bit binary number
-	ipBinary := fmt.Sprintf("%032b", 2799724390)
-	fmt.Printf("This is the value of the ipBinary:%v and this is the value of the ip:%v", ipBinary, ip)
-
-	// divide the binary number into four 8-bit segments
-	firstByte, _ := strconv.ParseUint(ipBinary[0:8], 2, 64)
-	secondByte, _ := strconv.ParseUint(ipBinary[8:16], 2, 64)
-	thirdByte, _ := strconv.ParseUint(ipBinary[16:24], 2, 64)
-	fourthByte, _ := strconv.ParseUint(ipBinary[24:32], 2, 64)
-
-	// concatenate the four decimal segments with a dot separator to form the dot-decimal string
-	return fmt.Sprintf("%d.%d.%d.%d", fourthByte, thirdByte, secondByte, firstByte)
-}
-
-func readBytes(reader io.Reader) ([]byte, error) {
-	var buffer []byte
-
-	for {
-		// Create a temporary buffer to hold the incoming bytes
-		buf := make([]byte, 1024)
-		rand.Seed(time.Now().UnixNano())
-		// tmp := rand.Intn(100)
-		// log.Printf("\n\n\n ----- before read bytes tmp: %v -------", tmp)
-		// Read bytes from the Reader
-		n, err := reader.Read(buf)
-		// log.Printf("\n\n\n ----- after read bytes tmp: %v -------", tmp)
-
-		if err != nil && err != io.EOF {
-			return nil, err
-		}
-
-		// Append the bytes to the buffer
-		buffer = append(buffer, buf[:n]...)
-		// log.Printf("appended buffer to read buff: %v and n: %v, err: %v\n", buf, n, err)
-
-		// If we've reached the end of the input stream, break out of the loop
-		if err == io.EOF || n != 1024 {
-			break
-		}
-	}
-
-	return buffer, nil
-}
 
 type Message struct {
 	Wm []byte
@@ -98,7 +49,6 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 		Opcode: wiremessage.OpCode(opCode),
 	}
 	if !ok || int(length) > wmLength {
-		// return nil, length, reqID, responseTo, int32(opCode), errors.New("malformed wire message: insufficient bytes")
 		return nil, messageHeader, &spec.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
 	}
 
@@ -120,7 +70,6 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
-		// tmp := wmBody
 		op, err = decodeMsg(reqID, wmBody)
 		var sections []string
 		for _, section := range op.(*opMsg).sections {
@@ -131,14 +80,6 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 			Sections: sections,
 			Checksum: int(op.(*opMsg).checksum),
 		}
-		// log.Printf("Decoded msg for reqId: %v is: %v \n", reqID, op.String())
-		// ebyte := op.Encode(respTo)
-		// _, reqID, _, _, ebyte, _ := wiremessage.ReadHeader(ebyte)
-		// if bytes.Equal(ebyte, tmp) {
-		// 	log.Println("decoded and encoded bytes are equal")
-		// }
-		// eop, _ := decodeMsg(reqID, ebyte)
-		// log.Println(eop.String())
 	case wiremessage.OpReply:
 		op, err = decodeReply(reqID, wmBody)
 		replyDocs := []string{}
@@ -170,10 +111,8 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 		}
 	}
 	if err != nil {
-		// return nil, length, reqID, responseTo, int32(opCode), err
 		return nil, messageHeader, mongoMsg, err
 	}
-	// return op, length, reqID, responseTo, int32(opCode), nil
 	return op, messageHeader, mongoMsg, nil
 }
 

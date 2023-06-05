@@ -1,10 +1,11 @@
 package connection
 
 import (
-	structs2 "go.keploy.io/server/pkg/hooks/structs"
-	"log"
 	"sync"
 	"time"
+
+	structs2 "go.keploy.io/server/pkg/hooks/structs"
+	"go.uber.org/zap"
 )
 
 const (
@@ -29,14 +30,16 @@ type Tracker struct {
 	recvBuf []byte
 	sentBuf []byte
 	mutex   sync.RWMutex
+	logger *zap.Logger
 }
 
-func NewTracker(connID structs2.ConnID) *Tracker {
+func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 	return &Tracker{
 		connID:  connID,
 		recvBuf: make([]byte, 0, maxBufferSize),
 		sentBuf: make([]byte, 0, maxBufferSize),
 		mutex:   sync.RWMutex{},
+		logger: logger,
 	}
 }
 
@@ -65,8 +68,9 @@ func (conn *Tracker) Malformed() bool {
 	conn.mutex.RLock()
 	defer conn.mutex.RUnlock()
 	// log.Printf("Malformed() called: request completed but is Malformed")
-	log.Printf("Total Read bytes:%v but received only:%v", conn.totalReadBytes, conn.recvBytes)
-	log.Printf("Total Written bytes:%v but sent only:%v", conn.totalWrittenBytes, conn.sentBytes)
+	conn.logger.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes recieved in userspace", conn.recvBytes))
+	conn.logger.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
+	// log.Printf("Total Written bytes:%v but sent only:%v", conn.totalWrittenBytes, conn.sentBytes)
 	// log.Printf("Req:%v", string(conn.recvBuf))
 	// log.Printf("Res:%v", string(conn.sentBuf))
 	return conn.closeTimestamp != 0 &&
@@ -98,7 +102,7 @@ func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	conn.updateTimestamps()
 	conn.addr = event.Addr
 	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
-		log.Printf("Changed open info timestamp from %v to %v", conn.openTimestamp, event.TimestampNano)
+		conn.logger.Debug("Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
 	}
 	conn.openTimestamp = event.TimestampNano
 }
@@ -108,7 +112,7 @@ func (conn *Tracker) AddCloseEvent(event structs2.SocketCloseEvent) {
 	defer conn.mutex.Unlock()
 	conn.updateTimestamps()
 	if conn.closeTimestamp != 0 && conn.closeTimestamp != event.TimestampNano {
-		log.Printf("changed close info timestamp from %v to %v", conn.closeTimestamp, event.TimestampNano)
+		conn.logger.Debug("Changed close info timestamp due to new request", zap.Any("from", conn.closeTimestamp), zap.Any("to", event.TimestampNano))
 	}
 	conn.closeTimestamp = event.TimestampNano
 

@@ -5,9 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	_ "strings"
-
 	"fmt"
-	"log"
 	"os"
 	"time"
 	"unsafe"
@@ -60,7 +58,7 @@ func launchSocketDataEvent(dataEventMap *ebpf.Map, connectionFactory *connection
 	// defer reader.Close()
 	RingEventReaders = append(RingEventReaders, reader)
 
-	go socketDataEventCallback(reader, connectionFactory)
+	go socketDataEventCallback(reader, connectionFactory, logger)
 
 }
 
@@ -81,71 +79,34 @@ func launchSocketCloseEvent(closeEventMap *ebpf.Map, connectionFactory *connecti
 
 var eventAttributesSize = int(unsafe.Sizeof(structs.SocketDataEvent{}))
 
-func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connection.Factory) {
+func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connection.Factory, logger *zap.Logger) {
 
 	for {
 
 		record, err := reader.Read()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) {
-				log.Println("received signal, exiting...")
+				logger.Error("failed to receive signal from ringbuf socketDataEvent reader", zap.Error(err))
 				return
 			}
-			log.Printf("reading from ringbuf socketDataEvent reader: %s", err)
 			continue
 		}
-		// else {
-		// 	log.Printf("\n<-------->\nSuccessfully received socketDataEvent from ebpf code...\n=====\n")
-		// }
 
 		data := record.RawSample
-		// println("length of data in socketdataevent:", len(data))
 		if len(data) < eventAttributesSize {
-			log.Printf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(data), eventAttributesSize)
+			logger.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(data), eventAttributesSize))
 			continue
 		} else if len(data) > structs.EventBodyMaxSize+eventAttributesSize {
-			log.Printf("Buffer's for SocketDataEvent is bigger (%d) than the maximum for the struct (%d)", len(data), structs.EventBodyMaxSize+eventAttributesSize)
+			logger.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is bigger (%d) than the maximum for the struct (%d)", len(data), structs.EventBodyMaxSize+eventAttributesSize))
 			continue
 		}
 
-		// log.Printf("data is in the range bro...")
 		var event structs.SocketDataEvent
 
 		if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &event); err != nil {
-			log.Printf("Failed to decode received data: %+v", err)
+			logger.Error("failed to decode the recieve data from ringbuf socketDataEvent reader", zap.Error(err))
 			continue
 		}
-
-		// temp := unix.ByteSliceToString(event.Msg[:])
-		// len := len(strings.Trim(temp, " "))
-
-		if event.Direction == structs.EgressTraffic {
-
-			// log.Printf("[Egress]: Event buffer actual len: %v", len)
-			// log.Printf("[Egress]: Event buffer assigned len: %v", event.MsgSize)
-
-			// a := fmt.Sprintf("[Egress]: Event buffer actual len: %v", len)
-			// b := fmt.Sprintf("[Egress]: Event buffer assigned len: %v", event.MsgSize)
-			// LogAny(a)
-			// LogAny(b)
-		} else {
-			// log.Printf("[Ingress]: Event buffer actual len: %v", len)
-			// log.Printf("[Ingress]: Event buffer assigned len: %v", event.MsgSize)
-			// a := fmt.Sprintf("[Ingress]: Event buffer actual len: %v", len)
-			// b := fmt.Sprintf("[Ingress]: Event buffer assigned len: %v", event.MsgSize)
-			// LogAny(a)
-			// LogAny(b)
-		}
-
-		// log.Printf("Event Msg Actual size:%v", len(event.Msg))
-		// if event.Direction == structs.EgressTraffic {
-		// 	log.Printf("Response Event Msg:\n%s", unix.ByteSliceToString(event.Msg[:]))
-		// } else {
-		// 	log.Printf("Request Event Msg:\n%s", unix.ByteSliceToString(event.Msg[:]))
-		// }
-
-		// log.Printf("Event MsgSize sent from ebpf:%v", event.MsgSize)
-
 		event.TimestampNano += settings.GetRealTimeOffset()
 		connectionFactory.GetOrCreate(event.ConnID).AddDataEvent(event)
 
@@ -160,22 +121,21 @@ func socketOpenEventCallback(reader *perf.Reader, connectionFactory *connection.
 			if errors.Is(err, perf.ErrClosed) {
 				return
 			}
-			log.Printf("reading from perf socketOpenEvent reader: %s", err)
+			logger.Error("failed to read from perf socketOpenEvent reader", zap.Error(err))
 			continue
 		}
 
 		if record.LostSamples != 0 {
-			log.Printf("perf socketOpenEvent array full, dropped %d samples", record.LostSamples)
+			logger.Debug("Unable to add samples to the socketOpenEvent array due to its full capacity", zap.Any("samples", record.LostSamples))
 			continue
 		}
 		data := record.RawSample
 		var event structs.SocketOpenEvent
 
 		if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &event); err != nil {
-			log.Printf("Failed to decode received data: %+v", err)
+			logger.Error("failed to decode the recieved data from perf socketOpenEvent reader", zap.Error(err))
 			continue
 		}
-		// log.Printf("i got the open event bro:%v", event)
 
 		event.TimestampNano += settings.GetRealTimeOffset()
 		connectionFactory.GetOrCreate(event.ConnID).AddOpenEvent(event)
