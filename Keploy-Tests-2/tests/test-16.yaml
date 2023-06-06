@@ -1,0 +1,29 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-16
+spec:
+    metadata:
+        method: GET
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "225"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 06 Jun 2023 13:45:09 GMT
+        body: '{"ts":1686059109297003746,"url":"{\"fact\":\"The normal body temperature of a cat is between 100.5 \\u00b0 and 102.5 \\u00b0F. A cat is sick if its temperature goes below 100 \\u00b0 or above 103 \\u00b0F.\",\"length\":136}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1686059110

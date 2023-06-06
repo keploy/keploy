@@ -1,0 +1,41 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-11-0
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Tue, 06 Jun 2023 13:29:25 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6InFncmlkMnd0NWtVT2xhVUIyZlFoV0E9PSIsInZhbHVlIjoiRVJIQjk3WHMrR2NVMHBNUk50SnEwOXBQVkVqTzlkSXhNOWZxenBScFRVbm92M21mVnkrdzJUUnBpbktCTElTenRiYUtEZndBd3JhYmVyUTROay82L2kzbEdkTmxqUmloUHRJVGRrcEdVaHZJMlJWRjJWMUp0QThTUVlTYUJtQjIiLCJtYWMiOiIyZDVlMjcwZDcyOGNhYmFmZWY4OThhYTAyMjAwOTQzYWE4Nzg4YzYxMjYyY2Q3OWUwNDBmZWM3ZDUyOGM1NjY1IiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:29:25 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6InZZOTRQZzlPZWs4T2R4bHRLZlpLOFE9PSIsInZhbHVlIjoibkdvR3RkTUEwbUROUWlVQlZMQWlxME9Ga0hHTXhRWGpLd0lKT3JUOUVXM2ltWCtFZWtySVAvRGNOaDcrbXg3ZzBvWjJNaWtjRThwSXJpakdLNkxkeFY2dHZHbTFXaER6WUNwRXYvcWRuZzVjSmsxaWVkeGFmdnVkSUsycTVCTkciLCJtYWMiOiI1ZTU1NGI4ZTFmZDY5NzY5MDA2MjQxMTk0ZWIyNTE2Y2NiMmZhZTUzYzk5YjM0YzgyOTZhZDQ1Mjc1NWMwY2RlIiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:29:25 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"The tiniest cat on record is Mr. Pebbles, a 2-year-old cat that weighed 3 lbs (1.3 k) and was 6.1 inches (15.5 cm) high.","length":120}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []

@@ -1,0 +1,41 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-16-0
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Tue, 06 Jun 2023 13:45:09 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6Ik1MK0RZM2N4YUIrdTg2djI5eXg4ZUE9PSIsInZhbHVlIjoiR0g4ZGNkdUlBRU5VNTVsSkFJSTFFN1pvMWZRTTZUYVlia0N4VHovRmMwNEJDcHdjaGFBZ2gxdUl2Vm5PTForczl3dXBkVE0wbVlEcncyNVVGdlNlQVBwM3ljWlpzeHhrUmNGcnRRT09FMmNLVmU0N0VFMm5JeUVsU0hjZENteGkiLCJtYWMiOiI0ZjkwYWFmNThlZGE1NjI1ZDNlODA3NTViMjI2NjFmMWVhNjI2OGE5MGUwNTc4NTIyZDFiMDVmMzNlMzAwMjlmIiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:45:09 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6IlQ0N3I4WTJxb0w1dlZmYVRWQUxIWWc9PSIsInZhbHVlIjoiWlJDZFd5d1JlV0g1V3dpQmtrMEk5S3ZESEp1Ym1DbmMvbHBESHNPdm5wdnBma2J6dG9XZzFjZjlXWnY3SzVnNW9SRTRDclZoUXQvZU80WVZNU0V4T2RrOVo4Y3IwSVYzQUhVYmMrNjhsaCtzRGxaT013U1VjVDd2bkZ0V1FUVFgiLCJtYWMiOiI5NDc0YTgwZjQzYmJlY2JhMTRiMTBjZWJkNjAyM2E2MGFhNWQ1NWQ3OGJiZGU4MDVhNTUwZTdhMDAwNzk3MWIzIiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:45:09 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"The normal body temperature of a cat is between 100.5 \u00b0 and 102.5 \u00b0F. A cat is sick if its temperature goes below 100 \u00b0 or above 103 \u00b0F.","length":136}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
