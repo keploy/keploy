@@ -3,6 +3,7 @@ package httpparser
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"io"
 	"io/ioutil"
 	"net"
@@ -23,9 +24,9 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("POST ")) ||
 		bytes.HasPrefix(buffer[:], []byte("PUT ")) ||
 		bytes.HasPrefix(buffer[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buffer[:], []byte("DELETE ")) || 
-		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) || 
-		bytes.HasPrefix(buffer[:], []byte("HEAD ")) 
+		bytes.HasPrefix(buffer[:], []byte("DELETE ")) ||
+		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) ||
+		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 }
 
 // CaptureHTTPMessage function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
@@ -79,6 +80,13 @@ func CaptureHTTPMessage(requestBuffer []byte, clientConn, destConn net.Conn, log
 	}
 	var respBody []byte
 	if resp.Body != nil { // Read
+		if resp.Header.Get("Content-Encoding") == "gzip" {
+			resp.Body, err = gzip.NewReader(resp.Body)
+			if err != nil {
+				logger.Error("failed to read the the http repsonse body", zap.Error(err))
+				return nil
+			}
+		}
 		var err error
 		respBody, err = ioutil.ReadAll(resp.Body)
 		if err != nil {
@@ -101,21 +109,21 @@ func CaptureHTTPMessage(requestBuffer []byte, clientConn, destConn net.Conn, log
 
 	// encode the message into yaml
 	err = httpMock.Spec.Encode(&spec.HttpSpec{
-			Metadata: meta,
-			Request: spec.HttpReqYaml{
-				Method:     spec.Method(req.Method),
-				ProtoMajor: req.ProtoMajor,
-				ProtoMinor: req.ProtoMinor,
-				URL:        req.URL.String(),
-				Header:     pkg.ToYamlHttpHeader(req.Header),
-				Body:       string(reqBody),
-				URLParams: pkg.UrlParams(req),
-			},
-			Response: spec.HttpRespYaml{
-				StatusCode: resp.StatusCode,
-				Header:     pkg.ToYamlHttpHeader(resp.Header),
-				Body: string(respBody),
-			},
+		Metadata: meta,
+		Request: spec.HttpReqYaml{
+			Method:     spec.Method(req.Method),
+			ProtoMajor: req.ProtoMajor,
+			ProtoMinor: req.ProtoMinor,
+			URL:        req.URL.String(),
+			Header:     pkg.ToYamlHttpHeader(req.Header),
+			Body:       string(reqBody),
+			URLParams:  pkg.UrlParams(req),
+		},
+		Response: spec.HttpRespYaml{
+			StatusCode: resp.StatusCode,
+			Header:     pkg.ToYamlHttpHeader(resp.Header),
+			Body:       string(respBody),
+		},
 	})
 	if err != nil {
 		logger.Error("failed to encode the http messsage into the yaml")
@@ -123,6 +131,6 @@ func CaptureHTTPMessage(requestBuffer []byte, clientConn, destConn net.Conn, log
 	}
 	return httpMock
 
-		// if val, ok := Deps[string(port)]; ok {
-		// keploy.Deps = append(keploy.Deps, httpMock)
+	// if val, ok := Deps[string(port)]; ok {
+	// keploy.Deps = append(keploy.Deps, httpMock)
 }
