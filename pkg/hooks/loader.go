@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/models/spec"
 	"go.keploy.io/server/pkg/platform"
 	"go.uber.org/zap"
 )
@@ -38,6 +39,7 @@ type Hook struct {
 	logger 			*zap.Logger
 	proxyPortList 		[]uint32
 	deps 			[]*models.Mock
+	respChannel 	chan *spec.HttpRespYaml
 
 	// ebpf objects and events
 	stopper 		chan os.Signal
@@ -63,6 +65,7 @@ func NewHook(proxyPorts []uint32, db platform.TestCaseDB, logger *zap.Logger) *H
 		logger: logger,
 		proxyPortList: proxyPorts,
 		db: db,
+		respChannel: make(chan *spec.HttpRespYaml),
 	}
 }
 
@@ -80,6 +83,14 @@ func (h *Hook) GetDeps () []*models.Mock {
 func (h *Hook) ResetDeps() int {
 	h.deps = []*models.Mock{}
 	return 1
+}
+func (h *Hook) PutResp(resp *spec.HttpRespYaml) error {
+	h.respChannel <- resp
+	return nil
+}
+func (h *Hook) GetResp() *spec.HttpRespYaml  {
+	resp := <-h.respChannel
+	return resp
 }
 
 func (h *Hook) UpdateProxyState (indx uint32, ps *PortState) {
@@ -174,14 +185,13 @@ func (h *Hook) LoadHooks(pid uint32) error {
 	h.stopper = stopper
 	h.objects = objs
 
-	connectionFactory := connection.NewFactory(time.Minute, h.logger)
+	connectionFactory := connection.NewFactory(time.Minute, h.respChannel, h.logger)
 	go func() {
 		for {
 			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps)
 			time.Sleep(1 * time.Second)
 		}
 	}()
-
 	// ------------ For Egress -------------
 
 	// Get the first-mounted cgroupv2 path.

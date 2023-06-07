@@ -3,6 +3,7 @@ package yaml
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -20,7 +22,7 @@ type yaml struct {
 	logger *zap.Logger
 }
 
-func NewYamlStore(tcsPath, mockPath string, logger *zap.Logger) *yaml {
+func NewYamlStore(tcsPath, mockPath string, logger *zap.Logger) platform.TestCaseDB {
 	return &yaml{
 		tcsPath: tcsPath,
 		mockPath: mockPath,
@@ -148,4 +150,82 @@ func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
 	}
 
 	return nil
+}
+
+func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.Mock, error) {
+	tcs := []models.Mock{}
+	mocks := map[string][]models.Mock{}
+
+	dir, err := os.OpenFile(ys.tcsPath, os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		ys.logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", ys.tcsPath))
+		return nil, nil, err
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		ys.logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", ys.tcsPath))
+		return nil, nil, err
+	}
+	for _, j := range files {
+		if filepath.Ext(j.Name()) != ".yaml" {
+			continue
+		}
+
+		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
+		tc, err := read(ys.tcsPath, name)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		m, err := read(ys.mockPath, "mock-"+strings.Split(name, "-")[1]) 
+		if err != nil {
+			return nil, nil, err
+		}
+		mocks[name] = m
+		if len(tc) == 1 {
+			tcs = append(tcs, tc[0])
+		}
+
+		// tests, err := toTestCase(tcs, name, mockPath)
+		// if err != nil {
+		// 	return nil, err
+		// }
+		// res = append(res, tests...)
+	}
+	// sort.Slice(res, func(i, j int) bool {
+	// 	return res[i].Captured < res[j].Captured
+	// })
+
+	// if tcsType != "" {
+	// 	filteredTcs := reqTypeFilter(res, tcsType)
+	// 	res = filteredTcs
+	// }
+
+
+	return tcs, mocks, nil
+}
+
+func read(path, name string) ([]models.Mock, error) {
+	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	decoder := yamlLib.NewDecoder(file)
+	yamlDocs := []models.Mock{}
+	for {
+		var doc models.Mock
+		err := decoder.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+		}
+		// if !libMode || doc.Name == name {
+			yamlDocs = append(yamlDocs, doc)
+		// }
+	}
+	return yamlDocs, nil
 }

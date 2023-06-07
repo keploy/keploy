@@ -1,0 +1,58 @@
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mock-1-0
+spec:
+    metadata:
+        operation: '{ OpQuery flags: [SecondaryOK], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"compression": [],"client": {"driver": {"name": "mongo-go-driver","version": "v1.8.3"},"os": {"type": "linux","architecture": "amd64"},"platform": "go1.20.4"}}, returnFieldsSelector:  }'
+    request_mongo_header:
+        length: 230
+        requestId: 485
+        responseTo: 0
+        Opcode: 2004
+    response_mongo_header:
+        length: 329
+        requestId: 704
+        responseTo: 485
+        Opcode: 1
+    mongo_request:
+        flags: 4
+        collection_name: admin.$cmd
+        number_to_skip: 0
+        number_to_return: -1
+        query: '{"isMaster": {"$numberInt":"1"},"helloOk": true,"compression": [],"client": {"driver": {"name": "mongo-go-driver","version": "v1.8.3"},"os": {"type": "linux","architecture": "amd64"},"platform": "go1.20.4"}}'
+        return_fields_selector: ""
+    mongo_response:
+        response_flags: 8
+        cursor_id: 0
+        starting_from: 0
+        number_returned: 1
+        documents:
+            - '{"helloOk": true,"ismaster": true,"topologyVersion": {"processId": {"$oid":"648060c9523dc40a7b690a69"},"counter": {"$numberLong":"0"}},"maxBsonObjectSize": {"$numberInt":"16777216"},"maxMessageSizeBytes": {"$numberInt":"48000000"},"maxWriteBatchSize": {"$numberInt":"100000"},"localTime": {"$date":{"$numberLong":"1686137166797"}},"logicalSessionTimeoutMinutes": {"$numberInt":"30"},"connectionId": {"$numberInt":"140"},"minWireVersion": {"$numberInt":"0"},"maxWireVersion": {"$numberInt":"17"},"readOnly": false,"ok": {"$numberDouble":"1.0"}}'
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mock-1-1
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"update": "url-shortener","ordered": true,"writeConcern": {"w": "majority"},"lsid": {"id": {"$binary":{"base64":"BLcp9z0NQCyqHNKiXpInYg==","subType":"04"}}},"$db": "keploy"} }, { SectionSingle identifier: updates, msgs: [{"q": {"_id": "Lhr4BWAi"},"u": {"$set": {"_id": "Lhr4BWAi","created": {"$date":{"$numberLong":"1686137166777"}},"updated": {"$date":{"$numberLong":"1686137166777"}},"url": "https://google.com"}},"upsert": true}] }], checksum: 0 }'
+    request_mongo_header:
+        length: 301
+        requestId: 486
+        responseTo: 0
+        Opcode: 2013
+    response_mongo_header:
+        length: 112
+        requestId: 705
+        responseTo: 486
+        Opcode: 2013
+    mongo_request:
+        flagBits: 0
+        sections:
+            - '{ SectionSingle msg: {"update": "url-shortener","ordered": true,"writeConcern": {"w": "majority"},"lsid": {"id": {"$binary":{"base64":"BLcp9z0NQCyqHNKiXpInYg==","subType":"04"}}},"$db": "keploy"} }'
+            - '{ SectionSingle identifier: updates, msgs: [{"q": {"_id": "Lhr4BWAi"},"u": {"$set": {"_id": "Lhr4BWAi","created": {"$date":{"$numberLong":"1686137166777"}},"updated": {"$date":{"$numberLong":"1686137166777"}},"url": "https://google.com"}},"upsert": true}] }'
+        checksum: 0
+    mongo_response:
+        flagBits: 0
+        sections:
+            - '{ SectionSingle msg: {"n": {"$numberInt":"1"},"upserted": [{"index": {"$numberInt":"0"},"_id": "Lhr4BWAi"}],"nModified": {"$numberInt":"0"},"ok": {"$numberDouble":"1.0"}} }'
+        checksum: 0
