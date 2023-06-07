@@ -3,6 +3,7 @@ package connection
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -22,15 +23,17 @@ type Factory struct {
 	connections         map[structs.ConnID]*Tracker
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
+	respChannel chan *spec.HttpRespYaml
 	logger *zap.Logger
 }
 
 // NewFactory creates a new instance of the factory.
-func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory {
+func NewFactory(inactivityThreshold time.Duration, respChannel chan *spec.HttpRespYaml, logger *zap.Logger) *Factory {
 	return &Factory{
 		connections:         make(map[structs.ConnID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
+		respChannel: respChannel,
 		logger: logger,
 	}
 }
@@ -56,11 +59,25 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 				continue
 			}
 
-			// capture the ingress call for record cmd
-			if models.GetMode() == models.MODE_RECORD {
+			
+			switch models.GetMode() {
+			case models.MODE_RECORD:
+				// capture the ingress call for record cmd
 				capture(db, parsedHttpReq, parsedHttpRes, getDeps, factory.logger)
 				resetDeps()
+			case models.MODE_TEST:
+				respBody, err := ioutil.ReadAll(parsedHttpRes.Body)
+				if err != nil {
+					factory.logger.Error("failed to read the http response body", zap.Error(err), zap.Any("mode", models.MODE_TEST))
+					return
+				}
+				factory.respChannel <- &spec.HttpRespYaml{
+					StatusCode: parsedHttpRes.StatusCode,
+					Header:     pkg.ToYamlHttpHeader(parsedHttpRes.Header),
+					Body: string(respBody),
+				}
 			}
+
 		} else if tracker.Malformed() {
 			trackersToDelete[connID] = struct{}{}
 		} else if tracker.IsInactive(factory.inactivityThreshold) {
@@ -107,7 +124,11 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 		logger.Error("failed to read the http response body", zap.Error(err))
 		return
 	}
-	
+	// b, err := req.URL.MarshalBinary()
+	// if err != nil {
+	// 	logger.Error("failed to parse the request URL", zap.Error(err))
+	// 	return
+	// }
 
 	// encode the message into yaml
 	err = httpMock.Spec.Encode(&spec.HttpSpec{
@@ -116,7 +137,10 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 				Method:     spec.Method(req.Method),
 				ProtoMajor: req.ProtoMajor,
 				ProtoMinor: req.ProtoMinor,
-				URL:        req.URL.String(),
+				// URL:        req.URL.String(),
+				// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
+				URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
+				//  URL: string(b),
 				Header:     pkg.ToYamlHttpHeader(req.Header),
 				Body:       string(reqBody),
 				URLParams: 	pkg.UrlParams(req),

@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-2
+spec:
+    metadata:
+        method: GET
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/Lhr4BWAi
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 303
+        header:
+            Content-Length: "45"
+            Content-Type: text/html; charset=utf-8
+            Date: Wed, 07 Jun 2023 11:34:40 GMT
+            Location: https://google.com
+        body: |+
+            <a href="https://google.com">See Other</a>.
+
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1686137680

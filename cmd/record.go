@@ -28,12 +28,20 @@ func (r *Record) GetCmd() *cobra.Command {
 		Short: "record the keploy testcases from the API calls",
 		Run: func(cmd *cobra.Command, args []string) {
 			pid, _ := cmd.Flags().GetUint32("pid")
-
-			path, err := os.Getwd()
-			if err != nil {
-				r.logger.Error("Failed to get the path of current directory", zap.Error(err))
+			path, err := cmd.Flags().GetString("path")
+			if err!=nil {
+				r.logger.Error("failed to read the testcase path input")
+				return
 			}
-			path += "/Keploy-Tests-2"
+
+			if path == "" {
+				path, err = os.Getwd()
+				if err != nil {
+					r.logger.Error("failed to get the path of current directory", zap.Error(err))
+					return
+				}
+			}
+			path += "/Keploy"
 			tcsPath := path + "/tests"
 			mockPath := path + "/mocks"
 
@@ -47,8 +55,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
 	recordCmd.MarkFlagRequired("pid")
 
-	recordCmd.Flags().String("tcsPath", "", "Path to the local directory where generated testcases should be stored")
-	recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
+	recordCmd.Flags().String("path", "", "Path to the local directory where generated testcases/mocks should be stored")
+	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
 
 	return recordCmd
 }
