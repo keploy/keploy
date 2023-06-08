@@ -12,26 +12,35 @@ type recorder struct {
 	logger *zap.Logger
 }
 
-func NewRecorder (logger *zap.Logger) Recorder {
+func NewRecorder(logger *zap.Logger) Recorder {
 	return &recorder{
 		logger: logger,
 	}
 }
 
-func (r *recorder) CaptureTraffic(tcsPath, mockPath string, pid uint32)  {
+func (r *recorder) CaptureTraffic(tcsPath, mockPath string, pid uint32, appCmd, appContainer string) {
 	models.SetMode(models.MODE_RECORD)
 
 	ys := yaml.NewYamlStore(tcsPath, mockPath, r.logger)
 	// start the proxies
 	ps := proxy.BootProxies(r.logger, proxy.Option{})
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(ps.PortList, ys, r.logger)
-	if err := loadedHooks.LoadHooks(pid); err != nil {
-		return 
+	loadedHooks := hooks.NewHook(ys, r.logger)
+	if err := loadedHooks.LoadHooks(pid, appCmd, appContainer); err != nil {
+		return
 	}
-	// proxy update its state in the ProxyPorts map
+
+	// // proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)
+
+	// start user application
+	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer); err != nil {
+		return
+	}
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop()
+
+	//stop listening for proxy server
+	ps.Listener.Close()
 }
