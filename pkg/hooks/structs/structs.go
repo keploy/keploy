@@ -48,17 +48,14 @@ type SockAddrIn struct {
 // }
 
 const (
-	// EventBodyMaxSize = 30720
 	EventBodyMaxSize = 16384 // 16 KB
-	// EventBodyMaxSize = 2048
-	// EventBodyMaxSize = 32768
 )
 
 // SocketDataEvent is a conversion of the following C-Struct into GO.
 //
 //	struct socket_data_event_t {
 //	   struct attr_t attr;
-//	   char msg[30720];
+//	   char msg[16384];
 //	};.
 // type SocketDataEvent struct {
 // 	Attr SocketDataEventAttr
@@ -102,3 +99,31 @@ type SocketCloseEvent struct {
 	WrittenBytes  int64
 	ReadBytes     int64
 }
+
+type Bpf_spin_lock struct{ Val uint32 }
+
+// struct dest_info_t
+// {
+//     u32 dest_ip;
+//     u32 dest_port;
+//     struct bpf_spin_lock lock;
+// };
+
+type DestInfo struct{
+	DestIp uint32
+	DestPort uint32
+	Lock Bpf_spin_lock
+}
+
+
+// struct proxy_info
+// {
+//     u32 ip;
+//     u32 port;
+// };
+
+type ProxyInfo struct {
+	IP uint32
+	Port uint32
+}
+

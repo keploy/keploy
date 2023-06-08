@@ -9,8 +9,7 @@ import (
 )
 
 const (
-	// maxBufferSize = 100 * 1024 // 100KB
-	maxBufferSize = 15 * 1024 * 1024 // 15MB
+	maxBufferSize = 16 * 1024 * 1024 // 16MB
 )
 
 type Tracker struct {
