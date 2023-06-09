@@ -118,8 +118,12 @@ func (h *Hook) GetProxyState(i uint32) (*PortState, error) {
 	return &proxyState, nil
 }
 
-func (h *Hook) Stop () {
-	<-h.stopper
+func (h *Hook) Stop (forceStop bool) {
+	if !forceStop {
+		<-h.stopper
+		log.Println("Received signal, exiting program..")
+
+	}
 	log.Println("Received signal, exiting program..")
 
 	// closing all readers.
