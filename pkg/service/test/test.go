@@ -200,7 +200,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 
 
 	// stop listening for the eBPF events
-	loadedHooks.Stop()
+	loadedHooks.Stop(true)
 	return true
 }
 

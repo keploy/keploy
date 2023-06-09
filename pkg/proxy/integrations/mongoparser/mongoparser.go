@@ -48,7 +48,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, de
 		// }
 	
 		if len(deps) <= 1 {
-			logger.Error("failed to mock the output for unrecorded outgoing mongo query")
+			// logger.Error("failed to mock the output for unrecorded outgoing mongo query")
 			// log.Println("the dep call is not mocked during record")
 			return
 		// } else {
@@ -214,6 +214,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, de
 				logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
 				return
 			}
+			// fmt.Println("the section in decode: ", unmarshaledDoc)
 			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
 			msg.sections = []opMsgSection{&opMsgSectionSingle{
 				msg: unmarshaledDoc,

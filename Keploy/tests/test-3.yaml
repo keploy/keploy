@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-1
+name: test-3
 spec:
     metadata:
         method: GET
@@ -8,22 +8,25 @@ spec:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8081/Lhr4BWA
+        url: http://localhost:8081/Lhr4BWAi
         header:
             Accept: '*/*'
             User-Agent: curl/7.81.0
         body: ""
         body_type: ""
     resp:
-        status_code: 404
+        status_code: 303
         header:
-            Content-Length: "25"
-            Content-Type: application/json; charset=utf-8
-            Date: Fri, 09 Jun 2023 11:42:19 GMT
-        body: '{"error":"url not found"}'
+            Content-Length: "45"
+            Content-Type: text/html; charset=utf-8
+            Date: Fri, 09 Jun 2023 11:43:03 GMT
+            Location: https://google.com
+        body: |+
+            <a href="https://google.com">See Other</a>.
+
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
-    created: 1686310940
+    created: 1686310984

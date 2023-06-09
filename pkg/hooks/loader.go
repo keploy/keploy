@@ -109,16 +109,20 @@ func (h *Hook) UpdateProxyState (indx uint32, ps *PortState) {
 
 func (h *Hook) GetProxyState(i uint32) (*PortState, error) {
 	proxyState := PortState{}
-	if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
-		// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
-		return nil, err
+	if h!=nil && h.proxyPortList != nil {
+		if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
+			// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
+			return nil, err
+		}
 	}
 	return &proxyState, nil
 }
 
-func (h *Hook) Stop () {
-	<-h.stopper
-	log.Println("Received signal, exiting program..")
+func (h *Hook) Stop (forceStop bool) {
+	if !forceStop {
+		<-h.stopper
+		log.Println("Received signal, exiting program..")
+	}
 
 	// closing all readers.
 	for _, reader := range PerfEventReaders {
@@ -194,7 +198,7 @@ func (h *Hook) LoadHooks(pid uint32) error {
 	connectionFactory := connection.NewFactory(time.Minute, h.respChannel, h.logger)
 	go func() {
 		for {
-			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps)
+			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h. ResetDeps)
 			time.Sleep(1 * time.Second)
 		}
 	}()

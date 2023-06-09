@@ -175,11 +175,14 @@ func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
 		tc, err := read(ys.tcsPath, name)
 		if err != nil {
+			ys.logger.Error("failed to read the testcase from yaml", zap.Error(err))
 			return nil, nil, err
 		}
 
 		m, err := read(ys.mockPath, "mock-"+strings.Split(name, "-")[1]) 
 		if err != nil {
+			ys.logger.Error("failed to read the mocks from yaml", zap.Error(err), zap.Any("mocks for testcase", tc[0].Name))
+
 			return nil, nil, err
 		}
 		mocks[name] = m

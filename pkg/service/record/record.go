@@ -33,5 +33,5 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, pid uint32)  {
 	ps.SetHook(loadedHooks)
 
 	// stop listening for the eBPF events
-	loadedHooks.Stop()
+	loadedHooks.Stop(false)
 }

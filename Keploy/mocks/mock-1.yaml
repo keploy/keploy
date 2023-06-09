@@ -6,13 +6,13 @@ spec:
         operation: '{ OpQuery flags: [SecondaryOK], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"compression": [],"client": {"driver": {"name": "mongo-go-driver","version": "v1.8.3"},"os": {"type": "linux","architecture": "amd64"},"platform": "go1.20.4"}}, returnFieldsSelector:  }'
     request_mongo_header:
         length: 230
-        requestId: 35
+        requestId: 2525
         responseTo: 0
         Opcode: 2004
     response_mongo_header:
         length: 329
-        requestId: 39456
-        responseTo: 35
+        requestId: 44047
+        responseTo: 2525
         Opcode: 1
     mongo_request:
         flags: 4
@@ -27,31 +27,31 @@ spec:
         starting_from: 0
         number_returned: 1
         documents:
-            - '{"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"6481d81be5f3d6bb67258ecf"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1686304412558"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"126"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}'
+            - '{"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"6481d81be5f3d6bb67258ecf"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1686310939717"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"172"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}'
 ---
 version: api.keploy.io/v1beta2
 kind: Mongo
 name: mock-1-1
 spec:
     metadata:
-        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"find":"url-shortener","filter":{"_id":"Lhr4BWAi"},"limit":{"$numberLong":"1"},"singleBatch":true,"lsid":{"id":{"$binary":{"base64":"Aeo9+CN6QSiVCqlOnTvgUw==","subType":"04"}}},"$db":"keploy"} }], checksum: 0 }'
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"find":"url-shortener","filter":{"_id":"Lhr4BWA"},"limit":{"$numberLong":"1"},"singleBatch":true,"lsid":{"id":{"$binary":{"base64":"JKQjOs9rS7yXzbMyLTyzZg==","subType":"04"}}},"$db":"keploy"} }], checksum: 0 }'
     request_mongo_header:
-        length: 162
-        requestId: 36
+        length: 161
+        requestId: 2526
         responseTo: 0
         Opcode: 2013
     response_mongo_header:
-        length: 197
-        requestId: 39457
-        responseTo: 36
+        length: 109
+        requestId: 44048
+        responseTo: 2526
         Opcode: 2013
     mongo_request:
         flagBits: 0
         sections:
-            - '{ SectionSingle msg: {"find":"url-shortener","filter":{"_id":"Lhr4BWAi"},"limit":{"$numberLong":"1"},"singleBatch":true,"lsid":{"id":{"$binary":{"base64":"Aeo9+CN6QSiVCqlOnTvgUw==","subType":"04"}}},"$db":"keploy"} }'
+            - '{ SectionSingle msg: {"find":"url-shortener","filter":{"_id":"Lhr4BWA"},"limit":{"$numberLong":"1"},"singleBatch":true,"lsid":{"id":{"$binary":{"base64":"JKQjOs9rS7yXzbMyLTyzZg==","subType":"04"}}},"$db":"keploy"} }'
         checksum: 0
     mongo_response:
         flagBits: 0
         sections:
-            - '{ SectionSingle msg: {"cursor":{"firstBatch":[{"_id":"Lhr4BWAi","created":{"$date":{"$numberLong":"1686302596697"}},"updated":{"$date":{"$numberLong":"1686302596697"}},"url":"https://google.com"}],"id":{"$numberLong":"0"},"ns":"keploy.url-shortener"},"ok":{"$numberDouble":"1.0"}} }'
+            - '{ SectionSingle msg: {"cursor":{"firstBatch":[],"id":{"$numberLong":"0"},"ns":"keploy.url-shortener"},"ok":{"$numberDouble":"1.0"}} }'
         checksum: 0

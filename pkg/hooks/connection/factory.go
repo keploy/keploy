@@ -71,6 +71,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 					factory.logger.Error("failed to read the http response body", zap.Error(err), zap.Any("mode", models.MODE_TEST))
 					return
 				}
+				resetDeps()
 				factory.respChannel <- &spec.HttpRespYaml{
 					StatusCode: parsedHttpRes.StatusCode,
 					Header:     pkg.ToYamlHttpHeader(parsedHttpRes.Header),
