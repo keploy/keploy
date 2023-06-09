@@ -3,30 +3,32 @@ kind: Http
 name: test-2
 spec:
     metadata:
-        method: GET
+        method: POST
     req:
-        method: GET
+        method: POST
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8081/Lhr4BWAi
+        url: http://localhost:8081/url
         header:
             Accept: '*/*'
+            Content-Length: "33"
+            Content-Type: application/json
             User-Agent: curl/7.81.0
-        body: ""
+        body: |-
+            {
+              "url": "https://google.com"
+            }
         body_type: ""
     resp:
-        status_code: 303
+        status_code: 200
         header:
-            Content-Length: "45"
-            Content-Type: text/html; charset=utf-8
-            Date: Wed, 07 Jun 2023 11:34:40 GMT
-            Location: https://google.com
-        body: |+
-            <a href="https://google.com">See Other</a>.
-
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 09 Jun 2023 10:22:54 GMT
+        body: '{"ts":1686306174467230625,"url":"http://localhost:8080/Lhr4BWAi"}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
-    created: 1686137680
+    created: 1686306175

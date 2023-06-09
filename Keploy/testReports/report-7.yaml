@@ -1,0 +1,91 @@
+version: api.keploy.io/v1beta1
+name: report-7
+status: PASSED
+success: 1
+failure: 0
+total: 1
+tests:
+    - kind: Http
+      name: report-7
+      status: PASSED
+      started: 1686305167
+      completed: 1686305210
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy-v2/keploy/Keploy/mocks
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/Lhr4BWAi
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 303
+        header:
+            Content-Length: "45"
+            Content-Type: text/html; charset=utf-8
+            Date: Fri, 09 Jun 2023 09:53:32 GMT
+            Location: https://google.com
+        body: |+
+            <a href="https://google.com">See Other</a>.
+
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 303
+            actual: 303
+        headers_result:
+            - normal: true
+              expected:
+                key: Location
+                value:
+                    - https://google.com
+              actual:
+                key: Location
+                value:
+                    - https://google.com
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "45"
+              actual:
+                key: Content-Length
+                value:
+                    - "45"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - text/html; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - text/html; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 09 Jun 2023 09:53:32 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 09 Jun 2023 10:06:49 GMT
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: |+
+                <a href="https://google.com">See Other</a>.
+
+              actual: |+
+                <a href="https://google.com">See Other</a>.
+
+        dep_result: []

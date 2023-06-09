@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/pkg/models/spec"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -61,12 +62,23 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 	switch opCode {
 	case wiremessage.OpQuery:
 		op, err = decodeQuery(reqID, wmBody)
+
+		jsonBytes, err := bson.MarshalExtJSON(op.(*opQuery).query, true, false)
+		if err != nil {
+			return nil, messageHeader, &spec.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
+
+			// fmt.Printf("Failed to marshal: %v\n", err)
+			// return
+		}
+		jsonString := string(jsonBytes)
+
 		mongoMsg = &spec.MongoOpQuery{
 			Flags: int32(op.(*opQuery).flags),
 			FullCollectionName: op.(*opQuery).fullCollectionName,
 			NumberToSkip: op.(*opQuery).numberToSkip,
 			NumberToReturn: op.(*opQuery).numberToReturn,
-			Query: op.(*opQuery).query.String(),
+			// Query: string(op.(*opQuery).query),
+			Query: jsonString,
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
@@ -74,6 +86,15 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 		var sections []string
 		for _, section := range op.(*opMsg).sections {
 			sections = append(sections, section.String())
+			// jsonBytes, err := bson.MarshalExtJSON(section, true, false)
+			// if err != nil {
+			// 	return nil, messageHeader, &spec.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
+
+			// 	// fmt.Printf("Failed to marshal: %v\n", err)
+			// 	// return
+			// }
+			// jsonString := string(jsonBytes)
+			// sections = append(sections, jsonString)
 		}
 		mongoMsg = &spec.MongoOpMessage{
 			FlagBits: int(op.(*opMsg).flags),
@@ -84,7 +105,17 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 		op, err = decodeReply(reqID, wmBody)
 		replyDocs := []string{}
 		for _, v := range op.(*opReply).documents {
-			replyDocs = append(replyDocs, v.String())
+			// replyDocs = append(replyDocs, v.String())
+			// replyDocs = append(replyDocs, string(v))
+			jsonBytes, err := bson.MarshalExtJSON(v, true, false)
+			if err != nil {
+				return nil, messageHeader, &spec.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
+
+				// fmt.Printf("Failed to marshal: %v\n", err)
+				// return
+			}
+			jsonString := string(jsonBytes)
+			replyDocs = append(replyDocs, jsonString)
 		}
 		mongoMsg = &spec.MongoOpReply{
 			ResponseFlags: int32(op.(*opReply).flags),
@@ -315,7 +346,18 @@ func (o *opMsgSectionSingle) commandAndCollection() (Command, string) {
 }
 
 func (o *opMsgSectionSingle) String() string {
-	return fmt.Sprintf("{ SectionSingle msg: %s }", o.msg.String())
+	jsonBytes, err := bson.MarshalExtJSON(o.msg, true, false)
+	if err != nil {
+		fmt.Println("failed to marshsal the bsoncore.Document")
+		return ""
+
+		// fmt.Printf("Failed to marshal: %v\n", err)
+		// return
+	}
+	jsonString := string(jsonBytes)
+	// sections = append(sections, jsonString)
+	
+	return fmt.Sprintf("{ SectionSingle msg: %s }", jsonString)
 }
 
 type opMsgSectionSequence struct {
@@ -356,7 +398,17 @@ func (o *opMsgSectionSequence) commandAndCollection() (Command, string) {
 func (o *opMsgSectionSequence) String() string {
 	var msgs []string
 	for _, msg := range o.msgs {
-		msgs = append(msgs, msg.String())
+		jsonBytes, err := bson.MarshalExtJSON(msg, true, false)
+		if err != nil {
+			fmt.Println("failed to marshsal the bsoncore.Document")
+			return ""
+
+			// fmt.Printf("Failed to marshal: %v\n", err)
+			// return
+		}
+		jsonString := string(jsonBytes)
+		msgs = append(msgs, jsonString)
+		// msgs = append(msgs, msg.String())
 	}
 	return fmt.Sprintf("{ SectionSingle identifier: %s, msgs: [%s] }", o.identifier, strings.Join(msgs, ", "))
 }

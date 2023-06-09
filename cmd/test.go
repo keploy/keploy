@@ -48,7 +48,14 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/Keploy"
 			tcsPath := path + "/tests"
 			mockPath := path + "/mocks"
-			t.tester.Test(tcsPath, mockPath, pid)
+
+			testReportPath, err := os.Getwd()
+			if err != nil {
+				t.logger.Error("failed to get the path of current directory", zap.Error(err))
+				return
+			}
+			testReportPath += "/Keploy/testReports"
+			t.tester.Test(tcsPath, mockPath, testReportPath, pid)
 		},
 	}
 

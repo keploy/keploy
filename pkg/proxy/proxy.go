@@ -12,6 +12,7 @@ import (
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 	"go.keploy.io/server/pkg/hooks"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -229,25 +230,39 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		dst net.Conn
 		actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(proxyState.Dest_ip), proxyState.Dest_port)
 	)
-	dst, err = net.Dial("tcp", actualAddress)
-	if err != nil {
-		ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-		conn.Close()
-		return
-	}
+	if models.GetMode() != models.MODE_TEST{
 
+		dst, err = net.Dial("tcp", actualAddress)
+		if err != nil {
+			ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			conn.Close()
+			return
+		}
+	}
 
 	switch  {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
-		ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// if models.GetMode() == models.MODE_RECORD {
+			// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+			// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+			// }
+			var deps []*models.Mock = ps.hook.GetDeps()
+		httpparser.ProcessOutgoingHttp(buffer, conn, dst, &deps, ps.logger)
+			ps.hook.SetDeps(deps)
 	case mongoparser.IsOutgoingMongo(buffer):
-		deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-		for _, v := range deps {
-			ps.hook.AppendDeps(v)
-		}
+		var deps []*models.Mock = ps.hook.GetDeps()
+
+		mongoparser.ProcessOutgoingMongo(buffer, conn, dst, &deps, ps.logger)
+		ps.hook.SetDeps(deps)
+
+		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+		// for _, v := range deps {
+		// 	ps.hook.AppendDeps(v)
+		// }
 	default:
-	}	
+		}	
+
 
 
 	// releases the occupied proxy
