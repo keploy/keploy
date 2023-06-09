@@ -215,7 +215,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	if indx == -1 {
-		ps.logger.Error("failed to fetch the state of proxy", zap.Any("port", port))
+		// ps.logger.Error("failed to fetch the state of proxy", zap.Any("port", port))
 		return
 	}
 

@@ -1,6 +1,194 @@
 version: api.keploy.io/v1beta1
 name: report-2
-status: RUNNING
-success: 0
-failure: 0
-total: 1
+status: FAILED
+success: 1
+failure: 2
+total: 3
+tests:
+    - kind: Http
+      name: report-2
+      status: PASSED
+      started: 1686311141
+      completed: 1686311142
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy-v2/keploy/Keploy/mocks
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/Lhr4BWA
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 404
+        header:
+            Content-Length: "25"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 09 Jun 2023 11:42:19 GMT
+        body: '{"error":"url not found"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 404
+            actual: 404
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "25"
+              actual:
+                key: Content-Length
+                value:
+                    - "25"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 09 Jun 2023 11:42:19 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 09 Jun 2023 11:45:41 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"error":"url not found"}'
+              actual: '{"error":"url not found"}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: FAILED
+      started: 1686311142
+      completed: 1686311143
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy-v2/keploy/Keploy/mocks
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/url
+        header:
+            Accept: '*/*'
+            Content-Length: "33"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://google.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 09 Jun 2023 11:42:45 GMT
+        body: '{"ts":1686310965227770098,"url":"http://localhost:8080/Lhr4BWAi"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 09 Jun 2023 11:42:45 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 09 Jun 2023 11:45:42 GMT
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "65"
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"ts":1686310965227770098,"url":"http://localhost:8080/Lhr4BWAi"}'
+              actual: '{"ts":1686311142311566910,"url":"http://localhost:8080/Lhr4BWAi"}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: FAILED
+      started: 1686311143
+      completed: 1686311144
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy-v2/keploy/Keploy/mocks
+      test_case_id: test-3
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/Lhr4BWAi
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 303
+        header:
+            Content-Length: "45"
+            Content-Type: text/html; charset=utf-8
+            Date: Fri, 09 Jun 2023 11:43:03 GMT
+            Location: https://google.com
+        body: |+
+            <a href="https://google.com">See Other</a>.
+
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: false
+            expected: 303
+            actual: 404
+        headers_result: []
+        body_result:
+            - normal: false
+              type: JSON
+              expected: |+
+                <a href="https://google.com">See Other</a>.
+
+              actual: '{"error":"url not found"}'
+        dep_result: []
