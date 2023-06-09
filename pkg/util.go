@@ -67,24 +67,24 @@ func IsTime(stringDate string) bool {
 }
 
 
-func SimulateHttp (tc models.Mock, logger *zap.Logger, getResp func() *spec.HttpRespYaml) (*spec.HttpRespYaml, error) {
+func SimulateHttp (tc models.Mock, httpSpec *spec.HttpSpec, logger *zap.Logger, getResp func() *spec.HttpRespYaml) (*spec.HttpRespYaml, error) {
 	resp := &spec.HttpRespYaml{}
 
-	spec := &spec.HttpSpec{}
-	err := tc.Spec.Decode(spec)
-	if err!=nil {
-		logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
-		return nil, err
-	}
-	req, err := http.NewRequest(string(spec.Request.Method), spec.Request.URL, bytes.NewBufferString(spec.Request.Body))
+	// httpSpec := &spec.HttpSpec{}
+	// err := tc.Spec.Decode(httpSpec)
+	// if err!=nil {
+	// 	logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
+	// 	return nil, err
+	// }
+	req, err := http.NewRequest(string(httpSpec.Request.Method), httpSpec.Request.URL, bytes.NewBufferString(httpSpec.Request.Body))
 	if err != nil {
 		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
 		return nil, err
 	}
-	req.Header = ToHttpHeader(spec.Request.Header)
+	req.Header = ToHttpHeader(httpSpec.Request.Header)
 	req.Header.Set("KEPLOY_TEST_ID", tc.Name)
-	req.ProtoMajor = spec.Request.ProtoMajor
-	req.ProtoMinor = spec.Request.ProtoMinor
+	req.ProtoMajor = httpSpec.Request.ProtoMajor
+	req.ProtoMinor = httpSpec.Request.ProtoMinor
 	req.Close = true
 
 	// httpresp, err := k.client.Do(req)

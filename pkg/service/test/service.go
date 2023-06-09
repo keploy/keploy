@@ -1,5 +1,5 @@
 package test
 
 type Tester interface {
-	Test(tcsPath, mockPath string, pid uint32) bool
+	Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 }

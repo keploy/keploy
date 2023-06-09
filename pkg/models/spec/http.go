@@ -7,7 +7,7 @@ type HttpSpec struct {
 	Request    HttpReqYaml         `json:"req" yaml:"req"`
 	Response   HttpRespYaml        `json:"resp" yaml:"resp"`
 	Objects    []Object            `json:"objects" yaml:"objects"`
-	Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
+	// Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
 	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
 	Created    int64               `json:"created" yaml:"created,omitempty"`
 }

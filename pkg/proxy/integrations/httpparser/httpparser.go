@@ -3,6 +3,7 @@ package httpparser
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
@@ -28,8 +29,64 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("HEAD ")) 
 }
 
-// CaptureHTTPMessage function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func CaptureHTTPMessage(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) *models.Mock {
+func ProcessOutgoingHttp (requestBuffer []byte, clientConn, destConn net.Conn, deps *[]*models.Mock, logger *zap.Logger) {
+	switch models.GetMode() {
+	case models.MODE_RECORD:
+		*deps = append(*deps, encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
+
+	case models.MODE_TEST:
+		decodeOutgoingHttp(requestBuffer, clientConn, destConn, *deps, logger)
+	default:
+		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
+	}
+
+}
+
+// decodeOutgoingHttp
+func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, deps []*models.Mock, logger *zap.Logger)  {
+	if len(deps) == 0 {
+		logger.Error("failed to mock the output for unrecorded outgoing http call")
+		return
+	}
+
+	var httpSpec spec.HttpSpec
+	err := deps[0].Spec.Decode(&httpSpec)
+	if err != nil {
+		logger.Error("failed to decode the yaml spec for the outgoing http call")
+		return
+	}
+
+	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", httpSpec.Request.ProtoMajor, httpSpec.Request.ProtoMinor, httpSpec.Response.StatusCode, http.StatusText(int(httpSpec.Response.StatusCode)))
+
+	// Generate the response headers
+	header := pkg.ToHttpHeader(httpSpec.Response.Header)
+	var headers string
+	for key, values := range header {
+		for _, value := range values {
+
+			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+			headers += headerLine
+		}
+	}
+
+	// Generate the response body
+	// bodyBytes, _ := ioutil.ReadAll(bytes.NewReader(httpSpec.Response.BodyData))
+	// body := string(bodyBytes)
+	body := httpSpec.Response.Body
+
+	// Concatenate the status line, headers, and body
+	responseString := statusLine + headers + "\r\n" + body
+	_, err = clienConn.Write([]byte(responseString))
+	if err != nil {
+		logger.Error("failed to write the mock output to the user application", zap.Error(err))
+		return
+	}
+	// pop the mocked output from the dependency queue
+	deps = deps[1:]
+}
+
+// encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
+func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) *models.Mock {
 	defer destConn.Close()
 
 	// write the request message to the actual destination server
@@ -121,6 +178,7 @@ func CaptureHTTPMessage(requestBuffer []byte, clientConn, destConn net.Conn, log
 		logger.Error("failed to encode the http messsage into the yaml")
 		return nil
 	}
+
 	return httpMock
 
 		// if val, ok := Deps[string(port)]; ok {

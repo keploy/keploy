@@ -131,6 +131,12 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 	// }
 
 	// encode the message into yaml
+	mocks := getDeps()
+	mockIds := []string{}
+	for i, v := range mocks {
+		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
+	}
+
 	err = httpMock.Spec.Encode(&spec.HttpSpec{
 			Metadata: meta,
 			Request: spec.HttpReqYaml{
@@ -152,13 +158,12 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 			},
 			Created: time.Now().Unix(),
 			Assertions: make(map[string][]string),
-			Mocks: []string{},
+			// Mocks: mockIds,
 	})
 	if err != nil {
 		logger.Error("failed to encode http spec for testcase", zap.Error(err))
 		return
 	}
-
 	// write yaml
 	err = db.Insert(httpMock, getDeps())
 	if err!=nil {

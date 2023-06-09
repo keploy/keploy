@@ -31,19 +31,19 @@ func NewYamlStore(tcsPath, mockPath string, logger *zap.Logger) platform.TestCas
 }
 
 // createYamlFile is used to create the yaml file along with the path directory (if does not exists)
-func (ys *yaml) createYamlFile(path string, fileName string) (bool, error) {
+func  createYamlFile(path string, fileName string, logger *zap.Logger) (bool, error) {
 	// checks id the yaml exists
 	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
 		// creates the path director if does not exists
 		err = os.MkdirAll(filepath.Join(path), os.ModePerm)
 		if err != nil {
-			ys.logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+			logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
 		// create the yaml file
 		_, err = os.Create(filepath.Join(path, fileName+".yaml"))
 		if err != nil {
-			ys.logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+			logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
 
@@ -53,7 +53,7 @@ func (ys *yaml) createYamlFile(path string, fileName string) (bool, error) {
 }
 
 // findLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
-func (ys *yaml) findLastIndex (path string) (int, error) {
+func findLastIndex (path string, logger *zap.Logger) (int, error) {
 
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
@@ -70,13 +70,13 @@ func (ys *yaml) findLastIndex (path string) (int, error) {
 		fileName := filepath.Base(v.Name())
 		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
 		if len(strings.Split(fileNameWithoutExt, "-")) < 1 {
-			ys.logger.Error("failed to decode the last sequence number from yaml test", zap.Any("for the file", fileName), zap.Any("at path", path))
+			logger.Error("failed to decode the last sequence number from yaml test", zap.Any("for the file", fileName), zap.Any("at path", path))
 			return 0, errors.New("failed to decode the last sequence number from yaml test")
 		}
 		indxStr := strings.Split(fileNameWithoutExt, "-")[1]
 		indx, err := strconv.Atoi(indxStr)
 		if err != nil {
-			ys.logger.Error("failed to read the sequence number from the yaml file name", zap.Error(err), zap.Any("for the file", fileName))
+			logger.Error("failed to read the sequence number from the yaml file name", zap.Error(err), zap.Any("for the file", fileName))
 			return 0, err
 		}
 		if indx > lastIndex {
@@ -91,7 +91,7 @@ func (ys *yaml) findLastIndex (path string) (int, error) {
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
 func (ys *yaml) write(path, fileName string, doc models.Mock) error {
 	// 
-	isFileEmpty, err := ys.createYamlFile(path, fileName)
+	isFileEmpty, err := createYamlFile(path, fileName, ys.logger)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func (ys *yaml) write(path, fileName string, doc models.Mock) error {
 
 func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
 	// finds the recently generated testcase to derive the sequence number for the current testcase
-	lastIndx, err := ys.findLastIndex(ys.tcsPath)
+	lastIndx, err := findLastIndex(ys.tcsPath, ys.logger)
 	if err != nil {
 		return err
 	}

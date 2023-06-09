@@ -71,8 +71,14 @@ func NewHook(proxyPorts []uint32, db platform.TestCaseDB, logger *zap.Logger) *H
 
 func (h *Hook) AppendDeps(m *models.Mock)  {
 	h.deps = append(h.deps, m)
-}
 
+}
+func (h *Hook) SetDeps(m []*models.Mock) {
+	h.deps = m
+}
+func (h *Hook) PopFront()  {
+	h.deps = h.deps[1:]
+}
 func (h *Hook) FetchDep (indx int) *models.Mock {
 	return h.deps[indx]
 }
