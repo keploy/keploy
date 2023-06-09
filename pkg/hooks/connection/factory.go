@@ -3,6 +3,7 @@ package connection
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -71,6 +72,11 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 					factory.logger.Error("failed to read the http response body", zap.Error(err), zap.Any("mode", models.MODE_TEST))
 					return
 				}
+				respBody, err = json.Marshal(respBody)
+				if err != nil {
+					factory.logger.Error("failed to marshal the http response body", zap.Error(err))
+					return
+				}
 				factory.respChannel <- &spec.HttpRespYaml{
 					StatusCode: parsedHttpRes.StatusCode,
 					Header:     pkg.ToYamlHttpHeader(parsedHttpRes.Header),
@@ -119,9 +125,19 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 		logger.Error("failed to read the http request body", zap.Error(err))
 		return
 	}
+	reqBody, err = json.Marshal(reqBody)
+	if err != nil {
+		logger.Error("failed to marshal the http request body", zap.Error(err))
+		return
+	}
 	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		logger.Error("failed to read the http response body", zap.Error(err))
+		return
+	}
+	respBody, err = json.Marshal(respBody)
+	if err != nil {
+		logger.Error("failed to marshal the http response body", zap.Error(err))
 		return
 	}
 	// b, err := req.URL.MarshalBinary()

@@ -109,9 +109,11 @@ func (h *Hook) UpdateProxyState (indx uint32, ps *PortState) {
 
 func (h *Hook) GetProxyState(i uint32) (*PortState, error) {
 	proxyState := PortState{}
-	if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
-		// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
-		return nil, err
+	if h!=nil && h.proxyStateMap != nil {
+		if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
+			// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
+			return nil, err
+		}
 	}
 	return &proxyState, nil
 }

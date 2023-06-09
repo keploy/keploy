@@ -186,6 +186,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, de
 			logger.Error("failed to decode the yaml spec for the outgoing mongo reply")
 			return
 		}
+		fmt.Println("the msg spec: ", msgSpec)
 // wiremessage.
 
 		msg := &opMsg{
@@ -214,6 +215,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, de
 				logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
 				return
 			}
+			fmt.Println("the unmarshaled doc: ", unmarshaledDoc)
 			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
 			msg.sections = []opMsgSection{&opMsgSectionSingle{
 				msg: unmarshaledDoc,
