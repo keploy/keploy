@@ -95,6 +95,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 				loadedHooks.AppendDeps(&mocks[tc.Name][i])
 			}
 			// loadedHooks.SetDeps(mocks[tc.Name])
+			time.Sleep(1 * time.Second)
 			resp, err := pkg.SimulateHttp(tc, httpSpec, t.logger, loadedHooks.GetResp)
 			if err!=nil {
 				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
