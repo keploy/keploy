@@ -26,6 +26,8 @@ func (t *Test) GetCmd() *cobra.Command {
 		Use:   "test",
 		Short: "run the recorded testcases and execute assertions",
 		Run: func(cmd *cobra.Command, args []string) {
+	println("called Test()")
+
 			pid, err := cmd.Flags().GetUint32("pid")
 			if err!=nil {
 				t.logger.Error("failed to read the process id flag")

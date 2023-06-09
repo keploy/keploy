@@ -20,14 +20,16 @@ type tester struct {
 	logger *zap.Logger
 }
 
-func NewTester (logger *zap.Logger) Tester {
+func NewTester(logger *zap.Logger) Tester {
 	return &tester{
 		logger: logger,
 	}
 }
 
-func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool  {
+func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
 	models.SetMode(models.MODE_TEST)
+
+	println("called Test()")
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
@@ -51,13 +53,13 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 	testReport := &models.TestReport{
 		Version: models.V1Beta1,
 		// Name:    runId,
-		Total:   len(tcs),
-		Status:  string(models.TestRunStatusRunning),
+		Total:  len(tcs),
+		Status: string(models.TestRunStatusRunning),
 	}
 
-	// starts the testrun 
+	// starts the testrun
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
-	if err!=nil {
+	if err != nil {
 		t.logger.Error(err.Error())
 		return false
 	}
@@ -69,7 +71,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 
 	passed := true
 
-	// sort the testcases in 
+	// sort the testcases in
 	sort.Slice(tcs, func(i, j int) bool {
 		if tcs[i].Kind == models.HTTP && tcs[j].Kind == models.HTTP {
 			iHttpSpec := &spec.HttpSpec{}
@@ -86,7 +88,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 		case models.HTTP:
 			httpSpec := &spec.HttpSpec{}
 			err := tc.Spec.Decode(httpSpec)
-			if err!=nil {
+			if err != nil {
 				t.logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
 				return false
 			}
@@ -95,13 +97,13 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 				loadedHooks.AppendDeps(&mocks[tc.Name][i])
 			}
 			// loadedHooks.SetDeps(mocks[tc.Name])
-			time.Sleep(1 * time.Second)
+			// time.Sleep(1 * time.Second)
 			resp, err := pkg.SimulateHttp(tc, httpSpec, t.logger, loadedHooks.GetResp)
-			if err!=nil {
+			if err != nil {
 				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 				continue
 			}
-		// println("before blocking simulate")
+			// println("before blocking simulate")
 
 			// resp := loadedHooks.GetResp()
 			// println("after blocking simulate")
@@ -117,7 +119,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 				failure++
 				status = models.TestRunStatusFailed
 			}
-			
+
 			testReportFS.Lock()
 			testReportFS.SetResult(testReport.Name, models.TestResult{
 				Kind:       models.HTTP,
@@ -151,37 +153,37 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 			})
 			testReportFS.Lock()
 			testReportFS.Unlock()
-	// 		spec := &spec.HttpSpec{}
-	// 		err := tc.Spec.Decode(spec)
-	// 		if err!=nil {
-	// 			t.logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
-	// 			return false
-	// 		}
-	// 		req, err := http.NewRequest(string(spec.Request.Method), "http://localhost"+":"+k.cfg.App.Port+spec.Request.URL, bytes.NewBufferString(spec.Request.Body))
-	// 		if err != nil {
-	// 			panic(err)
-	// 		}
-	// 		req.Header = tc.HttpReq.Header
-	// 		req.Header.Set("KEPLOY_TEST_ID", tc.ID)
-	// 		req.ProtoMajor = tc.HttpReq.ProtoMajor
-	// 		req.ProtoMinor = tc.HttpReq.ProtoMinor
-	// 		req.Close = true
+			// 		spec := &spec.HttpSpec{}
+			// 		err := tc.Spec.Decode(spec)
+			// 		if err!=nil {
+			// 			t.logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
+			// 			return false
+			// 		}
+			// 		req, err := http.NewRequest(string(spec.Request.Method), "http://localhost"+":"+k.cfg.App.Port+spec.Request.URL, bytes.NewBufferString(spec.Request.Body))
+			// 		if err != nil {
+			// 			panic(err)
+			// 		}
+			// 		req.Header = tc.HttpReq.Header
+			// 		req.Header.Set("KEPLOY_TEST_ID", tc.ID)
+			// 		req.ProtoMajor = tc.HttpReq.ProtoMajor
+			// 		req.ProtoMinor = tc.HttpReq.ProtoMinor
+			// 		req.Close = true
 
-	// 		// httpresp, err := k.client.Do(req)
-	// 		k.client.Do(req)
-	// 		if err != nil {
-	// 			k.Log.Error("failed sending testcase request to app", zap.Error(err))
-	// 			return nil, err
-	// 		}
-	// 		// defer httpresp.Body.Close()
-	// 		println("before blocking simulate")
-	
+			// 		// httpresp, err := k.client.Do(req)
+			// 		k.client.Do(req)
+			// 		if err != nil {
+			// 			k.Log.Error("failed sending testcase request to app", zap.Error(err))
+			// 			return nil, err
+			// 		}
+			// 		// defer httpresp.Body.Close()
+			// 		println("before blocking simulate")
+
 		}
 	}
 
 	// store the result of the testrun as test-report
 	testResults, err := testReportFS.GetResults(testReport.Name)
-	if err!= nil {
+	if err != nil {
 		t.logger.Error("failed to fetch test results", zap.Error(err))
 		return passed
 	}
@@ -191,17 +193,16 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 	testReport.Success = success
 	testReport.Failure = failure
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
-	if err!=nil {
+	if err != nil {
 		t.logger.Error(err.Error())
 		return false
 	}
 
 	t.logger.Info("test run completed", zap.Bool("passed overall", passed))
 
-
-
 	// stop listening for the eBPF events
-	loadedHooks.Stop()
+	loadedHooks.Stop(false)
+
 	return true
 }
 
@@ -213,7 +214,7 @@ func (t *tester) testHttp(tc models.Mock, httpSpec *spec.HttpSpec, actualRespons
 	}
 	pass := true
 	hRes := &[]models.HeaderResult{}
-	
+
 	res := &models.Result{
 		StatusCode: models.IntResult{
 			Normal:   false,
@@ -240,7 +241,7 @@ func (t *tester) testHttp(tc models.Mock, httpSpec *spec.HttpSpec, actualRespons
 		return false, res
 	}
 	noise := httpSpec.Assertions["noise"]
-	noise = append(noise,  FindNoisyFields(m, func(k string, vals []string) bool {
+	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
 		// check if k is date
 		for _, v := range vals {
 			if pkg.IsTime(v) {
@@ -251,9 +252,6 @@ func (t *tester) testHttp(tc models.Mock, httpSpec *spec.HttpSpec, actualRespons
 		// maybe we need to concatenate the values
 		return pkg.IsTime(strings.Join(vals, ", "))
 	})...)
-
-
-	
 
 	var (
 		bodyNoise   []string
@@ -303,8 +301,6 @@ func (t *tester) testHttp(tc models.Mock, httpSpec *spec.HttpSpec, actualRespons
 
 		pass = false
 	}
-
-	
 
 	// t.logger.Info("", zap.Any("result of test", res))
 
