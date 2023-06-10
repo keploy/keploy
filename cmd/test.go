@@ -4,12 +4,15 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/service/test"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/persistence"
+	"go.keploy.io/server/pkg/service/test"
 )
 
 func NewCmdTest(logger *zap.Logger) *Test {
-	tester := test.NewTester(logger)
+	fileSystem := persistence.NewNativeFilesystem(logger)
+	tester := test.NewTester(fileSystem, logger)
 	return &Test{
 		tester: tester,
 		logger: logger,
@@ -26,16 +29,16 @@ func (t *Test) GetCmd() *cobra.Command {
 		Use:   "test",
 		Short: "run the recorded testcases and execute assertions",
 		Run: func(cmd *cobra.Command, args []string) {
-	println("called Test()")
+			println("called Test()")
 
 			pid, err := cmd.Flags().GetUint32("pid")
-			if err!=nil {
+			if err != nil {
 				t.logger.Error("failed to read the process id flag")
 				return
 			}
 
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				t.logger.Error("failed to read the testcase path input")
 				return
 			}

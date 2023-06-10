@@ -7,33 +7,35 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/models/spec"
+	"go.keploy.io/server/pkg/persistence"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-	"go.uber.org/zap"
 )
 
 type tester struct {
-	logger *zap.Logger
+	fileSystem persistence.FileSystem
+	logger     *zap.Logger
 }
 
-func NewTester(logger *zap.Logger) Tester {
+func NewTester(fileSystem persistence.FileSystem, logger *zap.Logger) Tester {
 	return &tester{
-		logger: logger,
+		fileSystem: fileSystem,
+		logger:     logger,
 	}
 }
 
 func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
 	models.SetMode(models.MODE_TEST)
 
-	println("called Test()")
-
-	testReportFS := yaml.NewTestReportFS(t.logger)
+	testReportFS := yaml.NewTestReportFS(t.fileSystem, t.logger)
 	// fetch the recorded testcases with their mocks
-	ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
+	ys := yaml.NewYamlStore(tcsPath, mockPath, t.fileSystem, t.logger)
 	// start the proxies
 	ps := proxy.BootProxies(t.logger, proxy.Option{})
 	// Initiate the hooks and update the vaccant ProxyPorts map

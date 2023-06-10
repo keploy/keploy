@@ -6,14 +6,16 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/platform/yaml"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/persistence"
+	"go.keploy.io/server/pkg/platform/yaml"
 )
 
 type Root struct {
 	logger *zap.Logger
 	// subCommands holds a list of registered plugins.
-	subCommands  []Plugins
+	subCommands []Plugins
 }
 
 func newRoot() *Root {
@@ -27,7 +29,7 @@ func newRoot() *Root {
 	}
 
 	return &Root{
-		logger: logger,
+		logger:      logger,
 		subCommands: []Plugins{},
 	}
 }
@@ -38,7 +40,7 @@ func Execute() {
 	newRoot().execute()
 }
 
-// execute creates a root command for Cobra. The root cmd will be executed after attaching the subcommmands. 
+// execute creates a root command for Cobra. The root cmd will be executed after attaching the subcommmands.
 func (r *Root) execute() {
 	// Root command
 	var rootCmd = &cobra.Command{
@@ -46,7 +48,6 @@ func (r *Root) execute() {
 		Short: "Keploy CLI",
 	}
 	// rootCmd.Flags().IntP("pid", "", 0, "Please enter the process id on which your application is running.")
-
 
 	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger))
 
@@ -68,18 +69,15 @@ type Plugins interface {
 }
 
 // RegisterPlugin registers a plugin by appending it to the list of subCommands.
-func (r *Root)RegisterPlugin(p Plugins) {
+func (r *Root) RegisterPlugin(p Plugins) {
 	r.subCommands = append(r.subCommands, p)
 }
 
-func ReadTCS (logger *zap.Logger) *cobra.Command{
+func ReadTCS(logger *zap.Logger) *cobra.Command {
 	var recordCmd = &cobra.Command{
 		Use:   "read",
 		Short: "record the keploy testcases from the API calls",
 		Run: func(cmd *cobra.Command, args []string) {
-
-
-
 
 			// pid, _ := cmd.Flags().GetUint32("pid")
 			// path, err := cmd.Flags().GetString("path")
@@ -89,17 +87,18 @@ func ReadTCS (logger *zap.Logger) *cobra.Command{
 			// }
 
 			// if path == "" {
-				path, err := os.Getwd()
-				if err != nil {
-					logger.Error("failed to get the path of current directory", zap.Error(err))
-					return
-				}
+			path, err := os.Getwd()
+			if err != nil {
+				logger.Error("failed to get the path of current directory", zap.Error(err))
+				return
+			}
 			// }
 			path += "/Keploy"
 			tcsPath := path + "/tests"
 			mockPath := path + "/mocks"
 
-			ys := yaml.NewYamlStore(tcsPath, mockPath, logger)
+			nativeFileSystem := persistence.NewNativeFilesystem(logger)
+			ys := yaml.NewYamlStore(tcsPath, mockPath, nativeFileSystem, logger)
 			tcs, mocks, err := ys.Read(nil)
 			fmt.Println("no of tsc:", len(tcs), "tcs: ", tcs)
 			fmt.Println("mocks: ", mocks)

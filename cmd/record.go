@@ -4,21 +4,24 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/service/record"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/persistence"
+	"go.keploy.io/server/pkg/service/record"
 )
 
 func NewCmdRecord(logger *zap.Logger) *Record {
-	recorder := record.NewRecorder(logger)
+	fileSystem := persistence.NewNativeFilesystem(logger)
+	recorder := record.NewRecorder(fileSystem, logger)
 	return &Record{
 		recorder: recorder,
-		logger: logger,
+		logger:   logger,
 	}
 }
 
 type Record struct {
 	recorder record.Recorder
-	logger *zap.Logger
+	logger   *zap.Logger
 }
 
 func (r *Record) GetCmd() *cobra.Command {
@@ -29,7 +32,7 @@ func (r *Record) GetCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			pid, _ := cmd.Flags().GetUint32("pid")
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				r.logger.Error("failed to read the testcase path input")
 				return
 			}
