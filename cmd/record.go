@@ -4,21 +4,22 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/service/record"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/service/record"
 )
 
-func NewCmdRecord(logger *zap.Logger) *Record {
-	recorder := record.NewRecorder(logger)
+// NewCmdRecordSkeleton returns a new record, initialised only with the logger.
+// User should explicitly create the recorder upon execution of Run function.
+func NewCmdRecordSkeleton(logger *zap.Logger) *Record {
 	return &Record{
-		recorder: recorder,
 		logger: logger,
 	}
 }
 
 type Record struct {
 	recorder record.Recorder
-	logger *zap.Logger
+	logger   *zap.Logger
 }
 
 func (r *Record) GetCmd() *cobra.Command {
@@ -27,9 +28,14 @@ func (r *Record) GetCmd() *cobra.Command {
 		Use:   "record",
 		Short: "record the keploy testcases from the API calls",
 		Run: func(cmd *cobra.Command, args []string) {
+			// Overwrite the logger with the one demanded by the user,
+			// and use that logger to create the new recorder.
+			r.UpdateFieldsFromUserDefinedFlags(cmd)
+			defer r.logger.Sync()
+
 			pid, _ := cmd.Flags().GetUint32("pid")
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				r.logger.Error("failed to read the testcase path input")
 				return
 			}
@@ -59,4 +65,9 @@ func (r *Record) GetCmd() *cobra.Command {
 	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
 
 	return recordCmd
+}
+
+func (r *Record) UpdateFieldsFromUserDefinedFlags(cmd *cobra.Command) {
+	r.logger = CreateLoggerFromFlags(cmd)
+	r.recorder = record.NewRecorder(r.logger)
 }

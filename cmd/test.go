@@ -4,14 +4,15 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/service/test"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/service/test"
 )
 
-func NewCmdTest(logger *zap.Logger) *Test {
-	tester := test.NewTester(logger)
+// NewCmdTestSkeleton returns a new test, initialised only with the logger.
+// User should explicitly create the tester upon execution of Run function.
+func NewCmdTestSkeleton(logger *zap.Logger) *Test {
 	return &Test{
-		tester: tester,
 		logger: logger,
 	}
 }
@@ -26,16 +27,19 @@ func (t *Test) GetCmd() *cobra.Command {
 		Use:   "test",
 		Short: "run the recorded testcases and execute assertions",
 		Run: func(cmd *cobra.Command, args []string) {
-	println("called Test()")
+			// Overwrite the logger with the one demanded by the user,
+			// and use that logger to create the new tester.
+			t.UpdateFieldsFromUserDefinedFlags(cmd)
+			t.logger.Sync()
 
 			pid, err := cmd.Flags().GetUint32("pid")
-			if err!=nil {
+			if err != nil {
 				t.logger.Error("failed to read the process id flag")
 				return
 			}
 
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				t.logger.Error("failed to read the testcase path input")
 				return
 			}
@@ -67,4 +71,9 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().String("path", "", "Path to local directory where generated testcases/mocks are stored")
 
 	return testCmd
+}
+
+func (t *Test) UpdateFieldsFromUserDefinedFlags(cmd *cobra.Command) {
+	t.logger = CreateLoggerFromFlags(cmd)
+	t.tester = test.NewTester(t.logger)
 }
