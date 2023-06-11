@@ -4,8 +4,10 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/service/test"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/service/test"
+	sysUtils "go.keploy.io/server/pkg/sys/utils"
 )
 
 func NewCmdTest(logger *zap.Logger) *Test {
@@ -26,16 +28,15 @@ func (t *Test) GetCmd() *cobra.Command {
 		Use:   "test",
 		Short: "run the recorded testcases and execute assertions",
 		Run: func(cmd *cobra.Command, args []string) {
-	println("called Test()")
-
-			pid, err := cmd.Flags().GetUint32("pid")
-			if err!=nil {
-				t.logger.Error("failed to read the process id flag")
+			port, _ := cmd.Flags().GetUint16("port")
+			pid, err := sysUtils.FindPidFromPort(port)
+			if err != nil {
+				t.logger.Error("failed to get pid from port", zap.Error(err))
 				return
 			}
 
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				t.logger.Error("failed to read the testcase path input")
 				return
 			}
@@ -61,8 +62,8 @@ func (t *Test) GetCmd() *cobra.Command {
 		},
 	}
 
-	testCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
-	testCmd.MarkFlagRequired("pid")
+	testCmd.Flags().Uint16("port", 0, "Port on which your application is running.")
+	testCmd.MarkFlagRequired("port")
 
 	testCmd.Flags().String("path", "", "Path to local directory where generated testcases/mocks are stored")
 

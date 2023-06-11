@@ -4,21 +4,23 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/service/record"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/service/record"
+	sysUtils "go.keploy.io/server/pkg/sys/utils"
 )
 
 func NewCmdRecord(logger *zap.Logger) *Record {
 	recorder := record.NewRecorder(logger)
 	return &Record{
 		recorder: recorder,
-		logger: logger,
+		logger:   logger,
 	}
 }
 
 type Record struct {
 	recorder record.Recorder
-	logger *zap.Logger
+	logger   *zap.Logger
 }
 
 func (r *Record) GetCmd() *cobra.Command {
@@ -27,9 +29,15 @@ func (r *Record) GetCmd() *cobra.Command {
 		Use:   "record",
 		Short: "record the keploy testcases from the API calls",
 		Run: func(cmd *cobra.Command, args []string) {
-			pid, _ := cmd.Flags().GetUint32("pid")
+			port, _ := cmd.Flags().GetUint16("port")
+			pid, err := sysUtils.FindPidFromPort(port)
+			if err != nil {
+				r.logger.Error("failed to get pid from port", zap.Error(err))
+				return
+			}
+
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				r.logger.Error("failed to read the testcase path input")
 				return
 			}
@@ -52,8 +60,8 @@ func (r *Record) GetCmd() *cobra.Command {
 		},
 	}
 
-	recordCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
-	recordCmd.MarkFlagRequired("pid")
+	recordCmd.Flags().Uint16("port", 0, "Port on which your application is running.")
+	recordCmd.MarkFlagRequired("port")
 
 	recordCmd.Flags().String("path", "", "Path to the local directory where generated testcases/mocks should be stored")
 	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
