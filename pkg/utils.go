@@ -419,7 +419,7 @@ func ReplaceFields(r interface{}, replace map[string]string, logger *zap.Logger)
 				i.Req.ProtoMinor = int64(protominor)
 			}
 		default:
-			logger.Error("Invlaid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`")
+			logger.Error("Invalid format for replace map keys. Possible values for keys are `header, domain, method, proto_major, proto_minor`")
 		}
 	}
 	return r
