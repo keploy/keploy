@@ -15,7 +15,7 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/hashicorp/go-version v1.6.0
 	github.com/imdario/mergo v0.3.14 // indirect
-	github.com/k0kubun/pp/v3 v3.1.0
+	github.com/k0kubun/pp/v3 v3.2.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/keploy/go-sdk v0.8.6
 	github.com/soheilhy/cmux v0.1.5
