@@ -105,6 +105,8 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 		h.logger.Error("failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
 		return err
 	}
+	
+	// h.EnablePidFilter() // can enable here also
 
 	h.logger.Info("User application started successfully")
 	return nil

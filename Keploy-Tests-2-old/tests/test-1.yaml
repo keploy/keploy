@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-2
+name: test-1
 spec:
     metadata:
         method: GET
@@ -8,22 +8,22 @@ spec:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: /Lhr4BWAi
+        url: /wiki
         header:
             Accept: '*/*'
-            User-Agent: curl/7.85.0
+            User-Agent: curl/7.87.0
         body: ""
         body_type: ""
     resp:
-        status_code: 404
+        status_code: 200
         header:
-            Content-Length: "25"
+            Content-Length: "176"
             Content-Type: application/json; charset=utf-8
-            Date: Tue, 13 Jun 2023 19:08:05 GMT
-        body: '{"error":"url not found"}'
+            Date: Tue, 06 Jun 2023 07:53:07 GMT
+        body: '{"ts":1686037987062129610,"url":"{\"fact\":\"Cat families usually play best in even numbers. Cats and kittens should be acquired in pairs whenever possible.\",\"length\":111}"}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
-    created: 1686683286
+    created: 1686037987

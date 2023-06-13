@@ -124,17 +124,17 @@ func (h *Hook) CleanProxyEntry(srcPort uint16) {
 }
 
 // // printing the whole map
-// func (h *Hook) PrintRedirectProxyMap() {
-// 	println("------Redirect Proxy map-------")
-// 	itr := h.redirectProxyMap.Iterate()
-// 	var key uint32
-// 	dest := structs.DestInfo{}
+func (h *Hook) PrintRedirectProxyMap() {
+	println("------Redirect Proxy map-------")
+	itr := h.redirectProxyMap.Iterate()
+	var key uint16
+	dest := structs.DestInfo{}
 
-// 	for itr.Next(&key, &dest) {
-// 		fmt.Printf("Redirect Proxy:  [key:%v] || [value:%v]", key, dest)
-// 	}
-// 	println("------Redirect Proxy map-------")
-// }
+	for itr.Next(&key, &dest) {
+		fmt.Printf("Redirect Proxy:  [key:%v] || [value:%v]", key, dest)
+	}
+	println("------Redirect Proxy map-------")
+}
 
 func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	h.mutex.Lock()

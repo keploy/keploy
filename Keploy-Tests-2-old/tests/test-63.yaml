@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-1
+name: test-63
 spec:
     metadata:
         method: POST
@@ -20,15 +20,14 @@ spec:
             }
         body_type: ""
     resp:
-        status_code: 200
+        status_code: 500
         header:
-            Content-Length: "65"
-            Content-Type: application/json; charset=utf-8
-            Date: Tue, 13 Jun 2023 19:07:11 GMT
-        body: '{"ts":1686683231074712492,"url":"http://localhost:8080/Lhr4BWAi"}'
+            Content-Length: "0"
+            Date: Tue, 13 Jun 2023 16:52:27 GMT
+        body: ""
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
-    created: 1686683231
+    created: 1686675148
