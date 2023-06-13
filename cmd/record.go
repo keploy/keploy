@@ -52,7 +52,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
-				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
 
 			r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, delay)
