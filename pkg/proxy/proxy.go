@@ -21,6 +21,9 @@ import (
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
+
+	//
+	"time"
 )
 
 // const (
@@ -28,11 +31,12 @@ import (
 // )
 
 type ProxySet struct {
-	IP       uint32
-	Port     uint32
-	hook     *hooks.Hook
-	logger   *zap.Logger
-	Listener net.Listener
+	IP        uint32
+	Port      uint32
+	hook      *hooks.Hook
+	logger    *zap.Logger
+	FilterPid bool
+	Listener  net.Listener
 }
 
 type Conn struct {
@@ -118,7 +122,7 @@ func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
 
 	localIp, err := util.GetLocalIP()
 	if err != nil {
-		log.Fatalf("Failed to get the local Ip address", err)
+		log.Fatalln("Failed to get the local Ip address", err)
 	}
 
 	proxyAddr, ok := util.ConvertToIPV4(localIp)
@@ -135,6 +139,7 @@ func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
 	if isPortAvailable(opt.Port) {
 		go proxySet.startProxy()
 	} else {
+		// TODO: Release eBPF resources if failed abruptly
 		log.Fatalf("Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
 	}
 
@@ -284,11 +289,16 @@ func (ps *ProxySet) startProxy() {
 	// }
 	// listener = tls.NewListener(listener, config)
 
+	// retry := 0
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
-			continue
+			// retry++
+			// if retry < 5 {
+			// 	continue
+			// }
+			break
 		}
 
 		go ps.handleConnection(conn, port)
@@ -356,45 +366,24 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
+	println("Filtering in Proxy:", ps.FilterPid)
+
+	time.Sleep(1 * time.Second)
+
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
+	// ps.hook.PrintRedirectProxyMap()
+
+	println("GOT SOURCE PORT:", sourcePort, " at time:", time.Now().Unix())
+
 	ps.logger.Debug("Inside handleConnection of Proxy server:", zap.Int("Source port", sourcePort))
 
-	destInfo, err := ps.hook.GetDestinationInfo(uint32(sourcePort))
+	destInfo, err := ps.hook.GetDestinationInfo(uint16(sourcePort))
 	if err != nil {
-		ps.logger.Error("failed to fetch the destination info", zap.Any("Source port", sourcePort))
+		ps.logger.Error("failed to fetch the destination info", zap.Any("Source port", sourcePort), zap.Any("err:", err))
 		return
 	}
-
-	// var (
-	// 	proxyState *hooks.PortState
-	// 	indx       = -1
-	// 	err        error
-	// )
-
-	// for i := 0; i < len(ps.PortList); i++ {
-
-	// 	// if err = ps.hook.ProxyPorts.Lookup(uint32(i), &proxyState); err != nil {
-	// 	// 	ps.logger.Error(fmt.Sprintf("failed to fetch the state of proxy running at port: %v", port), zap.Error(err))
-	// 	// 	break
-	// 	// }
-	// 	proxyState, err = ps.hook.GetProxyState(uint32(i))
-	// 	if err != nil {
-	// 		ps.logger.Error("failed to lookup the proxy state from map", zap.Error(err))
-	// 		break
-	// 	}
-
-	// 	if proxyState.Port == port {
-	// 		indx = i
-	// 		break
-	// 	}
-	// }
-
-	// if indx == -1 {
-	// 	ps.logger.Error("failed to fetch the state of proxy", zap.Any("port", port))
-	// 	return
-	// }
 
 	reader := bufio.NewReader(conn)
 	initialData := make([]byte, 5)
@@ -412,7 +401,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			return
 		}
 	}
-	buffer, err := util.ReadBytes(conn)
+	buffer, err := util.ReadBytes(reader)
 	if err != nil {
 		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 		return
@@ -445,27 +434,64 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 
-	switch {
-	case httpparser.IsOutgoingHTTP(buffer):
-		// capture the otutgoing http text messages]
-		ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-	case mongoparser.IsOutgoingMongo(buffer):
-		deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-		for _, v := range deps {
-			ps.hook.AppendDeps(v)
+	// Do not capture anything until filtering is enabled
+	if !ps.FilterPid {
+		println("Calling Next on address", actualAddress)
+		err := callNext(buffer, conn, dst, ps.logger)
+		if err != nil {
+			ps.logger.Error("failed to call next", zap.Error(err))
+			conn.Close()
+			return
 		}
-	default:
+	} else {
+
+		switch {
+		case httpparser.IsOutgoingHTTP(buffer):
+			// capture the otutgoing http text messages]
+			ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		case mongoparser.IsOutgoingMongo(buffer):
+			deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+			for _, v := range deps {
+				ps.hook.AppendDeps(v)
+			}
+		default:
+		}
 	}
 	// releases the occupied source port
-	ps.hook.CleanProxyEntry(uint32(sourcePort))
+	ps.hook.CleanProxyEntry(uint16(sourcePort))
 
-	// proxyState.Occupied = 0
-	// proxyState.Dest_ip = 0
-	// proxyState.Dest_port = 0
-	// ps.hook.UpdateProxyState(uint32(indx), proxyState)
-	// err = ps.hook.ProxyPorts.Update(uint32(indx), proxyState, ebpf.UpdateLock)
-	// if err != nil {
-	// 	ps.logger.Error("failed to release the occupied proxy", zap.Error(err), zap.Any("proxy port", port))
-	// 	return
-	// }
+}
+
+func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
+	defer destConn.Close()
+
+	// write the request message to the actual destination server
+	_, err := destConn.Write(requestBuffer)
+	if err != nil {
+		logger.Error("failed to write request message to the destination server", zap.Error(err))
+		return err
+	}
+
+	// read the response from the actual server
+	respBuffer, err := util.ReadBytes(destConn)
+	if err != nil {
+		logger.Error("failed to read the response message from the destination server", zap.Error(err))
+		return err
+	}
+
+	// write the response message to the user client
+	_, err = clientConn.Write(respBuffer)
+	if err != nil {
+		logger.Error("failed to write response message to the user client", zap.Error(err))
+		return err
+	}
+	return nil
+}
+
+func (ps *ProxySet) StopProxyServer() {
+	err := ps.Listener.Close()
+	if err != nil {
+		ps.logger.Error("failed to stop proxy server", zap.Error(err))
+	}
+	ps.logger.Info("proxy stopped...")
 }

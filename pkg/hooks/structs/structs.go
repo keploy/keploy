@@ -112,7 +112,7 @@ type Bpf_spin_lock struct{ Val uint32 }
 type DestInfo struct{
 	DestIp uint32
 	DestPort uint32
-	Lock Bpf_spin_lock
+	// Lock Bpf_spin_lock
 }
 
 

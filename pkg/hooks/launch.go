@@ -1,19 +1,25 @@
 package hooks
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/docker/docker/client"
+	"go.uber.org/zap"
 )
 
-func (h *Hook) LaunchUserApplication(appCmd, appContainer string) error {
+func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) error {
 
+	var pids [15]int32
 	// Supports Linux, Windows
 	if dCmd := isDockerCmd(appCmd); dCmd {
 		// check if appContainer name if provided by the user
@@ -21,25 +27,105 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string) error {
 			appContainer = parseContainerName(appCmd)
 		}
 
-		pids := getNameSpacePIDs(appContainer)
+		errCh := make(chan error, 1)
+		go func() {
+			err := runApp(appCmd)
+			errCh <- err
+		}()
+
+		println("Waiting....")
+		time.Sleep(time.Duration(Delay) * time.Second)
+		println("After running application")
+
+		// Check if there is an error in the channel without blocking
+		select {
+		case err := <-errCh:
+			if err != nil {
+				h.logger.Error("failed to launch the user application", zap.Any("err", err.Error()))
+				return err
+			}
+		default:
+			// No error received yet, continue with further flow
+		}
+
+		println("Now setting app pids")
+
+		pids = getAppNameSpacePIDs(appContainer)
+
+		println("Namespace PIDS of application:", pids[0])
+
+		inode := getInodeNumber(pids)
+		h.SendNameSpaceId(inode)
 
 	} else { //Supports only linux
+		println("[Bug-fix]Running user application on linux")
 
+		errCh := make(chan error, 1)
+		go func() {
+			err := runApp(appCmd)
+			errCh <- err
+		}()
+
+		println("Waiting....")
+		time.Sleep(time.Duration(Delay) * time.Second)
+		println("After running application")
+
+		// Check if there is an error in the channel without blocking
+		select {
+		case err := <-errCh:
+			if err != nil {
+				h.logger.Error("failed to launch the user application", zap.Any("err", err.Error()))
+				return err
+			}
+		default:
+			// No error received yet, continue with further flow
+		}
+
+		println("Now setting app pids")
+
+		appPids, err := getAppPIDs(appCmd)
+		if err != nil {
+			h.logger.Error("failed to get the pid of user application", zap.Any("err", err.Error()))
+			return err
+		}
+
+		pids = appPids
+		// var pids [15]int32
+		// pids[0] = value
+
+		// for i := 1; i < 15; i++ {
+		// 	pids[i] = -1
+		// }
+
+		println("PIDS of application:", pids[0])
 	}
 
+	err := h.SendApplicationPIDs(pids)
+	if err != nil {
+		h.logger.Error("failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+
+	h.logger.Info("User application started successfully")
+	return nil
 }
 
+// It runs the application using the given command
 func runApp(appCmd string) error {
-	cmd := exec.Command("sh", "-c", appCmd)
+	// Create a new command with your appCmd
+	cmd := exec.Command(appCmd)
+
+	// Set the output of the command
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// Run the command, this handles non-zero exit code get from application.
 	err := cmd.Run()
 	if err != nil {
 		return err
 	}
-
-	return nil
+	//make it debug statemen
+	return fmt.Errorf("user application exited with zero error code")
 }
 
 func isDockerCmd(cmd string) bool {
@@ -55,11 +141,12 @@ func parseContainerName(cmd string) string {
 	return containerName
 }
 
-func getNameSpacePIDs(containerName string) *[15]int32 {
+func getAppNameSpacePIDs(containerName string) [15]int32 {
 	// Create a new Docker client
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		log.Fatalf("failed to make a docker client", err)
+		log.Fatalf("failed to make a docker client:", err)
+
 	}
 
 	// Create a new context
@@ -68,7 +155,7 @@ func getNameSpacePIDs(containerName string) *[15]int32 {
 	// Inspect the specified container
 	inspect, err := cli.ContainerInspect(ctx, containerName)
 	if err != nil {
-		log.Fatalf("failed to inspect container:%v", containerName, err)
+		log.Fatalf("failed to inspect container:%v,", containerName, err)
 	}
 
 	containerID := inspect.ID
@@ -76,11 +163,11 @@ func getNameSpacePIDs(containerName string) *[15]int32 {
 	// Retrieve the PIDs of the container's processes
 	processes, err := cli.ContainerTop(context.Background(), containerID, []string{})
 	if err != nil {
-		log.Fatalf("failed to retrieve processes inside the app container", err)
+		log.Fatalf("failed to retrieve processes inside the app container:", err)
 	}
 
-	if len(processes.Processes) > 12 {
-		log.Fatalf("Error: More than 12 processes are running inside the application container.")
+	if len(processes.Processes) > 15 {
+		log.Fatalf("Error: More than 15 processes are running inside the application container.")
 	}
 
 	var pids [15]int32
@@ -91,6 +178,9 @@ func getNameSpacePIDs(containerName string) *[15]int32 {
 
 	// Extract the PIDs from the processes
 	for idx, process := range processes.Processes {
+		if len(process) < 2 {
+			log.Fatalln("failed to get the process IDs from the app container")
+		}
 
 		pid, err := parseToInt32(process[1])
 		if err != nil {
@@ -99,11 +189,55 @@ func getNameSpacePIDs(containerName string) *[15]int32 {
 		pids[idx] = pid
 	}
 
-	// Print the PIDs
-	for _, pid := range pids {
-		fmt.Println(pid)
+	for i, v := range pids {
+		pids[i] = getNStgids(int(v))
 	}
-	return &pids
+
+	return pids
+}
+
+// This function fetches the actual pids from container point of view.
+func getNStgids(pid int) int32 {
+	fName := "/proc/" + strconv.Itoa(pid) + "/status"
+
+	file, err := os.Open(fName)
+	if err != nil {
+		log.Fatalf("failed to open file /proc/%v/status:", pid, err)
+	}
+	defer file.Close()
+
+	var lastNStgid string
+
+	// Read the file line by line
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "NStgid:") {
+			// Extract the values from the line
+			// println(line)
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				lastNStgid = fields[len(fields)-1]
+			}
+		}
+	}
+
+	// Check if any error occurred during scanning the file
+	if err := scanner.Err(); err != nil {
+		log.Fatal("failed to scan the file:", err)
+	}
+
+	// Print the last NStgid value
+	if lastNStgid == "" {
+		log.Fatal("NStgid value not found in the file")
+	}
+	// fmt.Println("Last NStgid:", lastNStgid)
+	NStgid, err := parseToInt32(strings.TrimSpace(lastNStgid))
+	if err != nil {
+		log.Fatalf("failed to convert the NStgid[%v] from string to int32", lastNStgid)
+	}
+
+	return NStgid
 }
 
 func parseToInt32(str string) (int32, error) {
@@ -114,24 +248,114 @@ func parseToInt32(str string) (int32, error) {
 	return int32(num), nil
 }
 
-func getChildPids(pid int) ([]int, error) {
-	out, err := exec.Command("pgrep", "-P", strconv.Itoa(pid)).Output()
+//An application can launch as many child processes as it wants but here we are only handling for 15 child process.
+func getAppPIDs(appCmd string) ([15]int32, error) {
+	// Getting pid of the command
+	cmdPid, err := getCmdPid(appCmd)
 	if err != nil {
-		return nil, err
+		return [15]int32{}, fmt.Errorf("failed to get the pid of the running command: %v\n", err)
 	}
 
-	s := strings.TrimSuffix(string(out), "\n")
-	if s == "" {
-		return nil, nil
+	if cmdPid == 0 {
+		return [15]int32{}, fmt.Errorf("The command '%s' is not running.: %v\n", appCmd, err)
+	} else {
+		// log.Printf("The command '%s' is running with PID: %d\n", appCmd, pid)
 	}
 
-	var pids []int
-	for _, pidStr := range strings.Split(s, "\n") {
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			return nil, err
-		}
-		pids = append(pids, pid)
+	// for i, pid := range cmdPids {
+
+	// 	println("PID-", i, ":", pid)
+	// }
+
+	const maxChildProcesses = 15
+	var pids [maxChildProcesses]int32
+
+	for i := 0; i < len(pids); i++ {
+		pids[i] = -1
 	}
+	pids[0] = int32(cmdPid)
+	// for i, pid := range cmdPids {
+
+	// 	if i >= maxChildProcesses {
+	// 		log.Fatalf("Error: More than %d child processes of cmd:[%v] are running", maxChildProcesses, appCmd)
+	// 	}
+	// 	pids[i] = pid
+	// 	println("PID-", i, ":", pids[i])
+	// }
+
 	return pids, nil
+
+	//---------------------------------------------------------------//
+	// Getting child pids
+	// cmdPid := "/usr/bin/sudo /usr/bin/pgrep -P " + strconv.Itoa(pid)
+	// out, err := exec.Command("sh", "-c", cmdPid).Output()
+	// if err != nil {
+	// 	log.Fatal("failed to get the application pid:", err)
+	// }
+
+	// s := strings.TrimSuffix(string(out), "\n")
+	// if s == "" {
+	// 	log.Fatal("unable to retrieve the application pid")
+	// }
+
+	// const maxChildProcesses = 15
+	// var pids [maxChildProcesses]int32
+
+	// for i := 0; i < len(pids); i++ {
+	// 	pids[i] = -1
+	// }
+
+	// for i, pidStr := range strings.Split(s, "\n") {
+	// 	pid, err := strconv.Atoi(pidStr)
+	// 	if err != nil {
+	// 		log.Fatalf("failed to convert the process id [%v] from string to int", pidStr)
+	// 	}
+	// 	if i >= maxChildProcesses {
+	// 		log.Fatalf("Error: More than %d child processes of cmd:[%v] are running", maxChildProcesses, appCmd)
+	// 	}
+	// 	pids[i] = int32(pid)
+	// 	println("PID-", i, ":", pids[i])
+	// }
+	// return pids
+}
+
+func getCmdPid(commandName string) (int, error) {
+	cmd := exec.Command("pidof", commandName)
+
+	println("Executing the command....")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Errorf("failed to execute the command: %v", commandName)
+		return 0, err
+	}
+
+	println("pidof the cmd is:", string(output))
+	pidStr := strings.TrimSpace(string(output))
+
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		fmt.Errorf("failed to convert the process id [%v] from string to int", pidStr)
+		return 0, err
+	}
+
+	return pid, nil
+}
+
+func getInodeNumber(pids [15]int32) uint64 {
+
+	for _, pid := range pids {
+
+		filepath := filepath.Join("/proc", strconv.Itoa(int(pid)), "ns", "pid")
+
+		f, err := os.Stat(filepath)
+		if err != nil {
+			log.Fatal("failed to get the inode number or namespace Id:", err)
+		}
+		// Dev := (f.Sys().(*syscall.Stat_t)).Dev
+		Ino := (f.Sys().(*syscall.Stat_t)).Ino
+		if Ino != 0 {
+			return Ino
+		}
+	}
+	return 0
 }
