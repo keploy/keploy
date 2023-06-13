@@ -1,18 +1,8 @@
-package spec
+package models
 
 type Method string
 
-type HttpSpec struct {
-	Metadata   map[string]string   `json:"metadata" yaml:"metadata"`
-	Request    HttpReqYaml         `json:"req" yaml:"req"`
-	Response   HttpRespYaml        `json:"resp" yaml:"resp"`
-	Objects    []Object            `json:"objects" yaml:"objects"`
-	// Mocks      []string            `json:"mocks" yaml:"mocks,omitempty"`
-	Assertions map[string][]string `json:"assertions" yaml:"assertions,omitempty"`
-	Created    int64               `json:"created" yaml:"created,omitempty"`
-}
-
-type HttpReqYaml struct {
+type HttpReq struct {
 	Method     Method            `json:"method" yaml:"method"`
 	ProtoMajor int               `json:"proto_major" yaml:"proto_major"` // e.g. 1
 	ProtoMinor int               `json:"proto_minor" yaml:"proto_minor"` // e.g. 0
@@ -31,7 +21,7 @@ type FormData struct {
 	Paths  []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
 }
 
-type HttpRespYaml struct {
+type HttpResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
 	Body          string            `json:"body" yaml:"body"`

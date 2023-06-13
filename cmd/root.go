@@ -100,9 +100,9 @@ func ReadTCS (logger *zap.Logger) *cobra.Command{
 			mockPath := path + "/mocks"
 
 			ys := yaml.NewYamlStore(tcsPath, mockPath, logger)
-			tcs, mocks, err := ys.Read(nil)
+			tcs, err := ys.Read(nil)
 			fmt.Println("no of tsc:", len(tcs), "tcs: ", tcs)
-			fmt.Println("mocks: ", mocks)
+			// fmt.Println("mocks: ", mocks)
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, pid)
 
 			// server.Server(version, kServices, conf, logger)

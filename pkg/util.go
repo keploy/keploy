@@ -8,7 +8,6 @@ import (
 	"github.com/araddon/dateparse"
 	"github.com/gorilla/mux"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/models/spec"
 	"go.uber.org/zap"
 )
 
@@ -67,8 +66,8 @@ func IsTime(stringDate string) bool {
 }
 
 
-func SimulateHttp (tc models.Mock, httpSpec *spec.HttpSpec, logger *zap.Logger, getResp func() *spec.HttpRespYaml) (*spec.HttpRespYaml, error) {
-	resp := &spec.HttpRespYaml{}
+func SimulateHttp (tc models.TestCase, logger *zap.Logger, getResp func() *models.HttpResp) (*models.HttpResp, error) {
+	resp := &models.HttpResp{}
 
 	// httpSpec := &spec.HttpSpec{}
 	// err := tc.Spec.Decode(httpSpec)
@@ -76,15 +75,15 @@ func SimulateHttp (tc models.Mock, httpSpec *spec.HttpSpec, logger *zap.Logger, 
 	// 	logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
 	// 	return nil, err
 	// }
-	req, err := http.NewRequest(string(httpSpec.Request.Method), httpSpec.Request.URL, bytes.NewBufferString(httpSpec.Request.Body))
+	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
 		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
 		return nil, err
 	}
-	req.Header = ToHttpHeader(httpSpec.Request.Header)
+	req.Header = ToHttpHeader(tc.HttpReq.Header)
 	req.Header.Set("KEPLOY_TEST_ID", tc.Name)
-	req.ProtoMajor = httpSpec.Request.ProtoMajor
-	req.ProtoMinor = httpSpec.Request.ProtoMinor
+	req.ProtoMajor = tc.HttpReq.ProtoMajor
+	req.ProtoMinor = tc.HttpReq.ProtoMinor
 	req.Close = true
 
 	// httpresp, err := k.client.Do(req)
@@ -96,7 +95,7 @@ func SimulateHttp (tc models.Mock, httpSpec *spec.HttpSpec, logger *zap.Logger, 
 	}
 
 	// get the response from the hooks
-	resp = getResp()
+	// resp = getResp()
 
 	// defer httpresp.Body.Close()
 	// println("before blocking simulate")

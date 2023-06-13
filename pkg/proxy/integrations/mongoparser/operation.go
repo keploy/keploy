@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"go.keploy.io/server/pkg/models/spec"
+	"go.keploy.io/server/pkg/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
@@ -39,18 +39,18 @@ type Operation interface {
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1361-L1426
 // func Decode(wm []byte) (Operation, int32, int32, int32, int32, error) {
-func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
+func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 
 	wmLength := len(wm)
 	length, reqID, responseTo, opCode, wmBody, ok := wiremessage.ReadHeader(wm)
-	messageHeader := spec.MongoHeader{
+	messageHeader := models.MongoHeader{
 		Length: length, 
 		RequestID: reqID, 
 		ResponseTo: responseTo, 
 		Opcode: wiremessage.OpCode(opCode),
 	}
 	if !ok || int(length) > wmLength {
-		return nil, messageHeader, &spec.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
+		return nil, messageHeader, &models.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
 	}
 
 	var(
@@ -65,14 +65,14 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 
 		jsonBytes, err := bson.MarshalExtJSON(op.(*opQuery).query, true, false)
 		if err != nil {
-			return nil, messageHeader, &spec.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
+			return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
 
 			// fmt.Printf("Failed to marshal: %v\n", err)
 			// return
 		}
 		jsonString := string(jsonBytes)
 
-		mongoMsg = &spec.MongoOpQuery{
+		mongoMsg = &models.MongoOpQuery{
 			Flags: int32(op.(*opQuery).flags),
 			FullCollectionName: op.(*opQuery).fullCollectionName,
 			NumberToSkip: op.(*opQuery).numberToSkip,
@@ -96,7 +96,7 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 			// jsonString := string(jsonBytes)
 			// sections = append(sections, jsonString)
 		}
-		mongoMsg = &spec.MongoOpMessage{
+		mongoMsg = &models.MongoOpMessage{
 			FlagBits: int(op.(*opMsg).flags),
 			Sections: sections,
 			Checksum: int(op.(*opMsg).checksum),
@@ -109,7 +109,7 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 			// replyDocs = append(replyDocs, string(v))
 			jsonBytes, err := bson.MarshalExtJSON(v, true, false)
 			if err != nil {
-				return nil, messageHeader, &spec.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
+				return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
 
 				// fmt.Printf("Failed to marshal: %v\n", err)
 				// return
@@ -117,7 +117,7 @@ func Decode(wm []byte) (Operation, spec.MongoHeader, interface{}, error) {
 			jsonString := string(jsonBytes)
 			replyDocs = append(replyDocs, jsonString)
 		}
-		mongoMsg = &spec.MongoOpReply{
+		mongoMsg = &models.MongoOpReply{
 			ResponseFlags: int32(op.(*opReply).flags),
 			CursorID: op.(*opReply).cursorID,
 			StartingFrom: op.(*opReply).startingFrom,

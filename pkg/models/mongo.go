@@ -1,22 +1,8 @@
-package spec
+package models
 
-import (
-	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
-	"gopkg.in/yaml.v3"
-)
-
-type MongoSpec struct {
-	Metadata map[string]string `json:"metadata" yaml:"metadata"`
-	RequestHeader   MongoHeader       `json:"request_mongo_header" yaml:"request_mongo_header"`
-	ResponseHeader   MongoHeader       `json:"response_mongo_header" yaml:"response_mongo_header"`
-	Request  yaml.Node         `json:"mongo_request" yaml:"mongo_request"`
-	Response yaml.Node         `json:"mongo_response" yaml:"mongo_response"`
-	// RequestMessage  MongoOpMessage `json:"request_mongo_message" yaml:"request_mongo_message,omitempty"`
-	// ResponseMessage MongoOpMessage `json:"response_mongo_message" yaml:"response_mongo_message,omitempty"`
-}
+import "go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 
 type MongoOpMessage struct {
-	// Header   MongoHeader `json:"mongo_header" yaml:"mongo_header"`
 	FlagBits int    `json:"flagBits" yaml:"flagBits"`
 	Sections []string `json:"sections" yaml:"sections"`
 	Checksum int    `json:"checksum" yaml:"checksum"`

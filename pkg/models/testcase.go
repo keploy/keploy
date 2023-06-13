@@ -1,9 +1,5 @@
 package models
 
-import (
-	"gopkg.in/yaml.v3"
-)
-
 type Kind string
 type BodyType string
 type Version string
@@ -26,9 +22,18 @@ const (
 	BodyTypeError  BodyType = "ERROR"
 )
 
-type Mock struct {
-	Version Version   `json:"version" yaml:"version"`
-	Kind    Kind      `json:"kind" yaml:"kind"`
-	Name    string    `json:"name" yaml:"name"`
-	Spec    yaml.Node `json:"spec" yaml:"spec"`
+type TestCase struct {
+	Version Version   `json:"version"`
+	Kind    Kind      `json:"kind"`
+	Name    string    `json:"name"`
+	Created  int64  `json:"created"`
+	Updated  int64  `json:"updated"`
+	Captured int64  `json:"captured"`
+	HttpReq  HttpReq             `json:"http_req"`
+	HttpResp HttpResp            `json:"http_resp"`
+	AllKeys  map[string][]string `json:"all_keys"`
+	Anchors  map[string][]string `json:"anchors"`
+	Noise    []string            `json:"noise"`
+	Mocks    []*Mock       `json:"mocks"`
+	Type     string              `json:"type"`
 }

@@ -8,10 +8,11 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"time"
 
 	"go.keploy.io/server/pkg"
+	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/models/spec"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
@@ -29,13 +30,13 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("HEAD ")) 
 }
 
-func ProcessOutgoingHttp (requestBuffer []byte, clientConn, destConn net.Conn, deps *[]*models.Mock, logger *zap.Logger) {
+func ProcessOutgoingHttp (requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		*deps = append(*deps, encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
-
+		// *deps = append(*deps, encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
+		h.AppendDeps(encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
 	case models.MODE_TEST:
-		decodeOutgoingHttp(requestBuffer, clientConn, destConn, *deps, logger)
+		decodeOutgoingHttp(requestBuffer, clientConn, destConn, h, logger)
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -43,23 +44,27 @@ func ProcessOutgoingHttp (requestBuffer []byte, clientConn, destConn net.Conn, d
 }
 
 // decodeOutgoingHttp
-func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, deps []*models.Mock, logger *zap.Logger)  {
-	if len(deps) == 0 {
-		logger.Error("failed to mock the output for unrecorded outgoing http call")
+func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger)  {
+	// if len(deps) == 0 {
+	if h.GetDepsSize() == 0 {
+		// logger.Error("failed to mock the output for unrecorded outgoing http call")
 		return
 	}
 
-	var httpSpec spec.HttpSpec
-	err := deps[0].Spec.Decode(&httpSpec)
-	if err != nil {
-		logger.Error("failed to decode the yaml spec for the outgoing http call")
-		return
-	}
+	// var httpSpec spec.HttpSpec
+	// err := deps[0].Spec.Decode(&httpSpec)
+	// if err != nil {
+	// 	logger.Error("failed to decode the yaml spec for the outgoing http call")
+	// 	return
+	// }
+	// httpSpec := deps[0]
+	httpSpec := h.FetchDep(0)
+	// fmt.Println("http mock in test: ", httpSpec)
 
-	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", httpSpec.Request.ProtoMajor, httpSpec.Request.ProtoMinor, httpSpec.Response.StatusCode, http.StatusText(int(httpSpec.Response.StatusCode)))
+	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", httpSpec.Spec.HttpReq.ProtoMajor, httpSpec.Spec.HttpReq.ProtoMinor, httpSpec.Spec.HttpResp.StatusCode, http.StatusText(int(httpSpec.Spec.HttpResp.StatusCode)))
 
 	// Generate the response headers
-	header := pkg.ToHttpHeader(httpSpec.Response.Header)
+	header := pkg.ToHttpHeader(httpSpec.Spec.HttpResp.Header)
 	var headers string
 	for key, values := range header {
 		for _, value := range values {
@@ -72,17 +77,18 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, deps
 	// Generate the response body
 	// bodyBytes, _ := ioutil.ReadAll(bytes.NewReader(httpSpec.Response.BodyData))
 	// body := string(bodyBytes)
-	body := httpSpec.Response.Body
+	body := httpSpec.Spec.HttpResp.Body
 
 	// Concatenate the status line, headers, and body
 	responseString := statusLine + headers + "\r\n" + body
-	_, err = clienConn.Write([]byte(responseString))
+	_, err := clienConn.Write([]byte(responseString))
 	if err != nil {
 		logger.Error("failed to write the mock output to the user application", zap.Error(err))
 		return
 	}
 	// pop the mocked output from the dependency queue
-	deps = deps[1:]
+	// deps = deps[1:]
+	h.PopFront()
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
@@ -150,17 +156,45 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		"type":      models.HttpClient,
 		"operation": req.Method,
 	}
-	httpMock := &models.Mock{
+	// httpMock := &models.Mock{
+	// 	Version: models.V1Beta2,
+	// 	Name:    "",
+	// 	Kind:    models.HTTP,
+	// }
+
+	// // encode the message into yaml
+	// err = httpMock.Spec.Encode(&spec.HttpSpec{
+	// 		Metadata: meta,
+	// 		Request: spec.HttpReqYaml{
+	// 			Method:     spec.Method(req.Method),
+	// 			ProtoMajor: req.ProtoMajor,
+	// 			ProtoMinor: req.ProtoMinor,
+	// 			URL:        req.URL.String(),
+	// 			Header:     pkg.ToYamlHttpHeader(req.Header),
+	// 			Body:       string(reqBody),
+	// 			URLParams: pkg.UrlParams(req),
+	// 		},
+	// 		Response: spec.HttpRespYaml{
+	// 			StatusCode: resp.StatusCode,
+	// 			Header:     pkg.ToYamlHttpHeader(resp.Header),
+	// 			Body: string(respBody),
+	// 		},
+	// })
+	// if err != nil {
+	// 	logger.Error("failed to encode the http messsage into the yaml")
+	// 	return nil
+	// }
+
+	// return httpMock
+
+	return &models.Mock{
 		Version: models.V1Beta2,
 		Name:    "",
 		Kind:    models.HTTP,
-	}
-
-	// encode the message into yaml
-	err = httpMock.Spec.Encode(&spec.HttpSpec{
+		Spec: models.MockSpec{
 			Metadata: meta,
-			Request: spec.HttpReqYaml{
-				Method:     spec.Method(req.Method),
+			HttpReq: &models.HttpReq{
+				Method:     models.Method(req.Method),
 				ProtoMajor: req.ProtoMajor,
 				ProtoMinor: req.ProtoMinor,
 				URL:        req.URL.String(),
@@ -168,18 +202,14 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 				Body:       string(reqBody),
 				URLParams: pkg.UrlParams(req),
 			},
-			Response: spec.HttpRespYaml{
+			HttpResp: &models.HttpResp{
 				StatusCode: resp.StatusCode,
 				Header:     pkg.ToYamlHttpHeader(resp.Header),
 				Body: string(respBody),
 			},
-	})
-	if err != nil {
-		logger.Error("failed to encode the http messsage into the yaml")
-		return nil
+			Created: time.Now().Unix(),
+		},
 	}
-
-	return httpMock
 
 		// if val, ok := Deps[string(port)]; ok {
 		// keploy.Deps = append(keploy.Deps, httpMock)
