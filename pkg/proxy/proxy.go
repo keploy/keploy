@@ -11,12 +11,13 @@ import (
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
-	"go.uber.org/zap"
 )
 
 const (
@@ -26,16 +27,15 @@ const (
 type ProxySet struct {
 	// PortList is the list of ports on which the keploy proxies are running
 	PortList []uint32
-	hook	*hooks.Hook
-	logger *zap.Logger
+	hook     *hooks.Hook
+	logger   *zap.Logger
 }
 
-func (ps *ProxySet) SetHook(hook	*hooks.Hook)  {
+func (ps *ProxySet) SetHook(hook *hooks.Hook) {
 	ps.hook = hook
 }
 
-
-// BootProxies starts proxy servers on the idle local ports and returns the list of ports on which proxies are running. 
+// BootProxies starts proxy servers on the idle local ports and returns the list of ports on which proxies are running.
 // 
 // "startingPort" represents the initial port number from which the system sequentially searches for available or idle ports.. Default: 5000
 // 
@@ -51,7 +51,7 @@ func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
 
 	var proxySet = ProxySet{
 		PortList: []uint32{},
-		logger: logger,
+		logger:   logger,
 	}
 
 	port := opt.StartingPort
@@ -164,12 +164,18 @@ func (ps *ProxySet) startProxy(port uint32) {
 	listener, err := net.Listen("tcp", fmt.Sprintf(proxyAddress+":%v", port))
 	if err != nil {
 		ps.logger.Error(fmt.Sprintf("failed to start proxy on port:%v", port), zap.Error(err))
+		// We do an early return in case of errors (for example, port has become unavailable)
+		// to avoid segfault via nil-pointer dereference when calling listener.Close
+		// and listener.Accept
+		//
+		// This has the effect of silently skipping proxies on certain ports, but the application
+		// should run fine even with the missed proxies.
+		return
 	}
 	defer listener.Close()
 
-
 	ps.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(proxyAddress+":%v", port)))
-	
+
 	// TODO: integerate method For TLS connections 
 	// config := &tls.Config{
 	// 	GetCertificate: certForClient,
@@ -187,13 +193,12 @@ func (ps *ProxySet) startProxy(port uint32) {
 	}
 }
 
-
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	var (
 		proxyState *hooks.PortState
-		indx    = -1
-		err error
+		indx       = -1
+		err        error
 	)
 
 	for i := 0; i < len(ps.PortList); i++ {
@@ -202,7 +207,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 	ps.logger.Error(fmt.Sprintf("failed to fetch the state of proxy running at port: %v", port), zap.Error(err))
 		// 	break
 		// }
-		proxyState, err =  ps.hook.GetProxyState(uint32(i))
+		proxyState, err = ps.hook.GetProxyState(uint32(i))
 		if err != nil {
 			ps.logger.Error("failed to lookup the proxy state from map", zap.Error(err))
 			break
@@ -227,10 +232,10 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	// dst stores the connection with actual destination for the outgoing network call
 	var (
-		dst net.Conn
+		dst           net.Conn
 		actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(proxyState.Dest_ip), proxyState.Dest_port)
 	)
-	if models.GetMode() != models.MODE_TEST{
+	if models.GetMode() != models.MODE_TEST {
 
 		dst, err = net.Dial("tcp", actualAddress)
 		if err != nil {
@@ -240,16 +245,16 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 
-	switch  {
+	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
 		// if models.GetMode() == models.MODE_RECORD {
-			// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-			// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-			// }
-			var deps []*models.Mock = ps.hook.GetDeps()
+		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// }
+		var deps []*models.Mock = ps.hook.GetDeps()
 		httpparser.ProcessOutgoingHttp(buffer, conn, dst, &deps, ps.logger)
-			ps.hook.SetDeps(deps)
+		ps.hook.SetDeps(deps)
 	case mongoparser.IsOutgoingMongo(buffer):
 		var deps []*models.Mock = ps.hook.GetDeps()
 
@@ -261,9 +266,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 	ps.hook.AppendDeps(v)
 		// }
 	default:
-		}	
-
-
+	}
 
 	// releases the occupied proxy
 	proxyState.Occupied = 0
