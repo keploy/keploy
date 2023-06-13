@@ -8,22 +8,25 @@ spec:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: /wiki
+        url: /Lhr4BWAi
         header:
             Accept: '*/*'
-            User-Agent: curl/7.87.0
+            User-Agent: curl/7.85.0
         body: ""
         body_type: ""
     resp:
-        status_code: 200
+        status_code: 303
         header:
-            Content-Length: "179"
-            Content-Type: application/json; charset=utf-8
-            Date: Tue, 06 Jun 2023 07:53:44 GMT
-        body: '{"ts":1686038024448018714,"url":"{\"fact\":\"Grown cats have 30 teeth. Kittens have about 26 temporary teeth, which they lose when they are about 6 months old.\",\"length\":114}"}'
+            Content-Length: "45"
+            Content-Type: text/html; charset=utf-8
+            Date: Tue, 13 Jun 2023 19:08:09 GMT
+            Location: https://google.com
+        body: |+
+            <a href="https://google.com">See Other</a>.
+
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
-    created: 1686038024
+    created: 1686683289

@@ -1,0 +1,29 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-8
+spec:
+    metadata:
+        method: GET
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "225"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 06 Jun 2023 13:14:09 GMT
+        body: '{"ts":1686057249914515775,"url":"{\"fact\":\"Cats, just like people, are subject to asthma. Dust, smoke, and other forms of air pullution in your cat''s environment can be troublesome sources of irritation.\",\"length\":160}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1686057250

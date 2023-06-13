@@ -3,27 +3,32 @@ kind: Http
 name: test-1
 spec:
     metadata:
-        method: GET
+        method: POST
     req:
-        method: GET
+        method: POST
         proto_major: 1
         proto_minor: 1
-        url: /wiki
+        url: /url
         header:
             Accept: '*/*'
-            User-Agent: curl/7.87.0
-        body: ""
+            Content-Length: "33"
+            Content-Type: application/json
+            User-Agent: curl/7.85.0
+        body: |-
+            {
+              "url": "https://google.com"
+            }
         body_type: ""
     resp:
         status_code: 200
         header:
-            Content-Length: "176"
+            Content-Length: "65"
             Content-Type: application/json; charset=utf-8
-            Date: Tue, 06 Jun 2023 07:53:07 GMT
-        body: '{"ts":1686037987062129610,"url":"{\"fact\":\"Cat families usually play best in even numbers. Cats and kittens should be acquired in pairs whenever possible.\",\"length\":111}"}'
+            Date: Tue, 13 Jun 2023 19:07:11 GMT
+        body: '{"ts":1686683231074712492,"url":"http://localhost:8080/Lhr4BWAi"}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
-    created: 1686037987
+    created: 1686683231
