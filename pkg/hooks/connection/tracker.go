@@ -6,6 +6,7 @@ import (
 
 	structs2 "go.keploy.io/server/pkg/hooks/structs"
 	"go.uber.org/zap"
+	"log"
 )
 
 const (
@@ -69,7 +70,7 @@ func (conn *Tracker) Malformed() bool {
 	// log.Printf("Malformed() called: request completed but is Malformed")
 	conn.logger.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes recieved in userspace", conn.recvBytes))
 	conn.logger.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
-	// log.Printf("Total Written bytes:%v but sent only:%v", conn.totalWrittenBytes, conn.sentBytes)
+	log.Printf("Total Written bytes:%v but sent only:%v", conn.totalWrittenBytes, conn.sentBytes)
 	// log.Printf("Req:%v", string(conn.recvBuf))
 	// log.Printf("Res:%v", string(conn.sentBuf))
 	return conn.closeTimestamp != 0 &&
@@ -93,7 +94,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		// log.Println("Apparent size of read payload after [%v] becomes:", uint64(event.MsgSize), conn.recvBytes)
 	default:
 	}
-}
+} 
 
 func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	conn.mutex.Lock()

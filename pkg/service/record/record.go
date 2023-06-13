@@ -18,7 +18,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(tcsPath, mockPath string, pid uint32, appCmd, appContainer string) {
+func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer string, Delay uint64) {
 	models.SetMode(models.MODE_RECORD)
 
 	ys := yaml.NewYamlStore(tcsPath, mockPath, r.logger)
@@ -26,21 +26,28 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, pid uint32, appCmd, 
 	ps := proxy.BootProxies(r.logger, proxy.Option{})
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks := hooks.NewHook(ys, r.logger)
-	if err := loadedHooks.LoadHooks(pid, appCmd, appContainer); err != nil {
+	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return
 	}
 
-	// // proxy fetches the destIp and destPort from the redirect proxy map
+	//proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)
 
+	//Sending Proxy Ip & Port to the ebpf program
+	loadedHooks.SendProxyInfo(ps.IP, ps.Port)
+
 	// start user application
-	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer); err != nil {
+	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, Delay); err != nil {
 		return
 	}
+
+	// Enable Pid Filtering
+	loadedHooks.EnablePidFilter()
+	ps.FilterPid = true
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop()
 
 	//stop listening for proxy server
-	ps.Listener.Close()
+	ps.StopProxyServer()
 }

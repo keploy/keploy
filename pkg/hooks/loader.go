@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,8 @@ type Hook struct {
 	proxyPortList []uint32
 	deps          []*models.Mock
 
+	mutex sync.RWMutex
+
 	// ebpf objects and events
 	stopper    chan os.Signal
 	connect4   link.Link
@@ -60,6 +63,7 @@ func NewHook(db platform.TestCaseDB, logger *zap.Logger) *Hook {
 	return &Hook{
 		logger: logger,
 		db:     db,
+		mutex:  sync.RWMutex{},
 	}
 }
 
@@ -79,37 +83,21 @@ func (h *Hook) ResetDeps() int {
 	return 1
 }
 
-// func (h *Hook) UpdateProxyState(indx uint32, ps *PortState) {
-// 	err := h.proxyStateMap.Update(uint32(indx), *ps, ebpf.UpdateLock)
-// 	if err != nil {
-// 		h.logger.Error("failed to release the occupied proxy", zap.Error(err), zap.Any("proxy port", ps.Port))
-// 		return
-// 	}
-// }
-
-// func (h *Hook) GetProxyState(i uint32) (*PortState, error) {
-// 	proxyState := PortState{}
-// 	if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
-// 		// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
-// 		return nil, err
-// 	}
-// 	return &proxyState, nil
-// }
-
 //This function enables filtering of the processes using pid in the eBPF program.
 func (h *Hook) EnablePidFilter() {
 	key := 0
 	value := true
-	err := h.filterMap.Update(key, &value, ebpf.UpdateAny)
+	err := h.filterMap.Update(uint32(key), &value, ebpf.UpdateAny)
 	if err != nil {
 		h.logger.Error("failed to enable pid filtering in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
+
 }
 
 // This function sends the IP and Port of the running proxy in the eBPF program.
 func (h *Hook) SendProxyInfo(ip, port uint32) error {
 	key := 0
-	err := h.proxyInfoMap.Update(key, structs.ProxyInfo{IP: ip, Port: port}, ebpf.UpdateAny)
+	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP: ip, Port: port}, ebpf.UpdateAny)
 	if err != nil {
 		// h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 		return err
@@ -120,20 +108,37 @@ func (h *Hook) SendProxyInfo(ip, port uint32) error {
 // This function is helpful when user application in running inside a docker container.
 func (h *Hook) SendNameSpaceId(inode uint64) {
 	key := 0
-	err := h.inodeMap.Update(key, &inode, ebpf.UpdateAny)
+	err := h.inodeMap.Update(uint32(key), &inode, ebpf.UpdateAny)
 	if err != nil {
 		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
 
-func (h *Hook) CleanProxyEntry(srcPort uint32) {
+func (h *Hook) CleanProxyEntry(srcPort uint16) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 	err := h.redirectProxyMap.Delete(srcPort)
 	if err != nil {
 		h.logger.Error("no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
 
-func (h *Hook) GetDestinationInfo(srcPort uint32) (*structs.DestInfo, error) {
+// // printing the whole map
+// func (h *Hook) PrintRedirectProxyMap() {
+// 	println("------Redirect Proxy map-------")
+// 	itr := h.redirectProxyMap.Iterate()
+// 	var key uint32
+// 	dest := structs.DestInfo{}
+
+// 	for itr.Next(&key, &dest) {
+// 		fmt.Printf("Redirect Proxy:  [key:%v] || [value:%v]", key, dest)
+// 	}
+// 	println("------Redirect Proxy map-------")
+// }
+
+func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 	destInfo := structs.DestInfo{}
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
 		// h.logger.Error("failed to fetch the destination info", zap.Error(err))
@@ -142,7 +147,7 @@ func (h *Hook) GetDestinationInfo(srcPort uint32) (*structs.DestInfo, error) {
 	return &destInfo, nil
 }
 
-func (h *Hook) SendApplicationPIDs(appPids []int32) error {
+func (h *Hook) SendApplicationPIDs(appPids [15]int32) error {
 	for i, v := range appPids {
 		err := h.appPidMap.Update(uint32(i), &v, ebpf.UpdateAny)
 		if err != nil {
@@ -189,6 +194,8 @@ func (h *Hook) Stop() {
 	h.write.Close()
 	h.writeRet.Close()
 	h.objects.Close()
+
+	log.Println("eBPF resources released successfully...")
 }
 
 // LoadHooks is used to attach the eBPF hooks into the linux kernel. Hooks are attached for outgoing and incoming network requests.
@@ -197,7 +204,7 @@ func (h *Hook) Stop() {
 //
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers
-func (h *Hook) LoadHooks(pid uint32, appCmd, appContainer string) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// k := keploy.KeployInitializer()
 
 	if err := settings.InitRealTimeOffset(); err != nil {
@@ -220,15 +227,6 @@ func (h *Hook) LoadHooks(pid uint32, appCmd, appContainer string) error {
 		h.logger.Error("failed to load eBPF objects", zap.Error(err))
 		return err
 	}
-	// defer objs.Close()
-	// hook := newHook(objs.ProxyPorts, stopper, db)
-	// err := objs.UserPid.Update(uint32(0), &pid, ebpf.UpdateAny)
-	// if err != nil {
-	// 	h.logger.Error("failed to update the process id of the user application", zap.Any("error thrown by ebpf map", err.Error()))
-	// 	return err
-	// }
-
-	// h.proxyStateMap = objs.ProxyPorts
 
 	h.proxyInfoMap = objs.ProxyInfoMap
 	h.appPidMap = objs.AppPidMap
