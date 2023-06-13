@@ -26,7 +26,11 @@ func (t *Test) GetCmd() *cobra.Command {
 		Use:   "test",
 		Short: "run the recorded testcases and execute assertions",
 		Run: func(cmd *cobra.Command, args []string) {
+<<<<<<< HEAD
 	// println("called Test()")
+=======
+	println("called Test()")
+>>>>>>> 446fcfa9af05ebed12ab6240dc2e054bb4ca4659
 
 			pid, err := cmd.Flags().GetUint32("pid")
 			if err!=nil {
