@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -35,18 +36,37 @@ func  createYamlFile(path string, fileName string, logger *zap.Logger) (bool, er
 	// checks id the yaml exists
 	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
 		// creates the path director if does not exists
-		err = os.MkdirAll(filepath.Join(path), os.ModePerm)
+		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
 		if err != nil {
 			logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
+		// Changes the permission of created directory to 777
+		if strings.HasSuffix(path, "Keploy/tests") || strings.HasSuffix(path, "Keploy/mocks") {
+			err = os.Chmod(filepath.Join(strings.TrimSuffix( strings.TrimSuffix(path, "/mocks"), "/tests")), fs.ModePerm)
+			if err != nil {
+				logger.Error("failed to change the ./Keploy directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+				return false, err
+			}
+		}
+		err = os.Chmod(filepath.Join(path), fs.ModePerm)
+		if err != nil {
+			logger.Error("failed to change the created directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+			return false, err
+		}
+
 		// create the yaml file
-		_, err = os.Create(filepath.Join(path, fileName+".yaml"))
+		yamlFile, err := os.Create(filepath.Join(path, fileName+".yaml"))
 		if err != nil {
 			logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
-
+		// changes user permission to allow write operation on yaml file
+		err = yamlFile.Chmod(fs.ModePerm)
+		if err!=nil {
+			logger.Error("failed to set the permission of yaml file", zap.Error(err))
+			return false, err
+		}
 		return true, nil
 	}
 	return false, nil
@@ -89,7 +109,7 @@ func findLastIndex (path string, logger *zap.Logger) (int, error) {
 }
 
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
-func (ys *yaml) write(path, fileName string, doc models.Mock) error {
+func (ys *yaml) write(path, fileName string, doc NetworkTrafficDoc) error {
 	// 
 	isFileEmpty, err := createYamlFile(path, fileName, ys.logger)
 	if err != nil {
@@ -122,27 +142,34 @@ func (ys *yaml) write(path, fileName string, doc models.Mock) error {
 	return nil
 }
 
-func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
+// func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
+func (ys *yaml) Insert(tc *models.TestCase) error {
 	// finds the recently generated testcase to derive the sequence number for the current testcase
 	lastIndx, err := findLastIndex(ys.tcsPath, ys.logger)
 	if err != nil {
 		return err
 	}
 
+	// encode the testcase and its mocks into yaml docs
+	yamlTc, yamlMocks, err := Encode(*tc, ys.logger)
+	if err != nil {
+		return err
+	}
+
 	// write testcase yaml
 	tcName := fmt.Sprintf("test-%v", lastIndx)
-	tc.Name = tcName
-	err = ys.write(ys.tcsPath, tcName, *tc) 
+	yamlTc.Name = tcName
+	err = ys.write(ys.tcsPath, tcName, *yamlTc) 
 	if err!= nil {
 		ys.logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
 	}
 
 	// write the mock yamls
-	for i, v := range mocks {
+	for i, v := range yamlMocks {
 		mockName := fmt.Sprintf("mock-%v", lastIndx)
 		v.Name = mockName+fmt.Sprintf("-%v", i)
-		err = ys.write(ys.mockPath, mockName, *v)
+		err = ys.write(ys.mockPath, mockName, v)
 		if err != nil {
 			ys.logger.Error("failed to write the yaml for mock", zap.Any("mockId", v.Name), zap.Error(err))
 			return err
@@ -152,20 +179,20 @@ func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
 	return nil
 }
 
-func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.Mock, error) {
-	tcs := []models.Mock{}
-	mocks := map[string][]models.Mock{}
+// func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.Mock, error) {
+func (ys *yaml) Read (options interface{}) ([]*models.TestCase, error) {
+	tcs := []*models.TestCase{}
 
 	dir, err := os.OpenFile(ys.tcsPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		ys.logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", ys.tcsPath))
-		return nil, nil, err
+		return nil, err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
 		ys.logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", ys.tcsPath))
-		return nil, nil, err
+		return nil, err
 	}
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" {
@@ -173,52 +200,43 @@ func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		tc, err := read(ys.tcsPath, name)
+		yamlTestcase, err := read(ys.tcsPath, name)
 		if err != nil {
 			ys.logger.Error("failed to read the testcase from yaml", zap.Error(err))
-			return nil, nil, err
+			return nil, err
 		}
 
-		m, err := read(ys.mockPath, "mock-"+strings.Split(name, "-")[1]) 
+		yamlMocks, err := read(ys.mockPath, "mock-"+strings.Split(name, "-")[1]) 
 		if err != nil {
-			ys.logger.Error("failed to read the mocks from yaml", zap.Error(err), zap.Any("mocks for testcase", tc[0].Name))
-
-			return nil, nil, err
+			ys.logger.Error("failed to read the mocks from yaml", zap.Error(err), zap.Any("mocks for testcase", yamlTestcase[0].Name))
+			return nil, err
 		}
-		mocks[name] = m
-		if len(tc) == 1 {
-			tcs = append(tcs, tc[0])
+		// Unmarshal the yaml doc into Testcase
+		tc, err := Decode(yamlTestcase[0], yamlMocks, ys.logger)
+		if err != nil {
+			return nil, err
 		}
-
-		// tests, err := toTestCase(tcs, name, mockPath)
-		// if err != nil {
-		// 	return nil, err
-		// }
-		// res = append(res, tests...)
+		// Append the encoded testcase
+		tcs = append(tcs, tc)
 	}
-	// sort.Slice(res, func(i, j int) bool {
-	// 	return res[i].Captured < res[j].Captured
-	// })
 
-	// if tcsType != "" {
-	// 	filteredTcs := reqTypeFilter(res, tcsType)
-	// 	res = filteredTcs
-	// }
+	sort.Slice(tcs, func(i, j int) bool {
+		return tcs[i].Created < tcs[j].Created
+	})
 
-
-	return tcs, mocks, nil
+	return tcs, nil
 }
 
-func read(path, name string) ([]models.Mock, error) {
+func read(path, name string) ([]*NetworkTrafficDoc, error) {
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 	decoder := yamlLib.NewDecoder(file)
-	yamlDocs := []models.Mock{}
+	yamlDocs := []*NetworkTrafficDoc{}
 	for {
-		var doc models.Mock
+		var doc NetworkTrafficDoc
 		err := decoder.Decode(&doc)
 		if errors.Is(err, io.EOF) {
 			break
@@ -227,7 +245,7 @@ func read(path, name string) ([]models.Mock, error) {
 			return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
 		}
 		// if !libMode || doc.Name == name {
-			yamlDocs = append(yamlDocs, doc)
+			yamlDocs = append(yamlDocs, &doc)
 		// }
 	}
 	return yamlDocs, nil

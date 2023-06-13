@@ -13,7 +13,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/models/spec"
 	"go.keploy.io/server/pkg/platform"
 	"go.uber.org/zap"
 )
@@ -23,20 +22,21 @@ type Factory struct {
 	connections         map[structs.ConnID]*Tracker
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
-	respChannel chan *spec.HttpRespYaml
-	logger *zap.Logger
+	respChannel         chan *models.HttpResp
+	logger              *zap.Logger
 }
 
 // NewFactory creates a new instance of the factory.
-func NewFactory(inactivityThreshold time.Duration, respChannel chan *spec.HttpRespYaml, logger *zap.Logger) *Factory {
+func NewFactory(inactivityThreshold time.Duration, respChannel chan *models.HttpResp, logger *zap.Logger) *Factory {
 	return &Factory{
 		connections:         make(map[structs.ConnID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
-		respChannel: respChannel,
-		logger: logger,
+		respChannel:         respChannel,
+		logger:              logger,
 	}
 }
+
 // func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
 func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
 
@@ -59,12 +59,14 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 				continue
 			}
 
-			
 			switch models.GetMode() {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
 				capture(db, parsedHttpReq, parsedHttpRes, getDeps, factory.logger)
+				// fmt.Println("\nbefore reseting the deps array: ", getDeps())
+
 				resetDeps()
+				// fmt.Println("after reseting the deps array: ", getDeps(), "\n ")
 			case models.MODE_TEST:
 				respBody, err := ioutil.ReadAll(parsedHttpRes.Body)
 				if err != nil {
@@ -72,10 +74,10 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 					return
 				}
 				resetDeps()
-				factory.respChannel <- &spec.HttpRespYaml{
+				factory.respChannel <- &models.HttpResp{
 					StatusCode: parsedHttpRes.StatusCode,
 					Header:     pkg.ToYamlHttpHeader(parsedHttpRes.Header),
-					Body: string(respBody),
+					Body:       string(respBody),
 				}
 			}
 
@@ -106,25 +108,35 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 }
 
 func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, getDeps func() []*models.Mock, logger *zap.Logger) {
-	meta := map[string]string{
-		"method": req.Method,
-	}
-	httpMock := &models.Mock{
-		Version: models.V1Beta2,
-		Name:    "",
-		Kind:    models.HTTP,
-	}
+	// meta := map[string]string{
+	// 	"method": req.Method,
+	// }
+	// httpMock := &models.Mock{
+	// 	Version: models.V1Beta2,
+	// 	Name:    "",
+	// 	Kind:    models.HTTP,
+	// }
 
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
 		return
 	}
+	// reqBody, err = json.Marshal(reqBody)
+	// if err != nil {
+	// 	logger.Error("failed to marshal the http request body", zap.Error(err))
+	// 	return
+	// }
 	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		logger.Error("failed to read the http response body", zap.Error(err))
 		return
 	}
+	// respBody, err = json.Marshal(respBody)
+	// if err != nil {
+	// 	logger.Error("failed to marshal the http response body", zap.Error(err))
+	// 	return
+	// }
 	// b, err := req.URL.MarshalBinary()
 	// if err != nil {
 	// 	logger.Error("failed to parse the request URL", zap.Error(err))
@@ -138,36 +150,61 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
 	}
 
-	err = httpMock.Spec.Encode(&spec.HttpSpec{
-			Metadata: meta,
-			Request: spec.HttpReqYaml{
-				Method:     spec.Method(req.Method),
-				ProtoMajor: req.ProtoMajor,
-				ProtoMinor: req.ProtoMinor,
-				// URL:        req.URL.String(),
-				// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
-				URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
-				//  URL: string(b),
-				Header:     pkg.ToYamlHttpHeader(req.Header),
-				Body:       string(reqBody),
-				URLParams: 	pkg.UrlParams(req),
-			},
-			Response: spec.HttpRespYaml{
-				StatusCode: resp.StatusCode,
-				Header:     pkg.ToYamlHttpHeader(resp.Header),
-				Body: string(respBody),
-			},
-			Created: time.Now().Unix(),
-			Assertions: make(map[string][]string),
-			// Mocks: mockIds,
+	// err = httpMock.Spec.Encode(&spec.HttpSpec{
+	// 	Metadata: meta,
+	// 	Request: spec.HttpReqYaml{
+	// 		Method:     spec.Method(req.Method),
+	// 		ProtoMajor: req.ProtoMajor,
+	// 		ProtoMinor: req.ProtoMinor,
+	// 		// URL:        req.URL.String(),
+	// 		// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
+	// 		URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
+	// 		//  URL: string(b),
+	// 		Header:    pkg.ToYamlHttpHeader(req.Header),
+	// 		Body:      string(reqBody),
+	// 		URLParams: pkg.UrlParams(req),
+	// 	},
+	// 	Response: spec.HttpRespYaml{
+	// 		StatusCode: resp.StatusCode,
+	// 		Header:     pkg.ToYamlHttpHeader(resp.Header),
+	// 		Body:       string(respBody),
+	// 	},
+	// 	Created:    time.Now().Unix(),
+	// 	Assertions: make(map[string][]string),
+	// 	// Mocks: mockIds,
+	// })
+	// if err != nil {
+	// 	logger.Error("failed to encode http spec for testcase", zap.Error(err))
+	// 	return
+	// }
+	// write yaml
+
+	// err = db.Insert(httpMock, getDeps())
+	err = db.Insert(&models.TestCase{
+		Version: models.V1Beta2,
+		Name:    "",
+		Kind:    models.HTTP,
+		Created:    time.Now().Unix(),
+		HttpReq: models.HttpReq{
+			Method:     models.Method(req.Method),
+			ProtoMajor: req.ProtoMajor,
+			ProtoMinor: req.ProtoMinor,
+			// URL:        req.URL.String(),
+			// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
+			URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
+			//  URL: string(b),
+			Header:    pkg.ToYamlHttpHeader(req.Header),
+			Body:      string(reqBody),
+			URLParams: pkg.UrlParams(req),
+		},
+		HttpResp: models.HttpResp{
+			StatusCode: resp.StatusCode,
+			Header:     pkg.ToYamlHttpHeader(resp.Header),
+			Body:       string(respBody),
+		},
+		Mocks: mocks,
 	})
 	if err != nil {
-		logger.Error("failed to encode http spec for testcase", zap.Error(err))
-		return
-	}
-	// write yaml
-	err = db.Insert(httpMock, getDeps())
-	if err!=nil {
 		logger.Error("failed to record the ingress requests", zap.Error(err))
 		return
 	}

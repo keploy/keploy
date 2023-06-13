@@ -1,7 +1,5 @@
 package models
 
-import "go.keploy.io/server/pkg/models/spec"
-
 type TestReport struct {
 	Version Version      `json:"version" yaml:"version"`
 	Name    string       `json:"name" yaml:"name"`
@@ -21,9 +19,9 @@ type TestResult struct {
 	TestCasePath string       `json:"testCasePath" yaml:"test_case_path"`
 	MockPath     string       `json:"mockPath" yaml:"mock_path"`
 	TestCaseID   string       `json:"testCaseID" yaml:"test_case_id"`
-	Req          spec.HttpReqYaml  `json:"req" yaml:"req,omitempty"`
+	Req          HttpReq  `json:"req" yaml:"req,omitempty"`
 	// Mocks        []string     `json:"mocks" yaml:"mocks"`
-	Res          spec.HttpRespYaml `json:"resp" yaml:"resp,omitempty"`
+	Res          HttpResp `json:"resp" yaml:"resp,omitempty"`
 	Noise        []string     `json:"noise" yaml:"noise,omitempty"`
 	Result       Result       `json:"result" yaml:"result"`
 }

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,7 +19,6 @@ import (
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/models/spec"
 	"go.keploy.io/server/pkg/platform"
 	"go.uber.org/zap"
 )
@@ -39,7 +39,8 @@ type Hook struct {
 	logger 			*zap.Logger
 	proxyPortList 		[]uint32
 	deps 			[]*models.Mock
-	respChannel 	chan *spec.HttpRespYaml
+	mu *sync.Mutex
+	respChannel 	chan *models.HttpResp
 
 	// ebpf objects and events
 	stopper 		chan os.Signal
@@ -65,36 +66,67 @@ func NewHook(proxyPorts []uint32, db platform.TestCaseDB, logger *zap.Logger) *H
 		logger: logger,
 		proxyPortList: proxyPorts,
 		db: db,
-		respChannel: make(chan *spec.HttpRespYaml),
+		mu: &sync.Mutex{},		
+		respChannel: make(chan *models.HttpResp),
 	}
 }
 
+func (h *Hook) GetDepsSize () int {
+	h.mu.Lock()
+	size := len(h.deps)
+	defer h.mu.Unlock()
+	return size
+}
+
 func (h *Hook) AppendDeps(m *models.Mock)  {
+	h.mu.Lock()
 	h.deps = append(h.deps, m)
+	h.mu.Unlock()
 
 }
 func (h *Hook) SetDeps(m []*models.Mock) {
+	h.mu.Lock()
 	h.deps = m
+	fmt.Println("deps are set after aq ", h.deps)
+	defer h.mu.Unlock()
+
 }
 func (h *Hook) PopFront()  {
+	h.mu.Lock()
 	h.deps = h.deps[1:]
+	h.mu.Unlock()
 }
 func (h *Hook) FetchDep (indx int) *models.Mock {
-	return h.deps[indx]
+	h.mu.Lock()
+	dep := h.deps[indx]
+	// fmt.Println("deps in hooks: ", dep)
+	// h.logger.Error("called FetchDep")
+
+	defer h.mu.Unlock()
+	return dep
 }
 
 func (h *Hook) GetDeps () []*models.Mock {
-	return h.deps
+	h.mu.Lock()
+	deps := h.deps
+	// fmt.Println("deps in hooks: ", deps)
+	// h.logger.Error("called GetDeps")
+	defer h.mu.Unlock()
+	return deps
 }
 func (h *Hook) ResetDeps() int {
+	h.mu.Lock()
 	h.deps = []*models.Mock{}
+	// h.logger.Error("called ResetDeps", zap.Any("deps: ", h.deps))
+	// fmt.Println("deps are reset") 
+	defer h.mu.Unlock()
 	return 1
 }
-func (h *Hook) PutResp(resp *spec.HttpRespYaml) error {
+func (h *Hook) PutResp(resp *models.HttpResp) error {
 	h.respChannel <- resp
 	return nil
 }
-func (h *Hook) GetResp() *spec.HttpRespYaml  {
+func (h *Hook) GetResp() *models.HttpResp  {
 	resp := <-h.respChannel
 	return resp
 }
@@ -109,7 +141,7 @@ func (h *Hook) UpdateProxyState (indx uint32, ps *PortState) {
 
 func (h *Hook) GetProxyState(i uint32) (*PortState, error) {
 	proxyState := PortState{}
-	if h!=nil && h.proxyPortList != nil {
+	if h!=nil && h.proxyStateMap != nil {
 		if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
 			// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
 			return nil, err
@@ -122,7 +154,9 @@ func (h *Hook) Stop (forceStop bool) {
 	if !forceStop {
 		<-h.stopper
 		log.Println("Received signal, exiting program..")
+
 	}
+	log.Println("Received signal, exiting program..")
 
 	// closing all readers.
 	for _, reader := range PerfEventReaders {

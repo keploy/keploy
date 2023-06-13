@@ -247,14 +247,20 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
 			// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
 			// }
-			var deps []*models.Mock = ps.hook.GetDeps()
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, &deps, ps.logger)
-			ps.hook.SetDeps(deps)
-	case mongoparser.IsOutgoingMongo(buffer):
-		var deps []*models.Mock = ps.hook.GetDeps()
+		// var deps []*models.Mock = ps.hook.GetDeps()
+			// fmt.Println("before http egress call, deps array: ", deps)
+		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
+			// fmt.Println("after http egress call, deps array: ", deps)
 
-		mongoparser.ProcessOutgoingMongo(buffer, conn, dst, &deps, ps.logger)
-		ps.hook.SetDeps(deps)
+		// ps.hook.SetDeps(deps)
+	case mongoparser.IsOutgoingMongo(buffer):
+		// var deps []*models.Mock = ps.hook.GetDeps()
+		// fmt.Println("before mongo egress call, deps array: ", deps)
+
+		mongoparser.ProcessOutgoingMongo(buffer, conn, dst, ps.hook, ps.logger)
+		// fmt.Println("after mongo egress call, deps array: ", deps)
+
+		// ps.hook.SetDeps(deps)
 
 		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
 		// for _, v := range deps {
@@ -269,6 +275,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	proxyState.Occupied = 0
 	proxyState.Dest_ip = 0
 	proxyState.Dest_port = 0
+	conn.Close()
 	ps.hook.UpdateProxyState(uint32(indx), proxyState)
 	// err = ps.hook.ProxyPorts.Update(uint32(indx), proxyState, ebpf.UpdateLock)
 	// if err != nil {
