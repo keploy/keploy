@@ -33,7 +33,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 			errCh <- err
 		}()
 
-		println("Waiting....")
+		println("Waiting for any error from user application")
 		time.Sleep(time.Duration(Delay) * time.Second)
 		println("After running application")
 
