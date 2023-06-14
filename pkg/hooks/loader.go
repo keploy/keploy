@@ -87,7 +87,7 @@ func (h *Hook) AppendDeps(m *models.Mock)  {
 func (h *Hook) SetDeps(m []*models.Mock) {
 	h.mu.Lock()
 	h.deps = m
-	fmt.Println("deps are set after aq ", h.deps)
+	// fmt.Println("deps are set after aq ", h.deps)
 	defer h.mu.Unlock()
 
 }

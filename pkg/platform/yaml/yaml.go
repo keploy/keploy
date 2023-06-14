@@ -206,11 +206,17 @@ func (ys *yaml) Read (options interface{}) ([]*models.TestCase, error) {
 			return nil, err
 		}
 
-		yamlMocks, err := read(ys.mockPath, "mock-"+strings.Split(name, "-")[1]) 
-		if err != nil {
-			ys.logger.Error("failed to read the mocks from yaml", zap.Error(err), zap.Any("mocks for testcase", yamlTestcase[0].Name))
-			return nil, err
+		yamlMocks := []*NetworkTrafficDoc{}
+		mockName := "mock-"+strings.Split(name, "-")[1]
+		// check if mocks exists for the current testcase. read the yaml documents if mock exists.
+		if _, err := os.Stat(filepath.Join(ys.mockPath, mockName + ".yaml")); err==nil {
+			yamlMocks, err = read(ys.mockPath, mockName) 
+			if err != nil {
+				ys.logger.Error("failed to read the mocks from yaml", zap.Error(err), zap.Any("mocks for testcase", yamlTestcase[0].Name))
+				return nil, err
+			}
 		}
+
 		// Unmarshal the yaml doc into Testcase
 		tc, err := Decode(yamlTestcase[0], yamlMocks, ys.logger)
 		if err != nil {
