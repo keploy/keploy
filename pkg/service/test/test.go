@@ -42,7 +42,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
 
-	tcs, err := ys.Read(nil)
+	tcs, err := ys.Read(nil) 
 	if err != nil {
 		return false
 	}
