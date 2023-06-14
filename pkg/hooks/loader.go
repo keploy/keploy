@@ -99,7 +99,7 @@ func (h *Hook) SendProxyInfo(ip, port uint32) error {
 	key := 0
 	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP: ip, Port: port}, ebpf.UpdateAny)
 	if err != nil {
-		// h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 		return err
 	}
 	return nil
