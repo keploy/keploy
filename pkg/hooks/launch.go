@@ -29,7 +29,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 
 		errCh := make(chan error, 1)
 		go func() {
-			err := runApp(appCmd)
+			err := runApp(appCmd, dCmd)
 			errCh <- err
 		}()
 
@@ -50,11 +50,16 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 
 		println("Now setting app pids")
 
-		pids = getAppNameSpacePIDs(appContainer)
+		nsPids, hostPids := getAppNameSpacePIDs(appContainer)
 
-		println("Namespace PIDS of application:", pids[0])
+		println("Namespace PIDS of application:--->")
+		pids = nsPids
+		for i, v := range pids {
+			println("nsPid-", i, ":", v)
+		}
 
-		inode := getInodeNumber(pids)
+		inode := getInodeNumber(hostPids)
+		println("INODE Number:", inode)
 		h.SendNameSpaceId(inode)
 
 	} else { //Supports only linux
@@ -62,7 +67,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 
 		errCh := make(chan error, 1)
 		go func() {
-			err := runApp(appCmd)
+			err := runApp(appCmd, false)
 			errCh <- err
 		}()
 
@@ -105,7 +110,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 		h.logger.Error("failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
 		return err
 	}
-	
+
 	// h.EnablePidFilter() // can enable here also
 
 	h.logger.Info("User application started successfully")
@@ -113,9 +118,15 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 }
 
 // It runs the application using the given command
-func runApp(appCmd string) error {
+func runApp(appCmd string, isDocker bool) error {
 	// Create a new command with your appCmd
-	cmd := exec.Command(appCmd)
+	var cmd *exec.Cmd
+	if isDocker {
+		parts := strings.Fields(appCmd)
+		cmd = exec.Command(parts[0], parts[1:]...)
+	} else {
+		cmd = exec.Command(appCmd)
+	}
 
 	// Set the output of the command
 	cmd.Stdout = os.Stdout
@@ -132,7 +143,7 @@ func runApp(appCmd string) error {
 
 func isDockerCmd(cmd string) bool {
 	// Parse the command and check if its docker cmd
-	return false
+	return true
 }
 
 func parseContainerName(cmd string) string {
@@ -143,12 +154,11 @@ func parseContainerName(cmd string) string {
 	return containerName
 }
 
-func getAppNameSpacePIDs(containerName string) [15]int32 {
+func getAppNameSpacePIDs(containerName string) ([15]int32, [15]int32) {
 	// Create a new Docker client
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		log.Fatalf("failed to make a docker client:", err)
-
 	}
 
 	// Create a new context
@@ -172,10 +182,12 @@ func getAppNameSpacePIDs(containerName string) [15]int32 {
 		log.Fatalf("Error: More than 15 processes are running inside the application container.")
 	}
 
-	var pids [15]int32
+	var hostPids [15]int32
+	var nsPids [15]int32
 
-	for i := 0; i < len(pids); i++ {
-		pids[i] = -1
+	for i := 0; i < len(hostPids); i++ {
+		hostPids[i] = -1
+		nsPids[i] = -1
 	}
 
 	// Extract the PIDs from the processes
@@ -188,14 +200,23 @@ func getAppNameSpacePIDs(containerName string) [15]int32 {
 		if err != nil {
 			log.Fatalf("failed to convert the process id [%v] from string to int32", process[1])
 		}
-		pids[idx] = pid
+		hostPids[idx] = pid
 	}
 
-	for i, v := range pids {
-		pids[i] = getNStgids(int(v))
+	// for i, v := range pids {
+	// 	println("[docker]:Pid-", i, ":", v)
+	// }
+
+	time.Sleep(time.Duration(10) * time.Second)
+
+	for i, v := range hostPids {
+		if v == -1 {
+			break
+		}
+		nsPids[i] = getNStgids(int(v))
 	}
 
-	return pids
+	return nsPids, hostPids
 }
 
 // This function fetches the actual pids from container point of view.
@@ -250,7 +271,7 @@ func parseToInt32(str string) (int32, error) {
 	return int32(num), nil
 }
 
-//An application can launch as many child processes as it wants but here we are only handling for 15 child process.
+// An application can launch as many child processes as it wants but here we are only handling for 15 child process.
 func getAppPIDs(appCmd string) ([15]int32, error) {
 	// Getting pid of the command
 	cmdPid, err := getCmdPid(appCmd)
@@ -346,6 +367,7 @@ func getCmdPid(commandName string) (int, error) {
 func getInodeNumber(pids [15]int32) uint64 {
 
 	for _, pid := range pids {
+		println("Checking Inode for pid:", pid)
 
 		filepath := filepath.Join("/proc", strconv.Itoa(int(pid)), "ns", "pid")
 

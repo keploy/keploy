@@ -84,3 +84,11 @@ func ConvertToIPV4(ip net.IP) (uint32, bool) {
 
 	return uint32(ipv4[0])<<24 | uint32(ipv4[1])<<16 | uint32(ipv4[2])<<8 | uint32(ipv4[3]), true
 }
+
+func IPToDotDecimal(ip net.IP) string {
+	ipStr := ip.String()
+	if ip.To4() != nil {
+		ipStr = ip.To4().String()
+	}
+	return ipStr
+}

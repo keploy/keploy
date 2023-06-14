@@ -11,6 +11,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"strconv"
 
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/helpers"
@@ -143,6 +144,7 @@ func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
 		log.Fatalf("Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
 	}
 
+	proxySet.logger.Debug(fmt.Sprintf("Proxy complete Addr %v:%v", proxySet.IP, proxySet.Port))
 	proxySet.logger.Info(fmt.Sprintf("Proxy started at port:%v", proxySet.Port))
 
 	return &proxySet
@@ -275,9 +277,21 @@ func (ps *ProxySet) startProxy() {
 	// if err != nil {
 	// 	log.Fatalf("Failed to parse CA certificate: %v", err)
 	// }
+
+	// Convert string to uint32
+	ip, err := strconv.ParseUint(strings.TrimSpace(proxyAddress), 10, 32)
+	if err != nil {
+		ps.logger.Error(fmt.Sprintf("failed to convert string to uint32:"), zap.Error(err))
+		return
+	}
+
+	proxyAddress = util.ToIPAddressStr(uint32(ip))
+	println("ProxyAddress:", proxyAddress)
+
 	listener, err := net.Listen("tcp", fmt.Sprintf(proxyAddress+":%v", port))
 	if err != nil {
 		ps.logger.Error(fmt.Sprintf("failed to start proxy on port:%v", port), zap.Error(err))
+		return
 	}
 	ps.Listener = listener
 
@@ -371,9 +385,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
-	
+
 	// ps.hook.PrintRedirectProxyMap()
-	
+
 	// println("RemoteAddr:",remoteAddr.IP.To4().String())
 	println("GOT SOURCE PORT:", sourcePort, " at time:", time.Now().Unix())
 	println("SourcePort in u16", uint16(sourcePort))
