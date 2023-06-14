@@ -207,7 +207,7 @@ func getAppNameSpacePIDs(containerName string) ([15]int32, [15]int32) {
 	// 	println("[docker]:Pid-", i, ":", v)
 	// }
 
-	time.Sleep(time.Duration(10) * time.Second)
+	// time.Sleep(time.Duration(10) * time.Second)
 
 	for i, v := range hostPids {
 		if v == -1 {
