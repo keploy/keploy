@@ -28,7 +28,7 @@ func (r *Record) GetCmd() *cobra.Command {
 		Short: "record the keploy testcases from the API calls",
 		Run: func(cmd *cobra.Command, args []string) {
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				r.logger.Error("failed to read the testcase path input")
 				return
 			}
@@ -56,13 +56,19 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 
+			networkName, err := cmd.Flags().GetString("networkName")
+
+			if err != nil {
+				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+			}
+
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
 				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
 
-			r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, delay)
+			r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 
 			// server.Server(version, kServices, conf, logger)
 			// server.Server(version)
@@ -80,6 +86,9 @@ func (r *Record) GetCmd() *cobra.Command {
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
 	// recordCmd.MarkFlagRequired("containerName")
+
+	recordCmd.Flags().String("networkName", "", "Name of the application's docker network")
+	// recordCmd.MarkFlagRequired("networkName")
 
 	recordCmd.Flags().Uint64("delay", 5, "User provided time to run its application")
 	// recordCmd.MarkFlagRequired("delay")

@@ -1,16 +1,16 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-6
+name: test-11
 spec:
     metadata: {}
     req:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8081/Lhr4BWAi
+        url: http://localhost:8080/Lhr4BWAi
         header:
             Accept: '*/*'
-            User-Agent: curl/7.81.0
+            User-Agent: curl/7.74.0
         body: ""
         body_type: ""
     resp:
@@ -18,7 +18,7 @@ spec:
         header:
             Content-Length: "45"
             Content-Type: text/html; charset=utf-8
-            Date: Thu, 15 Jun 2023 18:03:48 GMT
+            Date: Thu, 15 Jun 2023 21:34:45 GMT
             Location: https://google.com
         body: |+
             <a href="https://google.com">See Other</a>.
@@ -30,4 +30,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1686852229
+    created: 1686864886

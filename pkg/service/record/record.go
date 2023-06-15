@@ -18,7 +18,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer string, Delay uint64) {
+func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer,appNetwork string, Delay uint64) {
 	models.SetMode(models.MODE_RECORD)
 
 	ys := yaml.NewYamlStore(tcsPath, mockPath, r.logger)
@@ -39,7 +39,7 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer
 	}
 
 	// start user application
-	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, Delay); err != nil {
+	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
 		return
 	}
 
