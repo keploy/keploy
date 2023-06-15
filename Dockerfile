@@ -81,5 +81,8 @@ RUN chmod +x /app/entrypoint.sh
 # Build the keployV2 binary
 RUN go build -o keployV2
 
+# Change working directory
+WORKDIR /files
+
 # Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh", "./keployV2"]
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keployV2"]
