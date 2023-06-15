@@ -24,24 +24,45 @@ var (
 	AppContainerName string
 )
 
-func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) error {
+func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
 
 	var pids [15]int32
 	// Supports Linux, Windows
-	if dCmd := h.IsDockerRelatedCmd(appCmd); dCmd {
-		// check if appContainer name if provided by the user
-		if len(appContainer) == 0 {
-			var err error
-			AppContainerName, AppDockerNetwork, err = parseDockerCommand(appCmd)
-			if err != nil {
-				h.logger.Error("failed to parse container and network name from given command", zap.Error(err), zap.Any("AppCmd", appCmd))
-				return err
+	ok, cmd := h.IsDockerRelatedCmd(appCmd)
+	if ok {
+		println("Running user application on Docker")
+		println("given containerName length", len(appContainer))
+		println("given network name length", len(appNetwork))
+
+		if cmd == "docker-compose" {
+			if len(appContainer) == 0 {
+				h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
+				return fmt.Errorf("container name not found")
 			}
+
+			if len(appNetwork) == 0 {
+				h.logger.Error("please provide docker network name in case of docker-compose file", zap.Any("AppCmd", appCmd))
+				return fmt.Errorf("docker network name not found")
+			}
+		}
+
+		var err error
+		AppContainerName, AppDockerNetwork, err = parseDockerCommand(appCmd)
+		println("parsed Containername", AppContainerName)
+		println("parsed DockerNetwork", AppDockerNetwork)
+		if err != nil {
+			h.logger.Error("failed to parse container or network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+			return err
+		}
+
+		if len(appContainer) == 0 {
+
+			appContainer = AppContainerName
 		}
 
 		errCh := make(chan error, 1)
 		go func() {
-			err := runApp(appCmd, dCmd)
+			err := runApp(appCmd, ok)
 			errCh <- err
 		}()
 
@@ -76,7 +97,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 		h.SendNameSpaceId(inode)
 
 	} else { //Supports only linux
-		println("[Bug-fix]Running user application on linux")
+		println("Running user application on linux")
 
 		errCh := make(chan error, 1)
 		go func() {
@@ -154,12 +175,13 @@ func runApp(appCmd string, isDocker bool) error {
 	return fmt.Errorf("user application exited with zero error code")
 }
 
-func (h *Hook) IsDockerRelatedCmd(cmd string) bool {
+// It checks if the cmd is related to docker or not, it also returns if its a docker compose file
+func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
 	// Check for Docker command patterns
 	dockerCommandPatterns := []string{"docker ", "docker-compose "}
 	for _, pattern := range dockerCommandPatterns {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
-			return true
+			return true, "docker"
 		}
 	}
 
@@ -167,11 +189,11 @@ func (h *Hook) IsDockerRelatedCmd(cmd string) bool {
 	dockerComposeFileExtensions := []string{".yaml", ".yml"}
 	for _, extension := range dockerComposeFileExtensions {
 		if strings.HasSuffix(strings.ToLower(cmd), extension) {
-			return true
+			return true, "docker-compose"
 		}
 	}
 
-	return false
+	return false, ""
 }
 
 func parseDockerCommand(dockerCmd string) (string, string, error) {
@@ -207,7 +229,18 @@ func makeDockerClient() *client.Client {
 	return cli
 }
 
-func (h *Hook) GetUserIp(containerName string) string {
+func (h *Hook) GetUserIp(containerName, networkName string) string {
+
+	// If both containerName, networkName are not provided then it must not be a docker compose file,
+	// And it is checked at the time of launching the applicaton
+
+	if len(containerName) == 0 {
+		containerName = AppContainerName
+	}
+
+	if len(networkName) == 0 {
+		networkName = AppDockerNetwork
+	}
 
 	cli := dockerClient
 	// Create a new context

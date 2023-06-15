@@ -28,7 +28,7 @@ func (t *Test) GetCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 
 			path, err := cmd.Flags().GetString("path")
-			if err!=nil {
+			if err != nil {
 				t.logger.Error("failed to read the testcase path input")
 				return
 			}
@@ -62,13 +62,19 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 
+			networkName, err := cmd.Flags().GetString("networkName")
+
+			if err != nil {
+				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+			}
+
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
 				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
 
-			t.tester.Test(tcsPath, mockPath, testReportPath, appCmd, appContainer, delay)
+			t.tester.Test(tcsPath, mockPath, testReportPath, appCmd, appContainer, networkName, delay)
 		},
 	}
 
@@ -79,6 +85,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().String("c", "", "Command to start the user application")
 	testCmd.MarkFlagRequired("c")
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
+	testCmd.Flags().String("networkName", "", "Name of the application's docker network")
+	// recordCmd.MarkFlagRequired("networkName")
 	testCmd.Flags().Uint64("delay", 5, "User provided time to run its application")
 
 	return testCmd

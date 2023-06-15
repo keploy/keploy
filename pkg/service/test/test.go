@@ -27,7 +27,7 @@ func NewTester(logger *zap.Logger) Tester {
 }
 
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
-func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer string, Delay uint64) bool {
+func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
 	models.SetMode(models.MODE_TEST)
 
 	// println("called Test()")
@@ -52,7 +52,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	}
 
 	// start user application
-	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, Delay); err != nil {
+	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
 		return false
 	}
 
@@ -102,8 +102,9 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	// })
 
 	var userIp string
-	if loadedHooks.IsDockerRelatedCmd(appCmd) {
-		userIp = loadedHooks.GetUserIp(appContainer)
+	ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
+	if ok {
+		userIp = loadedHooks.GetUserIp(appContainer, appNetwork)
 		println("UserIp address:", userIp)
 	}
 
@@ -124,7 +125,8 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			// fmt.Println("before simulating the request", tc)
 			// time.Sleep(1 * time.Second)
 
-			if loadedHooks.IsDockerRelatedCmd(appCmd) {
+			ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
+			if ok {
 				//changing Ip address only in case of docker
 				tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
 			}
