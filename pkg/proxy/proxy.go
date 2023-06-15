@@ -21,6 +21,7 @@ import (
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 	"go.keploy.io/server/pkg/hooks"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -441,7 +442,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			ps.logger.Error("failed to handle TLS connection", zap.Error(err))
 			return
 		}
-	} 
+	}
 	buffer, err := util.ReadBytes(conn)
 	if err != nil {
 		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
@@ -454,24 +455,26 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(destInfo.DestIp), destInfo.DestPort)
 	)
 	//Dialing for tls connection
-	if isTLS {
-		fmt.Println("isTLS: ", isTLS)
-		config := &tls.Config{
-			InsecureSkipVerify: false,
-			ServerName:         destinationUrl,
-		}
-		dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-		if err != nil {
-			ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
-			return
-		}
-	} else {
-		dst, err = net.Dial("tcp", actualAddress)
-		if err != nil {
-			ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
-			return
+	if models.GetMode() != models.MODE_TEST {
+		if isTLS {
+			fmt.Println("isTLS: ", isTLS)
+			config := &tls.Config{
+				InsecureSkipVerify: false,
+				ServerName:         destinationUrl,
+			}
+			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			if err != nil {
+				ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		} else {
+			dst, err = net.Dial("tcp", actualAddress)
+			if err != nil {
+				ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
 		}
 	}
 
@@ -486,17 +489,17 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	} else {
 
-		switch  {
+		switch {
 		case httpparser.IsOutgoingHTTP(buffer):
 			// capture the otutgoing http text messages]
 			// if models.GetMode() == models.MODE_RECORD {
-				// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-				// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-				// }
+			// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+			// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+			// }
 			// var deps []*models.Mock = ps.hook.GetDeps()
-				// fmt.Println("before http egress call, deps array: ", deps)
+			// fmt.Println("before http egress call, deps array: ", deps)
 			httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
-				// fmt.Println("after http egress call, deps array: ", deps)
+			// fmt.Println("after http egress call, deps array: ", deps)
 
 			// ps.hook.SetDeps(deps)
 		case mongoparser.IsOutgoingMongo(buffer):
@@ -513,7 +516,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			// 	ps.hook.AppendDeps(v)
 			// }
 		default:
-		}	
+		}
 	}
 
 	

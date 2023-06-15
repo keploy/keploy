@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,14 +18,25 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	dockerClient     *client.Client
+	AppDockerNetwork string
+	AppContainerName string
+)
+
 func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) error {
 
 	var pids [15]int32
 	// Supports Linux, Windows
-	if dCmd := isDockerCmd(appCmd); dCmd {
+	if dCmd := h.IsDockerRelatedCmd(appCmd); dCmd {
 		// check if appContainer name if provided by the user
 		if len(appContainer) == 0 {
-			appContainer = parseContainerName(appCmd)
+			var err error
+			AppContainerName, AppDockerNetwork, err = parseDockerCommand(appCmd)
+			if err != nil {
+				h.logger.Error("failed to parse container and network name from given command", zap.Error(err), zap.Any("AppCmd", appCmd))
+				return err
+			}
 		}
 
 		errCh := make(chan error, 1)
@@ -50,6 +62,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer string, Delay uint64) 
 
 		println("Now setting app pids")
 
+		dockerClient = makeDockerClient()
 		nsPids, hostPids := getAppNameSpacePIDs(appContainer)
 
 		println("Namespace PIDS of application:--->")
@@ -141,25 +154,83 @@ func runApp(appCmd string, isDocker bool) error {
 	return fmt.Errorf("user application exited with zero error code")
 }
 
-func isDockerCmd(cmd string) bool {
-	// Parse the command and check if its docker cmd
+func (h *Hook) IsDockerRelatedCmd(cmd string) bool {
+	// Check for Docker command patterns
+	dockerCommandPatterns := []string{"docker ", "docker-compose "}
+	for _, pattern := range dockerCommandPatterns {
+		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
+			return true
+		}
+	}
+
+	// Check for Docker Compose file extension
+	dockerComposeFileExtensions := []string{".yaml", ".yml"}
+	for _, extension := range dockerComposeFileExtensions {
+		if strings.HasSuffix(strings.ToLower(cmd), extension) {
+			return true
+		}
+	}
+
 	return false
 }
 
-func parseContainerName(cmd string) string {
-	containerName := ""
+func parseDockerCommand(dockerCmd string) (string, string, error) {
+	// Regular expression patterns
+	containerNamePattern := `--name\s+([^\s]+)`
+	networkNamePattern := `--network\s+([^\s]+)`
 
-	//parse the container Name from cmd, if failed then panic.
+	// Extract container name
+	containerNameRegex := regexp.MustCompile(containerNamePattern)
+	containerNameMatches := containerNameRegex.FindStringSubmatch(dockerCmd)
+	if len(containerNameMatches) < 2 {
+		return "", "", fmt.Errorf("failed to parse container name")
+	}
+	containerName := containerNameMatches[1]
 
-	return containerName
+	// Extract network name
+	networkNameRegex := regexp.MustCompile(networkNamePattern)
+	networkNameMatches := networkNameRegex.FindStringSubmatch(dockerCmd)
+	if len(networkNameMatches) < 2 {
+		return "", "", fmt.Errorf("failed to parse network name")
+	}
+	networkName := networkNameMatches[1]
+
+	return containerName, networkName, nil
 }
 
-func getAppNameSpacePIDs(containerName string) ([15]int32, [15]int32) {
+func makeDockerClient() *client.Client {
 	// Create a new Docker client
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		log.Fatalf("failed to make a docker client:", err)
 	}
+	return cli
+}
+
+func (h *Hook) GetUserIp(containerName string) string {
+
+	cli := dockerClient
+	// Create a new context
+	ctx := context.Background()
+
+	// Inspect the specified container
+	inspect, err := cli.ContainerInspect(ctx, containerName)
+	if err != nil {
+		log.Fatalf("failed to inspect container:%v,", containerName, err)
+	}
+
+	// Find the IP address of the container in the network
+	ipAddress := inspect.NetworkSettings.Networks[AppDockerNetwork].IPAddress
+
+	fmt.Printf("Container IP Address: %s\n", ipAddress)
+
+	return ipAddress
+}
+
+func getAppNameSpacePIDs(containerName string) ([15]int32, [15]int32) {
+
+	// Get the docker client
+	cli := dockerClient
 
 	// Create a new context
 	ctx := context.Background()
