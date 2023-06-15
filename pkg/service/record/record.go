@@ -34,7 +34,6 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer
 	ps.SetHook(loadedHooks)
 
 	//Sending Proxy Ip & Port to the ebpf program
-
 	if err := loadedHooks.SendProxyInfo(ps.IP, ps.Port); err != nil {
 		return
 	}
