@@ -5,13 +5,16 @@ import (
 	"crypto"
 	"crypto/tls"
 	"crypto/x509"
+	"embed"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
+	"os"
 	"os/exec"
-	"strings"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/helpers"
@@ -27,9 +30,6 @@ import (
 	"time"
 )
 
-// const (
-// 	proxyAddress = "0.0.0.0"
-// )
 
 type ProxySet struct {
 	IP        uint32
@@ -96,22 +96,46 @@ func getDistroInfo() string {
 	return ""
 }
 
+//go:embed asset/ca.crt
+var caCrt []byte
+
+//go:embed asset/ca.key
+var caPKey []byte
+
+//go:embed asset
+var caFolder embed.FS
+
 // BootProxies starts proxy servers on the idle local ports and returns the list of ports on which proxies are running.
 //
 // "startingPort" represents the initial port number from which the system sequentially searches for available or idle ports.. Default: 5000
 //
 // "count" variable represents the number of proxies to be started. Default: 50
 func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
+
 	// assign default values if not provided
 	distro := getDistroInfo()
-	cmd := exec.Command("sudo", "cp", caCertPath, caStorePath[distro])
-	err := cmd.Run()
+
+	fs, err := os.Create(filepath.Join(caStorePath[distro], "ca.crt"))
 	if err != nil {
-		log.Fatalf("Failed to copy the CA to the trusted store: %v", err)
+		logger.Error("failed to create custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
+		return nil
 	}
+
+	_, err = fs.Write(caCrt)
+	if err != nil {
+		logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
+		return nil
+	}
+
+	// cmd := exec.Command("sudo", "cp", caCertPath, caStorePath[distro])
+	// err := cmd.Run()
+	// if err != nil {
+	// 	log.Fatalf("Failed to copy the CA to the trusted store: %v", err)
+	// }
+
 	// log.Printf("This is the value of cmd1: %v", cmd)
 	//Update the trusted CAs store
-	cmd = exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
+	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
 	// log.Printf("This is the command2: %v", cmd)
 	err = cmd.Run()
 	if err != nil {
@@ -329,19 +353,21 @@ func isTLSHandshake(data []byte) bool {
 func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	fmt.Println("Handling TLS connection from", conn.RemoteAddr().String())
 	//Load the CA certificate and private key
-	caCert, err := ioutil.ReadFile(caCertPath)
-	if err != nil {
-		log.Fatalf("Failed to read CA certificate: %v", err)
-	}
-	caKey, err := ioutil.ReadFile(caPrivateKeyPath)
-	if err != nil {
-		log.Fatalf("Failed to read CA private key: %v", err)
-	}
-	caPrivKey, err = helpers.ParsePrivateKeyPEM(caKey)
+	// caCert, err := ioutil.ReadFile(caCertPath)
+	// if err != nil {
+	// 	log.Fatalf("Failed to read CA certificate: %v", err)
+	// }
+	// caKey, err := ioutil.ReadFile(caPrivateKeyPath)
+	// if err != nil {
+	// 	log.Fatalf("Failed to read CA private key: %v", err)
+	// }
+
+	var err error
+	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
 		log.Fatalf("Failed to parse CA private key: %v", err)
 	}
-	caCertParsed, err = helpers.ParseCertificatePEM(caCert)
+	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
 		log.Fatalf("Failed to parse CA certificate: %v", err)
 	}
@@ -391,7 +417,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// println("RemoteAddr:",remoteAddr.IP.To4().String())
 	println("GOT SOURCE PORT:", sourcePort, " at time:", time.Now().Unix())
 	println("SourcePort in u16", uint16(sourcePort))
-
 
 	ps.logger.Debug("Inside handleConnection of Proxy server:", zap.Int("Source port", sourcePort))
 

@@ -143,7 +143,7 @@ func runApp(appCmd string, isDocker bool) error {
 
 func isDockerCmd(cmd string) bool {
 	// Parse the command and check if its docker cmd
-	return true
+	return false
 }
 
 func parseContainerName(cmd string) string {
