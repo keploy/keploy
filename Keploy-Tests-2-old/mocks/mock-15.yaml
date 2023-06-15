@@ -1,0 +1,41 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-15-0
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Tue, 06 Jun 2023 13:44:02 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6ImZpNkJ2dkNhRU5QcEcxUWkrQTBQclE9PSIsInZhbHVlIjoiQ0I5OFl2dkgzUVExSGhFU2owN1hzZFFZMWdkdmJOK2FzbmNVYWlCQ09JK1pHSDNaYUF4R2xxUkhYMFVST0haSXFZeTk1MVI2QzdPWCtzN21YTStzUGdyRkgwcWxtcmo2Mnc3RFJtcUVxVHo3Z1hFUG9IZWVFZWo1eG4vUHJGcWoiLCJtYWMiOiI4YmJlNzFkYzZiMjIxZmMwYWIxODZmYTc2MTFlNDc3M2YxMmRkZWJkMWU3NzYwODA0M2Y3MDRlOTJiODhkNTk2IiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:44:02 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6InBqUmZaMTV6czQ2Wkx5VEpNQzZVdEE9PSIsInZhbHVlIjoidWFKeVUyRVpOTE9BZk15Q1dmLzliN1lLcVFmdHV3YzdpZTVHT3lQelBLL0hXdXZaTXdYVnByWTFPTHZqZnhNNmMyUkRPbUxBdGF3b3dqTEpzYUZyQkh4dkNxd0RjODdOTDdER2M0SVFHc2h1MEVQV2JqUU1RZzJoaDZYajRlTW4iLCJtYWMiOiI2YWE1OTEyMDI0NWYyNjA4ZTg4MWFiNThmZWMyYTM2ZDQ5ZmFjZmExNzJmYmI5Y2MyYzliM2YyYzAwM2M3OTNhIiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:44:02 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"Cats see six times better in the dark and at night than humans.","length":63}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []

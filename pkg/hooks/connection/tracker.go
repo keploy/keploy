@@ -6,11 +6,11 @@ import (
 
 	structs2 "go.keploy.io/server/pkg/hooks/structs"
 	"go.uber.org/zap"
+	// "log"
 )
 
 const (
-	// maxBufferSize = 100 * 1024 // 100KB
-	maxBufferSize = 15 * 1024 * 1024 // 15MB
+	maxBufferSize = 16 * 1024 * 1024 // 16MB
 )
 
 type Tracker struct {
@@ -94,7 +94,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		// log.Println("Apparent size of read payload after [%v] becomes:", uint64(event.MsgSize), conn.recvBytes)
 	default:
 	}
-}
+} 
 
 func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	conn.mutex.Lock()

@@ -24,7 +24,8 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
+// func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
+func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer string, Delay uint64) bool {
 	models.SetMode(models.MODE_TEST)
 
 	// println("called Test()")
@@ -35,8 +36,9 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool
 	// start the proxies
 	ps := proxy.BootProxies(t.logger, proxy.Option{})
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(ps.PortList, ys, t.logger)
-	if err := loadedHooks.LoadHooks(pid); err != nil {
+	// loadedHooks := hooks.NewHook(ps.PortList, ys, t.logger)
+	loadedHooks := hooks.NewHook(ys, t.logger)
+	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return false
 	}
 	// proxy update its state in the ProxyPorts map

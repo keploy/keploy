@@ -1,0 +1,29 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-11
+spec:
+    metadata:
+        method: GET
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "185"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 06 Jun 2023 13:29:26 GMT
+        body: '{"ts":1686058166007194664,"url":"{\"fact\":\"The tiniest cat on record is Mr. Pebbles, a 2-year-old cat that weighed 3 lbs (1.3 k) and was 6.1 inches (15.5 cm) high.\",\"length\":120}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1686058166

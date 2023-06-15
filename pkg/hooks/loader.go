@@ -18,53 +18,51 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
+	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
 	"go.uber.org/zap"
 )
 
-type Bpf_spin_lock struct{ Val uint32 }
-
-type PortState struct {
-	Port      uint32
-	Occupied  uint32
-	Dest_ip   uint32
-	Dest_port uint32
-	Lock      Bpf_spin_lock
-}
-
 type Hook struct {
-	proxyStateMap      *ebpf.Map
-	db  			platform.TestCaseDB
-	logger 			*zap.Logger
-	proxyPortList 		[]uint32
-	deps 			[]*models.Mock
+	proxyInfoMap     *ebpf.Map
+	appPidMap        *ebpf.Map
+	inodeMap         *ebpf.Map
+	filterMap        *ebpf.Map
+	redirectProxyMap *ebpf.Map
+
+	db            platform.TestCaseDB
+	logger        *zap.Logger
+	proxyPortList []uint32
+	deps          []*models.Mock
 	mu *sync.Mutex
 	respChannel 	chan *models.HttpResp
+	mutex sync.RWMutex
 
 	// ebpf objects and events
-	stopper 		chan os.Signal
-	connect4 		link.Link
-	connect6 		link.Link
-	gp4 			link.Link
-	accept 			link.Link
-	acceptRet 		link.Link
-	accept4 		link.Link
-	accept4Ret 		link.Link
-	read 			link.Link
-	readRet 		link.Link
-	write 			link.Link
-	writeRet 		link.Link
-	close 			link.Link
-	closeRet 		link.Link
-	objects 		bpfObjects
+	stopper    chan os.Signal
+	connect4   link.Link
+	connect6   link.Link
+	gp4        link.Link
+	tcppv4     link.Link
+	tcpv4      link.Link
+	tcpv4Ret   link.Link
+	accept     link.Link
+	acceptRet  link.Link
+	accept4    link.Link
+	accept4Ret link.Link
+	read       link.Link
+	readRet    link.Link
+	write      link.Link
+	writeRet   link.Link
+	close      link.Link
+	closeRet   link.Link
+	objects    bpfObjects
 }
 
-func NewHook(proxyPorts []uint32, db platform.TestCaseDB, logger *zap.Logger) *Hook {
+func NewHook(db platform.TestCaseDB, logger *zap.Logger) *Hook {
 	return &Hook{
-		// ProxyPorts: proxyPorts,
 		logger: logger,
-		proxyPortList: proxyPorts,
 		db: db,
 		mu: &sync.Mutex{},		
 		respChannel: make(chan *models.HttpResp),
@@ -131,23 +129,79 @@ func (h *Hook) GetResp() *models.HttpResp  {
 	return resp
 }
 
-func (h *Hook) UpdateProxyState (indx uint32, ps *PortState) {
-	err := h.proxyStateMap.Update(uint32(indx), *ps, ebpf.UpdateLock)
+//This function enables filtering of the processes using pid in the eBPF program.
+func (h *Hook) EnablePidFilter() {
+	key := 0
+	value := true
+	err := h.filterMap.Update(uint32(key), &value, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to release the occupied proxy", zap.Error(err), zap.Any("proxy port", ps.Port))
-		return
+		h.logger.Error("failed to enable pid filtering in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+	}
+
+}
+
+// This function sends the IP and Port of the running proxy in the eBPF program.
+func (h *Hook) SendProxyInfo(ip, port uint32) error {
+	key := 0
+	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP: ip, Port: port}, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	return nil
+}
+
+// This function is helpful when user application in running inside a docker container.
+func (h *Hook) SendNameSpaceId(inode uint64) {
+	key := 0
+	err := h.inodeMap.Update(uint32(key), &inode, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
 
-func (h *Hook) GetProxyState(i uint32) (*PortState, error) {
-	proxyState := PortState{}
-	if h!=nil && h.proxyStateMap != nil {
-		if err := h.proxyStateMap.LookupWithFlags(uint32(i), &proxyState, ebpf.LookupLock); err != nil {
-			// h.logger.Error("failed to fetch the state of proxy", zap.Error(err))
-			return nil, err
+func (h *Hook) CleanProxyEntry(srcPort uint16) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	err := h.redirectProxyMap.Delete(srcPort)
+	if err != nil {
+		h.logger.Error("no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
+	}
+}
+
+// // printing the whole map
+func (h *Hook) PrintRedirectProxyMap() {
+	println("------Redirect Proxy map-------")
+	itr := h.redirectProxyMap.Iterate()
+	var key uint16
+	dest := structs.DestInfo{}
+
+	for itr.Next(&key, &dest) {
+		fmt.Printf("Redirect Proxy:  [key:%v] || [value:%v]", key, dest)
+	}
+	println("------Redirect Proxy map-------")
+}
+
+func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	destInfo := structs.DestInfo{}
+	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
+		// h.logger.Error("failed to fetch the destination info", zap.Error(err))
+		return nil, err
+	}
+	return &destInfo, nil
+}
+
+func (h *Hook) SendApplicationPIDs(appPids [15]int32) error {
+	for i, v := range appPids {
+		err := h.appPidMap.Update(uint32(i), &v, ebpf.UpdateAny)
+		if err != nil {
+			// h.logger.Error("failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
+			return err
 		}
 	}
-	return &proxyState, nil
+	return nil
 }
 
 func (h *Hook) Stop (forceStop bool) {
@@ -171,8 +225,11 @@ func (h *Hook) Stop (forceStop bool) {
 			// log.Fatalf("closing ringbuf reader: %s", err)
 		}
 	}
-	
+
 	// closing all events
+	h.tcppv4.Close()
+	h.tcpv4.Close()
+	h.tcpv4Ret.Close()
 	h.accept.Close()
 	h.acceptRet.Close()
 	h.accept4.Close()
@@ -187,6 +244,8 @@ func (h *Hook) Stop (forceStop bool) {
 	h.write.Close()
 	h.writeRet.Close()
 	h.objects.Close()
+
+	log.Println("eBPF resources released successfully...")
 }
 
 // LoadHooks is used to attach the eBPF hooks into the linux kernel. Hooks are attached for outgoing and incoming network requests.
@@ -195,37 +254,36 @@ func (h *Hook) Stop (forceStop bool) {
 //
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers
-func (h *Hook) LoadHooks(pid uint32) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// k := keploy.KeployInitializer()
-	
+
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err
 	}
-	
+
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
-	
+
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		h.logger.Error("failed to lock memory for eBPF resources", zap.Error(err))
 		return err
 	}
-	
+
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
 		h.logger.Error("failed to load eBPF objects", zap.Error(err))
 		return err
 	}
-	// defer objs.Close()
-	// hook := newHook(objs.ProxyPorts, stopper, db)
-	err := objs.UserPid.Update(uint32(0), &pid, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error("failed to update the process id of the user application", zap.Any("error thrown by ebpf map", err.Error()))
-		return err
-	}
-	h.proxyStateMap = objs.ProxyPorts
+
+	h.proxyInfoMap = objs.ProxyInfoMap
+	h.appPidMap = objs.AppPidMap
+	h.inodeMap = objs.InodeMap
+	h.filterMap = objs.FilterMap
+	h.redirectProxyMap = objs.RedirectProxyMap
+
 	h.stopper = stopper
 	h.objects = objs
 
@@ -238,13 +296,30 @@ func (h *Hook) LoadHooks(pid uint32) error {
 	}()
 	// ------------ For Egress -------------
 
+	tcpp_c4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
+	if err != nil {
+		log.Fatalf("opening tcp_v4_pre_connect kprobe: %s", err)
+	}
+	h.tcppv4 = tcpp_c4
+
+	tcp_c4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
+	if err != nil {
+		log.Fatalf("opening tcp_v4_connect kprobe: %s", err)
+	}
+	h.tcpv4 = tcp_c4
+
+	tcp_r_c4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
+	if err != nil {
+		log.Fatalf("opening tcp_v4_connect kretprobe: %s", err)
+	}
+	h.tcpv4Ret = tcp_r_c4
+
 	// Get the first-mounted cgroupv2 path.
 	cgroupPath, err := detectCgroupPath()
 	if err != nil {
 		h.logger.Error("failed to detect the cgroup path", zap.Error(err))
 		return err
 	}
-
 
 	c4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -285,31 +360,30 @@ func (h *Hook) LoadHooks(pid uint32) error {
 	h.gp4 = gp4
 	// defer gp4.Close()
 
+	// // objs.PortMapping.Update(uint32(1), Dest_info{Dest_ip: 10, Dest_port: 11}, ebpf.UpdateAny)
+	// // log.Println("the ports on which proxy is running: ", h.proxyPortList)
+	// for i, v := range h.proxyPortList {
+	// 	// log.Printf("setting the vPorts at i: %v and port: %v, sizeof(vaccantPorts): %v", i, v, unsafe.Sizeof(PortState{Port: v})) // Occupied: false
 
-	// objs.PortMapping.Update(uint32(1), Dest_info{Dest_ip: 10, Dest_port: 11}, ebpf.UpdateAny)
-	// log.Println("the ports on which proxy is running: ", h.proxyPortList)
-	for i, v := range h.proxyPortList {
-		// log.Printf("setting the vPorts at i: %v and port: %v, sizeof(vaccantPorts): %v", i, v, unsafe.Sizeof(PortState{Port: v})) // Occupied: false
+	// 	// inf, _ := objs.VaccantPorts.Info()
 
-		// inf, _ := objs.VaccantPorts.Info()
+	// 	err = objs.ProxyPorts.Update(uint32(i), PortState{Port: v}, ebpf.UpdateLock)
+	// 	if err != nil {
+	// 		h.logger.Error("failed to update the proxy state in the ebpf map", zap.Error(err))
+	// 		return err
+	// 	}
+	// 	// err := objs.VaccantPorts.Update(uint32(i), []PortState{{Port: v, Occupied: false}}, ebpf.UpdateAny)
+	// 	// ports := []uint32{}
+	// 	// for i := 0; i < runtime.NumCPU(); i++ {
+	// 	// 	ports = append(ports, v)
+	// 	// }
+	// 	// err := objs.VaccantPorts.Put(uint32(i), ports)
 
-		err = objs.ProxyPorts.Update(uint32(i), PortState{Port: v}, ebpf.UpdateLock)
-		if err != nil {
-			h.logger.Error("failed to update the proxy state in the ebpf map", zap.Error(err))
-			return err
-		}
-		// err := objs.VaccantPorts.Update(uint32(i), []PortState{{Port: v, Occupied: false}}, ebpf.UpdateAny)
-		// ports := []uint32{}
-		// for i := 0; i < runtime.NumCPU(); i++ {
-		// 	ports = append(ports, v)
-		// }
-		// err := objs.VaccantPorts.Put(uint32(i), ports)
+	// 	// err := objs.VaccantPorts.Put(uint32(i), []PortState{{Port: v, Occupied: false}, {Port: v, Occupied: false}})
 
-		// err := objs.VaccantPorts.Put(uint32(i), []PortState{{Port: v, Occupied: false}, {Port: v, Occupied: false}})
+	// 	// log.Printf("info about VaccantPorts: %v, flags: %v", inf, objs.VaccantPorts.Flags())
+	// }
 
-		// log.Printf("info about VaccantPorts: %v, flags: %v", inf, objs.VaccantPorts.Flags())
-	}
-	
 	// ------------ For Ingress using Kprobes --------------
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
@@ -324,7 +398,7 @@ func (h *Hook) LoadHooks(pid uint32) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	ac_, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, nil)
+	ac_, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_accept", zap.Error(err))
 		return err
@@ -344,7 +418,7 @@ func (h *Hook) LoadHooks(pid uint32) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	ac4_, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, nil)
+	ac4_, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_accept4", zap.Error(err))
 		return err
@@ -384,7 +458,7 @@ func (h *Hook) LoadHooks(pid uint32) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	wt_, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, nil)
+	wt_, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_write", zap.Error(err))
 		return err
@@ -404,7 +478,7 @@ func (h *Hook) LoadHooks(pid uint32) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	cl_, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, nil)
+	cl_, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
 		h.logger.Error("failed to attach the kretprobe hook on sys_close", zap.Error(err))
 		return err
