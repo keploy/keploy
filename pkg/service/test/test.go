@@ -44,7 +44,21 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
 
-	tcs, err := ys.Read(nil) 
+	//Sending Proxy Ip & Port to the ebpf program
+	if err := loadedHooks.SendProxyInfo(ps.IP, ps.Port); err != nil {
+		return false
+	}
+
+	// start user application
+	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, Delay); err != nil {
+		return false
+	}
+
+	// Enable Pid Filtering
+	loadedHooks.EnablePidFilter()
+	ps.FilterPid = true
+
+	tcs, err := ys.Read(nil)
 	if err != nil {
 		return false
 	}
@@ -102,7 +116,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			// time.Sleep(1 * time.Second)
 			resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
 			resp = loadedHooks.GetResp()
-			if err != nil { 
+			if err != nil {
 				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 				continue
 			}
@@ -152,8 +166,8 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 				TestCasePath: tcsPath,
 				MockPath:     mockPath,
 				// Noise:        httpSpec.Assertions["noise"],
-				Noise: tc.Noise,
-				Result:       *testResult,
+				Noise:  tc.Noise,
+				Result: *testResult,
 			})
 			testReportFS.Lock()
 			testReportFS.Unlock()
@@ -206,6 +220,10 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop(true)
+
+	//stop listening for proxy server
+	ps.StopProxyServer()
+
 	return true
 }
 
