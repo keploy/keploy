@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"net/url"
+
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -98,6 +100,13 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	// 	// return true
 	// 	return tcs[i].Created < tcs[j].Created
 	// })
+
+	var userIp string
+	if loadedHooks.IsDockerRelatedCmd(appCmd) {
+		userIp = loadedHooks.GetUserIp(appContainer)
+		println("UserIp address:", userIp)
+	}
+
 	for _, tc := range tcs {
 		switch tc.Kind {
 		case models.HTTP:
@@ -114,6 +123,12 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			loadedHooks.SetDeps(tc.Mocks)
 			// fmt.Println("before simulating the request", tc)
 			// time.Sleep(1 * time.Second)
+
+			if loadedHooks.IsDockerRelatedCmd(appCmd) {
+				//changing Ip address only in case of docker
+				tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
+			}
+
 			resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
 			resp = loadedHooks.GetResp()
 			if err != nil {
@@ -327,4 +342,26 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	// t.logger.Info("", zap.Any("result of test", res))
 
 	return pass, res
+}
+
+func replaceHostToIP(currentURL string, ipAddress string) string {
+	// Parse the current URL
+	parsedURL, err := url.Parse(currentURL)
+	if err != nil {
+		// Return the original URL if parsing fails
+		return currentURL
+	}
+
+	if ipAddress == "" {
+		return currentURL
+	}
+
+	// Check if the URL host is "localhost"
+	if parsedURL.Hostname() == "localhost" {
+		// Replace "localhost" with the IP address
+		parsedURL.Host = strings.Replace(parsedURL.Host, "localhost", ipAddress, 1)
+	}
+
+	// Return the modified URL
+	return parsedURL.String()
 }
