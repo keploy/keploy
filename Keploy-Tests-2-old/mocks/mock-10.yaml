@@ -1,0 +1,41 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-10-0
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Tue, 06 Jun 2023 13:27:23 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6IlQvQkRUZUUwbzFsVWhBc2dHUyttbFE9PSIsInZhbHVlIjoibU42eHNITEhXUUUzdG5sM1NiY0ozU2NpeFNNMDQ5TnpxTktPU1lxZDFHdEE3MlBkbWYrMmlXRFZTMnFmSnNrTDN2RlYycHZnNnlpcllocjZIczIyRTFqdDl4Tk1Ec2k5UlBJelFEWlRpTW9qcElPdFFhem9Lai83Sk1pb0pjNzAiLCJtYWMiOiJkODcxZGJjYzUyZmExMTcyYjM1ZTUwYjUwODg2MzBiNTc2ZDEyNmUzYjkwZTBjMDExZmRmZWQyNTUxZTg0MGI3IiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:27:23 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6Ik1PN0I3OXB0STJ6Z3lRSmJqbmdudGc9PSIsInZhbHVlIjoiUFU0NWdyRGM5UGFaMUZwRHo3RTQvdVEyZVN5Y2wzaUNtWU1NY2xpQWlScHBPYjBZUlVFZktkVm12K3VYaWVsbDgzS0RDdmdkVDZFM2pPTno2V2pVZ3Z2dHpVcXYwaStpM3Ricm96enNDK2tiMXRCY0xDZWpHVGJlRGtYN2J1ekMiLCJtYWMiOiJlNDQwMjI1OWI4YmM5ZTI3OGMzNGRmMjc2YjQwNDU2MjY1ZWQwMWZjNTUxYjU1MWMyZjk1OTdjZTc3NjJiOTc3IiwidGFnIjoiIn0%3D; expires=Tue, 06-Jun-2023 15:27:23 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "98"
+            X-Xss-Protection: 1; mode=block
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []

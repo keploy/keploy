@@ -12,13 +12,13 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 	recorder := record.NewRecorder(logger)
 	return &Record{
 		recorder: recorder,
-		logger: logger,
+		logger:   logger,
 	}
 }
 
 type Record struct {
 	recorder record.Recorder
-	logger *zap.Logger
+	logger   *zap.Logger
 }
 
 func (r *Record) GetCmd() *cobra.Command {
@@ -27,7 +27,6 @@ func (r *Record) GetCmd() *cobra.Command {
 		Use:   "record",
 		Short: "record the keploy testcases from the API calls",
 		Run: func(cmd *cobra.Command, args []string) {
-			pid, _ := cmd.Flags().GetUint32("pid")
 			path, err := cmd.Flags().GetString("path")
 			if err!=nil {
 				r.logger.Error("failed to read the testcase path input")
@@ -45,18 +44,45 @@ func (r *Record) GetCmd() *cobra.Command {
 			tcsPath := path + "/tests"
 			mockPath := path + "/mocks"
 
-			r.recorder.CaptureTraffic(tcsPath, mockPath, pid)
+			appCmd, err := cmd.Flags().GetString("c")
+
+			if err != nil {
+				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+			}
+
+			appContainer, err := cmd.Flags().GetString("containerName")
+
+			if err != nil {
+				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+			}
+
+			delay, err := cmd.Flags().GetUint64("delay")
+
+			if err != nil {
+				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
+			}
+
+			r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, delay)
 
 			// server.Server(version, kServices, conf, logger)
 			// server.Server(version)
 		},
 	}
 
-	recordCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
-	recordCmd.MarkFlagRequired("pid")
+	// recordCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
+	// recordCmd.MarkFlagRequired("pid")
 
 	recordCmd.Flags().String("path", "", "Path to the local directory where generated testcases/mocks should be stored")
 	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
+
+	recordCmd.Flags().String("c", "", "Command to start the user application")
+	recordCmd.MarkFlagRequired("c")
+
+	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
+	// recordCmd.MarkFlagRequired("containerName")
+
+	recordCmd.Flags().Uint64("delay", 5, "User provided time to run its application")
+	// recordCmd.MarkFlagRequired("delay")
 
 	return recordCmd
 }

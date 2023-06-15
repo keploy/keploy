@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"compress/gzip"
 	"io"
 	"io/ioutil"
 	"net"
@@ -25,9 +26,9 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("POST ")) ||
 		bytes.HasPrefix(buffer[:], []byte("PUT ")) ||
 		bytes.HasPrefix(buffer[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buffer[:], []byte("DELETE ")) || 
-		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) || 
-		bytes.HasPrefix(buffer[:], []byte("HEAD ")) 
+		bytes.HasPrefix(buffer[:], []byte("DELETE ")) ||
+		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) ||
+		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 }
 
 func ProcessOutgoingHttp (requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
@@ -142,6 +143,13 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 	}
 	var respBody []byte
 	if resp.Body != nil { // Read
+		if resp.Header.Get("Content-Encoding") == "gzip" {
+			resp.Body, err = gzip.NewReader(resp.Body)
+			if err != nil {
+				logger.Error("failed to read the the http repsonse body", zap.Error(err))
+				return nil
+			}
+		}
 		var err error
 		respBody, err = ioutil.ReadAll(resp.Body)
 		if err != nil {
@@ -211,6 +219,6 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		},
 	}
 
-		// if val, ok := Deps[string(port)]; ok {
-		// keploy.Deps = append(keploy.Deps, httpMock)
+	// if val, ok := Deps[string(port)]; ok {
+	// keploy.Deps = append(keploy.Deps, httpMock)
 }

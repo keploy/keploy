@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"strconv"
 	"time"
 )
@@ -21,10 +22,10 @@ func ToIPAddressStr(ip uint32) string {
 	fourthByte, _ := strconv.ParseUint(ipBinary[24:32], 2, 64)
 
 	// concatenate the four decimal segments with a dot separator to form the dot-decimal string
-	return fmt.Sprintf("%d.%d.%d.%d", fourthByte, thirdByte, secondByte, firstByte)
+	return fmt.Sprintf("%d.%d.%d.%d", firstByte, secondByte, thirdByte, fourthByte)
 }
 
-// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF). 
+// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
 func ReadBytes(reader io.Reader) ([]byte, error) {
 	var buffer []byte
@@ -33,7 +34,7 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 		// Create a temporary buffer to hold the incoming bytes
 		buf := make([]byte, 1024)
 		rand.Seed(time.Now().UnixNano())
-		
+
 		// Read bytes from the Reader
 		n, err := reader.Read(buf)
 		if err != nil && err != io.EOF {
@@ -50,4 +51,44 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 	}
 
 	return buffer, nil
+}
+
+func GetLocalIP() (net.IP, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+				return ipNet.IP, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("No valid IP address found")
+}
+
+func ConvertToIPV4(ip net.IP) (uint32, bool) {
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return 0, false // Return 0 or handle the error accordingly
+	}
+
+	return uint32(ipv4[0])<<24 | uint32(ipv4[1])<<16 | uint32(ipv4[2])<<8 | uint32(ipv4[3]), true
+}
+
+func IPToDotDecimal(ip net.IP) string {
+	ipStr := ip.String()
+	if ip.To4() != nil {
+		ipStr = ip.To4().String()
+	}
+	return ipStr
 }

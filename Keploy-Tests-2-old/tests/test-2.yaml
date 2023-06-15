@@ -1,0 +1,29 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-2
+spec:
+    metadata:
+        method: GET
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "144"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 06 Jun 2023 07:53:25 GMT
+        body: '{"ts":1686038005240562149,"url":"{\"fact\":\"Cats lived with soldiers in trenches, where they killed mice during World War I.\",\"length\":80}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1686038005
