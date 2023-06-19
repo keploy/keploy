@@ -84,7 +84,7 @@ jobs:
           brew tap mitchellh/gon
           brew install mitchellh/gon/gon
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v2
+        uses: goreleaser/goreleaser-action@v4
         with:
           distribution: goreleaser
           version: latest
