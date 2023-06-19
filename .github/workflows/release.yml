@@ -73,7 +73,7 @@ jobs:
 #          path: web
 #          key: ${{ hashFiles('ui/src') }}
       - name: Import Code-Signing Certificates
-        uses: Apple-Actions/import-codesign-certs@v1
+        uses: Apple-Actions/import-codesign-certs@v2
         with:
           # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
           p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
