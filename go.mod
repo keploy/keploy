@@ -5,7 +5,7 @@ go 1.16
 //replace github.com/keploy/go-sdk => ../go-sdk
 
 require (
-	github.com/99designs/gqlgen v0.15.1 // v should be less or equal 0.15.1
+	github.com/99designs/gqlgen v0.17.33 // v should be less or equal 0.15.1
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/cors v1.2.0
@@ -19,11 +19,11 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/keploy/go-sdk v0.8.6
 	github.com/soheilhy/cmux v0.1.5
-	github.com/vektah/gqlparser/v2 v2.2.0 // v should b4 less or equal 2.2.0
+	github.com/vektah/gqlparser/v2 v2.5.3 // v should b4 less or equal 2.2.0
 	github.com/wI2L/jsondiff v0.3.0
 	go.mongodb.org/mongo-driver v1.8.3
 	go.uber.org/zap v1.22.0
-	google.golang.org/protobuf v1.28.1
+	google.golang.org/protobuf v1.30.0
 )
 
 require (
@@ -34,7 +34,7 @@ require (
 )
 
 require (
-	golang.org/x/sync v0.1.0
+	golang.org/x/sync v0.2.0
 	google.golang.org/grpc v1.48.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -44,8 +44,5 @@ require (
 	github.com/ProtonMail/go-crypto v0.0.0-20230321155629-9a39f2531310 // indirect
 	github.com/cloudflare/circl v1.3.2 // indirect
 	github.com/mattn/go-runewidth v0.0.14 // indirect
-	github.com/sergi/go-diff v1.3.1 // indirect
-	github.com/stretchr/testify v1.8.0 // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
-	golang.org/x/tools v0.7.0 // indirect
 )
