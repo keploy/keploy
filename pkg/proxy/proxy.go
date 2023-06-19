@@ -13,13 +13,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
+
+	"github.com/miekg/dns"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
@@ -31,14 +32,15 @@ import (
 	"time"
 )
 
-
 type ProxySet struct {
-	IP        uint32
-	Port      uint32
-	hook      *hooks.Hook
-	logger    *zap.Logger
-	FilterPid bool
-	Listener  net.Listener
+	IP           uint32
+	Port         uint32
+	hook         *hooks.Hook
+	logger       *zap.Logger
+	FilterPid    bool
+	Listener     net.Listener
+	DnsServer    *dns.Server
+	dockerAppCmd bool
 }
 
 type Conn struct {
@@ -111,7 +113,7 @@ var caFolder embed.FS
 // "startingPort" represents the initial port number from which the system sequentially searches for available or idle ports.. Default: 5000
 //
 // "count" variable represents the number of proxies to be started. Default: 50
-func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
+func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -156,14 +158,19 @@ func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
 		log.Fatalf("Failed to convert local Ip to IPV4")
 	}
 
+	//check if the user application is running inside docker container
+	dCmd, _ := util.IsDockerRelatedCommand(appCmd)
+
 	var proxySet = ProxySet{
-		Port:   opt.Port,
-		IP:     proxyAddr,
-		logger: logger,
+		Port:         opt.Port,
+		IP:           proxyAddr,
+		logger:       logger,
+		dockerAppCmd: dCmd,
 	}
 
 	if isPortAvailable(opt.Port) {
 		go proxySet.startProxy()
+		go proxySet.startDnsServer()
 	} else {
 		// TODO: Release eBPF resources if failed abruptly
 		log.Fatalf("Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
@@ -283,7 +290,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 func (ps *ProxySet) startProxy() {
 
 	port := ps.Port
-	proxyAddress := fmt.Sprint(ps.IP)
+	// proxyAddress := fmt.Sprint(ps.IP)
 	// Read the CA certificate and private key from files
 	// caCert, err := ioutil.ReadFile(caCertPath)
 	// if err != nil {
@@ -303,14 +310,7 @@ func (ps *ProxySet) startProxy() {
 	// 	log.Fatalf("Failed to parse CA certificate: %v", err)
 	// }
 
-	// Convert string to uint32
-	ip, err := strconv.ParseUint(strings.TrimSpace(proxyAddress), 10, 32)
-	if err != nil {
-		ps.logger.Error(fmt.Sprintf("failed to convert string to uint32:"), zap.Error(err))
-		return
-	}
-
-	proxyAddress = util.ToIPAddressStr(uint32(ip))
+	proxyAddress := util.ToIPAddressStr(ps.IP)
 	println("ProxyAddress:", proxyAddress)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(proxyAddress+":%v", port))
@@ -342,6 +342,98 @@ func (ps *ProxySet) startProxy() {
 
 		go ps.handleConnection(conn, port)
 	}
+}
+
+func readableProxyAddress(ps *ProxySet) string {
+
+	if ps != nil {
+		port := ps.Port
+
+		proxyAddress := util.ToIPAddressStr(ps.IP)
+		println("ProxyAddress:", proxyAddress)
+		return fmt.Sprintf(proxyAddress+":%v", port)
+	}
+	return ""
+}
+
+func (ps *ProxySet) startDnsServer() {
+
+	proxyAddress := readableProxyAddress(ps)
+	println("ProxyAddress:", proxyAddress)
+
+	handler := new(ProxySet)
+	server := &dns.Server{
+		Addr:      proxyAddress,
+		Net:       "udp",
+		Handler:   handler,
+		UDPSize:   65535,
+		ReusePort: true,
+		// DisableBackground: true,
+	}
+
+	ps.DnsServer = server
+
+	fmt.Println("Starting DNS server at addr", server.Addr)
+	err := server.ListenAndServe()
+	if err != nil {
+		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
+	}
+
+	ps.logger.Debug(fmt.Sprintf("Proxy complete Addr %v:", server.Addr))
+	ps.logger.Info(fmt.Sprintf("DNS server started at port:%v", ps.Port))
+
+}
+
+func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+
+	msg := new(dns.Msg)
+	msg.SetReply(r)
+	msg.Authoritative = true
+	println("got a query....")
+	for _, question := range r.Question {
+		fmt.Println("TYPE of record:", question.Qtype)
+		fmt.Printf("Received query: %s\n", question.Name)
+
+		dnsAddr := "8.8.8.8:53" //default: google public dns server address
+		if ps.dockerAppCmd {
+			dnsAddr = "127.0.0.11:53" //docker dns server address
+		}
+
+		answers := resolveDNSQuery(question.Name, question.Qtype, dnsAddr, ps.logger)
+		if len(answers) == 0 {
+			// If resolution failed, return a default A record with Proxy IP
+			answers = append(answers, &dns.A{
+				Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+				A:   net.ParseIP(util.ToIPAddressStr(ps.IP)),
+			})
+		}
+		msg.Answer = append(msg.Answer, answers...)
+	}
+
+	err := w.WriteMsg(msg)
+	if err != nil {
+		ps.logger.Error("failed to write dns info back to the client", zap.Error(err))
+	}
+}
+
+func resolveDNSQuery(domain string, qtype uint16, dnsAddr string, logger *zap.Logger) []dns.RR {
+	msg := new(dns.Msg)
+	dnsClient := new(dns.Client)
+	// m.SetQuestion(dns.Fqdn(domain), qtype)
+	msg.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	msg.RecursionDesired = true
+
+	in, _, err := dnsClient.Exchange(msg, dnsAddr)
+
+	if err != nil {
+		logger.Error("failed to resolve the dns query", zap.Error(err))
+		return nil
+	}
+
+	for _, ans := range in.Answer {
+		fmt.Println("Answer:", ans)
+	}
+	return in.Answer
 }
 
 func isTLSHandshake(data []byte) bool {
@@ -519,7 +611,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 
-	
 	// releases the occupied source port
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
 	conn.Close()

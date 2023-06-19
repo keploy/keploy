@@ -30,14 +30,16 @@ type Hook struct {
 	inodeMap         *ebpf.Map
 	filterMap        *ebpf.Map
 	redirectProxyMap *ebpf.Map
+	keployModeMap    *ebpf.Map
+	// dnsResolutionMap *ebpf.Map
 
 	db            platform.TestCaseDB
 	logger        *zap.Logger
 	proxyPortList []uint32
 	deps          []*models.Mock
-	mu *sync.Mutex
-	respChannel 	chan *models.HttpResp
-	mutex sync.RWMutex
+	mu            *sync.Mutex
+	respChannel   chan *models.HttpResp
+	mutex         sync.RWMutex
 
 	// ebpf objects and events
 	stopper    chan os.Signal
@@ -62,21 +64,21 @@ type Hook struct {
 
 func NewHook(db platform.TestCaseDB, logger *zap.Logger) *Hook {
 	return &Hook{
-		logger: logger,
-		db: db,
-		mu: &sync.Mutex{},		
+		logger:      logger,
+		db:          db,
+		mu:          &sync.Mutex{},
 		respChannel: make(chan *models.HttpResp),
 	}
 }
 
-func (h *Hook) GetDepsSize () int {
+func (h *Hook) GetDepsSize() int {
 	h.mu.Lock()
 	size := len(h.deps)
 	defer h.mu.Unlock()
 	return size
 }
 
-func (h *Hook) AppendDeps(m *models.Mock)  {
+func (h *Hook) AppendDeps(m *models.Mock) {
 	h.mu.Lock()
 	h.deps = append(h.deps, m)
 	h.mu.Unlock()
@@ -89,12 +91,12 @@ func (h *Hook) SetDeps(m []*models.Mock) {
 	defer h.mu.Unlock()
 
 }
-func (h *Hook) PopFront()  {
+func (h *Hook) PopFront() {
 	h.mu.Lock()
 	h.deps = h.deps[1:]
 	h.mu.Unlock()
 }
-func (h *Hook) FetchDep (indx int) *models.Mock {
+func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
 	dep := h.deps[indx]
 	// fmt.Println("deps in hooks: ", dep)
@@ -104,7 +106,7 @@ func (h *Hook) FetchDep (indx int) *models.Mock {
 	return dep
 }
 
-func (h *Hook) GetDeps () []*models.Mock {
+func (h *Hook) GetDeps() []*models.Mock {
 	h.mu.Lock()
 	deps := h.deps
 	// fmt.Println("deps in hooks: ", deps)
@@ -116,7 +118,7 @@ func (h *Hook) ResetDeps() int {
 	h.mu.Lock()
 	h.deps = []*models.Mock{}
 	// h.logger.Error("called ResetDeps", zap.Any("deps: ", h.deps))
-	// fmt.Println("deps are reset") 
+	// fmt.Println("deps are reset")
 	defer h.mu.Unlock()
 	return 1
 }
@@ -124,7 +126,7 @@ func (h *Hook) PutResp(resp *models.HttpResp) error {
 	h.respChannel <- resp
 	return nil
 }
-func (h *Hook) GetResp() *models.HttpResp  {
+func (h *Hook) GetResp() *models.HttpResp {
 	resp := <-h.respChannel
 	return resp
 }
@@ -204,7 +206,36 @@ func (h *Hook) SendApplicationPIDs(appPids [15]int32) error {
 	return nil
 }
 
-func (h *Hook) Stop (forceStop bool) {
+func (h *Hook) SetKeployModeInKernel(mode uint32) {
+	key := 0
+	err := h.keployModeMap.Update(uint32(key), &mode, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+	}
+}
+
+// func (h *Hook) UpdateDnsResolutionMap(indx uint32, ps *structs.DnsResolve) {
+// 	if h != nil && h.dnsResolutionMap != nil {
+// 		err := h.dnsResolutionMap.Update(uint32(indx), *ps, ebpf.UpdateLock)
+// 		if err != nil {
+// 			h.logger.Error("failed to release the occupied entry from dns resolution map", zap.Error(err))
+// 			return
+// 		}
+// 	}
+// }
+
+// func (h *Hook) GetDNSDestInfo(i uint32) (*structs.DnsResolve, error) {
+// 	dnsDestInfo := structs.DnsResolve{}
+// 	if h != nil && h.dnsResolutionMap != nil {
+// 		if err := h.dnsResolutionMap.LookupWithFlags(uint32(i), &dnsDestInfo, ebpf.LookupLock); err != nil {
+// 			// h.logger.Error("failed to fetch the destination info from dns resolution map", zap.Error(err))
+// 			return nil, err
+// 		}
+// 	}
+// 	return &dnsDestInfo, nil
+// }
+
+func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
 		log.Println("Received signal, exiting program..")
@@ -283,6 +314,8 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.inodeMap = objs.InodeMap
 	h.filterMap = objs.FilterMap
 	h.redirectProxyMap = objs.RedirectProxyMap
+	h.keployModeMap = objs.KeployModeMap
+	// h.dnsResolutionMap = objs.DnsResolutionMap
 
 	h.stopper = stopper
 	h.objects = objs
@@ -290,7 +323,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	connectionFactory := connection.NewFactory(time.Minute, h.respChannel, h.logger)
 	go func() {
 		for {
-			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h. ResetDeps)
+			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps)
 			time.Sleep(1 * time.Second)
 		}
 	}()
@@ -359,30 +392,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	}
 	h.gp4 = gp4
 	// defer gp4.Close()
-
-	// // objs.PortMapping.Update(uint32(1), Dest_info{Dest_ip: 10, Dest_port: 11}, ebpf.UpdateAny)
-	// // log.Println("the ports on which proxy is running: ", h.proxyPortList)
-	// for i, v := range h.proxyPortList {
-	// 	// log.Printf("setting the vPorts at i: %v and port: %v, sizeof(vaccantPorts): %v", i, v, unsafe.Sizeof(PortState{Port: v})) // Occupied: false
-
-	// 	// inf, _ := objs.VaccantPorts.Info()
-
-	// 	err = objs.ProxyPorts.Update(uint32(i), PortState{Port: v}, ebpf.UpdateLock)
-	// 	if err != nil {
-	// 		h.logger.Error("failed to update the proxy state in the ebpf map", zap.Error(err))
-	// 		return err
-	// 	}
-	// 	// err := objs.VaccantPorts.Update(uint32(i), []PortState{{Port: v, Occupied: false}}, ebpf.UpdateAny)
-	// 	// ports := []uint32{}
-	// 	// for i := 0; i < runtime.NumCPU(); i++ {
-	// 	// 	ports = append(ports, v)
-	// 	// }
-	// 	// err := objs.VaccantPorts.Put(uint32(i), ports)
-
-	// 	// err := objs.VaccantPorts.Put(uint32(i), []PortState{{Port: v, Occupied: false}, {Port: v, Occupied: false}})
-
-	// 	// log.Printf("info about VaccantPorts: %v, flags: %v", inf, objs.VaccantPorts.Flags())
-	// }
 
 	// ------------ For Ingress using Kprobes --------------
 
@@ -490,21 +499,13 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 
-	// need to add this stopper in the service function
-	// <-stopper
-	// log.Println("Received signal, exiting program..")
+	switch models.GetMode() {
+	case models.MODE_RECORD:
+		h.SetKeployModeInKernel(1)
+	case models.MODE_TEST:
+		h.SetKeployModeInKernel(2)
+	}
 
-	// // closing all readers.
-	// for _, reader := range PerfEventReaders {
-	// 	if err := reader.Close(); err != nil {
-	// 		log.Fatalf("closing perf reader: %s", err)
-	// 	}
-	// }
-	// for _, reader := range RingEventReaders {
-	// 	if err := reader.Close(); err != nil {
-	// 		log.Fatalf("closing ringbuf reader: %s", err)
-	// 	}
-	// }
 	return nil
 }
 

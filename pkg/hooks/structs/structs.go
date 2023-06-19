@@ -109,8 +109,8 @@ type Bpf_spin_lock struct{ Val uint32 }
 //     struct bpf_spin_lock lock;
 // };
 
-type DestInfo struct{
-	DestIp uint32
+type DestInfo struct {
+	DestIp   uint32
 	DestPort uint32
 	// Lock Bpf_spin_lock
 }
@@ -123,7 +123,19 @@ type DestInfo struct{
 // };
 
 type ProxyInfo struct {
-	IP uint32
+	IP   uint32
 	Port uint32
 }
 
+// // struct dns_resolve
+// // {
+// //     struct dest_info_t dest_info;
+// //     u32 occupied;
+// //     struct bpf_spin_lock lock;
+// // }
+
+// type DnsResolve struct {
+// 	Dst      DestInfo
+// 	Occupied uint32
+// 	Lock     Bpf_spin_lock
+// }

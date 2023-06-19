@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -36,7 +37,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	// fetch the recorded testcases with their mocks
 	ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
 	// start the proxies
-	ps := proxy.BootProxies(t.logger, proxy.Option{})
+	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	// loadedHooks := hooks.NewHook(ps.PortList, ys, t.logger)
 	loadedHooks := hooks.NewHook(ys, t.logger)
@@ -108,6 +109,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 		println("UserIp address:", userIp)
 	}
 
+	println("TEST cases:", len(tcs))
 	for _, tc := range tcs {
 		switch tc.Kind {
 		case models.HTTP:
@@ -121,8 +123,9 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			// for i, _ := range mocks[tc.Name] {
 			// 	loadedHooks.AppendDeps(&mocks[tc.Name][i])
 			// }
+			fmt.Println("Before setting deps.... during testing...")
 			loadedHooks.SetDeps(tc.Mocks)
-			// fmt.Println("before simulating the request", tc)
+			fmt.Println("before simulating the request", tc)
 			// time.Sleep(1 * time.Second)
 
 			ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)

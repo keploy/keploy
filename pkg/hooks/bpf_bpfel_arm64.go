@@ -87,6 +87,7 @@ type bpfMapSpecs struct {
 	FilterMap                 *ebpf.MapSpec `ebpf:"filter_map"`
 	GlobalNsPidInfoMap        *ebpf.MapSpec `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.MapSpec `ebpf:"inode_map"`
+	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
 	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
@@ -125,6 +126,7 @@ type bpfMaps struct {
 	FilterMap                 *ebpf.Map `ebpf:"filter_map"`
 	GlobalNsPidInfoMap        *ebpf.Map `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.Map `ebpf:"inode_map"`
+	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
 	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
@@ -146,6 +148,7 @@ func (m *bpfMaps) Close() error {
 		m.FilterMap,
 		m.GlobalNsPidInfoMap,
 		m.InodeMap,
+		m.KeployModeMap,
 		m.ProxyInfoMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
