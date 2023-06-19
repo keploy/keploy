@@ -20,8 +20,8 @@ import (
 
 var (
 	dockerClient     *client.Client
-	AppDockerNetwork string
-	AppContainerName string
+	appDockerNetwork string
+	appContainerName string
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
@@ -47,9 +47,9 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 
 		var err error
-		AppContainerName, AppDockerNetwork, err = parseDockerCommand(appCmd)
-		println("parsed Containername", AppContainerName)
-		println("parsed DockerNetwork", AppDockerNetwork)
+		appContainerName, appDockerNetwork, err = parseDockerCommand(appCmd)
+		println("parsed Containername", appContainerName)
+		println("parsed DockerNetwork", appDockerNetwork)
 		if err != nil {
 			h.logger.Error("failed to parse container or network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
 			return err
@@ -57,7 +57,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		if len(appContainer) == 0 {
 
-			appContainer = AppContainerName
+			appContainer = appContainerName
 		}
 
 		errCh := make(chan error, 1)
@@ -235,11 +235,11 @@ func (h *Hook) GetUserIp(containerName, networkName string) string {
 	// And it is checked at the time of launching the applicaton
 
 	if len(containerName) == 0 {
-		containerName = AppContainerName
+		containerName = appContainerName
 	}
 
 	if len(networkName) == 0 {
-		networkName = AppDockerNetwork
+		networkName = appDockerNetwork
 	}
 
 	cli := dockerClient
@@ -253,7 +253,7 @@ func (h *Hook) GetUserIp(containerName, networkName string) string {
 	}
 
 	// Find the IP address of the container in the network
-	ipAddress := inspect.NetworkSettings.Networks[AppDockerNetwork].IPAddress
+	ipAddress := inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
 
 	fmt.Printf("Container IP Address: %s\n", ipAddress)
 

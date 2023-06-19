@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -91,4 +92,24 @@ func IPToDotDecimal(ip net.IP) string {
 		ipStr = ip.To4().String()
 	}
 	return ipStr
+}
+
+func IsDockerRelatedCommand(cmd string) (bool, string) {
+	// Check for Docker command patterns
+	dockerCommandPatterns := []string{"docker ", "docker-compose "}
+	for _, pattern := range dockerCommandPatterns {
+		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
+			return true, "docker"
+		}
+	}
+
+	// Check for Docker Compose file extension
+	dockerComposeFileExtensions := []string{".yaml", ".yml"}
+	for _, extension := range dockerComposeFileExtensions {
+		if strings.HasSuffix(strings.ToLower(cmd), extension) {
+			return true, "docker-compose"
+		}
+	}
+
+	return false, ""
 }
