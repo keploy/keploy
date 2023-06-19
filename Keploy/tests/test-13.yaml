@@ -1,0 +1,30 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-13
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "174"
+            Content-Type: application/json; charset=utf-8
+            Date: Mon, 19 Jun 2023 09:04:07 GMT
+        body: '{"ts":1687165447080009230,"url":"{\"fact\":\"The way you treat kittens in the early stages of it''s life will render it''s personality traits later in life.\",\"length\":109}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1687165447

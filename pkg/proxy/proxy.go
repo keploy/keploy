@@ -381,14 +381,9 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	// Wrap the TCP connection with TLS
 	tlsConn := tls.Server(conn, config)
 
-	req := make([]byte, 1024)
-	fmt.Println("before the parsed req: ", string(req))
-
-	// _, err = tlsConn.Read(req)
 	if err != nil {
 		log.Panic("failed reading the request message with error: ", err)
 	}
-	fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
 	// err = tlsConn.Handshake()
 	// if err != nil {
@@ -457,7 +452,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	//Dialing for tls connection
 	if models.GetMode() != models.MODE_TEST {
 		if isTLS {
-			fmt.Println("isTLS: ", isTLS)
 			config := &tls.Config{
 				InsecureSkipVerify: false,
 				ServerName:         destinationUrl,
@@ -519,7 +513,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 
-	
+
 	// releases the occupied source port
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
 	conn.Close()

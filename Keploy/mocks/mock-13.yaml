@@ -1,0 +1,42 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-13-0
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Mon, 19 Jun 2023 09:04:06 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6IjBDbnprNnJsdlk4ZUN1NGF2UDFFU2c9PSIsInZhbHVlIjoiM3NTbDdsM1JIQXV5MjE3RlprMmRQOXY2T0Zsc2YrRis3a2N6R3dpK2czSDlRYlhNcnp4SVpYOHFLV2hhcE0rK3dUaWl2R0g5S1NkdHJ6SnNTVFJwUU1PZXVsMFpNV242L0E4VGxpTVkvME1nUDhFT3kyS2FCMVNGeEZ1Q0VsWGIiLCJtYWMiOiJjOTE2ODMzMTM2MjEzNDlhNWMxYzA5OTE5NmRjYWEwNDQwMzEyN2U1ZjZkMTg0MTM3ZmM1YTI0MjIwNDVhOTkyIiwidGFnIjoiIn0%3D; expires=Mon, 19-Jun-2023 11:04:06 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6ImJPR2VtWFdQUk9XSEt4K2Z6b2cvRGc9PSIsInZhbHVlIjoiMjRNajBJSHFPbmwxc2pwWFV2am5aN3B3cllNUzQ3QzlWVUIzVHA2aER5VWhScVRZa3NHRDJXaU5EVXJBQzgvNDJybjBUaWJGdlQwVEN0OFFYUjZqK1kzR2tkM1UwYWxDL1B1eDB5NEwxZXBEcmZRWXRZbWZjMTJZaGFyY0psQjYiLCJtYWMiOiJlNTY3Y2ZlOTM4N2UxODM3NmU0MjJiOTcwM2E3YzE3YzcxNTIxZGM4YWViMDY4ZmFkM2VhYTIyYzM4ZmI4YTVhIiwidGFnIjoiIn0%3D; expires=Mon, 19-Jun-2023 11:04:06 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"The way you treat kittens in the early stages of it''s life will render it''s personality traits later in life.","length":109}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1687165447

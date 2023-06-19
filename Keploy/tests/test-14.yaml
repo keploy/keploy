@@ -1,0 +1,30 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-14
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "121"
+            Content-Type: application/json; charset=utf-8
+            Date: Mon, 19 Jun 2023 09:08:06 GMT
+        body: '{"ts":1687165686187330688,"url":"{\"fact\":\"Kittens remain with their mother till the age of 9 weeks.\",\"length\":57}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1687165686
