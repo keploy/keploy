@@ -170,7 +170,10 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
 
 	if isPortAvailable(opt.Port) {
 		go proxySet.startProxy()
-		go proxySet.startDnsServer()
+		// Resolve DNS queries only in case of test mode.
+		if models.GetMode() == models.MODE_TEST {
+			go proxySet.startDnsServer()
+		}
 	} else {
 		// TODO: Release eBPF resources if failed abruptly
 		log.Fatalf("Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
@@ -359,7 +362,7 @@ func readableProxyAddress(ps *ProxySet) string {
 func (ps *ProxySet) startDnsServer() {
 
 	proxyAddress := readableProxyAddress(ps)
-	println("ProxyAddress:", proxyAddress)
+	println("ProxyAddress (dns server):", proxyAddress)
 
 	handler := new(ProxySet)
 	server := &dns.Server{
@@ -394,18 +397,14 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		fmt.Println("TYPE of record:", question.Qtype)
 		fmt.Printf("Received query: %s\n", question.Name)
 
-		dnsAddr := "8.8.8.8:53" //default: google public dns server address
-		if ps.dockerAppCmd {
-			dnsAddr = "127.0.0.11:53" //docker dns server address
-		}
-
-		answers := resolveDNSQuery(question.Name, question.Qtype, dnsAddr, ps.logger)
+		answers := resolveDNSQuery(question.Name, ps.logger)
 		if len(answers) == 0 {
 			// If resolution failed, return a default A record with Proxy IP
-			answers = append(answers, &dns.A{
+			defaultAnswer := &dns.A{
 				Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
 				A:   net.ParseIP(util.ToIPAddressStr(ps.IP)),
-			})
+			}
+			answers = append(answers, defaultAnswer)
 		}
 		msg.Answer = append(msg.Answer, answers...)
 	}
@@ -415,25 +414,35 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		ps.logger.Error("failed to write dns info back to the client", zap.Error(err))
 	}
 }
+func resolveDNSQuery(domain string, logger *zap.Logger) []dns.RR {
+	// Remove the last dot from the domain name if it exists
+	domain = strings.TrimSuffix(domain, ".")
 
-func resolveDNSQuery(domain string, qtype uint16, dnsAddr string, logger *zap.Logger) []dns.RR {
-	msg := new(dns.Msg)
-	dnsClient := new(dns.Client)
-	// m.SetQuestion(dns.Fqdn(domain), qtype)
-	msg.SetQuestion(dns.Fqdn(domain), dns.TypeA)
-	msg.RecursionDesired = true
-
-	in, _, err := dnsClient.Exchange(msg, dnsAddr)
-
+	println("Got dns query for domain name:", domain)
+	// Use net.LookupIP to resolve the IP
+	ips, err := net.LookupIP(domain)
 	if err != nil {
 		logger.Error("failed to resolve the dns query", zap.Error(err))
 		return nil
 	}
 
-	for _, ans := range in.Answer {
-		fmt.Println("Answer:", ans)
+	// Convert the resolved IPs to dns.RR
+	var answers []dns.RR
+	for _, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			answers = append(answers, &dns.A{
+				Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+				A:   ipv4,
+			})
+		} else {
+			answers = append(answers, &dns.AAAA{
+				Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+				AAAA: ip,
+			})
+		}
 	}
-	return in.Answer
+
+	return answers
 }
 
 func isTLSHandshake(data []byte) bool {
