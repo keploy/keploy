@@ -31,5 +31,5 @@ spec:
         proto_minor: 0
     objects: []
     assertions:
-        noise: []
+        noise: ["body.ts","header.Date"]
     created: 1686864878

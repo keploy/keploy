@@ -72,6 +72,8 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		// Check if there is an error in the channel without blocking
 		select {
+		// channel for only checking for error during this instant looks
+		// like an overkill. TODO refactor
 		case err := <-errCh:
 			if err != nil {
 				h.logger.Error("failed to launch the user application", zap.Any("err", err.Error()))
@@ -94,7 +96,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		inode := getInodeNumber(hostPids)
 		println("INODE Number:", inode)
-		h.SendNameSpaceId(inode)
+		h.SendNameSpaceId(0, inode)
 
 	} else { //Supports only linux
 		println("Running user application on linux")
@@ -484,6 +486,23 @@ func getInodeNumber(pids [15]int32) uint64 {
 		if Ino != 0 {
 			return Ino
 		}
+	}
+	return 0
+}
+
+func getSelfInodeNumber() uint64 {
+	println("Checking self Inode for keploy")
+
+	filepath := filepath.Join("/proc", "self", "ns", "pid")
+
+	f, err := os.Stat(filepath)
+	if err != nil {
+		log.Fatal("failed to get the self inode number or namespace Id:", err)
+	}
+	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
+	Ino := (f.Sys().(*syscall.Stat_t)).Ino
+	if Ino != 0 {
+		return Ino
 	}
 	return 0
 }

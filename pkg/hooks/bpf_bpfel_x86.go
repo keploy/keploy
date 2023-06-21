@@ -63,6 +63,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
+	SyscallProbeEntryUdpPreConnect   *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_udp_pre_connect"`
 	SyscallProbeEntryWrite           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_write"`
 	SyscallProbeRetAccept            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept4"`
@@ -87,6 +88,9 @@ type bpfMapSpecs struct {
 	FilterMap                 *ebpf.MapSpec `ebpf:"filter_map"`
 	GlobalNsPidInfoMap        *ebpf.MapSpec `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.MapSpec `ebpf:"inode_map"`
+	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
+	KeployNsPidInfoMap        *ebpf.MapSpec `ebpf:"keploy_nsPid_info_map"`
+	KeployPidMap              *ebpf.MapSpec `ebpf:"keploy_pid_map"`
 	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
@@ -125,6 +129,9 @@ type bpfMaps struct {
 	FilterMap                 *ebpf.Map `ebpf:"filter_map"`
 	GlobalNsPidInfoMap        *ebpf.Map `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.Map `ebpf:"inode_map"`
+	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
+	KeployNsPidInfoMap        *ebpf.Map `ebpf:"keploy_nsPid_info_map"`
+	KeployPidMap              *ebpf.Map `ebpf:"keploy_pid_map"`
 	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
@@ -146,6 +153,9 @@ func (m *bpfMaps) Close() error {
 		m.FilterMap,
 		m.GlobalNsPidInfoMap,
 		m.InodeMap,
+		m.KeployModeMap,
+		m.KeployNsPidInfoMap,
+		m.KeployPidMap,
 		m.ProxyInfoMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
@@ -168,6 +178,7 @@ type bpfPrograms struct {
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
+	SyscallProbeEntryUdpPreConnect   *ebpf.Program `ebpf:"syscall__probe_entry_udp_pre_connect"`
 	SyscallProbeEntryWrite           *ebpf.Program `ebpf:"syscall__probe_entry_write"`
 	SyscallProbeRetAccept            *ebpf.Program `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.Program `ebpf:"syscall__probe_ret_accept4"`
@@ -188,6 +199,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeEntryRead,
 		p.SyscallProbeEntryTcpV4Connect,
 		p.SyscallProbeEntryTcpV4PreConnect,
+		p.SyscallProbeEntryUdpPreConnect,
 		p.SyscallProbeEntryWrite,
 		p.SyscallProbeRetAccept,
 		p.SyscallProbeRetAccept4,

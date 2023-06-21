@@ -31,6 +31,7 @@ type Hook struct {
 	filterMap        *ebpf.Map
 	redirectProxyMap *ebpf.Map
 	keployModeMap    *ebpf.Map
+	keployPid        *ebpf.Map
 	// dnsResolutionMap *ebpf.Map
 
 	db            platform.TestCaseDB
@@ -46,6 +47,7 @@ type Hook struct {
 	connect4   link.Link
 	connect6   link.Link
 	gp4        link.Link
+	udpp4      link.Link
 	tcppv4     link.Link
 	tcpv4      link.Link
 	tcpv4Ret   link.Link
@@ -131,7 +133,7 @@ func (h *Hook) GetResp() *models.HttpResp {
 	return resp
 }
 
-//This function enables filtering of the processes using pid in the eBPF program.
+// This function enables filtering of the processes using pid in the eBPF program.
 func (h *Hook) EnablePidFilter() {
 	key := 0
 	value := true
@@ -154,12 +156,13 @@ func (h *Hook) SendProxyInfo(ip, port uint32) error {
 }
 
 // This function is helpful when user application in running inside a docker container.
-func (h *Hook) SendNameSpaceId(inode uint64) {
-	key := 0
+func (h *Hook) SendNameSpaceId(key uint32, inode uint64) error {
 	err := h.inodeMap.Update(uint32(key), &inode, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()), zap.Any("key", key), zap.Any("Inode", inode))
+		return err
 	}
+	return nil
 }
 
 func (h *Hook) CleanProxyEntry(srcPort uint16) {
@@ -202,6 +205,16 @@ func (h *Hook) SendApplicationPIDs(appPids [15]int32) error {
 			// h.logger.Error("failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
 			return err
 		}
+	}
+	return nil
+}
+
+func (h *Hook) SendKeployPid(kPid uint32) error {
+	println("Getting keploy pid:", kPid)
+	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send the keploy pid to the ebpf program", zap.Any("Keploy Pid", kPid), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
 	}
 	return nil
 }
@@ -258,6 +271,7 @@ func (h *Hook) Stop(forceStop bool) {
 	}
 
 	// closing all events
+	h.udpp4.Close()
 	h.tcppv4.Close()
 	h.tcpv4.Close()
 	h.tcpv4Ret.Close()
@@ -284,6 +298,7 @@ func (h *Hook) Stop(forceStop bool) {
 // proxyPorts is used for redirecting outgoing network calls to the unoccupied proxy server.
 //
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
+//
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers
 func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// k := keploy.KeployInitializer()
@@ -315,6 +330,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.filterMap = objs.FilterMap
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
+	h.keployPid = objs.KeployPidMap
 	// h.dnsResolutionMap = objs.DnsResolutionMap
 
 	h.stopper = stopper
@@ -346,6 +362,12 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 		log.Fatalf("opening tcp_v4_connect kretprobe: %s", err)
 	}
 	h.tcpv4Ret = tcp_r_c4
+
+	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
+	if err != nil {
+		log.Fatalf("opening udp_pre_connect kprobe: %s", err)
+	}
+	h.udpp4 = udpp_c4
 
 	// Get the first-mounted cgroupv2 path.
 	cgroupPath, err := detectCgroupPath()
@@ -505,6 +527,13 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	case models.MODE_TEST:
 		h.SetKeployModeInKernel(2)
 	}
+
+	//sending keploy pid to kernel to get filtered
+	k_inode := getSelfInodeNumber()
+	println("KEPLOY INODE:", k_inode)
+	h.SendNameSpaceId(1, k_inode)
+	h.SendKeployPid(uint32(os.Getpid()))
+	println("KEPLOY PID SENT SUCCESSFULLY...")
 
 	return nil
 }
