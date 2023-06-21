@@ -364,7 +364,7 @@ func (ps *ProxySet) startDnsServer() {
 	proxyAddress := readableProxyAddress(ps)
 	println("ProxyAddress (dns server):", proxyAddress)
 
-	handler := new(ProxySet)
+	handler := ps
 	server := &dns.Server{
 		Addr:      proxyAddress,
 		Net:       "udp",
@@ -376,7 +376,7 @@ func (ps *ProxySet) startDnsServer() {
 
 	ps.DnsServer = server
 
-	fmt.Println("Starting DNS server at addr", server.Addr)
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr:%v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
 		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
@@ -397,7 +397,21 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		fmt.Println("TYPE of record:", question.Qtype)
 		fmt.Printf("Received query: %s\n", question.Name)
 
-		answers := resolveDNSQuery(question.Name, ps.logger)
+		// fmt.Printf("Proxyset is:%+v\n", *ps)
+		// if ps.logger == nil {
+		// 	println("[ServeDNS]: logger is nil")
+		// } else {
+		// 	println("[ServeDNS]:logger is not nil")
+		// }
+		// answers := resolveDNSQuery(question.Name, ps.logger)
+		// println("[ServeDNS]: answers:", answers)
+		// if answers == nil {
+		// 	println("answers is nil because failed dns resolution")
+		// 	answers = []dns.RR{}
+		// } else {
+		// 	println("[ServeDNS]: length of answers:", len(answers))
+		// }
+		var answers []dns.RR
 		if len(answers) == 0 {
 			// If resolution failed, return a default A record with Proxy IP
 			defaultAnswer := &dns.A{
@@ -405,10 +419,12 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				A:   net.ParseIP(util.ToIPAddressStr(ps.IP)),
 			}
 			answers = append(answers, defaultAnswer)
+			fmt.Printf("\nSending our proxy ip address:%+v\n", answers)
 		}
 		msg.Answer = append(msg.Answer, answers...)
 	}
 
+	println("Writing dns info back to the client...")
 	err := w.WriteMsg(msg)
 	if err != nil {
 		ps.logger.Error("failed to write dns info back to the client", zap.Error(err))
@@ -422,6 +438,7 @@ func resolveDNSQuery(domain string, logger *zap.Logger) []dns.RR {
 	// Use net.LookupIP to resolve the IP
 	ips, err := net.LookupIP(domain)
 	if err != nil {
+		println("Failed to resolve the dns query:", err)
 		logger.Error("failed to resolve the dns query", zap.Error(err))
 		return nil
 	}
@@ -440,6 +457,14 @@ func resolveDNSQuery(domain string, logger *zap.Logger) []dns.RR {
 				AAAA: ip,
 			})
 		}
+	}
+
+	println("Answer length:", len(answers))
+	if len(answers) > 0 {
+		println("net.LookupIP resolved the ip address...")
+	}
+	for i, ans := range answers {
+		println("Answer-", i, ":", ans)
 	}
 
 	return answers
