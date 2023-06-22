@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/helpers"
@@ -392,6 +393,11 @@ func (ps *ProxySet) startDnsServer() {
 
 }
 
+var cache = struct {
+	sync.RWMutex
+	m map[string][]dns.RR
+}{m: make(map[string][]dns.RR)}
+
 func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	msg := new(dns.Msg)
@@ -402,30 +408,51 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		fmt.Println("TYPE of record:", question.Qtype)
 		fmt.Printf("Received query: %s\n", question.Name)
 
-		fmt.Printf("Proxyset is:%+v\n", *ps)
-		if ps.logger == nil {
-			println("[ServeDNS]: logger is nil")
-		} else {
-			println("[ServeDNS]:logger is not nil")
-		}
-		answers := resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
-		println("[ServeDNS]: answers:", answers)
-		if answers == nil {
-			println("answers is nil because failed dns resolution")
-			answers = []dns.RR{}
-		} else {
-			println("[ServeDNS]: length of answers:", len(answers))
-		}
-		// var answers []dns.RR
-		if len(answers) == 0 {
-			// If resolution failed, return a default A record with Proxy IP
-			defaultAnswer := &dns.A{
-				Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-				A:   net.ParseIP(util.ToIPAddressStr(ps.IP)),
+		// 	answers := resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
+		// 	println("[ServeDNS]: answers:", answers)
+		// 	if answers == nil {
+		// 		fmt.Println("answers is nil because failed dns resolution")
+		// 		answers = []dns.RR{}
+		// 	} else {
+		// 		println("[ServeDNS]: length of answers:", len(answers))
+		// 	}
+		// 	// var answers []dns.RR
+		// 	if len(answers) == 0 {
+		// 		// If resolution failed, return a default A record with Proxy IP
+		// 		defaultAnswer := &dns.A{
+		// 			Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+		// 			A:   net.ParseIP(util.ToIPAddressStr(ps.IP)),
+		// 		}
+		// 		answers = append(answers, defaultAnswer)
+		// 		fmt.Printf("\nSending our proxy ip address:%+v\n", answers)
+		// 	}
+		// 	msg.Answer = append(msg.Answer, answers...)
+		// }
+
+		// Check if the answer is cached
+		cache.RLock()
+		answers, found := cache.m[question.Name]
+		cache.RUnlock()
+
+		if !found {
+			// If not, resolve the DNS query
+			answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
+
+			if answers == nil {
+				fmt.Println("answers is nil because failed dns resolution")
+				// If the resolution failed, return a default A record with Proxy IP
+				answers = []dns.RR{&dns.A{
+					Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+					A:   net.ParseIP("127.0.0.1"),
+				}}
 			}
-			answers = append(answers, defaultAnswer)
-			fmt.Printf("\nSending our proxy ip address:%+v\n", answers)
+
+			// Cache the answer
+			cache.Lock()
+			cache.m[question.Name] = answers
+			cache.Unlock()
 		}
+
 		msg.Answer = append(msg.Answer, answers...)
 	}
 
@@ -558,6 +585,12 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	println("SourcePort in u16", uint16(sourcePort))
 
 	ps.logger.Debug("Inside handleConnection of Proxy server:", zap.Int("Source port", sourcePort))
+
+	//TODO:  fix this bug, getting source port same as proxy port.
+	if uint16(sourcePort) == 16789 {
+		ps.logger.Debug("Inside handleConnection: Got source port == proxy port", zap.Int("Source port", sourcePort), zap.Int("Proxy port", int(ps.Port)))
+		return
+	}
 
 	destInfo, err := ps.hook.GetDestinationInfo(uint16(sourcePort))
 	if err != nil {

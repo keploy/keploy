@@ -18,7 +18,7 @@ spec:
         header:
             Content-Length: "25"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:48 GMT
+            Date: Thu, 22 Jun 2023 09:34:13 GMT
         body: '{"error":"url not found"}'
         body_type: ""
         status_message: ""
@@ -27,4 +27,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1687419948
+    created: 1687426454
