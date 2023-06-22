@@ -43,7 +43,7 @@ type Hook struct {
 	mu            *sync.Mutex
 	respChannel   chan *models.HttpResp
 	mutex         sync.RWMutex
-	userAppCmd *exec.Cmd
+	userAppCmd    *exec.Cmd
 
 	// ebpf objects and events
 	stopper    chan os.Signal
@@ -254,7 +254,12 @@ func (h *Hook) Stop(forceStop bool) {
 
 	// stop the user application cmd
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
-		h.userAppCmd.Process.Kill()
+		err := h.userAppCmd.Process.Kill()
+		if err != nil {
+			h.logger.Error(Emoji+"failed to stop user application",zap.Error(err))
+		}else{
+			h.logger.Info(Emoji+"User application stopped successfully...")
+		}
 	}
 
 	// closing all events

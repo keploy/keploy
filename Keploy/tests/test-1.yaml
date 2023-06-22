@@ -32,6 +32,6 @@ spec:
     objects: []
     assertions:
         noise: [
-            # "body.ts",
+             "body.ts",
             "header.Date"]
     created: 1687426429
