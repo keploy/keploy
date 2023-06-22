@@ -1,29 +1,30 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-9
+name: test-4
 spec:
-    metadata:
-        method: GET
+    metadata: {}
     req:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: /wiki
+        url: http://localhost:8080/Lhr4BWAi
         header:
             Accept: '*/*'
-            User-Agent: curl/7.87.0
+            User-Agent: curl/7.74.0
         body: ""
         body_type: ""
     resp:
-        status_code: 200
+        status_code: 404
         header:
-            Content-Length: "129"
+            Content-Length: "25"
             Content-Type: application/json; charset=utf-8
-            Date: Tue, 06 Jun 2023 13:26:45 GMT
-        body: '{"ts":1686058005076041607,"url":"{\"fact\":\"In one stride, a cheetah can cover 23 to 26 feet (7 to 8 meters).\",\"length\":65}"}'
+            Date: Thu, 22 Jun 2023 09:36:37 GMT
+        body: '{"error":"url not found"}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
-    created: 1686058005
+    assertions:
+        noise: []
+    created: 1687426598

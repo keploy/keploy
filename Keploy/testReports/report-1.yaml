@@ -1,15 +1,15 @@
 version: api.keploy.io/v1beta1
 name: report-1
 status: FAILED
-success: 2
+success: 3
 failure: 1
-total: 3
+total: 4
 tests:
     - kind: Http
       name: report-1
       status: FAILED
-      started: 1687420916
-      completed: 1687420922
+      started: 1687426731
+      completed: 1687426738
       test_case_path: /files/Keploy/tests
       mock_path: /files/Keploy/mocks
       test_case_id: test-1
@@ -33,8 +33,8 @@ tests:
         header:
             Content-Length: "65"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:21 GMT
-        body: '{"ts":1687419921424868876,"url":"http://localhost:8080/Lhr4BWAi"}'
+            Date: Thu, 22 Jun 2023 09:33:48 GMT
+        body: '{"ts":1687426428178407270,"url":"http://localhost:8080/Lhr4BWAi"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -47,15 +47,6 @@ tests:
         headers_result:
             - normal: true
               expected:
-                key: Date
-                value:
-                    - Thu, 22 Jun 2023 07:45:21 GMT
-              actual:
-                key: Date
-                value:
-                    - Thu, 22 Jun 2023 08:02:02 GMT
-            - normal: true
-              expected:
                 key: Content-Length
                 value:
                     - "65"
@@ -72,17 +63,26 @@ tests:
                 key: Content-Type
                 value:
                     - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 22 Jun 2023 09:33:48 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 22 Jun 2023 09:38:57 GMT
         body_result:
             - normal: false
               type: JSON
-              expected: '{"ts":1687419921424868876,"url":"http://localhost:8080/Lhr4BWAi"}'
-              actual: '{"ts":1687420922738333713,"url":"http://localhost:8080/Lhr4BWAi"}'
+              expected: '{"ts":1687426428178407270,"url":"http://localhost:8080/Lhr4BWAi"}'
+              actual: '{"ts":1687426737524300150,"url":"http://localhost:8080/Lhr4BWAi"}'
         dep_result: []
     - kind: Http
       name: report-1
       status: PASSED
-      started: 1687420922
-      completed: 1687420932
+      started: 1687426738
+      completed: 1687426744
       test_case_path: /files/Keploy/tests
       mock_path: /files/Keploy/mocks
       test_case_id: test-2
@@ -101,7 +101,7 @@ tests:
         header:
             Content-Length: "45"
             Content-Type: text/html; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:38 GMT
+            Date: Thu, 22 Jun 2023 09:34:04 GMT
             Location: https://google.com
         body: |+
             <a href="https://google.com">See Other</a>.
@@ -138,11 +138,11 @@ tests:
               expected:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 07:45:38 GMT
+                    - Thu, 22 Jun 2023 09:34:04 GMT
               actual:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 08:02:10 GMT
+                    - Thu, 22 Jun 2023 09:39:03 GMT
             - normal: true
               expected:
                 key: Location
@@ -165,8 +165,8 @@ tests:
     - kind: Http
       name: report-1
       status: PASSED
-      started: 1687420932
-      completed: 1687420939
+      started: 1687426744
+      completed: 1687426750
       test_case_path: /files/Keploy/tests
       mock_path: /files/Keploy/mocks
       test_case_id: test-3
@@ -185,7 +185,7 @@ tests:
         header:
             Content-Length: "25"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:48 GMT
+            Date: Thu, 22 Jun 2023 09:34:13 GMT
         body: '{"error":"url not found"}'
         body_type: ""
         status_message: ""
@@ -219,11 +219,79 @@ tests:
               expected:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 07:45:48 GMT
+                    - Thu, 22 Jun 2023 09:34:13 GMT
               actual:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 08:02:18 GMT
+                    - Thu, 22 Jun 2023 09:39:09 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"error":"url not found"}'
+              actual: '{"error":"url not found"}'
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1687426750
+      completed: 1687426780
+      test_case_path: /files/Keploy/tests
+      mock_path: /files/Keploy/mocks
+      test_case_id: test-4
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://172.19.0.3:8080/Lhr4BWAi
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.74.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 404
+        header:
+            Content-Length: "25"
+            Content-Type: application/json; charset=utf-8
+            Date: Thu, 22 Jun 2023 09:36:37 GMT
+        body: '{"error":"url not found"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 404
+            actual: 404
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "25"
+              actual:
+                key: Content-Length
+                value:
+                    - "25"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 22 Jun 2023 09:36:37 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 22 Jun 2023 09:39:40 GMT
         body_result:
             - normal: true
               type: JSON
