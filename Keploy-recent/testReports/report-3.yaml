@@ -1,28 +1,28 @@
 version: api.keploy.io/v1beta1
-name: report-2
+name: report-3
 status: PASSED
 success: 3
 failure: 0
 total: 3
 tests:
     - kind: Http
-      name: report-2
+      name: report-3
       status: PASSED
-      started: 1687421038
-      completed: 1687421050
-      test_case_path: /files/Keploy/tests
-      mock_path: /files/Keploy/mocks
+      started: 1686660156
+      completed: 1686660156
+      test_case_path: /home/shubham/Desktop/delete_this/tmp_demo/keploy/Keploy/tests
+      mock_path: /home/shubham/Desktop/delete_this/tmp_demo/keploy/Keploy/mocks
       test_case_id: test-1
       req:
         method: POST
         proto_major: 1
         proto_minor: 1
-        url: http://172.19.0.3:8080/url
+        url: http://localhost:8081/url
         header:
             Accept: '*/*'
             Content-Length: "33"
             Content-Type: application/json
-            User-Agent: curl/7.74.0
+            User-Agent: curl/7.85.0
         body: |-
             {
               "url": "https://google.com"
@@ -33,15 +33,14 @@ tests:
         header:
             Content-Length: "65"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:21 GMT
-        body: '{"ts":1687419921424868876,"url":"http://localhost:8080/Lhr4BWAi"}'
+            Date: Tue, 13 Jun 2023 12:22:35 GMT
+        body: '{"ts":1686658955004839967,"url":"http://localhost:8080/Lhr4BWAi"}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
       noise:
         - body.ts
-        - header.Date
       result:
         status_code:
             normal: true
@@ -50,13 +49,22 @@ tests:
         headers_result:
             - normal: true
               expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 07:45:21 GMT
+                    - Tue, 13 Jun 2023 12:22:35 GMT
               actual:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 08:04:10 GMT
+                    - Tue, 13 Jun 2023 12:42:36 GMT
             - normal: true
               expected:
                 key: Content-Length
@@ -66,37 +74,28 @@ tests:
                 key: Content-Length
                 value:
                     - "65"
-            - normal: true
-              expected:
-                key: Content-Type
-                value:
-                    - application/json; charset=utf-8
-              actual:
-                key: Content-Type
-                value:
-                    - application/json; charset=utf-8
         body_result:
             - normal: true
               type: JSON
-              expected: '{"ts":1687419921424868876,"url":"http://localhost:8080/Lhr4BWAi"}'
-              actual: '{"ts":1687421050712000415,"url":"http://localhost:8080/Lhr4BWAi"}'
+              expected: '{"ts":1686658955004839967,"url":"http://localhost:8080/Lhr4BWAi"}'
+              actual: '{"ts":1686660156039424326,"url":"http://localhost:8080/Lhr4BWAi"}'
         dep_result: []
     - kind: Http
-      name: report-2
+      name: report-3
       status: PASSED
-      started: 1687421050
-      completed: 1687421060
-      test_case_path: /files/Keploy/tests
-      mock_path: /files/Keploy/mocks
+      started: 1686660156
+      completed: 1686660157
+      test_case_path: /home/shubham/Desktop/delete_this/tmp_demo/keploy/Keploy/tests
+      mock_path: /home/shubham/Desktop/delete_this/tmp_demo/keploy/Keploy/mocks
       test_case_id: test-2
       req:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://172.19.0.3:8080/Lhr4BWAi
+        url: http://localhost:8081/Lhr4BWAi
         header:
             Accept: '*/*'
-            User-Agent: curl/7.74.0
+            User-Agent: curl/7.85.0
         body: ""
         body_type: ""
       resp:
@@ -104,7 +103,7 @@ tests:
         header:
             Content-Length: "45"
             Content-Type: text/html; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:38 GMT
+            Date: Tue, 13 Jun 2023 12:25:57 GMT
             Location: https://google.com
         body: |+
             <a href="https://google.com">See Other</a>.
@@ -123,11 +122,11 @@ tests:
               expected:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 07:45:38 GMT
+                    - Tue, 13 Jun 2023 12:25:57 GMT
               actual:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 08:04:18 GMT
+                    - Tue, 13 Jun 2023 12:42:36 GMT
             - normal: true
               expected:
                 key: Location
@@ -166,51 +165,44 @@ tests:
 
         dep_result: []
     - kind: Http
-      name: report-2
+      name: report-3
       status: PASSED
-      started: 1687421060
-      completed: 1687421067
-      test_case_path: /files/Keploy/tests
-      mock_path: /files/Keploy/mocks
-      test_case_id: test-3
+      started: 1686660157
+      completed: 1686660158
+      test_case_path: /home/shubham/Desktop/delete_this/tmp_demo/keploy/Keploy/tests
+      mock_path: /home/shubham/Desktop/delete_this/tmp_demo/keploy/Keploy/mocks
+      test_case_id: test-4
       req:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://172.19.0.3:8080/Lhr4BWAii
+        url: http://localhost:8081/
         header:
             Accept: '*/*'
-            User-Agent: curl/7.74.0
+            User-Agent: curl/7.85.0
         body: ""
         body_type: ""
       resp:
-        status_code: 404
+        status_code: 200
         header:
-            Content-Length: "25"
+            Content-Length: "57"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:48 GMT
-        body: '{"error":"url not found"}'
+            Date: Tue, 13 Jun 2023 12:27:00 GMT
+        body: '{"ts":1686659220923328030,"url":"http://localhost:8080/"}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
+      noise:
+        - body.ts
       result:
         status_code:
             normal: true
-            expected: 404
-            actual: 404
+            expected: 200
+            actual: 200
         headers_result:
             - normal: true
               expected:
-                key: Content-Length
-                value:
-                    - "25"
-              actual:
-                key: Content-Length
-                value:
-                    - "25"
-            - normal: true
-              expected:
                 key: Content-Type
                 value:
                     - application/json; charset=utf-8
@@ -222,14 +214,23 @@ tests:
               expected:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 07:45:48 GMT
+                    - Tue, 13 Jun 2023 12:27:00 GMT
               actual:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 08:04:26 GMT
+                    - Tue, 13 Jun 2023 12:42:37 GMT
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "57"
+              actual:
+                key: Content-Length
+                value:
+                    - "57"
         body_result:
             - normal: true
               type: JSON
-              expected: '{"error":"url not found"}'
-              actual: '{"error":"url not found"}'
+              expected: '{"ts":1686659220923328030,"url":"http://localhost:8080/"}'
+              actual: '{"ts":1686660157927708457,"url":"http://localhost:8080/"}'
         dep_result: []
