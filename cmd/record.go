@@ -29,14 +29,14 @@ func (r *Record) GetCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				r.logger.Error("failed to read the testcase path input")
+				r.logger.Error(Emoji + "failed to read the testcase path input")
 				return
 			}
 
 			if path == "" {
 				path, err = os.Getwd()
 				if err != nil {
-					r.logger.Error("failed to get the path of current directory", zap.Error(err))
+					r.logger.Error(Emoji+"failed to get the path of current directory", zap.Error(err))
 					return
 				}
 			}
@@ -47,25 +47,25 @@ func (r *Record) GetCmd() *cobra.Command {
 			appCmd, err := cmd.Flags().GetString("c")
 
 			if err != nil {
-				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				r.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
 			}
 
 			appContainer, err := cmd.Flags().GetString("containerName")
 
 			if err != nil {
-				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				r.logger.Error(Emoji+"Failed to get the application's docker container name", zap.Error((err)))
 			}
 
 			networkName, err := cmd.Flags().GetString("networkName")
 
 			if err != nil {
-				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				r.logger.Error(Emoji+"Failed to get the application's docker network name", zap.Error((err)))
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
-				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				r.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
 			}
 
 			r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)

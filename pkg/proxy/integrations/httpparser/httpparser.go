@@ -3,8 +3,8 @@ package httpparser
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
@@ -17,6 +17,8 @@ import (
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
+
+var Emoji = "\U0001F430" + " Keploy:"
 
 // IsOutgoingHTTP function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
@@ -31,21 +33,21 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 }
 
-func ProcessOutgoingHttp (requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
-		h.AppendDeps(encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
+		h.AppendDeps(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
 	case models.MODE_TEST:
 		decodeOutgoingHttp(requestBuffer, clientConn, destConn, h, logger)
 	default:
-		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
+		logger.Info(Emoji+"Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
 
 // decodeOutgoingHttp
-func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger)  {
+func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	// if len(deps) == 0 {
 	if h.GetDepsSize() == 0 {
 		// logger.Error("failed to mock the output for unrecorded outgoing http call")
@@ -84,7 +86,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	responseString := statusLine + headers + "\r\n" + body
 	_, err := clienConn.Write([]byte(responseString))
 	if err != nil {
-		logger.Error("failed to write the mock output to the user application", zap.Error(err))
+		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
 		return
 	}
 	// pop the mocked output from the dependency queue
@@ -99,28 +101,28 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 	// write the request message to the actual destination server
 	_, err := destConn.Write(requestBuffer)
 	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err))
+		logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
 		return nil
 	}
 
 	// read the response from the actual server
 	respBuffer, err := util.ReadBytes(destConn)
 	if err != nil {
-		logger.Error("failed to read the response message from the destination server", zap.Error(err))
+		logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
 		return nil
 	}
 
 	// write the response message to the user client
 	_, err = clientConn.Write(respBuffer)
 	if err != nil {
-		logger.Error("failed to write response message to the user client", zap.Error(err))
+		logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
 		return nil
 	}
 
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
 	if err != nil {
-		logger.Error("failed to parse the http request message", zap.Error(err))
+		logger.Error(Emoji+"failed to parse the http request message", zap.Error(err))
 		return nil
 	}
 
@@ -130,7 +132,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			logger.Error("failed to read the http request body", zap.Error(err))
+			logger.Error(Emoji+"failed to read the http request body", zap.Error(err))
 			return nil
 		}
 	}
@@ -138,7 +140,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 	// converts the response message buffer to http response
 	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(respBuffer)), req)
 	if err != nil {
-		logger.Error("failed to parse the http response message", zap.Error(err))
+		logger.Error(Emoji+"failed to parse the http response message", zap.Error(err))
 		return nil
 	}
 	var respBody []byte
@@ -146,14 +148,14 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		if resp.Header.Get("Content-Encoding") == "gzip" {
 			resp.Body, err = gzip.NewReader(resp.Body)
 			if err != nil {
-				logger.Error("failed to read the the http repsonse body", zap.Error(err))
+				logger.Error(Emoji+"failed to read the the http repsonse body", zap.Error(err))
 				return nil
 			}
 		}
 		var err error
 		respBody, err = ioutil.ReadAll(resp.Body)
 		if err != nil {
-			logger.Error("failed to read the the http repsonse body", zap.Error(err))
+			logger.Error(Emoji+"failed to read the the http repsonse body", zap.Error(err))
 			return nil
 		}
 	}
@@ -208,12 +210,12 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 				URL:        req.URL.String(),
 				Header:     pkg.ToYamlHttpHeader(req.Header),
 				Body:       string(reqBody),
-				URLParams: pkg.UrlParams(req),
+				URLParams:  pkg.UrlParams(req),
 			},
 			HttpResp: &models.HttpResp{
 				StatusCode: resp.StatusCode,
 				Header:     pkg.ToYamlHttpHeader(resp.Header),
-				Body: string(respBody),
+				Body:       string(respBody),
 			},
 			Created: time.Now().Unix(),
 		},
