@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto"
 	"crypto/tls"
 	"crypto/x509"
@@ -33,14 +34,15 @@ import (
 )
 
 type ProxySet struct {
-	IP           uint32
-	Port         uint32
-	hook         *hooks.Hook
-	logger       *zap.Logger
-	FilterPid    bool
-	Listener     net.Listener
-	DnsServer    *dns.Server
-	dockerAppCmd bool
+	IP               uint32
+	Port             uint32
+	hook             *hooks.Hook
+	logger           *zap.Logger
+	FilterPid        bool
+	Listener         net.Listener
+	DnsServer        *dns.Server
+	DnsServerTimeout time.Duration
+	dockerAppCmd     bool
 }
 
 type Conn struct {
@@ -364,6 +366,9 @@ func (ps *ProxySet) startDnsServer() {
 	proxyAddress := readableProxyAddress(ps)
 	println("ProxyAddress (dns server):", proxyAddress)
 
+	//TODO: Need to make it configurable
+	ps.DnsServerTimeout = 1 * time.Second
+
 	handler := ps
 	server := &dns.Server{
 		Addr:      proxyAddress,
@@ -397,21 +402,21 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		fmt.Println("TYPE of record:", question.Qtype)
 		fmt.Printf("Received query: %s\n", question.Name)
 
-		// fmt.Printf("Proxyset is:%+v\n", *ps)
-		// if ps.logger == nil {
-		// 	println("[ServeDNS]: logger is nil")
-		// } else {
-		// 	println("[ServeDNS]:logger is not nil")
-		// }
-		// answers := resolveDNSQuery(question.Name, ps.logger)
-		// println("[ServeDNS]: answers:", answers)
-		// if answers == nil {
-		// 	println("answers is nil because failed dns resolution")
-		// 	answers = []dns.RR{}
-		// } else {
-		// 	println("[ServeDNS]: length of answers:", len(answers))
-		// }
-		var answers []dns.RR
+		fmt.Printf("Proxyset is:%+v\n", *ps)
+		if ps.logger == nil {
+			println("[ServeDNS]: logger is nil")
+		} else {
+			println("[ServeDNS]:logger is not nil")
+		}
+		answers := resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
+		println("[ServeDNS]: answers:", answers)
+		if answers == nil {
+			println("answers is nil because failed dns resolution")
+			answers = []dns.RR{}
+		} else {
+			println("[ServeDNS]: length of answers:", len(answers))
+		}
+		// var answers []dns.RR
 		if len(answers) == 0 {
 			// If resolution failed, return a default A record with Proxy IP
 			defaultAnswer := &dns.A{
@@ -430,15 +435,22 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		ps.logger.Error("failed to write dns info back to the client", zap.Error(err))
 	}
 }
-func resolveDNSQuery(domain string, logger *zap.Logger) []dns.RR {
+
+func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) []dns.RR {
 	// Remove the last dot from the domain name if it exists
 	domain = strings.TrimSuffix(domain, ".")
 
 	println("Got dns query for domain name:", domain)
-	// Use net.LookupIP to resolve the IP
-	ips, err := net.LookupIP(domain)
+	// Create a context with a timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Use the default system resolver
+	resolver := net.DefaultResolver
+
+	// Perform the lookup with the context
+	ips, err := resolver.LookupIPAddr(ctx, domain)
 	if err != nil {
-		println("Failed to resolve the dns query:", err)
 		logger.Error("failed to resolve the dns query", zap.Error(err))
 		return nil
 	}
@@ -446,7 +458,7 @@ func resolveDNSQuery(domain string, logger *zap.Logger) []dns.RR {
 	// Convert the resolved IPs to dns.RR
 	var answers []dns.RR
 	for _, ip := range ips {
-		if ipv4 := ip.To4(); ipv4 != nil {
+		if ipv4 := ip.IP.To4(); ipv4 != nil {
 			answers = append(answers, &dns.A{
 				Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
 				A:   ipv4,
@@ -454,7 +466,7 @@ func resolveDNSQuery(domain string, logger *zap.Logger) []dns.RR {
 		} else {
 			answers = append(answers, &dns.AAAA{
 				Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-				AAAA: ip,
+				AAAA: ip.IP,
 			})
 		}
 	}
@@ -607,7 +619,29 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// Do not capture anything until filtering is enabled
 	if !ps.FilterPid {
 		println("Calling Next on address", actualAddress)
-		err := callNext(buffer, conn, dst, ps.logger)
+		var dstConn net.Conn
+		if isTLS {
+			fmt.Println("isTLS: ", isTLS)
+			config := &tls.Config{
+				InsecureSkipVerify: false,
+				ServerName:         destinationUrl,
+			}
+			dstConn, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			if err != nil {
+				ps.logger.Error("(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		} else {
+			dstConn, err = net.Dial("tcp", actualAddress)
+			if err != nil {
+				ps.logger.Error("(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		}
+
+		err := callNext(buffer, conn, dstConn, ps.logger)
 		if err != nil {
 			ps.logger.Error("failed to call next", zap.Error(err))
 			conn.Close()
@@ -651,6 +685,18 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 }
 
 func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
+	if requestBuffer == nil {
+		println("[callNext]:request buffer is nil")
+	}
+
+	if logger == nil {
+		println("[callNext]:logger is nil")
+	}
+
+	if destConn == nil {
+		println("[callNext]:destConn is nil")
+	}
+
 	defer destConn.Close()
 
 	// write the request message to the actual destination server

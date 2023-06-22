@@ -1,28 +1,98 @@
 version: api.keploy.io/v1beta1
-name: report-1
+name: report-4
 status: FAILED
 success: 2
-failure: 1
-total: 3
+failure: 2
+total: 4
 tests:
     - kind: Http
-      name: report-1
+      name: report-4
       status: FAILED
-      started: 1687420916
-      completed: 1687420922
-      test_case_path: /files/Keploy/tests
-      mock_path: /files/Keploy/mocks
-      test_case_id: test-1
+      started: 1686852500
+      completed: 1686852500
+      test_case_path: /home/ubuntu/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy/Keploy/mocks
+      test_case_id: test-4
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.85.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "57"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 13 Jun 2023 12:27:00 GMT
+        body: '{"ts":1686659220923328030,"url":"http://localhost:8080/"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - body.ts
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 404
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 13 Jun 2023 12:27:00 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 15 Jun 2023 18:08:20 GMT
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "57"
+              actual:
+                key: Content-Length
+                value:
+                    - "18"
+            - normal: false
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - text/plain
+        body_result:
+            - normal: false
+              type: PLAIN
+              expected: '{"ts":1686659220923328030,"url":"http://localhost:8080/"}'
+              actual: 404 page not found
+        dep_result: []
+    - kind: Http
+      name: report-4
+      status: FAILED
+      started: 1686852500
+      completed: 1686852505
+      test_case_path: /home/ubuntu/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy/Keploy/mocks
+      test_case_id: test-5
       req:
         method: POST
         proto_major: 1
         proto_minor: 1
-        url: http://172.19.0.3:8080/url
+        url: http://localhost:8081/url
         header:
             Accept: '*/*'
             Content-Length: "33"
             Content-Type: application/json
-            User-Agent: curl/7.74.0
+            User-Agent: curl/7.81.0
         body: |-
             {
               "url": "https://google.com"
@@ -33,8 +103,8 @@ tests:
         header:
             Content-Length: "65"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:21 GMT
-        body: '{"ts":1687419921424868876,"url":"http://localhost:8080/Lhr4BWAi"}'
+            Date: Thu, 15 Jun 2023 18:03:30 GMT
+        body: '{"ts":1686852210111135531,"url":"http://localhost:8080/Lhr4BWAi"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -47,15 +117,6 @@ tests:
         headers_result:
             - normal: true
               expected:
-                key: Date
-                value:
-                    - Thu, 22 Jun 2023 07:45:21 GMT
-              actual:
-                key: Date
-                value:
-                    - Thu, 22 Jun 2023 08:02:02 GMT
-            - normal: true
-              expected:
                 key: Content-Length
                 value:
                     - "65"
@@ -72,28 +133,37 @@ tests:
                 key: Content-Type
                 value:
                     - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 15 Jun 2023 18:03:30 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 15 Jun 2023 18:08:24 GMT
         body_result:
             - normal: false
               type: JSON
-              expected: '{"ts":1687419921424868876,"url":"http://localhost:8080/Lhr4BWAi"}'
-              actual: '{"ts":1687420922738333713,"url":"http://localhost:8080/Lhr4BWAi"}'
+              expected: '{"ts":1686852210111135531,"url":"http://localhost:8080/Lhr4BWAi"}'
+              actual: '{"ts":1686852504645824744,"url":"http://localhost:8080/Lhr4BWAi"}'
         dep_result: []
     - kind: Http
-      name: report-1
+      name: report-4
       status: PASSED
-      started: 1687420922
-      completed: 1687420932
-      test_case_path: /files/Keploy/tests
-      mock_path: /files/Keploy/mocks
-      test_case_id: test-2
+      started: 1686852505
+      completed: 1686852509
+      test_case_path: /home/ubuntu/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy/Keploy/mocks
+      test_case_id: test-6
       req:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://172.19.0.3:8080/Lhr4BWAi
+        url: http://localhost:8081/Lhr4BWAi
         header:
             Accept: '*/*'
-            User-Agent: curl/7.74.0
+            User-Agent: curl/7.81.0
         body: ""
         body_type: ""
       resp:
@@ -101,7 +171,7 @@ tests:
         header:
             Content-Length: "45"
             Content-Type: text/html; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:38 GMT
+            Date: Thu, 15 Jun 2023 18:03:48 GMT
             Location: https://google.com
         body: |+
             <a href="https://google.com">See Other</a>.
@@ -138,11 +208,11 @@ tests:
               expected:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 07:45:38 GMT
+                    - Thu, 15 Jun 2023 18:03:48 GMT
               actual:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 08:02:10 GMT
+                    - Thu, 15 Jun 2023 18:08:28 GMT
             - normal: true
               expected:
                 key: Location
@@ -163,21 +233,21 @@ tests:
 
         dep_result: []
     - kind: Http
-      name: report-1
+      name: report-4
       status: PASSED
-      started: 1687420932
-      completed: 1687420939
-      test_case_path: /files/Keploy/tests
-      mock_path: /files/Keploy/mocks
-      test_case_id: test-3
+      started: 1686852509
+      completed: 1686852513
+      test_case_path: /home/ubuntu/keploy/Keploy/tests
+      mock_path: /home/ubuntu/keploy/Keploy/mocks
+      test_case_id: test-7
       req:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://172.19.0.3:8080/Lhr4BWAii
+        url: http://localhost:8081/Lhr4
         header:
             Accept: '*/*'
-            User-Agent: curl/7.74.0
+            User-Agent: curl/7.81.0
         body: ""
         body_type: ""
       resp:
@@ -185,7 +255,7 @@ tests:
         header:
             Content-Length: "25"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 07:45:48 GMT
+            Date: Thu, 15 Jun 2023 18:03:57 GMT
         body: '{"error":"url not found"}'
         body_type: ""
         status_message: ""
@@ -219,11 +289,11 @@ tests:
               expected:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 07:45:48 GMT
+                    - Thu, 15 Jun 2023 18:03:57 GMT
               actual:
                 key: Date
                 value:
-                    - Thu, 22 Jun 2023 08:02:18 GMT
+                    - Thu, 15 Jun 2023 18:08:32 GMT
         body_result:
             - normal: true
               type: JSON
