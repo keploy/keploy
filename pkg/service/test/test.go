@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -23,13 +24,13 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 type tester struct {
 	logger *zap.Logger
-	mutex sync.Mutex
+	mutex  sync.Mutex
 }
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
 		logger: logger,
-		mutex: sync.Mutex{},
+		mutex:  sync.Mutex{},
 	}
 }
 
@@ -114,7 +115,6 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 		userIp = loadedHooks.GetUserIp(appContainer, appNetwork)
 		t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
 	}
-
 
 	t.logger.Info(Emoji, zap.Any("no of test cases", len(tcs)))
 	for _, tc := range tcs {
@@ -427,7 +427,6 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 		t.mutex.Unlock()
 
 	}
-
 
 	// t.logger.Info("", zap.Any("result of test", res))
 
