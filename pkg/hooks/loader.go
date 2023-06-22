@@ -25,6 +25,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var Emoji = "\U0001F430" + " Keploy:"
+
 type Hook struct {
 	proxyInfoMap     *ebpf.Map
 	appPidMap        *ebpf.Map
@@ -33,7 +35,6 @@ type Hook struct {
 	redirectProxyMap *ebpf.Map
 	keployModeMap    *ebpf.Map
 	keployPid        *ebpf.Map
-	// dnsResolutionMap *ebpf.Map
 
 	db            platform.TestCaseDB
 	logger        *zap.Logger
@@ -141,7 +142,7 @@ func (h *Hook) EnablePidFilter() {
 	value := true
 	err := h.filterMap.Update(uint32(key), &value, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to enable pid filtering in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error(Emoji+"failed to enable pid filtering in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 
 }
@@ -151,7 +152,7 @@ func (h *Hook) SendProxyInfo(ip, port uint32) error {
 	key := 0
 	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP: ip, Port: port}, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error(Emoji+"failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 		return err
 	}
 	return nil
@@ -161,7 +162,7 @@ func (h *Hook) SendProxyInfo(ip, port uint32) error {
 func (h *Hook) SendNameSpaceId(key uint32, inode uint64) error {
 	err := h.inodeMap.Update(uint32(key), &inode, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()), zap.Any("key", key), zap.Any("Inode", inode))
+		h.logger.Error(Emoji+"failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()), zap.Any("key", key), zap.Any("Inode", inode))
 		return err
 	}
 	return nil
@@ -172,7 +173,7 @@ func (h *Hook) CleanProxyEntry(srcPort uint16) {
 	defer h.mutex.Unlock()
 	err := h.redirectProxyMap.Delete(srcPort)
 	if err != nil {
-		h.logger.Error("no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error(Emoji+"no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
 
@@ -212,10 +213,10 @@ func (h *Hook) SendApplicationPIDs(appPids [15]int32) error {
 }
 
 func (h *Hook) SendKeployPid(kPid uint32) error {
-	println("Getting keploy pid:", kPid)
+	h.logger.Debug(Emoji+"Sending keploy pid to kernel", zap.Any("pid", kPid))
 	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the keploy pid to the ebpf program", zap.Any("Keploy Pid", kPid), zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error(Emoji+"failed to send the keploy pid to the ebpf program", zap.Any("Keploy Pid", kPid), zap.Any("error thrown by ebpf map", err.Error()))
 		return err
 	}
 	return nil
@@ -225,49 +226,28 @@ func (h *Hook) SetKeployModeInKernel(mode uint32) {
 	key := 0
 	err := h.keployModeMap.Update(uint32(key), &mode, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error(Emoji+"failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
-
-// func (h *Hook) UpdateDnsResolutionMap(indx uint32, ps *structs.DnsResolve) {
-// 	if h != nil && h.dnsResolutionMap != nil {
-// 		err := h.dnsResolutionMap.Update(uint32(indx), *ps, ebpf.UpdateLock)
-// 		if err != nil {
-// 			h.logger.Error("failed to release the occupied entry from dns resolution map", zap.Error(err))
-// 			return
-// 		}
-// 	}
-// }
-
-// func (h *Hook) GetDNSDestInfo(i uint32) (*structs.DnsResolve, error) {
-// 	dnsDestInfo := structs.DnsResolve{}
-// 	if h != nil && h.dnsResolutionMap != nil {
-// 		if err := h.dnsResolutionMap.LookupWithFlags(uint32(i), &dnsDestInfo, ebpf.LookupLock); err != nil {
-// 			// h.logger.Error("failed to fetch the destination info from dns resolution map", zap.Error(err))
-// 			return nil, err
-// 		}
-// 	}
-// 	return &dnsDestInfo, nil
-// }
 
 func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
-		log.Println("Received signal, exiting program..")
+		h.logger.Info(Emoji + "Received signal, exiting program..")
 
 	}
-	log.Println("Received signal, exiting program..")
+	h.logger.Info(Emoji + "Received signal, exiting program..")
 
 	// closing all readers.
 	for _, reader := range PerfEventReaders {
 		if err := reader.Close(); err != nil {
-			h.logger.Error("failed to close the eBPF perf reader", zap.Error(err))
+			h.logger.Error(Emoji+"failed to close the eBPF perf reader", zap.Error(err))
 			// log.Fatalf("closing perf reader: %s", err)
 		}
 	}
 	for _, reader := range RingEventReaders {
 		if err := reader.Close(); err != nil {
-			h.logger.Error("failed to close the eBPF ringbuf reader", zap.Error(err))
+			h.logger.Error(Emoji+"failed to close the eBPF ringbuf reader", zap.Error(err))
 			// log.Fatalf("closing ringbuf reader: %s", err)
 		}
 	}
@@ -297,7 +277,7 @@ func (h *Hook) Stop(forceStop bool) {
 	h.writeRet.Close()
 	h.objects.Close()
 
-	log.Println("eBPF resources released successfully...")
+	h.logger.Info(Emoji + "eBPF resources released successfully...")
 }
 
 // LoadHooks is used to attach the eBPF hooks into the linux kernel. Hooks are attached for outgoing and incoming network requests.
@@ -311,7 +291,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// k := keploy.KeployInitializer()
 
 	if err := settings.InitRealTimeOffset(); err != nil {
-		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
+		h.logger.Error(Emoji+"failed to fix the BPF clock", zap.Error(err))
 		return err
 	}
 
@@ -320,14 +300,14 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
-		h.logger.Error("failed to lock memory for eBPF resources", zap.Error(err))
+		h.logger.Error(Emoji+"failed to lock memory for eBPF resources", zap.Error(err))
 		return err
 	}
 
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
-		h.logger.Error("failed to load eBPF objects", zap.Error(err))
+		h.logger.Error(Emoji+"failed to load eBPF objects", zap.Error(err))
 		return err
 	}
 
@@ -338,7 +318,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
 	h.keployPid = objs.KeployPidMap
-	// h.dnsResolutionMap = objs.DnsResolutionMap
 
 	h.stopper = stopper
 	h.objects = objs
@@ -354,32 +333,32 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 
 	tcpp_c4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
 	if err != nil {
-		log.Fatalf("opening tcp_v4_pre_connect kprobe: %s", err)
+		log.Fatalf(Emoji, "opening tcp_v4_pre_connect kprobe: %s", err)
 	}
 	h.tcppv4 = tcpp_c4
 
 	tcp_c4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
 	if err != nil {
-		log.Fatalf("opening tcp_v4_connect kprobe: %s", err)
+		log.Fatalf(Emoji, "opening tcp_v4_connect kprobe: %s", err)
 	}
 	h.tcpv4 = tcp_c4
 
 	tcp_r_c4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		log.Fatalf("opening tcp_v4_connect kretprobe: %s", err)
+		log.Fatalf(Emoji, "opening tcp_v4_connect kretprobe: %s", err)
 	}
 	h.tcpv4Ret = tcp_r_c4
 
 	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 	if err != nil {
-		log.Fatalf("opening udp_pre_connect kprobe: %s", err)
+		log.Fatalf(Emoji, "opening udp_pre_connect kprobe: %s", err)
 	}
 	h.udpp4 = udpp_c4
 
 	// Get the first-mounted cgroupv2 path.
 	cgroupPath, err := detectCgroupPath()
 	if err != nil {
-		h.logger.Error("failed to detect the cgroup path", zap.Error(err))
+		h.logger.Error(Emoji+"failed to detect the cgroup path", zap.Error(err))
 		return err
 	}
 
@@ -390,7 +369,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	})
 
 	if err != nil {
-		h.logger.Error("failed to attach the connect4 cgroup hook", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the connect4 cgroup hook", zap.Error(err))
 		return err
 	}
 	h.connect4 = c4
@@ -403,7 +382,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	})
 
 	if err != nil {
-		h.logger.Error("failed to attach the connect6 cgroup hook", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the connect6 cgroup hook", zap.Error(err))
 		return err
 	}
 	h.connect6 = c6
@@ -416,7 +395,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	})
 
 	if err != nil {
-		h.logger.Error("faled to attach GetPeername cgroup hook", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach GetPeername cgroup hook", zap.Error(err))
 		return err
 	}
 	h.gp4 = gp4
@@ -428,7 +407,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	ac, err := link.Kprobe("sys_accept", objs.SyscallProbeEntryAccept, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_accept", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_accept", zap.Error(err))
 		return err
 	}
 	h.accept = ac
@@ -438,7 +417,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	ac_, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_accept", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_accept", zap.Error(err))
 		return err
 	}
 	h.acceptRet = ac_
@@ -448,7 +427,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	ac4, err := link.Kprobe("sys_accept4", objs.SyscallProbeEntryAccept4, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_accept4", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_accept4", zap.Error(err))
 		return err
 	}
 	h.accept4 = ac4
@@ -458,7 +437,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	ac4_, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_accept4", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_accept4", zap.Error(err))
 		return err
 	}
 	h.accept4Ret = ac4_
@@ -468,7 +447,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_read", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_read", zap.Error(err))
 		return err
 	}
 	h.read = rd
@@ -478,7 +457,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	rd_, err := link.Kretprobe("sys_read", objs.SyscallProbeRetRead, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_read", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_read", zap.Error(err))
 		return err
 	}
 	h.readRet = rd_
@@ -488,7 +467,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	wt, err := link.Kprobe("sys_write", objs.SyscallProbeEntryWrite, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_write", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_write", zap.Error(err))
 		return err
 	}
 	h.write = wt
@@ -498,7 +477,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	wt_, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_write", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_write", zap.Error(err))
 		return err
 	}
 	h.writeRet = wt_
@@ -508,7 +487,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	cl, err := link.Kprobe("sys_close", objs.SyscallProbeEntryClose, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_close", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_close", zap.Error(err))
 		return err
 	}
 	h.close = cl
@@ -518,7 +497,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	// pre-compiled program.
 	cl_, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_close", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_close", zap.Error(err))
 		return err
 	}
 	h.closeRet = cl_
@@ -526,7 +505,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 
 	LaunchPerfBufferConsumers(objs, connectionFactory, stopper, h.logger)
 
-	h.logger.Info("keploy initialized and probes added to the kernel.")
+	h.logger.Info(Emoji + "keploy initialized and probes added to the kernel.")
 
 	switch models.GetMode() {
 	case models.MODE_RECORD:
@@ -537,10 +516,10 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 
 	//sending keploy pid to kernel to get filtered
 	k_inode := getSelfInodeNumber()
-	println("KEPLOY INODE:", k_inode)
+	h.logger.Debug(Emoji, zap.Any("Keploy Inode number", k_inode))
 	h.SendNameSpaceId(1, k_inode)
 	h.SendKeployPid(uint32(os.Getpid()))
-	println("KEPLOY PID SENT SUCCESSFULLY...")
+	h.logger.Debug(Emoji + "Keploy Pid sent successfully...")
 
 	return nil
 }

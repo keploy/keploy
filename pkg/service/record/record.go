@@ -8,6 +8,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var Emoji = "\U0001F430" + " Keploy:"
+
 type recorder struct {
 	logger *zap.Logger
 }

@@ -3,7 +3,6 @@ package test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +18,8 @@ import (
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
+
+var Emoji = "\U0001F430" + " Keploy:"
 
 type tester struct {
 	logger *zap.Logger
@@ -82,7 +83,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	// starts the testrun
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 	if err != nil {
-		t.logger.Error(err.Error())
+		t.logger.Error(Emoji + err.Error())
 		return false
 	}
 	var (
@@ -111,9 +112,11 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
 	if ok {
 		userIp = loadedHooks.GetUserIp(appContainer, appNetwork)
-		println("UserIp address:", userIp)
+		t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
 	}
 
+
+	t.logger.Info(Emoji, zap.Any("no of test cases", len(tcs)))
 	for _, tc := range tcs {
 		switch tc.Kind {
 		case models.HTTP:
@@ -127,8 +130,10 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			// for i, _ := range mocks[tc.Name] {
 			// 	loadedHooks.AppendDeps(&mocks[tc.Name][i])
 			// }
+
+			t.logger.Debug(Emoji + "Before setting deps.... during testing...")
 			loadedHooks.SetDeps(tc.Mocks)
-			// time.Sleep(1 * time.Second)
+			t.logger.Debug(Emoji+"Before simulating the request", zap.Any("Test case", tc))
 
 			ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
 			if ok {
@@ -139,7 +144,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
 			resp = loadedHooks.GetResp()
 			if err != nil {
-				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
+				t.logger.Info(Emoji+"result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 				continue
 			}
 			// println("before blocking simulate")
@@ -148,7 +153,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			// println("after blocking simulate")
 			testPass, testResult := t.testHttp(*tc, resp)
 			passed = passed && testPass
-			t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", testPass))
+			t.logger.Info(Emoji+"result", zap.Any("testcase id", tc.Name), zap.Any("passed", testPass))
 			testStatus := models.TestStatusPending
 			if testPass {
 				testStatus = models.TestStatusPassed
@@ -224,7 +229,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	// store the result of the testrun as test-report
 	testResults, err := testReportFS.GetResults(testReport.Name)
 	if err != nil {
-		t.logger.Error("failed to fetch test results", zap.Error(err))
+		t.logger.Error(Emoji+"failed to fetch test results", zap.Error(err))
 		return passed
 	}
 	testReport.Total = len(testResults)
@@ -238,7 +243,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 		return false
 	}
 
-	t.logger.Info("test run completed", zap.Bool("passed overall", passed))
+	t.logger.Info(Emoji+"test run completed", zap.Bool("passed overall", passed))
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop(true)
@@ -280,7 +285,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
 	if err != nil {
 		msg := "error in flattening http response"
-		t.logger.Error(msg, zap.Error(err))
+		t.logger.Error(Emoji+msg, zap.Error(err))
 		return false, res
 	}
 	// noise := httpSpec.Assertions["noise"]
@@ -391,7 +396,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 			if json.Valid([]byte(actualResponse.Body)) {
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
-					t.logger.Warn("failed to compute json diff", zap.Error(err))
+					t.logger.Warn(Emoji+"failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
 					keyStr := op.Path

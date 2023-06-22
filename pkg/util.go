@@ -11,6 +11,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var Emoji = "\U0001F430" + " Keploy:"
+
 // UrlParams returns the Url and Query parameters from the request url.
 func UrlParams(r *http.Request) map[string]string {
 	params := mux.Vars(r)
@@ -65,8 +67,7 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-
-func SimulateHttp (tc models.TestCase, logger *zap.Logger, getResp func() *models.HttpResp) (*models.HttpResp, error) {
+func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models.HttpResp) (*models.HttpResp, error) {
 	resp := &models.HttpResp{}
 
 	// httpSpec := &spec.HttpSpec{}
@@ -77,7 +78,7 @@ func SimulateHttp (tc models.TestCase, logger *zap.Logger, getResp func() *model
 	// }
 	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
-		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
+		logger.Error(Emoji+"failed to create a http request from the yaml document", zap.Error(err))
 		return nil, err
 	}
 	req.Header = ToHttpHeader(tc.HttpReq.Header)
@@ -90,7 +91,7 @@ func SimulateHttp (tc models.TestCase, logger *zap.Logger, getResp func() *model
 	client := &http.Client{}
 	client.Do(req)
 	if err != nil {
-		logger.Error("failed sending testcase request to app", zap.Error(err))
+		logger.Error(Emoji+"failed sending testcase request to app", zap.Error(err))
 		return nil, err
 	}
 
