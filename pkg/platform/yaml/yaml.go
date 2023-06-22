@@ -166,16 +166,20 @@ func (ys *yaml) Insert(tc *models.TestCase) error {
 		ys.logger.Error(Emoji+"failed to write testcase yaml file", zap.Error(err))
 		return err
 	}
-
+	ys.logger.Info(Emoji+"🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.tcsPath), zap.String("testcase name", tcName))
+	
 	// write the mock yamls
+	mockName := fmt.Sprintf("mock-%v", lastIndx)
 	for i, v := range yamlMocks {
-		mockName := fmt.Sprintf("mock-%v", lastIndx)
-		v.Name = mockName + fmt.Sprintf("-%v", i)
+		v.Name = mockName+fmt.Sprintf("-%v", i)
 		err = ys.write(ys.mockPath, mockName, v)
 		if err != nil {
 			ys.logger.Error(Emoji+"failed to write the yaml for mock", zap.Any("mockId", v.Name), zap.Error(err))
 			return err
 		}
+	}
+	if len(yamlMocks) > 0 {
+		ys.logger.Info(Emoji+"🟠 Keploy has recorded mocks for the external calls of user's application", zap.String("path", ys.mockPath), zap.String("mock name", mockName))
 	}
 
 	return nil

@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	"net/url"
 
+	"github.com/k0kubun/pp/v3"
+	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -20,11 +23,13 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 type tester struct {
 	logger *zap.Logger
+	mutex sync.Mutex
 }
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
 		logger: logger,
+		mutex: sync.Mutex{},
 	}
 }
 
@@ -110,6 +115,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 		t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
 	}
 
+
 	t.logger.Info(Emoji, zap.Any("no of test cases", len(tcs)))
 	for _, tc := range tcs {
 		switch tc.Kind {
@@ -124,6 +130,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 			// for i, _ := range mocks[tc.Name] {
 			// 	loadedHooks.AppendDeps(&mocks[tc.Name][i])
 			// }
+
 			t.logger.Debug(Emoji + "Before setting deps.... during testing...")
 			loadedHooks.SetDeps(tc.Mocks)
 			t.logger.Debug(Emoji+"Before simulating the request", zap.Any("Test case", tc))
@@ -278,7 +285,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
 	if err != nil {
 		msg := "error in flattening http response"
-		t.logger.Error(msg, zap.Error(err))
+		t.logger.Error(Emoji+msg, zap.Error(err))
 		return false, res
 	}
 	// noise := httpSpec.Assertions["noise"]
@@ -316,10 +323,10 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	}
 
 	// stores the json body after removing the noise
-	// cleanExp, cleanAct := "", ""
+	cleanExp, cleanAct := "", ""
 
 	if !Contains(noise, "body") && bodyType == models.BodyTypeJSON {
-		_, _, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
+		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
 		}
@@ -343,6 +350,84 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 
 		pass = false
 	}
+
+	if !pass {
+		logDiffs := NewDiffsPrinter(tc.Name)
+
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
+		var logs = ""
+
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+		// "Test Result:\n"+
+		// "\tInput Http Request: %+v\n\n"+
+		// "\tExpected Response: "+
+		// "%+v\n\n"+"\tActual Response: "+
+		// , tc.ID)
+
+		// ------------ DIFFS RELATED CODE -----------
+		if !res.StatusCode.Normal {
+			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
+		}
+
+		var (
+			actualHeader   = map[string][]string{}
+			expectedHeader = map[string][]string{}
+			unmatched      = true
+		)
+
+		for _, j := range res.HeadersResult {
+			if !j.Normal {
+				unmatched = false
+				actualHeader[j.Actual.Key] = j.Actual.Value
+				expectedHeader[j.Expected.Key] = j.Expected.Value
+			}
+		}
+
+		if !unmatched {
+			for i, j := range expectedHeader {
+				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), headerNoise)
+			}
+		}
+
+		if !res.BodyResult[0].Normal {
+
+			if json.Valid([]byte(actualResponse.Body)) {
+				patch, err := jsondiff.Compare(cleanExp, cleanAct)
+				if err != nil {
+					t.logger.Warn(Emoji+"failed to compute json diff", zap.Error(err))
+				}
+				for _, op := range patch {
+					keyStr := op.Path
+					if len(keyStr) > 1 && keyStr[0] == '/' {
+						keyStr = keyStr[1:]
+					}
+					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+
+				}
+			} else {
+				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
+			}
+		}
+		t.mutex.Lock()
+		logger.Printf(logs)
+		// time.Sleep(time.Second * time.Duration(delay)) // race condition bugging and mixing outputs
+		logDiffs.Render()
+		t.mutex.Unlock()
+
+	} else {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		var log2 = ""
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+		t.mutex.Lock()
+		logger.Printf(log2)
+		t.mutex.Unlock()
+
+	}
+
 
 	// t.logger.Info("", zap.Any("result of test", res))
 

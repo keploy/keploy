@@ -61,7 +61,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		errCh := make(chan error, 1)
 		go func() {
-			err := runApp(appCmd, ok)
+			err := h.runApp(appCmd, ok)
 			errCh <- err
 		}()
 
@@ -102,7 +102,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		errCh := make(chan error, 1)
 		go func() {
-			err := runApp(appCmd, false)
+			err := h.runApp(appCmd, false)
 			errCh <- err
 		}()
 
@@ -147,7 +147,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 }
 
 // It runs the application using the given command
-func runApp(appCmd string, isDocker bool) error {
+func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	// Create a new command with your appCmd
 	var cmd *exec.Cmd
 	if isDocker {
@@ -160,6 +160,7 @@ func runApp(appCmd string, isDocker bool) error {
 	// Set the output of the command
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	h.userAppCmd = cmd
 
 	// Run the command, this handles non-zero exit code get from application.
 	err := cmd.Run()
