@@ -44,20 +44,20 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 	wmLength := len(wm)
 	length, reqID, responseTo, opCode, wmBody, ok := wiremessage.ReadHeader(wm)
 	messageHeader := models.MongoHeader{
-		Length: length, 
-		RequestID: reqID, 
-		ResponseTo: responseTo, 
-		Opcode: wiremessage.OpCode(opCode),
+		Length:     length,
+		RequestID:  reqID,
+		ResponseTo: responseTo,
+		Opcode:     wiremessage.OpCode(opCode),
 	}
 	if !ok || int(length) > wmLength {
 		return nil, messageHeader, &models.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
 	}
 
-	var(
-		op Operation
-		err error
+	var (
+		op       Operation
+		err      error
 		mongoMsg interface{}
-	) 
+	)
 	// var err error
 	switch opCode {
 	case wiremessage.OpQuery:
@@ -73,12 +73,12 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 		jsonString := string(jsonBytes)
 
 		mongoMsg = &models.MongoOpQuery{
-			Flags: int32(op.(*opQuery).flags),
+			Flags:              int32(op.(*opQuery).flags),
 			FullCollectionName: op.(*opQuery).fullCollectionName,
-			NumberToSkip: op.(*opQuery).numberToSkip,
-			NumberToReturn: op.(*opQuery).numberToReturn,
+			NumberToSkip:       op.(*opQuery).numberToSkip,
+			NumberToReturn:     op.(*opQuery).numberToReturn,
 			// Query: string(op.(*opQuery).query),
-			Query: jsonString,
+			Query:                jsonString,
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
@@ -118,11 +118,11 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 			replyDocs = append(replyDocs, jsonString)
 		}
 		mongoMsg = &models.MongoOpReply{
-			ResponseFlags: int32(op.(*opReply).flags),
-			CursorID: op.(*opReply).cursorID,
-			StartingFrom: op.(*opReply).startingFrom,
+			ResponseFlags:  int32(op.(*opReply).flags),
+			CursorID:       op.(*opReply).cursorID,
+			StartingFrom:   op.(*opReply).startingFrom,
 			NumberReturned: op.(*opReply).numReturned,
-			Documents: replyDocs,	
+			Documents:      replyDocs,
 		}
 	case wiremessage.OpGetMore:
 		op, err = decodeGetMore(reqID, wmBody)
@@ -348,7 +348,7 @@ func (o *opMsgSectionSingle) commandAndCollection() (Command, string) {
 func (o *opMsgSectionSingle) String() string {
 	jsonBytes, err := bson.MarshalExtJSON(o.msg, true, false)
 	if err != nil {
-		fmt.Println("failed to marshsal the bsoncore.Document")
+		fmt.Println(Emoji + "failed to marshsal the bsoncore.Document")
 		return ""
 
 		// fmt.Printf("Failed to marshal: %v\n", err)
@@ -356,7 +356,7 @@ func (o *opMsgSectionSingle) String() string {
 	}
 	jsonString := string(jsonBytes)
 	// sections = append(sections, jsonString)
-	
+
 	return fmt.Sprintf("{ SectionSingle msg: %s }", jsonString)
 }
 
@@ -400,7 +400,7 @@ func (o *opMsgSectionSequence) String() string {
 	for _, msg := range o.msgs {
 		jsonBytes, err := bson.MarshalExtJSON(msg, true, false)
 		if err != nil {
-			fmt.Println("failed to marshsal the bsoncore.Document")
+			fmt.Println(Emoji + "failed to marshsal the bsoncore.Document")
 			return ""
 
 			// fmt.Printf("Failed to marshal: %v\n", err)

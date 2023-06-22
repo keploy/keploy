@@ -30,7 +30,7 @@ type Tracker struct {
 	recvBuf []byte
 	sentBuf []byte
 	mutex   sync.RWMutex
-	logger *zap.Logger
+	logger  *zap.Logger
 }
 
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
@@ -39,7 +39,7 @@ func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 		recvBuf: make([]byte, 0, maxBufferSize),
 		sentBuf: make([]byte, 0, maxBufferSize),
 		mutex:   sync.RWMutex{},
-		logger: logger,
+		logger:  logger,
 	}
 }
 
@@ -67,10 +67,8 @@ func (conn *Tracker) IsComplete() bool {
 func (conn *Tracker) Malformed() bool {
 	conn.mutex.RLock()
 	defer conn.mutex.RUnlock()
-	// log.Printf("Malformed() called: request completed but is Malformed")
-	conn.logger.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes recieved in userspace", conn.recvBytes))
-	conn.logger.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
-	// log.Printf("Total Written bytes:%v but sent only:%v", conn.totalWrittenBytes, conn.sentBytes)
+	conn.logger.Debug(Emoji+"data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes recieved in userspace", conn.recvBytes))
+	conn.logger.Debug(Emoji+"data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
 	// log.Printf("Req:%v", string(conn.recvBuf))
 	// log.Printf("Res:%v", string(conn.sentBuf))
 	return conn.closeTimestamp != 0 &&
@@ -94,7 +92,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		// log.Println("Apparent size of read payload after [%v] becomes:", uint64(event.MsgSize), conn.recvBytes)
 	default:
 	}
-} 
+}
 
 func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	conn.mutex.Lock()
@@ -102,7 +100,7 @@ func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	conn.updateTimestamps()
 	conn.addr = event.Addr
 	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
-		conn.logger.Debug("Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
+		conn.logger.Debug(Emoji+"Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
 	}
 	conn.openTimestamp = event.TimestampNano
 }
@@ -112,7 +110,7 @@ func (conn *Tracker) AddCloseEvent(event structs2.SocketCloseEvent) {
 	defer conn.mutex.Unlock()
 	conn.updateTimestamps()
 	if conn.closeTimestamp != 0 && conn.closeTimestamp != event.TimestampNano {
-		conn.logger.Debug("Changed close info timestamp due to new request", zap.Any("from", conn.closeTimestamp), zap.Any("to", event.TimestampNano))
+		conn.logger.Debug(Emoji+"Changed close info timestamp due to new request", zap.Any("from", conn.closeTimestamp), zap.Any("to", event.TimestampNano))
 	}
 	conn.closeTimestamp = event.TimestampNano
 

@@ -70,7 +70,7 @@ func Flatten(j interface{}) map[string][]string {
 			}
 		}
 	default:
-		fmt.Println("found invalid value in json", j, x.Kind())
+		fmt.Println(Emoji, "found invalid value in json", j, x.Kind())
 	}
 	return o
 }

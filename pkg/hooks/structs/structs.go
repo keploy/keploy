@@ -126,16 +126,3 @@ type ProxyInfo struct {
 	IP   uint32
 	Port uint32
 }
-
-// // struct dns_resolve
-// // {
-// //     struct dest_info_t dest_info;
-// //     u32 occupied;
-// //     struct bpf_spin_lock lock;
-// // }
-
-// type DnsResolve struct {
-// 	Dst      DestInfo
-// 	Occupied uint32
-// 	Lock     Bpf_spin_lock
-// }

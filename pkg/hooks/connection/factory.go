@@ -17,6 +17,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var Emoji = "\U0001F430" + " Keploy:"
+
 // Factory is a routine-safe container that holds a trackers with unique ID, and able to create new tracker.
 type Factory struct {
 	connections         map[structs.ConnID]*Tracker
@@ -51,11 +53,11 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 			parsedHttpReq, err1 := ParseHTTPRequest(tracker.recvBuf)
 			parsedHttpRes, err2 := ParseHTTPResponse(tracker.sentBuf, parsedHttpReq)
 			if err1 != nil {
-				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err1))
+				factory.logger.Error(Emoji+"failed to parse the http request from byte array", zap.Error(err1))
 				continue
 			}
 			if err2 != nil {
-				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err2))
+				factory.logger.Error(Emoji+"failed to parse the http response from byte array", zap.Error(err2))
 				continue
 			}
 
@@ -70,7 +72,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 			case models.MODE_TEST:
 				respBody, err := ioutil.ReadAll(parsedHttpRes.Body)
 				if err != nil {
-					factory.logger.Error("failed to read the http response body", zap.Error(err), zap.Any("mode", models.MODE_TEST))
+					factory.logger.Error(Emoji+"failed to read the http response body", zap.Error(err), zap.Any("mode", models.MODE_TEST))
 					return
 				}
 				resetDeps()
@@ -119,7 +121,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
-		logger.Error("failed to read the http request body", zap.Error(err))
+		logger.Error(Emoji+"failed to read the http request body", zap.Error(err))
 		return
 	}
 	// reqBody, err = json.Marshal(reqBody)
@@ -129,7 +131,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 	// }
 	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		logger.Error("failed to read the http response body", zap.Error(err))
+		logger.Error(Emoji+"failed to read the http response body", zap.Error(err))
 		return
 	}
 	// respBody, err = json.Marshal(respBody)
@@ -184,7 +186,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 		Version: models.V1Beta2,
 		Name:    "",
 		Kind:    models.HTTP,
-		Created:    time.Now().Unix(),
+		Created: time.Now().Unix(),
 		HttpReq: models.HttpReq{
 			Method:     models.Method(req.Method),
 			ProtoMajor: req.ProtoMajor,
@@ -205,7 +207,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 		Mocks: mocks,
 	})
 	if err != nil {
-		logger.Error("failed to record the ingress requests", zap.Error(err))
+		logger.Error(Emoji+"failed to record the ingress requests", zap.Error(err))
 		return
 	}
 }

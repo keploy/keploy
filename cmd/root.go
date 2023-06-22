@@ -8,10 +8,12 @@ import (
 	"go.uber.org/zap"
 )
 
+var Emoji = "\U0001F430" + " Keploy:"
+
 type Root struct {
 	logger *zap.Logger
 	// subCommands holds a list of registered plugins.
-	subCommands  []Plugins
+	subCommands []Plugins
 }
 
 func newRoot() *Root {
@@ -20,12 +22,12 @@ func newRoot() *Root {
 	logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	logger, err := logCfg.Build()
 	if err != nil {
-		log.Panic("failed to start the logger for the CLI")
+		log.Panic(Emoji, "failed to start the logger for the CLI")
 		return nil
 	}
 
 	return &Root{
-		logger: logger,
+		logger:      logger,
 		subCommands: []Plugins{},
 	}
 }
@@ -36,7 +38,7 @@ func Execute() {
 	newRoot().execute()
 }
 
-// execute creates a root command for Cobra. The root cmd will be executed after attaching the subcommmands. 
+// execute creates a root command for Cobra. The root cmd will be executed after attaching the subcommmands.
 func (r *Root) execute() {
 	// Root command
 	var rootCmd = &cobra.Command{
@@ -54,7 +56,7 @@ func (r *Root) execute() {
 	}
 
 	if err := rootCmd.Execute(); err != nil {
-		r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
+		r.logger.Error(Emoji+"failed to start the CLI.", zap.Any("error", err.Error()))
 		os.Exit(1)
 	}
 }
@@ -65,6 +67,6 @@ type Plugins interface {
 }
 
 // RegisterPlugin registers a plugin by appending it to the list of subCommands.
-func (r *Root)RegisterPlugin(p Plugins) {
+func (r *Root) RegisterPlugin(p Plugins) {
 	r.subCommands = append(r.subCommands, p)
 }
