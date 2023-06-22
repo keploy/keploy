@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"strings"
@@ -42,6 +43,7 @@ type Hook struct {
 	mu            *sync.Mutex
 	respChannel   chan *models.HttpResp
 	mutex         sync.RWMutex
+	userAppCmd *exec.Cmd
 
 	// ebpf objects and events
 	stopper    chan os.Signal
@@ -248,6 +250,11 @@ func (h *Hook) Stop(forceStop bool) {
 			h.logger.Error(Emoji+"failed to close the eBPF ringbuf reader", zap.Error(err))
 			// log.Fatalf("closing ringbuf reader: %s", err)
 		}
+	}
+
+	// stop the user application cmd
+	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
+		h.userAppCmd.Process.Kill()
 	}
 
 	// closing all events
