@@ -1,0 +1,215 @@
+type TestCase{
+  id: String
+  created: String
+  updated: String
+  captured: String
+  cid: String
+  appID: String
+  uri: String
+  httpReq: HttpReq
+  httpResp: HttpResp
+  grpcReq: GrpcReq
+  grpcResp: GrpcResp
+  deps: [Dependency]
+  allKeys: [KV]
+  anchors: [KV!]
+  noise: [String!]
+  mocks: [Mock]
+  type: String
+}
+
+type HttpReq {
+  method: Method
+  protoMajor: Int
+  protoMinor: Int
+  url: String
+  urlParams: [KV]
+  header: [KV]
+  body: String
+  bodyType: String
+  binary: String
+  form: [FormData]
+}
+
+type HttpResp {
+  statusCode: Int
+  header: [KV]
+  body: String
+  bodyType: String
+  statusMessage: String
+  protoMajor: Int
+  protoMinor: Int
+  binary: String
+}
+
+type GrpcReq {
+  body: String
+  method: String
+}
+
+type GrpcResp {
+  body: String
+  error: String
+}
+
+type FormData {
+  key: String
+  values: [String]
+  paths: [String]
+}
+
+type Mock {
+  version: Version
+  kind: Kind
+  name: String
+  spec: String
+}
+
+type TestSuite {
+  name: String
+  path: String
+}
+
+type TestReport {
+  id: String
+  version: Version
+  kind: Kind
+  name: String
+  status: String
+  success: Int
+  completed: Int
+  started: Int
+  failure: Int
+  total: Int
+  testCasePath: String
+  mockPath: String
+  tests: [Test]
+}
+
+type Test {
+  id: String
+  status: TestStatus
+  started: String
+  completed: String
+  runId: String
+  testCaseId: String
+  uri: String
+  dep: [Dependency]
+  mocks: [String]
+  req: HttpReq
+  http_resp: HttpResp
+  noise: [String]
+  result: Result
+  grpc_req: GrpcReq
+  grpc_resp: GrpcResp
+}
+
+type Result {
+  statusCode: IntResult
+  headersResult: [HeaderResult]
+  bodyResult: [BodyResult]
+  depResult: [DepResult]
+}
+
+type BodyResult {
+  path: String
+  normal: Boolean
+  expected: String
+  actual: String
+}
+
+type DepResult {
+  name: String
+  type: DependencyType
+  meta: [DepMetaResult]
+}
+
+type DepMetaResult {
+  normal: Boolean
+  key: String
+  expected: String
+  actual: String
+}
+
+type IntResult {
+  normal: Boolean
+  expected: Int
+  actual: Int
+}
+
+type HeaderResult {
+  normal: Boolean
+  expected: Header
+  actual: Header
+}
+
+type Header {
+  key: String
+  value: [String]
+}
+
+type Dependency {
+  name: String
+  type: DependencyType
+  meta: MetaKeyValue
+  data: String
+}
+
+type MetaKeyValue {
+  key: String
+  value: String
+}
+
+enum DependencyType {
+  NoSqlDB
+  SqlDB
+  GRPC
+  HttpClient
+}
+
+enum TestStatus {
+  Pending
+  Running
+  Failed
+  Passed
+}
+
+type KV {
+  key: String
+  value: String
+}
+
+enum Version {
+  V1Beta1
+  V1Beta2
+}
+
+enum Method {
+  GET
+  PUT
+  HEAD
+  POST
+  PATCH
+  DELETE
+  OPTIONS
+  TRACE
+}
+
+enum Kind {
+  HTTP
+  GENERIC
+  SQL
+  GRPC_EXPORT
+}
+
+type Query {
+  testSuites: [TestSuite]
+  testCases: [TestCase]
+  testCase(testCaseId: ID!): TestCase
+  testReports: [TestReport]
+  testReport(testReportId: ID!): TestReport
+  testReportCase(testCaseId: ID!): [Test]
+}
+
+
+
