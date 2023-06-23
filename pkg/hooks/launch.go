@@ -149,13 +149,16 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 // It runs the application using the given command
 func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	// Create a new command with your appCmd
-	var cmd *exec.Cmd
-	if isDocker {
-		parts := strings.Fields(appCmd)
-		cmd = exec.Command(parts[0], parts[1:]...)
-	} else {
-		cmd = exec.Command(appCmd)
-	}
+	// var cmd *exec.Cmd
+	// if isDocker {
+	// 	parts := strings.Fields(appCmd)
+	// 	cmd = exec.Command(parts[0], parts[1:]...)
+	// } else {
+	// 	cmd = exec.Command(appCmd)
+	// }
+
+	parts := strings.Fields(appCmd)
+	cmd := exec.Command(parts[0], parts[1:]...)
 
 	// Set the output of the command
 	cmd.Stdout = os.Stdout
@@ -167,7 +170,7 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	if err != nil {
 		return err
 	}
-	
+
 	//make it debug statement
 	return fmt.Errorf(Emoji, "user application exited with zero error code")
 }
@@ -369,7 +372,10 @@ func parseToInt32(str string) (int32, error) {
 // An application can launch as many child processes as it wants but here we are only handling for 15 child process.
 func getAppPIDs(appCmd string) ([15]int32, error) {
 	// Getting pid of the command
-	cmdPid, err := getCmdPid(appCmd)
+	parts := strings.Fields(appCmd)
+	cmdPid, err := getCmdPid(parts[0])
+
+	// cmdPid, err := getCmdPid(appCmd)
 	if err != nil {
 		return [15]int32{}, fmt.Errorf(Emoji, "failed to get the pid of the running command: %v\n", err)
 	}
@@ -441,12 +447,15 @@ func getCmdPid(commandName string) (int, error) {
 	cmd := exec.Command("pidof", commandName)
 
 	output, err := cmd.Output()
+	fmt.Println(Emoji, "Output of pidof", output)
 	if err != nil {
 		fmt.Errorf(Emoji, "failed to execute the command: %v", commandName)
 		return 0, err
 	}
 
 	pidStr := strings.TrimSpace(string(output))
+	pidStrings:= strings.Split(pidStr," ")
+	pidStr = pidStrings[0]
 
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
