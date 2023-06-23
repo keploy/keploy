@@ -7,7 +7,7 @@ spec:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8080/Lhr4BWAi
+        url: http://localhost:8080/Lhr4BWAii
         header:
             Accept: '*/*'
             User-Agent: curl/7.74.0
@@ -18,7 +18,7 @@ spec:
         header:
             Content-Length: "25"
             Content-Type: application/json; charset=utf-8
-            Date: Thu, 22 Jun 2023 09:36:37 GMT
+            Date: Thu, 22 Jun 2023 18:45:04 GMT
         body: '{"error":"url not found"}'
         body_type: ""
         status_message: ""
@@ -27,4 +27,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1687426598
+    created: 1687459505

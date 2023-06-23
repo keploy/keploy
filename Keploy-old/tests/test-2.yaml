@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-3
+name: test-2
 spec:
     metadata: {}
     req:
@@ -18,7 +18,7 @@ spec:
         header:
             Content-Length: "45"
             Content-Type: text/html; charset=utf-8
-            Date: Thu, 22 Jun 2023 18:44:56 GMT
+            Date: Thu, 22 Jun 2023 09:34:04 GMT
             Location: https://google.com
         body: |+
             <a href="https://google.com">See Other</a>.
@@ -30,4 +30,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1687459496
+    created: 1687426445

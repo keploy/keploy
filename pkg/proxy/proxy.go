@@ -570,8 +570,7 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
-	time.Sleep(2 * time.Second)
-
+	
 	ps.logger.Debug(Emoji, zap.Any("Filtering in Proxy", ps.FilterPid))
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
