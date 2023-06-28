@@ -1,0 +1,42 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-18-0
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Thu, 22 Jun 2023 04:37:51 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6IlBMVXV3Uy9tUjBpeGlmY1F0RWJDaUE9PSIsInZhbHVlIjoiY1FlT1lRTlRobzNaVExGeUh4MGJ3RWlPVk5jQ3dmeUpRN1VRUExFQjhqV2NhRGw4TFlhSTVwY2lEZE4xOVgyWGxmRllhcFdxQjVEQkIwNk4xdmtQN280TWFCR0EzWjQ2WU5NRHZzSVNOZ2hzWTRQNXVWTmVvSFpLbE9DNlVFc2siLCJtYWMiOiI1Y2YxOWFiMzdkOGEzOGZiOGE3NjJlZTQzNDZmZGU4NDljN2ViOGZhNTM2YWYxNmE0MWRjYWJjMDA1ZjIzNDA2IiwidGFnIjoiIn0%3D; expires=Thu, 22-Jun-2023 06:37:51 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6Ik5VMlFXdVJyM2RENm5xd2Rob3krOFE9PSIsInZhbHVlIjoiZm5DRVVUblE5QVQ0UFJZLy9obThzYW9iNStEd1lJaUhDckJGK2tLS1RPSGZRSzdxeTh3SkJSbVkzN1NCZUF2WjdBV2kremJ0aFNieExBeS9LR0JNWDBodjJjZlFpVWJzSmJGWGU4S2N6clNKNERJRVR0L1F0VmI0dFRlaGlIS3UiLCJtYWMiOiI3YzMzNTNkYWY2NjkwY2U3MmUwNGQwODRjZTM1YjBhYmEwYjkwMzhkZTI4Yjk4OTE4YzI0NWU2Y2RjMjczYjU1IiwidGFnIjoiIn0%3D; expires=Thu, 22-Jun-2023 06:37:51 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"Mohammed loved cats and reportedly his favorite cat, Muezza, was a tabby. Legend says that tabby cats have an \u201cM\u201d for Mohammed on top of their heads because Mohammad would often rest his hand on the cat\u2019s head.","length":210}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1687408671

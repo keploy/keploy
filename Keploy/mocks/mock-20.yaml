@@ -1,0 +1,42 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mock-20-0
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Fri, 23 Jun 2023 06:34:43 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6ImlPNS8xRlIrWFlyZGk2b3B6Mi9QN2c9PSIsInZhbHVlIjoiZm56TWpHcm9iSkgxQ09oZ1VXOERBdmphYnJVR290QWxOZE04bUNkS1F4MHc1TDJ3QlN3UjJpNjEzUVdaTkVIaUVIZGJlcWdydVlWRUYzaW5FbkZTTkt1Y1JCUTVvNmpYc2tSVDVybE91VTEvY0JDdmJMU3BjQU5vT05wbEFsazQiLCJtYWMiOiJlMTI1NmU2YzlhN2U5YTQwMWIxNDc1YzdiNWViMGY2ODMwM2VjYzljZjViMmMzZWZkNjVmMTM5ZGExYWJmOTg4IiwidGFnIjoiIn0%3D; expires=Fri, 23-Jun-2023 08:34:43 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6IklIMm02Sjg2NTBvM3RXQWNwR081cXc9PSIsInZhbHVlIjoiVlhEdU82VExJTzNGVG52MVIrQitNdnE4cmdBWUlBZURYeVcvd0Y2S1creFU0QlhSL1JvMVpET0c2RkVoSzdCRjZVb0JTVklJZ1BTckIvSk00VE4zTWVrck9oaUtmeDE3VU92RXEveTN0SSt0L3FJTVkweTBXVGxHS1psNmJ1QjMiLCJtYWMiOiIyZjBjYTM2MzkxNzA5ZjhhMmYwMjJkYzdjZjY3MGMzMTU1Y2I2NDczYWU0OWRhYjc3NzhlNTBiZWJhN2IzNTVjIiwidGFnIjoiIn0%3D; expires=Fri, 23-Jun-2023 08:34:43 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"The smallest wildcat today is the Black-footed cat. The females are less than 20 inches (50 cm) long and can weigh as little as 2.5 lbs (1.2 kg).","length":145}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1687502083

@@ -1,0 +1,30 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-20
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "210"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 23 Jun 2023 06:34:43 GMT
+        body: '{"ts":1687502083789508822,"url":"{\"fact\":\"The smallest wildcat today is the Black-footed cat. The females are less than 20 inches (50 cm) long and can weigh as little as 2.5 lbs (1.2 kg).\",\"length\":145}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1687502084

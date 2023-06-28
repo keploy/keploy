@@ -1,0 +1,30 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-18
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "293"
+            Content-Type: application/json; charset=utf-8
+            Date: Thu, 22 Jun 2023 04:37:51 GMT
+        body: '{"ts":1687408671763248775,"url":"{\"fact\":\"Mohammed loved cats and reportedly his favorite cat, Muezza, was a tabby. Legend says that tabby cats have an \\u201cM\\u201d for Mohammed on top of their heads because Mohammad would often rest his hand on the cat\\u2019s head.\",\"length\":210}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1687408671

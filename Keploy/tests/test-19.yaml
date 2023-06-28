@@ -1,0 +1,30 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-19
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "287"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 23 Jun 2023 05:36:41 GMT
+        body: '{"ts":1687498601512300180,"url":"{\"fact\":\"Perhaps the most famous comic cat is the Cheshire Cat in Lewis Carroll\\u2019s Alice in Wonderland. With the ability to disappear, this mysterious character embodies the magic and sorcery historically associated with cats.\",\"length\":216}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1687498602

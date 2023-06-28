@@ -3,6 +3,7 @@ module go.keploy.io/server
 go 1.16
 
 require (
+	github.com/99designs/gqlgen v0.17.34
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/cilium/ebpf v0.10.0
@@ -17,11 +18,11 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.2 // indirect
 	github.com/spf13/cobra v1.7.0
-	github.com/stretchr/testify v1.8.2 // indirect
+	github.com/vektah/gqlparser/v2 v2.5.6
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.24.0
 	golang.org/x/crypto v0.7.0 // indirect
-	golang.org/x/sys v0.6.0
+	golang.org/x/sys v0.8.0
 	gopkg.in/yaml.v3 v3.0.1
 	gotest.tools/v3 v3.4.0 // indirect
 )

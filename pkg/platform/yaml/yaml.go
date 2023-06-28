@@ -17,15 +17,15 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-type yaml struct {
-	tcsPath string
+type Yaml struct {
+	TcsPath string
 	mockPath string
 	logger *zap.Logger
 }
 
 func NewYamlStore(tcsPath, mockPath string, logger *zap.Logger) platform.TestCaseDB {
-	return &yaml{
-		tcsPath: tcsPath,
+	return &Yaml{
+		TcsPath: tcsPath,
 		mockPath: mockPath,
 		logger: logger,
 	}
@@ -109,8 +109,8 @@ func findLastIndex (path string, logger *zap.Logger) (int, error) {
 }
 
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
-func (ys *yaml) write(path, fileName string, doc NetworkTrafficDoc) error {
-	// 
+func (ys *Yaml) write(path, fileName string, doc NetworkTrafficDoc) error {
+	//
 	isFileEmpty, err := createYamlFile(path, fileName, ys.logger)
 	if err != nil {
 		return err
@@ -143,9 +143,9 @@ func (ys *yaml) write(path, fileName string, doc NetworkTrafficDoc) error {
 }
 
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
-func (ys *yaml) Insert(tc *models.TestCase) error {
+func (ys *Yaml) Insert(tc *models.TestCase) error {
 	// finds the recently generated testcase to derive the sequence number for the current testcase
-	lastIndx, err := findLastIndex(ys.tcsPath, ys.logger)
+	lastIndx, err := findLastIndex(ys.TcsPath, ys.logger)
 	if err != nil {
 		return err
 	}
@@ -159,7 +159,7 @@ func (ys *yaml) Insert(tc *models.TestCase) error {
 	// write testcase yaml
 	tcName := fmt.Sprintf("test-%v", lastIndx)
 	yamlTc.Name = tcName
-	err = ys.write(ys.tcsPath, tcName, *yamlTc) 
+	err = ys.write(ys.TcsPath, tcName, *yamlTc)
 	if err!= nil {
 		ys.logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
@@ -180,18 +180,18 @@ func (ys *yaml) Insert(tc *models.TestCase) error {
 }
 
 // func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.Mock, error) {
-func (ys *yaml) Read (options interface{}) ([]*models.TestCase, error) {
+func (ys *Yaml) Read (options interface{}) ([]*models.TestCase, error) {
 	tcs := []*models.TestCase{}
 
-	dir, err := os.OpenFile(ys.tcsPath, os.O_RDONLY, os.ModePerm)
+	dir, err := os.OpenFile(ys.TcsPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		ys.logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", ys.tcsPath))
+		ys.logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", ys.TcsPath))
 		return nil, err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		ys.logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", ys.tcsPath))
+		ys.logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", ys.TcsPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -200,7 +200,7 @@ func (ys *yaml) Read (options interface{}) ([]*models.TestCase, error) {
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		yamlTestcase, err := read(ys.tcsPath, name)
+		yamlTestcase, err := read(ys.TcsPath, name)
 		if err != nil {
 			ys.logger.Error("failed to read the testcase from yaml", zap.Error(err))
 			return nil, err
@@ -210,7 +210,7 @@ func (ys *yaml) Read (options interface{}) ([]*models.TestCase, error) {
 		mockName := "mock-"+strings.Split(name, "-")[1]
 		// check if mocks exists for the current testcase. read the yaml documents if mock exists.
 		if _, err := os.Stat(filepath.Join(ys.mockPath, mockName + ".yaml")); err==nil {
-			yamlMocks, err = read(ys.mockPath, mockName) 
+			yamlMocks, err = read(ys.mockPath, mockName)
 			if err != nil {
 				ys.logger.Error("failed to read the mocks from yaml", zap.Error(err), zap.Any("mocks for testcase", yamlTestcase[0].Name))
 				return nil, err

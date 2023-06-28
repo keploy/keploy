@@ -1,0 +1,30 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-17
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.87.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "137"
+            Content-Type: application/json; charset=utf-8
+            Date: Wed, 21 Jun 2023 12:46:08 GMT
+        body: '{"ts":1687351568731379688,"url":"{\"fact\":\"In relation to their body size, cats have the largest eyes of any mammal.\",\"length\":73}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1687351569
