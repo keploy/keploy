@@ -594,22 +594,23 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
 
 	reader := bufio.NewReader(conn)
-	initialData := make([]byte, 5)
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
-	isTLS := isTLSHandshake(testBuffer)
+	// initialData := make([]byte, 5)
+	// testBuffer, err := reader.Peek(len(initialData))
+	// if err != nil {
+	// 	ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+	// 	return
+	// }
+	// isTLS := isTLSHandshake(testBuffer)
 	conn = &Conn{r: *reader, Conn: conn}
-	if isTLS {
-		conn, err = handleTLSConnection(conn)
-		if err != nil {
-			ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
-			return
-		}
-	}
+	// if isTLS {
+	// 	conn, err = handleTLSConnection(conn)
+	// 	if err != nil {
+	// 		ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
+	// 		return
+	// 	}
+	// }
 	buffer, err := util.ReadBytes(conn)
+	// buffer, err = util.ReadBytes(conn)
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 		return
@@ -622,52 +623,52 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	)
 	//Dialing for tls connection
 	if models.GetMode() != models.MODE_TEST {
-		if isTLS {
-			ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
-			config := &tls.Config{
-				InsecureSkipVerify: false,
-				ServerName:         destinationUrl,
-			}
-			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-			if err != nil {
-				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-				conn.Close()
-				return
-			}
-		} else {
+		// if isTLS {
+		// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
+		// 	config := &tls.Config{
+		// 		InsecureSkipVerify: false,
+		// 		ServerName:         destinationUrl,
+		// 	}
+		// 	dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+		// 	if err != nil {
+		// 		ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+		// 		conn.Close()
+		// 		return
+		// 	}
+		// } else {
 			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 			}
-		}
+		// }
 	}
 
 	// Do not capture anything until filtering is enabled
 	if !ps.FilterPid {
 		ps.logger.Debug(Emoji+"Calling Next", zap.Any("address", actualAddress))
 		var dstConn net.Conn
-		if isTLS {
-			ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
-			config := &tls.Config{
-				InsecureSkipVerify: false,
-				ServerName:         destinationUrl,
-			}
-			dstConn, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-			if err != nil {
-				ps.logger.Error(Emoji+"(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-				conn.Close()
-				return
-			}
-		} else {
+		// if isTLS {
+		// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
+		// 	config := &tls.Config{
+		// 		InsecureSkipVerify: false,
+		// 		ServerName:         destinationUrl,
+		// 	}
+		// 	dstConn, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+		// 	if err != nil {
+		// 		ps.logger.Error(Emoji+"(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+		// 		conn.Close()
+		// 		return
+		// 	}
+		// } else {
 			dstConn, err = net.Dial("tcp", actualAddress)
 			if err != nil {
 				ps.logger.Error(Emoji+"(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 			}
-		}
+		// }
 
 		err := callNext(buffer, conn, dstConn, ps.logger)
 		if err != nil {

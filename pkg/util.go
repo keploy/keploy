@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"strings"
-
+	"bufio"
 	"github.com/araddon/dateparse"
 	"github.com/gorilla/mux"
 	"go.keploy.io/server/pkg/models"
@@ -102,4 +102,24 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models
 	// println("before blocking simulate")
 
 	return resp, nil
+}
+
+func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
+	// Parse the request using the http.ReadRequest function
+	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
+	if err != nil {
+		return nil, err
+	}
+
+	return request, nil
+}
+
+func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, error) {
+	buffer := bytes.NewBuffer(data)
+	reader := bufio.NewReader(buffer)
+	response, err := http.ReadResponse(reader, request)
+	if err != nil {
+		return nil, err
+	}
+	return response, nil
 }
