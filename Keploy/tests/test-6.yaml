@@ -1,0 +1,35 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-6
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/url
+        header:
+            Accept: '*/*'
+            Content-Length: "33"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://google.com"
+            }
+        body_type: ""
+    resp:
+        status_code: 500
+        header:
+            Content-Length: "509"
+            Content-Type: application/json; charset=utf-8
+            Date: Thu, 29 Jun 2023 06:44:09 GMT
+        body: '{"error":{"ConnectionID":"","Wrapped":{"Code":0,"Message":"connection(localhost:27017[-1047]) incomplete read of message header: read tcp 172.31.31.104:52022-\u003e172.31.31.104:16789: read: connection reset by peer","Labels":["NetworkError"],"Name":"","Wrapped":{"ConnectionID":"localhost:27017[-1047]","Wrapped":{"Op":"read","Net":"tcp","Source":{"IP":"172.31.31.104","Port":52022,"Zone":""},"Addr":{"IP":"172.31.31.104","Port":16789,"Zone":""},"Err":{"Syscall":"read","Err":104}}},"TopologyVersion":null}}}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1688021049

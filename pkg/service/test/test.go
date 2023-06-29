@@ -43,14 +43,17 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
 	ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
-	// start the proxies
-	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
-	// Initiate the hooks and update the vaccant ProxyPorts map
-	// loadedHooks := hooks.NewHook(ps.PortList, ys, t.logger)
+
+
+	// Initiate the hooks 
 	loadedHooks := hooks.NewHook(ys, t.logger)
 	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return false
 	}
+
+	// start the proxies
+	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
+
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
 
