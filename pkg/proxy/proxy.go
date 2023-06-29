@@ -112,11 +112,7 @@ var caPKey []byte
 //go:embed asset
 var caFolder embed.FS
 
-// BootProxies starts proxy servers on the idle local ports and returns the list of ports on which proxies are running.
-//
-// "startingPort" represents the initial port number from which the system sequentially searches for available or idle ports.. Default: 5000
-//
-// "count" variable represents the number of proxies to be started. Default: 50
+// BootProxies starts proxy servers on the idle local port, Default:16789
 func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
 
 	// assign default values if not provided
@@ -393,6 +389,7 @@ func (ps *ProxySet) startDnsServer() {
 
 }
 
+// For DNS caching
 var cache = struct {
 	sync.RWMutex
 	m map[string][]dns.RR
@@ -570,7 +567,8 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
-	
+
+	ps.logger.Debug(Emoji, zap.Any("PID in proxy:", os.Getpid()))
 	ps.logger.Debug(Emoji, zap.Any("Filtering in Proxy", ps.FilterPid))
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
@@ -591,6 +589,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		ps.logger.Error(Emoji+"failed to fetch the destination info", zap.Any("Source port", sourcePort), zap.Any("err:", err))
 		return
 	}
+
+	// releases the occupied source port when done fetching the destination info
+	ps.hook.CleanProxyEntry(uint16(sourcePort))
 
 	reader := bufio.NewReader(conn)
 	initialData := make([]byte, 5)
@@ -703,15 +704,24 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			// 	ps.hook.AppendDeps(v)
 			// }
 		default:
+			fmt.Println("into default desp mode, before passing")
+			err = callNext(buffer, conn, dst, ps.logger)
+			if err != nil {
+				ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
+				conn.Close()
+				return
+			}
+			fmt.Println("into default desp mode, after passing")
+
 		}
 	}
 
-	// releases the occupied source port
-	ps.hook.CleanProxyEntry(uint16(sourcePort))
 	conn.Close()
 }
 
 func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
+
+	fmt.Println(Emoji, "trying to forward requests to target: ", destConn.RemoteAddr().String())
 
 	defer destConn.Close()
 
@@ -735,6 +745,8 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 		logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
 		return err
 	}
+
+	fmt.Println(Emoji, "Successfully wrote response to the user client ", destConn.RemoteAddr().String())
 	return nil
 }
 

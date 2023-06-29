@@ -130,7 +130,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 
 		pids = appPids
-
+		println("Pid of application:",pids[0])
 		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
 
@@ -454,8 +454,8 @@ func getCmdPid(commandName string) (int, error) {
 	}
 
 	pidStr := strings.TrimSpace(string(output))
-	pidStrings:= strings.Split(pidStr," ")
-	pidStr = pidStrings[0]
+	// pidStrings:= strings.Split(pidStr," ")
+	// pidStr = pidStrings[0]
 
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {

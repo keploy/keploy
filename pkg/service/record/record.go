@@ -24,13 +24,15 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer
 	models.SetMode(models.MODE_RECORD)
 
 	ys := yaml.NewYamlStore(tcsPath, mockPath, r.logger)
-	// start the proxies
-	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
-	// Initiate the hooks and update the vaccant ProxyPorts map
+
+	// Initiate the hooks 
 	loadedHooks := hooks.NewHook(ys, r.logger)
 	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return
 	}
+
+	// start the proxies
+	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)

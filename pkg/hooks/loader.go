@@ -50,6 +50,7 @@ type Hook struct {
 	connect4   link.Link
 	connect6   link.Link
 	gp4        link.Link
+	bind       link.Link
 	udpp4      link.Link
 	tcppv4     link.Link
 	tcpv4      link.Link
@@ -175,19 +176,21 @@ func (h *Hook) CleanProxyEntry(srcPort uint16) {
 	if err != nil {
 		h.logger.Error(Emoji+"no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
 	}
+	h.logger.Debug(Emoji+"successfully removed entry from redirect proxy map", zap.Any("(Key)/SourcePort", srcPort))
 }
 
 // // printing the whole map
 func (h *Hook) PrintRedirectProxyMap() {
 	println("------Redirect Proxy map-------")
+	h.logger.Debug(Emoji + "--------Redirect Proxy Map-------")
 	itr := h.redirectProxyMap.Iterate()
 	var key uint16
 	dest := structs.DestInfo{}
 
 	for itr.Next(&key, &dest) {
-		fmt.Printf("Redirect Proxy:  [key:%v] || [value:%v]", key, dest)
+		h.logger.Debug(Emoji + fmt.Sprintf("Redirect Proxy:  [key:%v] || [value:%v]\n", key, dest))
 	}
-	println("------Redirect Proxy map-------")
+	h.logger.Debug(Emoji + "--------Redirect Proxy Map-------")
 }
 
 func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
@@ -256,13 +259,14 @@ func (h *Hook) Stop(forceStop bool) {
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		err := h.userAppCmd.Process.Kill()
 		if err != nil {
-			h.logger.Error(Emoji+"failed to stop user application",zap.Error(err))
-		}else{
-			h.logger.Info(Emoji+"User application stopped successfully...")
+			h.logger.Error(Emoji+"failed to stop user application", zap.Error(err))
+		} else {
+			h.logger.Info(Emoji + "User application stopped successfully...")
 		}
 	}
 
 	// closing all events
+	h.bind.Close()
 	h.udpp4.Close()
 	h.tcppv4.Close()
 	h.tcpv4.Close()
@@ -335,6 +339,12 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 		}
 	}()
 	// ------------ For Egress -------------
+
+	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening sys_bind kprobe: %s", err)
+	}
+	h.bind = bind
 
 	tcpp_c4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
 	if err != nil {

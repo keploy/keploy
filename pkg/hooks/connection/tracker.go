@@ -67,10 +67,10 @@ func (conn *Tracker) IsComplete() bool {
 func (conn *Tracker) Malformed() bool {
 	conn.mutex.RLock()
 	defer conn.mutex.RUnlock()
-	conn.logger.Debug(Emoji+"data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes recieved in userspace", conn.recvBytes))
-	conn.logger.Debug(Emoji+"data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
-	// log.Printf("Req:%v", string(conn.recvBuf))
-	// log.Printf("Res:%v", string(conn.sentBuf))
+	// conn.logger.Debug(Emoji+"data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes recieved in userspace", conn.recvBytes))
+	// conn.logger.Debug(Emoji+"data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
+	// conn.logger.Debug(Emoji, zap.Any("Request buffer", string(conn.recvBuf)))
+	// conn.logger.Debug(Emoji, zap.Any("Response buffer", string(conn.sentBuf)))
 	return conn.closeTimestamp != 0 &&
 		conn.totalReadBytes != conn.recvBytes &&
 		conn.totalWrittenBytes != conn.sentBytes
@@ -81,6 +81,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 	defer conn.mutex.Unlock()
 	conn.updateTimestamps()
 
+	conn.logger.Debug(Emoji+"Got a data event from eBPF", zap.Any("Direction", event.Direction), zap.Any("current event size", event.MsgSize))
 	switch event.Direction {
 	case structs2.EgressTraffic:
 		conn.sentBuf = append(conn.sentBuf, event.Msg[:event.MsgSize]...)
@@ -88,8 +89,6 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 	case structs2.IngressTraffic:
 		conn.recvBuf = append(conn.recvBuf, event.Msg[:event.MsgSize]...)
 		conn.recvBytes += uint64(event.MsgSize)
-		// log.Println("Actual size of read payload becomes [%v]:", len(conn.recvBuf))
-		// log.Println("Apparent size of read payload after [%v] becomes:", uint64(event.MsgSize), conn.recvBytes)
 	default:
 	}
 }
@@ -102,6 +101,7 @@ func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
 		conn.logger.Debug(Emoji+"Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
 	}
+	conn.logger.Debug(Emoji+"Got an open event from eBPF", zap.Any("File Descriptor", event.ConnID.FD))
 	conn.openTimestamp = event.TimestampNano
 }
 
@@ -116,6 +116,7 @@ func (conn *Tracker) AddCloseEvent(event structs2.SocketCloseEvent) {
 
 	conn.totalWrittenBytes = uint64(event.WrittenBytes)
 	conn.totalReadBytes = uint64(event.ReadBytes)
+	conn.logger.Debug(Emoji+"Got a close event from eBPF", zap.Any("TotalReadBytes", conn.totalReadBytes), zap.Any("TotalWrittenBytes", conn.totalWrittenBytes))
 }
 
 func (conn *Tracker) updateTimestamps() {
