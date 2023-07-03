@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/test"
+	HistCfg "go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
 )
 
@@ -75,6 +76,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			t.tester.Test(tcsPath, mockPath, testReportPath, appCmd, appContainer, networkName, delay)
+			HistCfg.NewHistCfgFS().CaptureTestsEvent(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 		},
 	}
 
