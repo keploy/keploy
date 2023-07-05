@@ -101,7 +101,7 @@ func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
 		conn.logger.Debug(Emoji+"Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
 	}
-	conn.logger.Debug(Emoji+"Got an open event from eBPF", zap.Any("File Descriptor", event.ConnID.FD))
+	// conn.logger.Debug(Emoji+"Got an open event from eBPF", zap.Any("File Descriptor", event.ConnID.FD))
 	conn.openTimestamp = event.TimestampNano
 }
 

@@ -106,15 +106,14 @@ type Bpf_spin_lock struct{ Val uint32 }
 // {
 //     u32 dest_ip;
 //     u32 dest_port;
-//     struct bpf_spin_lock lock;
+//	   u32 kernelPid;
 // };
 
 type DestInfo struct {
-	DestIp   uint32
-	DestPort uint32
-	// Lock Bpf_spin_lock
+	DestIp    uint32
+	DestPort  uint32
+	KernelPid uint32
 }
-
 
 // struct proxy_info
 // {

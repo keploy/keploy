@@ -59,6 +59,7 @@ type bpfProgramSpecs struct {
 	K_getpeername4                   *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
+	SyscallProbeEntryBind            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -174,6 +175,7 @@ type bpfPrograms struct {
 	K_getpeername4                   *ebpf.Program `ebpf:"k_getpeername4"`
 	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
+	SyscallProbeEntryBind            *ebpf.Program `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -195,6 +197,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_getpeername4,
 		p.SyscallProbeEntryAccept,
 		p.SyscallProbeEntryAccept4,
+		p.SyscallProbeEntryBind,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
 		p.SyscallProbeEntryTcpV4Connect,
