@@ -130,20 +130,14 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
 		return nil
 	}
 
-	// cmd := exec.Command("sudo", "cp", caCertPath, caStorePath[distro])
-	// err := cmd.Run()
-	// if err != nil {
-	// 	log.Fatalf("Failed to copy the CA to the trusted store: %v", err)
-	// }
-
-	// log.Printf("This is the value of cmd1: %v", cmd)
-	//Update the trusted CAs store
+	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
 	// log.Printf("This is the command2: %v", cmd)
 	err = cmd.Run()
 	if err != nil {
 		log.Fatalf(Emoji+"Failed to update system trusted store: %v", err)
 	}
+
 	if opt.Port == 0 {
 		opt.Port = 16789
 	}
@@ -204,6 +198,7 @@ func isPortAvailable(port uint32) bool {
 
 var caStorePath = map[string]string{
 	"Ubuntu":   "/usr/local/share/ca-certificates/",
+	"Pop!_OS":  "/usr/local/share/ca-certificates/",
 	"Debian":   "/usr/local/share/ca-certificates/",
 	"CentOS":   "/etc/pki/ca-trust/source/anchors/",
 	"Red Hat":  "/etc/pki/ca-trust/source/anchors/",
@@ -221,6 +216,7 @@ var caStorePath = map[string]string{
 
 var caStoreUpdateCmd = map[string]string{
 	"Ubuntu":   "update-ca-certificates",
+	"Pop!_OS":  "update-ca-certificates",
 	"Debian":   "update-ca-certificates",
 	"CentOS":   "update-ca-trust",
 	"Red Hat":  "update-ca-trust",
@@ -567,6 +563,8 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
+	//checking how much time proxy takes to execute the flow.
+	start := time.Now()
 
 	ps.logger.Debug(Emoji, zap.Any("PID in proxy:", os.Getpid()))
 	ps.logger.Debug(Emoji, zap.Any("Filtering in Proxy", ps.FilterPid))
@@ -589,6 +587,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		ps.logger.Error(Emoji+"failed to fetch the destination info", zap.Any("Source port", sourcePort), zap.Any("err:", err))
 		return
 	}
+
+	ps.logger.Debug(Emoji, zap.Any("DestIp", destInfo.DestIp), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
 
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
@@ -636,12 +636,12 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 		return
 		// 	}
 		// } else {
-			dst, err = net.Dial("tcp", actualAddress)
-			if err != nil {
-				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-				conn.Close()
-				return
-			}
+		dst, err = net.Dial("tcp", actualAddress)
+		if err != nil {
+			ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			conn.Close()
+			return
+		}
 		// }
 	}
 
@@ -662,12 +662,12 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 		return
 		// 	}
 		// } else {
-			dstConn, err = net.Dial("tcp", actualAddress)
-			if err != nil {
-				ps.logger.Error(Emoji+"(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-				conn.Close()
-				return
-			}
+		dstConn, err = net.Dial("tcp", actualAddress)
+		if err != nil {
+			ps.logger.Error(Emoji+"(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			conn.Close()
+			return
+		}
 		// }
 
 		err := callNext(buffer, conn, dstConn, ps.logger)
@@ -717,12 +717,15 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 
+	// Closing the user client connection
 	conn.Close()
+	duration := time.Since(start)
+	ps.logger.Debug(Emoji+"time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 }
 
 func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
 
-	fmt.Println(Emoji, "trying to forward requests to target: ", destConn.RemoteAddr().String())
+	logger.Debug(Emoji+"trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 
 	defer destConn.Close()
 
@@ -747,7 +750,8 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 		return err
 	}
 
-	fmt.Println(Emoji, "Successfully wrote response to the user client ", destConn.RemoteAddr().String())
+	logger.Debug(Emoji+"Successfully wrote response to the user client", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+
 	return nil
 }
 

@@ -178,7 +178,7 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file
 func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{"docker ", "docker-compose "}
+	dockerCommandPatterns := []string{"docker ", "docker-compose ","sudo docker ", "sudo docker-compose "}
 	for _, pattern := range dockerCommandPatterns {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
 			return true, "docker"
