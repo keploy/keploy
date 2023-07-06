@@ -199,23 +199,23 @@ func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
 func parseDockerCommand(dockerCmd string) (string, string, error) {
 	// Regular expression patterns
 	containerNamePattern := `--name\s+([^\s]+)`
-	networkNamePattern := `--network\s+([^\s]+)`
+	networkNamePattern := `(--network|--net)\s+([^\s]+)`
 
 	// Extract container name
 	containerNameRegex := regexp.MustCompile(containerNamePattern)
 	containerNameMatches := containerNameRegex.FindStringSubmatch(dockerCmd)
 	if len(containerNameMatches) < 2 {
-		return "", "", fmt.Errorf(Emoji, "failed to parse container name")
+		return "", "", fmt.Errorf("failed to parse container name")
 	}
 	containerName := containerNameMatches[1]
 
 	// Extract network name
 	networkNameRegex := regexp.MustCompile(networkNamePattern)
 	networkNameMatches := networkNameRegex.FindStringSubmatch(dockerCmd)
-	if len(networkNameMatches) < 2 {
-		return "", "", fmt.Errorf(Emoji, "failed to parse network name")
+	if len(networkNameMatches) < 3 {
+		return "", "", fmt.Errorf("failed to parse network name")
 	}
-	networkName := networkNameMatches[1]
+	networkName := networkNameMatches[2]
 
 	return containerName, networkName, nil
 }

@@ -36,7 +36,8 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type ProxySet struct {
-	IP               uint32
+	IP4              uint32
+	IP6              [4]uint32
 	Port             uint32
 	hook             *hooks.Hook
 	logger           *zap.Logger
@@ -142,22 +143,36 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
 		opt.Port = 16789
 	}
 
-	localIp, err := util.GetLocalIP()
+	//IPv4
+	localIp4, err := util.GetLocalIPv4()
 	if err != nil {
-		log.Fatalln(Emoji+"Failed to get the local Ip address", err)
+		log.Fatalln(Emoji+"Failed to get the local Ip4 address", err)
 	}
 
-	proxyAddr, ok := util.ConvertToIPV4(localIp)
+	proxyAddr4, ok := util.ConvertToIPV4(localIp4)
 	if !ok {
 		log.Fatalf(Emoji + "Failed to convert local Ip to IPV4")
 	}
+
+	//IPv6
+	// localIp6, err := util.GetLocalIPv6()
+	// if err != nil {
+	// 	log.Fatalln(Emoji+"Failed to get the local Ip6 address", err)
+	// }
+
+	// proxyAddr6, err := util.ConvertIPv6ToUint32Array(localIp6)
+	// if err != nil {
+	// 	log.Fatalf(Emoji + "Failed to convert local Ip to IPV6")
+	// }
+	proxyAddr6 := [4]uint32{0000, 0000, 0000, 0001}
 
 	//check if the user application is running inside docker container
 	dCmd, _ := util.IsDockerRelatedCommand(appCmd)
 
 	var proxySet = ProxySet{
 		Port:         opt.Port,
-		IP:           proxyAddr,
+		IP4:          proxyAddr4,
+		IP6:          proxyAddr6,
 		logger:       logger,
 		dockerAppCmd: dCmd,
 	}
@@ -175,7 +190,8 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
 		log.Fatalf(Emoji+"Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
 	}
 
-	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy complete Addr %v:%v", proxySet.IP, proxySet.Port))
+	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPv4:Port %v:%v", proxySet.IP4, proxySet.Port))
+	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPV6:Port Addr %v:%v", proxySet.IP6, proxySet.Port))
 	proxySet.logger.Info(Emoji + fmt.Sprintf("Proxy started at port:%v", proxySet.Port))
 
 	return &proxySet
@@ -291,37 +307,22 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 func (ps *ProxySet) startProxy() {
 
 	port := ps.Port
-	// proxyAddress := fmt.Sprint(ps.IP)
-	// Read the CA certificate and private key from files
-	// caCert, err := ioutil.ReadFile(caCertPath)
-	// if err != nil {
-	// 	log.Fatalf("Failed to read CA certificate: %v", err)
-	// }
 
-	// caKey, err := ioutil.ReadFile(caPrivateKeyPath)
-	// if err != nil {
-	// 	log.Fatalf("Failed to read CA private key: %v", err)
-	// }
-	// caPrivKey, err = helpers.ParsePrivateKeyPEM(caKey)
-	// if err != nil {
-	// 	log.Fatalf("Failed to parse CA private key: %v", err)
-	// }
-	// caCertParsed, err = helpers.ParseCertificatePEM(caCert)
-	// if err != nil {
-	// 	log.Fatalf("Failed to parse CA certificate: %v", err)
-	// }
+	proxyAddress4 := util.ToIP4AddressStr(ps.IP4)
+	ps.logger.Debug(Emoji, zap.Any("ProxyAddress4", proxyAddress4))
 
-	proxyAddress := util.ToIPAddressStr(ps.IP)
-	ps.logger.Debug(Emoji, zap.Any("ProxyAddress", proxyAddress))
+	proxyAddress6 := util.ToIPv6AddressStr(ps.IP6)
+	ps.logger.Debug(Emoji, zap.Any("ProxyAddress6", proxyAddress6))
 
-	listener, err := net.Listen("tcp", fmt.Sprintf(proxyAddress+":%v", port))
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", port))
 	if err != nil {
 		ps.logger.Error(Emoji+fmt.Sprintf("failed to start proxy on port:%v", port), zap.Error(err))
 		return
 	}
 	ps.Listener = listener
 
-	ps.logger.Debug(Emoji + fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(proxyAddress+":%v", port)))
+	ps.logger.Debug(Emoji + fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
+	ps.logger.Debug(Emoji+"Proxy will accept both ipv4 and ipv6 connections", zap.Any("Ipv4", proxyAddress4), zap.Any("Ipv6", proxyAddress6))
 
 	// TODO: integerate method For TLS connections
 	// config := &tls.Config{
@@ -349,7 +350,7 @@ func readableProxyAddress(ps *ProxySet) string {
 
 	if ps != nil {
 		port := ps.Port
-		proxyAddress := util.ToIPAddressStr(ps.IP)
+		proxyAddress := util.ToIP4AddressStr(ps.IP4)
 		return fmt.Sprintf(proxyAddress+":%v", port)
 	}
 	return ""
@@ -357,15 +358,15 @@ func readableProxyAddress(ps *ProxySet) string {
 
 func (ps *ProxySet) startDnsServer() {
 
-	proxyAddress := readableProxyAddress(ps)
-	ps.logger.Debug(Emoji, zap.Any("ProxyAddress in dns server", proxyAddress))
+	proxyAddress4 := readableProxyAddress(ps)
+	ps.logger.Debug(Emoji, zap.Any("ProxyAddress in dns server", proxyAddress4))
 
 	//TODO: Need to make it configurable
 	ps.DnsServerTimeout = 1 * time.Second
 
 	handler := ps
 	server := &dns.Server{
-		Addr:      proxyAddress,
+		Addr:      proxyAddress4,
 		Net:       "udp",
 		Handler:   handler,
 		UDPSize:   65535,
@@ -414,7 +415,7 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		// 		// If resolution failed, return a default A record with Proxy IP
 		// 		defaultAnswer := &dns.A{
 		// 			Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-		// 			A:   net.ParseIP(util.ToIPAddressStr(ps.IP)),
+		// 			A:   net.ParseIP(util.ToIP4AddressStr(ps.IP)),
 		// 		}
 		// 		answers = append(answers, defaultAnswer)
 		// 		fmt.Printf("\nSending our proxy ip address:%+v\n", answers)
@@ -432,11 +433,11 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
 
 			if answers == nil || len(answers) == 0 {
-				ps.logger.Debug(Emoji+"failed to resolve dns query hence sending proxy ip", zap.Any("proxy Ip", util.ToIPAddressStr(ps.IP)))
+				ps.logger.Debug(Emoji+"failed to resolve dns query hence sending proxy ip", zap.Any("proxy Ip", util.ToIP4AddressStr(ps.IP4)))
 				// If the resolution failed, return a default A record with Proxy IP
 				answers = []dns.RR{&dns.A{
 					Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-					A:   net.ParseIP(util.ToIPAddressStr(ps.IP)),
+					A:   net.ParseIP(util.ToIP4AddressStr(ps.IP4)),
 				}}
 			}
 
@@ -511,14 +512,6 @@ func isTLSHandshake(data []byte) bool {
 func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	fmt.Println(Emoji, "Handling TLS connection from", conn.RemoteAddr().String())
 	//Load the CA certificate and private key
-	// caCert, err := ioutil.ReadFile(caCertPath)
-	// if err != nil {
-	// 	log.Fatalf("Failed to read CA certificate: %v", err)
-	// }
-	// caKey, err := ioutil.ReadFile(caPrivateKeyPath)
-	// if err != nil {
-	// 	log.Fatalf("Failed to read CA private key: %v", err)
-	// }
 
 	var err error
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
@@ -588,7 +581,11 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		return
 	}
 
-	ps.logger.Debug(Emoji, zap.Any("DestIp", destInfo.DestIp), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
+	if destInfo.IpVersion == 4 {
+		ps.logger.Debug(Emoji, zap.Any("DestIp4", destInfo.DestIp4), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
+	} else if destInfo.IpVersion == 6 {
+		ps.logger.Debug(Emoji, zap.Any("DestIp6", destInfo.DestIp6), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
+	}
 
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
@@ -617,10 +614,14 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	// dst stores the connection with actual destination for the outgoing network call
-	var (
-		dst           net.Conn
-		actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(destInfo.DestIp), destInfo.DestPort)
-	)
+	var dst net.Conn
+	var actualAddress = ""
+	if destInfo.IpVersion == 4 {
+		actualAddress = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.DestIp4), destInfo.DestPort)
+	} else if destInfo.IpVersion == 6 {
+		actualAddress = fmt.Sprintf("%v:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
+	}
+
 	//Dialing for tls connection
 	if models.GetMode() != models.MODE_TEST {
 		// if isTLS {

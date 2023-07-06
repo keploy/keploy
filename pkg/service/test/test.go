@@ -44,8 +44,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	// fetch the recorded testcases with their mocks
 	ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
 
-
-	// Initiate the hooks 
+	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, t.logger)
 	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return false
@@ -58,7 +57,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	ps.SetHook(loadedHooks)
 
 	//Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP, ps.Port); err != nil {
+	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return false
 	}
 

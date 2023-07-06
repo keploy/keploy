@@ -25,7 +25,7 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer
 
 	ys := yaml.NewYamlStore(tcsPath, mockPath, r.logger)
 
-	// Initiate the hooks 
+	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, r.logger)
 	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return
@@ -38,7 +38,7 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer
 	ps.SetHook(loadedHooks)
 
 	//Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP, ps.Port); err != nil {
+	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
 	}
 
