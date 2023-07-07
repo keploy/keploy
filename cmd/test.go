@@ -41,8 +41,8 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 			}
 			path += "/Keploy"
-			tcsPath := path + "/tests"
-			mockPath := path + "/mocks"
+			// tcsPath := path + "/tests"
+			// mockPath := path + "/mocks"
 
 			testReportPath, err := os.Getwd()
 			if err != nil {
@@ -74,7 +74,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
 			}
 
-			t.tester.Test(tcsPath, mockPath, testReportPath, appCmd, appContainer, networkName, delay)
+			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay)
 		},
 	}
 

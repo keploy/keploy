@@ -38,6 +38,7 @@ func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
 		h.AppendDeps(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
+		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
 	case models.MODE_TEST:
 		decodeOutgoingHttp(requestBuffer, clientConn, destConn, h, logger)
 	default:
@@ -199,7 +200,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 
 	return &models.Mock{
 		Version: models.V1Beta2,
-		Name:    "",
+		Name:    "mocks",
 		Kind:    models.HTTP,
 		Spec: models.MockSpec{
 			Metadata: meta,

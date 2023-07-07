@@ -36,10 +36,11 @@ type Hook struct {
 	keployModeMap    *ebpf.Map
 	keployPid        *ebpf.Map
 
-	db            platform.TestCaseDB
+	platform.TestCaseDB
 	logger        *zap.Logger
 	proxyPortList []uint32
 	deps          []*models.Mock
+	path          string
 	mu            *sync.Mutex
 	respChannel   chan *models.HttpResp
 	mutex         sync.RWMutex
@@ -67,11 +68,13 @@ type Hook struct {
 	objects    bpfObjects
 }
 
-func NewHook(db platform.TestCaseDB, logger *zap.Logger) *Hook {
+func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 	return &Hook{
-		logger:      logger,
-		db:          db,
+		logger: logger,
+		// db:          db,
+		TestCaseDB:  db,
 		mu:          &sync.Mutex{},
+		path:        path,
 		respChannel: make(chan *models.HttpResp),
 	}
 }
@@ -83,11 +86,15 @@ func (h *Hook) GetDepsSize() int {
 	return size
 }
 
-func (h *Hook) AppendDeps(m *models.Mock) {
+func (h *Hook) AppendDeps(m *models.Mock) error {
 	h.mu.Lock()
-	h.deps = append(h.deps, m)
-	h.mu.Unlock()
-
+	defer h.mu.Unlock()
+	// h.deps = append(h.deps, m)
+	err := h.TestCaseDB.WriteMock(h.path, m)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 func (h *Hook) SetDeps(m []*models.Mock) {
 	h.mu.Lock()
@@ -256,9 +263,9 @@ func (h *Hook) Stop(forceStop bool) {
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		err := h.userAppCmd.Process.Kill()
 		if err != nil {
-			h.logger.Error(Emoji+"failed to stop user application",zap.Error(err))
-		}else{
-			h.logger.Info(Emoji+"User application stopped successfully...")
+			h.logger.Error(Emoji+"failed to stop user application", zap.Error(err))
+		} else {
+			h.logger.Info(Emoji + "User application stopped successfully...")
 		}
 	}
 
@@ -330,7 +337,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	connectionFactory := connection.NewFactory(time.Minute, h.respChannel, h.logger)
 	go func() {
 		for {
-			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps)
+			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB, h.GetDeps, h.ResetDeps)
 			time.Sleep(1 * time.Second)
 		}
 	}()

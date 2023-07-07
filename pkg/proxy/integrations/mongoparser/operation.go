@@ -49,6 +49,7 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 		ResponseTo: responseTo,
 		Opcode:     wiremessage.OpCode(opCode),
 	}
+	fmt.Println("\n\n the mongo msg header: ", messageHeader, "\n ")
 	if !ok || int(length) > wmLength {
 		return nil, messageHeader, &models.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
 	}
@@ -61,8 +62,11 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 	// var err error
 	switch opCode {
 	case wiremessage.OpQuery:
+		fmt.Println("the opcode matche query. msgheader opcode: ", opCode, "the opcode for query: ", wiremessage.OpQuery)
 		op, err = decodeQuery(reqID, wmBody)
-
+		if err != nil {
+			return nil, messageHeader, mongoMsg, err
+		}
 		jsonBytes, err := bson.MarshalExtJSON(op.(*opQuery).query, true, false)
 		if err != nil {
 			return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
@@ -82,7 +86,12 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
+		fmt.Println("the opcode matche msg. msgheader opcode: ", opCode, "the opcode for msg: ", wiremessage.OpMsg)
+
 		op, err = decodeMsg(reqID, wmBody)
+		if err != nil {
+			return nil, messageHeader, mongoMsg, err
+		}
 		var sections []string
 		for _, section := range op.(*opMsg).sections {
 			sections = append(sections, section.String())
@@ -103,6 +112,9 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 		}
 	case wiremessage.OpReply:
 		op, err = decodeReply(reqID, wmBody)
+		if err != nil {
+			return nil, messageHeader, mongoMsg, err
+		}
 		replyDocs := []string{}
 		for _, v := range op.(*opReply).documents {
 			// replyDocs = append(replyDocs, v.String())
@@ -144,6 +156,7 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 	if err != nil {
 		return nil, messageHeader, mongoMsg, err
 	}
+	fmt.Println("the decoded string for the wiremessage: ", op.String())
 	return op, messageHeader, mongoMsg, nil
 }
 

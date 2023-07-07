@@ -35,19 +35,22 @@ func NewTester(logger *zap.Logger) Tester {
 }
 
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
-func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
+// func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
+func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
 	models.SetMode(models.MODE_TEST)
 
 	// println("called Test()")
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
-	ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
+	// ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
+	ys := yaml.NewYamlStore(t.logger)
+
 	// start the proxies
 	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	// loadedHooks := hooks.NewHook(ps.PortList, ys, t.logger)
-	loadedHooks := hooks.NewHook(ys, t.logger)
+	loadedHooks := hooks.NewHook(path, ys, t.logger)
 	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return false
 	}
@@ -68,10 +71,11 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	loadedHooks.EnablePidFilter()
 	ps.FilterPid = true
 
-	tcs, err := ys.Read(nil)
+	tcs, mocks, err := ys.Read(path, nil)
 	if err != nil {
 		return false
 	}
+	loadedHooks.SetDeps(mocks)
 
 	// testReport stores the result of all testruns
 	testReport := &models.TestReport{
@@ -190,8 +194,9 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 					ProtoMinor:    tc.HttpResp.ProtoMinor,
 				},
 				// Mocks:        httpSpec.Mocks,
-				TestCasePath: tcsPath,
-				MockPath:     mockPath,
+				// TestCasePath: tcsPath,
+				TestCasePath: path,
+				// MockPath:     mockPath,
 				// Noise:        httpSpec.Assertions["noise"],
 				Noise:  tc.Noise,
 				Result: *testResult,

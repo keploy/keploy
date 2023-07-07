@@ -40,7 +40,7 @@ func NewFactory(inactivityThreshold time.Duration, respChannel chan *models.Http
 }
 
 // func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
-func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
+func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
 
 	trackersToDelete := make(map[structs.ConnID]struct{})
 	for connID, tracker := range factory.connections {
@@ -64,10 +64,10 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 			switch models.GetMode() {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
-				capture(db, parsedHttpReq, parsedHttpRes, getDeps, factory.logger)
+				capture(path, db, parsedHttpReq, parsedHttpRes, getDeps, factory.logger)
 				// fmt.Println("\nbefore reseting the deps array: ", getDeps())
 
-				resetDeps()
+				// resetDeps()
 				// fmt.Println("after reseting the deps array: ", getDeps(), "\n ")
 			case models.MODE_TEST:
 				respBody, err := ioutil.ReadAll(parsedHttpRes.Body)
@@ -75,7 +75,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 					factory.logger.Error(Emoji+"failed to read the http response body", zap.Error(err), zap.Any("mode", models.MODE_TEST))
 					return
 				}
-				resetDeps()
+				// resetDeps()
 				factory.respChannel <- &models.HttpResp{
 					StatusCode: parsedHttpRes.StatusCode,
 					Header:     pkg.ToYamlHttpHeader(parsedHttpRes.Header),
@@ -109,7 +109,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, getDeps func() []*models.Mock, logger *zap.Logger) {
+func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.Response, getDeps func() []*models.Mock, logger *zap.Logger) {
 	// meta := map[string]string{
 	// 	"method": req.Method,
 	// }
@@ -182,7 +182,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 	// write yaml
 
 	// err = db.Insert(httpMock, getDeps())
-	err = db.Insert(&models.TestCase{
+	err = db.WriteTestcase(path, &models.TestCase{
 		Version: models.V1Beta2,
 		Name:    "",
 		Kind:    models.HTTP,

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -570,7 +571,7 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
-	
+
 	ps.logger.Debug(Emoji, zap.Any("Filtering in Proxy", ps.FilterPid))
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
@@ -608,7 +609,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			return
 		}
 	}
+	connEstablishedAt := time.Now()
 	buffer, err := util.ReadBytes(conn)
+	readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 		return
@@ -620,7 +623,10 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(destInfo.DestIp), destInfo.DestPort)
 	)
 	//Dialing for tls connection
+	connId := 0
 	if models.GetMode() != models.MODE_TEST {
+		rand.Seed(time.Now().UnixNano())
+		connId = rand.Intn(101)
 		if isTLS {
 			ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
 			config := &tls.Config{
@@ -693,7 +699,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			// var deps []*models.Mock = ps.hook.GetDeps()
 			// fmt.Println("before mongo egress call, deps array: ", deps)
 
-			mongoparser.ProcessOutgoingMongo(buffer, conn, dst, ps.hook, ps.logger)
+			mongoparser.ProcessOutgoingMongo(connId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
 			// fmt.Println("after mongo egress call, deps array: ", deps)
 
 			// ps.hook.SetDeps(deps)
