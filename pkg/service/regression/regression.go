@@ -38,6 +38,7 @@ func New(tdb models.TestCaseDB, rdb TestRunDB, testReportFS TestReportFS, adb te
 		testReportFS: testReportFS,
 		mockFS:       mFS,
 		testExport:   TestExport,
+		mutex:        sync.Mutex{},
 	}
 }
 
@@ -53,6 +54,7 @@ type Regression struct {
 	mockFS       models.MockFS
 	testExport   bool
 	log          *zap.Logger
+	mutex        sync.Mutex
 }
 
 func (r *Regression) startTestRun(ctx context.Context, runId, testCasePath, mockPath, testReportPath string, totalTcs int) error {
@@ -120,6 +122,7 @@ func (r *Regression) stopTestRun(ctx context.Context, runId, testReportPath stri
 	return nil
 }
 
+// var delay = 0 // We need a delay to dont mess the entire output
 func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp models.HttpResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
 		tc  models.TestCase
@@ -194,6 +197,7 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	cleanExp, cleanAct := "", ""
 
 	if !pkg.Contains(tc.Noise, "body") && bodyType == models.BodyTypeJSON {
+
 		cleanExp, cleanAct, pass, err = pkg.Match(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 		if err != nil {
 			return false, res, &tc, err
@@ -207,7 +211,6 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 	res.BodyResult[0].Normal = pass
 
 	if !pkg.CompareHeaders(tc.HttpResp.Header, grpcMock.ToHttpHeader(grpcMock.ToMockHeader(resp.Header)), hRes, headerNoise) {
-
 		pass = false
 	}
 
@@ -218,23 +221,27 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 
 		pass = false
 	}
+
 	if !pass {
+		logDiffs := NewDiffsPrinter(tc.ID)
+
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
 		var logs = ""
 
-		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n"+
-			"Test Result:\n"+
-			"\tInput Http Request: %+v\n\n"+
-			"\tExpected Response: "+
-			"%+v\n\n"+"\tActual Response: "+
-			"%+v\n\n"+"DIFF: \n", tc.ID, tc.HttpReq, tc.HttpResp, resp)
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		// "Test Result:\n"+
+		// "\tInput Http Request: %+v\n\n"+
+		// "\tExpected Response: "+
+		// "%+v\n\n"+"\tActual Response: "+
+		// , tc.ID)
 
+		// ------------ DIFFS RELATED CODE -----------
 		if !res.StatusCode.Normal {
-			logs += logger.Sprintf("\tExpected StatusCode: %s"+"\n\tActual StatusCode: %s\n\n", res.StatusCode.Expected, res.StatusCode.Actual)
-
+			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
 		}
+
 		var (
 			actualHeader   = map[string][]string{}
 			expectedHeader = map[string][]string{}
@@ -250,21 +257,14 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 		}
 
 		if !unmatched {
-			logs += "\t Response Headers: {\n"
 			for i, j := range expectedHeader {
-				logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", i, fmt.Sprintf("%v", j), fmt.Sprintf("%v", actualHeader[i]))
+				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), headerNoise)
 			}
-			logs += "\t}\n"
 		}
-		// TODO: cleanup the logging related code. this is a mess
-		if !res.BodyResult[0].Normal {
-			logs += "\tResponse body: {\n"
-			if json.Valid([]byte(resp.Body)) {
-				// compute and log body's json diff
-				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
-				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
-				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 
+		if !res.BodyResult[0].Normal {
+
+			if json.Valid([]byte(resp.Body)) {
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
 					r.log.Warn("failed to compute json diff", zap.Error(err))
@@ -274,33 +274,39 @@ func (r *Regression) test(ctx context.Context, cid, runId, id, app string, resp 
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
-				}
-				logs += "\t}\n"
-			} else {
-				// just log both the bodies as plain text without really computing the diff
-				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.HttpResp.Body, resp.Body)
+					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 
+				}
+			} else {
+				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(resp.Body), bodyNoise)
 			}
 		}
-		logs += "--------------------------------------------------------------------\n\n"
+		r.mutex.Lock()
 		logger.Printf(logs)
+		// time.Sleep(time.Second * time.Duration(delay)) // race condition bugging and mixing outputs
+		logDiffs.Render()
+		r.mutex.Unlock()
+
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		r.mutex.Lock()
 		logger.Printf(log2)
+		r.mutex.Unlock()
 
 	}
+
 	return pass, res, &tc, nil
 }
 
 func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, resp models.GrpcResp) (bool, *models.Result, *models.TestCase, error) {
 	var (
-		tc  models.TestCase
-		err error
+		tc    models.TestCase
+		err   error
+		mutex sync.Mutex
 	)
 	switch r.testExport {
 	case false:
@@ -385,6 +391,7 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 	}
 
 	if !pass {
+		logDiff := NewDiffsPrinter(tc.ID)
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.FailingColorScheme)
@@ -395,16 +402,13 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 			"\tInput Grpc Request: %+v\n\n"+
 			"\tExpected Response: "+
 			"%+v\n\n"+"\tActual Response: "+
-			"%+v\n\n"+"DIFF: \n", tc.ID, tc.GrpcReq, tc.GrpcResp, resp)
+			"%+v\n\n", tc.ID, tc.GrpcReq, tc.GrpcResp, resp)
 
-		// TODO: cleanup the logging related code. this is a mess
+		// ------------ DIFFS RELATED CODE --------------
+
 		if !res.BodyResult[0].Normal {
-			logs += "\tResponse body: {\n"
+
 			if json.Valid([]byte(resp.Body)) {
-				// compute and log body's json diff
-				//diff := cmp.Diff(tc.HttpResp.Body, resp.Body)
-				//logs += logger.Sprintf("\t\t%s\n\t\t}\n", diff)
-				//expected, actual := pkg.RemoveNoise(tc.HttpResp.Body, resp.Body, bodyNoise, r.log)
 
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
@@ -415,28 +419,30 @@ func (r *Regression) testGrpc(ctx context.Context, cid, runId, id, app string, r
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					logs += logger.Sprintf("\t\t%s"+": {\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", keyStr, op.OldValue, op.Value)
+					logDiff.PushBodyDiff(keyStr, fmt.Sprint(op.OldValue), bodyNoise)
 				}
-				logs += "\t}\n"
 			} else {
-				// just log both the bodies as plain text without really computing the diff
-				logs += logger.Sprintf("{\n\t\t\tExpected value: %+v"+"\n\t\t\tActual value: %+v\n\t\t}\n", tc.GrpcResp, resp)
-
+				logDiff.PushBodyDiff(fmt.Sprint(tc.GrpcResp), fmt.Sprint(resp), bodyNoise)
 			}
+
 		}
+
 		if !res.BodyResult[1].Normal {
-			logs += "\tResponse error: {\n"
-			logs += logger.Sprintf("\t\tExpected value: %+v"+"\n\t\tActual value: %+v\n\t}\n", tc.GrpcResp.Err, resp.Err)
+			logDiff.PushBodyDiff(fmt.Sprint(tc.GrpcResp.Err), fmt.Sprint(resp.Err), bodyNoise)
 		}
-		logs += "--------------------------------------------------------------------\n\n"
+		mutex.Lock()
 		logger.Printf(logs)
+		logDiff.Render()
+		mutex.Unlock()
 	} else {
 		logger := pp.New()
 		logger.WithLineInfo = false
 		logger.SetColorScheme(models.PassingColorScheme)
 		var log2 = ""
 		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.ID)
+		mutex.Lock()
 		logger.Printf(log2)
+		mutex.Unlock()
 
 	}
 	return pass, res, &tc, nil
@@ -929,7 +935,7 @@ func (r *Regression) PutTest(ctx context.Context, run models.TestRun, testExport
 			r.tele.MockTestRun(success, failure, ctx)
 		} else {
 			// sending Testrun Telemetry event to Telemetry service.
-			r.tele.Testrun(success, failure,ctx)
+			r.tele.Testrun(success, failure, ctx)
 		}
 
 		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", run.ID, total, success, failure)
