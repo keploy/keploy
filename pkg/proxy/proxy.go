@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	"go.keploy.io/server/pkg/proxy/integrations/redisparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
@@ -30,8 +31,8 @@ const (
 type ProxySet struct {
 	// PortList is the list of ports on which the keploy proxies are running
 	PortList []uint32
-	hook	*hooks.Hook
-	logger *zap.Logger
+	hook     *hooks.Hook
+	logger   *zap.Logger
 }
 
 type Conn struct {
@@ -41,6 +42,7 @@ type Conn struct {
 	// ReadComplete bool
 	// pointer      int
 }
+
 func (c *Conn) Read(b []byte) (n int, err error) {
 	return c.r.Read(b)
 
@@ -69,7 +71,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 
 	// return n, nil
 }
-func (ps *ProxySet) SetHook(hook	*hooks.Hook)  {
+func (ps *ProxySet) SetHook(hook *hooks.Hook) {
 	ps.hook = hook
 }
 
@@ -88,6 +90,7 @@ func getDistroInfo() string {
 	}
 	return ""
 }
+
 // BootProxies starts proxy servers on the idle local ports and returns the list of ports on which proxies are running.
 //
 // "startingPort" represents the initial port number from which the system sequentially searches for available or idle ports.. Default: 5000
@@ -118,7 +121,7 @@ func BootProxies(logger *zap.Logger, opt Option) *ProxySet {
 
 	var proxySet = ProxySet{
 		PortList: []uint32{},
-		logger: logger,
+		logger:   logger,
 	}
 
 	port := opt.StartingPort
@@ -148,42 +151,42 @@ func isPortAvailable(port uint32) bool {
 }
 
 const (
-	caCertPath       = "pkg/proxy/ca.crt"                           // Your CA certificate file path
-	caPrivateKeyPath = "pkg/proxy/ca.key"                           // Your CA private key file path
+	caCertPath       = "pkg/proxy/ca.crt" // Your CA certificate file path
+	caPrivateKeyPath = "pkg/proxy/ca.key" // Your CA private key file path
 )
 
 var caStorePath = map[string]string{
-	"Ubuntu":       "/usr/local/share/ca-certificates/",
-	"Debian":       "/usr/local/share/ca-certificates/",
-	"CentOS":       "/etc/pki/ca-trust/source/anchors/",
-	"Red Hat":      "/etc/pki/ca-trust/source/anchors/",
-	"Fedora":       "/etc/pki/ca-trust/source/anchors/",
-	"Arch ":   "/etc/ca-certificates/trust-source/anchors/",
-	"openSUSE":     "/etc/pki/trust/anchors/",
-	"SUSE ":   "/etc/pki/trust/anchors/",
-	"Oracle ": "/etc/pki/ca-trust/source/anchors/",
-	"Alpine ": "/usr/local/share/ca-certificates/",
-	"Gentoo ": "/usr/local/share/ca-certificates/",
-	"FreeBSD":      "/usr/local/share/certs/",
-	"OpenBSD":      "/etc/ssl/certs/",
-	"macOS":        "/usr/local/share/ca-certificates/",
+	"Ubuntu":   "/usr/local/share/ca-certificates/",
+	"Debian":   "/usr/local/share/ca-certificates/",
+	"CentOS":   "/etc/pki/ca-trust/source/anchors/",
+	"Red Hat":  "/etc/pki/ca-trust/source/anchors/",
+	"Fedora":   "/etc/pki/ca-trust/source/anchors/",
+	"Arch ":    "/etc/ca-certificates/trust-source/anchors/",
+	"openSUSE": "/etc/pki/trust/anchors/",
+	"SUSE ":    "/etc/pki/trust/anchors/",
+	"Oracle ":  "/etc/pki/ca-trust/source/anchors/",
+	"Alpine ":  "/usr/local/share/ca-certificates/",
+	"Gentoo ":  "/usr/local/share/ca-certificates/",
+	"FreeBSD":  "/usr/local/share/certs/",
+	"OpenBSD":  "/etc/ssl/certs/",
+	"macOS":    "/usr/local/share/ca-certificates/",
 }
 
 var caStoreUpdateCmd = map[string]string{
-	"Ubuntu":       "update-ca-certificates",
-	"Debian":       "update-ca-certificates",
-	"CentOS":       "update-ca-trust",
-	"Red Hat":      "update-ca-trust",
-	"Fedora":       "update-ca-trust",
-	"Arch ":   "trust extract-compat",
-	"openSUSE":     "update-ca-certificates",
-	"SUSE ":   "update-ca-certificates",
-	"Oracle ": "update-ca-trust",
-	"Alpine ": "update-ca-certificates",
-	"Gentoo ": "update-ca-certificates",
-	"FreeBSD":      "trust extract-compat",
-	"OpenBSD":      "trust extract-compat",
-	"macOS":        "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain",
+	"Ubuntu":   "update-ca-certificates",
+	"Debian":   "update-ca-certificates",
+	"CentOS":   "update-ca-trust",
+	"Red Hat":  "update-ca-trust",
+	"Fedora":   "update-ca-trust",
+	"Arch ":    "trust extract-compat",
+	"openSUSE": "update-ca-certificates",
+	"SUSE ":    "update-ca-certificates",
+	"Oracle ":  "update-ca-trust",
+	"Alpine ":  "update-ca-certificates",
+	"Gentoo ":  "update-ca-certificates",
+	"FreeBSD":  "trust extract-compat",
+	"OpenBSD":  "trust extract-compat",
+	"macOS":    "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain",
 }
 
 type certKeyPair struct {
@@ -267,7 +270,6 @@ func (ps *ProxySet) startProxy(port uint32) {
 	}
 	defer listener.Close()
 
-
 	ps.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(proxyAddress+":%v", port)))
 
 	// TODO: integerate method For TLS connections
@@ -287,14 +289,14 @@ func (ps *ProxySet) startProxy(port uint32) {
 	}
 }
 
-func isTLSHandshake (data []byte) bool {
+func isTLSHandshake(data []byte) bool {
 	if len(data) < 5 {
 		return false
 	}
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
-func handleTLSConnection(conn net.Conn)(net.Conn, error){
+func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	fmt.Println("Handling TLS connection from", conn.RemoteAddr().String())
 	//Load the CA certificate and private key
 	caCert, err := ioutil.ReadFile(caCertPath)
@@ -313,7 +315,6 @@ func handleTLSConnection(conn net.Conn)(net.Conn, error){
 	if err != nil {
 		log.Fatalf("Failed to parse CA certificate: %v", err)
 	}
-
 
 	// Create a TLS configuration
 	config := &tls.Config{
@@ -345,12 +346,13 @@ func handleTLSConnection(conn net.Conn)(net.Conn, error){
 	// tlsConn.Close()
 	return tlsConn, nil
 }
+
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	var (
 		proxyState *hooks.PortState
-		indx    = -1
-		err error
+		indx       = -1
+		err        error
 	)
 
 	for i := 0; i < len(ps.PortList); i++ {
@@ -359,7 +361,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 	ps.logger.Error(fmt.Sprintf("failed to fetch the state of proxy running at port: %v", port), zap.Error(err))
 		// 	break
 		// }
-		proxyState, err =  ps.hook.GetProxyState(uint32(i))
+		proxyState, err = ps.hook.GetProxyState(uint32(i))
 		if err != nil {
 			ps.logger.Error("failed to lookup the proxy state from map", zap.Error(err))
 			break
@@ -375,66 +377,78 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		ps.logger.Error("failed to fetch the state of proxy", zap.Any("port", port))
 		return
 	}
-	reader := bufio.NewReader(conn)
-	initialData := make([]byte, 5)
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
-	isTLS := isTLSHandshake(testBuffer)
-	if isTLS {
-		connWrapped := Conn{r: *reader, Conn: conn}
-		conn, err = handleTLSConnection(&connWrapped)
-		if err != nil {
-			ps.logger.Error("failed to handle TLS connection", zap.Error(err))
-			return
-		}
-	}
-	buffer, err := util.ReadBytes(conn)
-	if err != nil {
-		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
+	if proxyState.Dest_port == 6379 {
+		var (
+			dst           net.Conn
+			actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(proxyState.Dest_ip), proxyState.Dest_port)
+		)
 
-	// dst stores the connection with actual destination for the outgoing network call
-	var (
-		dst net.Conn
-		actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(proxyState.Dest_ip), proxyState.Dest_port)
-	)
-	//Dialing for tls connection
-	if isTLS {
-		fmt.Println("isTLS: ",isTLS)
-		config := &tls.Config{
-			InsecureSkipVerify: false,
-			ServerName: destinationUrl,
-		}
-		dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, proxyState.Dest_port), config)
-		if err != nil {
-			ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
-			return
-		}
-	}else{
 		dst, err = net.Dial("tcp", actualAddress)
+		mock := redisparser.CaptureRedisMessage(conn, dst, ps.logger)
+		ps.hook.AppendDeps(mock)
+	} else {
+		reader := bufio.NewReader(conn)
+		initialData := make([]byte, 5)
+		testBuffer, err := reader.Peek(len(initialData))
 		if err != nil {
-			ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
+			ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 			return
 		}
-	}
-
-
-	switch  {
-	case httpparser.IsOutgoingHTTP(buffer):
-		// capture the otutgoing http text messages]
-		ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-	case mongoparser.IsOutgoingMongo(buffer):
-		deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-		for _, v := range deps {
-			ps.hook.AppendDeps(v)
+		isTLS := isTLSHandshake(testBuffer)
+		if isTLS {
+			connWrapped := Conn{r: *reader, Conn: conn}
+			conn, err = handleTLSConnection(&connWrapped)
+			if err != nil {
+				ps.logger.Error("failed to handle TLS connection", zap.Error(err))
+				return
+			}
 		}
-	default:
+		var buffer []byte
+		if !redisparser.IsOutgoingRedis(testBuffer) {
+			buffer, err = util.ReadBytes(conn)
+			if err != nil {
+				ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+				return
+			}
+		}
+		// dst stores the connection with actual destination for the outgoing network call
+		var (
+			dst           net.Conn
+			actualAddress = fmt.Sprintf("%v:%v", util.ToIPAddressStr(proxyState.Dest_ip), proxyState.Dest_port)
+		)
+		//Dialing for tls connection
+		if isTLS {
+			fmt.Println("isTLS: ", isTLS)
+			config := &tls.Config{
+				InsecureSkipVerify: false,
+				ServerName:         destinationUrl,
+			}
+			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, proxyState.Dest_port), config)
+			if err != nil {
+				ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		} else {
+			dst, err = net.Dial("tcp", actualAddress)
+			if err != nil {
+				ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		}
+
+		switch {
+		case httpparser.IsOutgoingHTTP(buffer):
+			// capture the otutgoing http text messages]
+			ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		case mongoparser.IsOutgoingMongo(buffer):
+			deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+			for _, v := range deps {
+				ps.hook.AppendDeps(v)
+			}
+		default:
+		}
 	}
 	// releases the occupied proxy
 	proxyState.Occupied = 0

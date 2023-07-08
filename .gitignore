@@ -42,3 +42,4 @@ test-reports
 #Ignore the c and header files
 *.c
 *.h
+Keploy-Tests-2

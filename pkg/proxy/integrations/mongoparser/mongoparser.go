@@ -14,6 +14,9 @@ import (
 // IsOutgoingMongo function determines if the outgoing network call is Mongo by comparing the
 // message format with that of a mongo wire message.
 func IsOutgoingMongo(buffer []byte) bool {
+	if len(buffer) < 4 {
+		return false
+	}
 	messageLength := binary.LittleEndian.Uint32(buffer[0:4])
 	return int(messageLength) == len(buffer)
 }
@@ -48,7 +51,7 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 		return nil
 	}
 
-	// 
+	//
 	opr1, _, _, err := Decode(msgRequestbuffer)
 	if err != nil {
 		// logger.Error("failed to decode t")
@@ -94,7 +97,6 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 			return nil
 		}
 
-		
 		replyDocs := []string{}
 		for _, v := range op.(*opReply).documents {
 			replyDocs = append(replyDocs, v.String())
@@ -108,8 +110,8 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 			Name:    "",
 		}
 		mongoSpec := &spec.MongoSpec{
-			Metadata: meta1,
-			RequestHeader: requestHeader,
+			Metadata:       meta1,
+			RequestHeader:  requestHeader,
 			ResponseHeader: responseHeader,
 		}
 		err = mongoSpec.Request.Encode(mongoRequest)
@@ -146,8 +148,8 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 			Name:    "",
 		}
 		mongoSpec = &spec.MongoSpec{
-			Metadata: meta,
-			RequestHeader: msgRequestHeader,
+			Metadata:       meta,
+			RequestHeader:  msgRequestHeader,
 			ResponseHeader: msgResponseHeader,
 		}
 		err = mongoSpec.Request.Encode(mongoMsgRequest)
@@ -164,7 +166,6 @@ func CaptureMongoMessage(requestBuffer []byte, clientConn, destConn net.Conn, lo
 		deps = append(deps, mongoMock)
 		return deps
 	}
-
 
 	return nil
 }
