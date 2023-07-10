@@ -37,7 +37,6 @@ func DecodeRedisResponse(response string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// Read additional two characters for trailing \r\n
 		_, err = reader.ReadString('\n')
 		if err != nil {
 			return "", err
@@ -62,7 +61,7 @@ func DecodeRedisRequest(request string) ([]string, error) {
 			fmt.Sscanf(element, "$%d", &length)
 			if i+1 < len(elements) {
 				result = append(result, elements[i+1])
-				i++ // Skip next item
+				i++
 			} else {
 				return nil, fmt.Errorf("invalid format")
 			}

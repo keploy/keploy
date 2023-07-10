@@ -10,13 +10,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// IsOutgoingRedis function determines if the outgoing network call is a Redis command.
 func IsOutgoingRedis(buffer []byte) bool {
 	command := string(buffer[:])
 	return strings.HasPrefix(command, "*") // All Redis commands start with '*'
 }
 
-// CaptureRedisMessage function parses the Redis commands and responses to capture outgoing network calls as mocks.
 func CaptureRedisMessage(clientConn, destConn net.Conn, logger *zap.Logger) *models.Mock {
 
 	handshakeRequest, err := util.ReadBytes(clientConn)
@@ -25,7 +23,7 @@ func CaptureRedisMessage(clientConn, destConn net.Conn, logger *zap.Logger) *mod
 		logger.Error("failed to read the command from client", zap.Error(err))
 		return nil
 	}
-	// write the command to the actual Redis server
+	// write the command to the Redis server
 	_, err = destConn.Write(handshakeRequest)
 	if err != nil {
 		logger.Error("failed to write command to the Redis server", zap.Error(err))
@@ -80,10 +78,8 @@ func CaptureRedisMessage(clientConn, destConn net.Conn, logger *zap.Logger) *mod
 
 	interactions := []spec.RedisInteraction{}
 
-	// Now we are assigning slices of strings to Request and Response
 	interactions = append(interactions, spec.RedisInteraction{Request: command, Response: response})
 
-	// store the command and response as mocks
 	meta := map[string]string{
 		"name": "Redis",
 		"type": models.RedisClient,
