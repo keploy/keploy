@@ -8,10 +8,6 @@ import (
 	"strings"
 )
 
-var (
-	separator = []byte("\r\n")
-)
-
 func DecodeRedisResponse(response string) (string, error) {
 	if len(response) == 0 {
 		return "", nil
