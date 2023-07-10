@@ -1,12 +1,11 @@
 package spec
 
-type RedisSpec struct {
-	Metadata map[string]string
-	Command  string
+type RedisInteraction struct {
+	Request  []string
 	Response string
 }
 
-func (r *RedisSpec) Encode(rs *RedisSpec) error {
-
-	return nil
+type RedisSpec struct {
+	Metadata     map[string]string
+	Interactions []RedisInteraction
 }

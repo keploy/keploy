@@ -67,14 +67,28 @@ func CaptureRedisMessage(clientConn, destConn net.Conn, logger *zap.Logger) *mod
 		return nil
 	}
 
-	command := string(requestBuffer)
-	response := string(respBuffer)
+	command, err := DecodeRedisRequest(string(requestBuffer))
+	if err != nil {
+		logger.Error("failed to decode the Redis request", zap.Error(err))
+		return nil
+	}
+	response, err := DecodeRedisResponse(string(respBuffer))
+	if err != nil {
+		logger.Error("failed to decode the Redis response", zap.Error(err))
+		return nil
+	}
+
+	interactions := []spec.RedisInteraction{}
+
+	// Now we are assigning slices of strings to Request and Response
+	interactions = append(interactions, spec.RedisInteraction{Request: command, Response: response})
 
 	// store the command and response as mocks
 	meta := map[string]string{
 		"name": "Redis",
 		"type": models.RedisClient,
 	}
+
 	redisMock := &models.Mock{
 		Version: models.V1Beta2,
 		Name:    "",
@@ -82,13 +96,14 @@ func CaptureRedisMessage(clientConn, destConn net.Conn, logger *zap.Logger) *mod
 	}
 
 	err = redisMock.Spec.Encode(&spec.RedisSpec{
-		Metadata: meta,
-		Command:  command,
-		Response: response,
+		Metadata:     meta,
+		Interactions: interactions,
 	})
 	if err != nil {
-		logger.Error("failed to encode the Redis messsage into the yaml")
+		logger.Error("failed to encode the Redis message into the yaml")
 		return nil
 	}
+
 	return redisMock
+
 }
