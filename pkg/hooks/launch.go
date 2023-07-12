@@ -130,7 +130,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 
 		pids = appPids
-
+		println("Pid of application:",pids[0])
 		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
 
@@ -178,7 +178,7 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file
 func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{"docker ", "docker-compose "}
+	dockerCommandPatterns := []string{"docker ", "docker-compose ","sudo docker ", "sudo docker-compose "}
 	for _, pattern := range dockerCommandPatterns {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
 			return true, "docker"
@@ -199,23 +199,23 @@ func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
 func parseDockerCommand(dockerCmd string) (string, string, error) {
 	// Regular expression patterns
 	containerNamePattern := `--name\s+([^\s]+)`
-	networkNamePattern := `--network\s+([^\s]+)`
+	networkNamePattern := `(--network|--net)\s+([^\s]+)`
 
 	// Extract container name
 	containerNameRegex := regexp.MustCompile(containerNamePattern)
 	containerNameMatches := containerNameRegex.FindStringSubmatch(dockerCmd)
 	if len(containerNameMatches) < 2 {
-		return "", "", fmt.Errorf(Emoji, "failed to parse container name")
+		return "", "", fmt.Errorf("failed to parse container name")
 	}
 	containerName := containerNameMatches[1]
 
 	// Extract network name
 	networkNameRegex := regexp.MustCompile(networkNamePattern)
 	networkNameMatches := networkNameRegex.FindStringSubmatch(dockerCmd)
-	if len(networkNameMatches) < 2 {
-		return "", "", fmt.Errorf(Emoji, "failed to parse network name")
+	if len(networkNameMatches) < 3 {
+		return "", "", fmt.Errorf("failed to parse network name")
 	}
-	networkName := networkNameMatches[1]
+	networkName := networkNameMatches[2]
 
 	return containerName, networkName, nil
 }
@@ -454,8 +454,8 @@ func getCmdPid(commandName string) (int, error) {
 	}
 
 	pidStr := strings.TrimSpace(string(output))
-	pidStrings:= strings.Split(pidStr," ")
-	pidStr = pidStrings[0]
+	// pidStrings:= strings.Split(pidStr," ")
+	// pidStr = pidStrings[0]
 
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {

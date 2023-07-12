@@ -26,7 +26,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	ys := yaml.NewYamlStore(r.logger)
 	// start the proxies
-	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
+	// ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
 	dirName, err := ys.LastSessionIndex(path)
 	if err != nil {
 		r.logger.Error("failed to find the directroy name for the session", zap.Error(err))
@@ -39,11 +39,14 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 		return
 	}
 
+	// start the proxies
+	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
+
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)
 
 	//Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP, ps.Port); err != nil {
+	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
 	}
 	// time.

@@ -1,6 +1,8 @@
 package util
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -10,8 +12,8 @@ import (
 	"time"
 )
 
-// ToIPAddressStr converts the integer IP4 Address to the octet format
-func ToIPAddressStr(ip uint32) string {
+// ToIP4AddressStr converts the integer IP4 Address to the octet format
+func ToIP4AddressStr(ip uint32) string {
 	// convert the IP address to a 32-bit binary number
 	ipBinary := fmt.Sprintf("%032b", ip)
 	// fmt.Printf("This is the value of the ipBinary:%v and this is the value of the ip:%v", ipBinary, ip)
@@ -26,6 +28,21 @@ func ToIPAddressStr(ip uint32) string {
 	return fmt.Sprintf("%d.%d.%d.%d", firstByte, secondByte, thirdByte, fourthByte)
 }
 
+func ToIPv6AddressStr(ip [4]uint32) string {
+	// construct a byte slice
+	ipBytes := make([]byte, 16) // IPv6 address is 128 bits or 16 bytes long
+	for i := 0; i < 4; i++ {
+		// for each uint32, extract its four bytes and put them into the byte slice
+		ipBytes[i*4] = byte(ip[i] >> 24)
+		ipBytes[i*4+1] = byte(ip[i] >> 16)
+		ipBytes[i*4+2] = byte(ip[i] >> 8)
+		ipBytes[i*4+3] = byte(ip[i])
+	}
+	// net.IP is a byte slice, so it can be directly used to construct an IPv6 address
+	ipv6Addr := net.IP(ipBytes)
+	return ipv6Addr.String()
+}
+
 // ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
 func ReadBytes(reader io.Reader) ([]byte, error) {
@@ -38,7 +55,7 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 
 		// Read bytes from the Reader
 		n, err := reader.Read(buf)
-		fmt.Println("read bytes: ", n , ", err: ", err)
+		fmt.Println("read bytes: ", n, ", err: ", err)
 		if err != nil && err != io.EOF {
 			return nil, err
 		}
@@ -67,7 +84,7 @@ func ReadBytes1(reader io.Reader) ([]byte, string, error) {
 		// Read bytes from the Reader
 		n, err := reader.Read(buf)
 		// fmt.Println("read bytes: ", n , ", err: ", err)
-		logStr += fmt.Sprintln("read bytes: ", n , ", err: ", err)
+		logStr += fmt.Sprintln("read bytes: ", n, ", err: ", err)
 		if err != nil && err != io.EOF {
 			return nil, logStr, err
 		}
@@ -85,7 +102,7 @@ func ReadBytes1(reader io.Reader) ([]byte, string, error) {
 	return buffer, logStr, nil
 }
 
-func GetLocalIP() (net.IP, error) {
+func GetLocalIPv4() (net.IP, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
@@ -117,6 +134,43 @@ func ConvertToIPV4(ip net.IP) (uint32, bool) {
 	return uint32(ipv4[0])<<24 | uint32(ipv4[1])<<16 | uint32(ipv4[2])<<8 | uint32(ipv4[3]), true
 }
 
+func GetLocalIPv6() (net.IP, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() == nil && ipNet.IP.To16() != nil {
+				return ipNet.IP, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("No valid IPv6 address found")
+}
+
+func ConvertIPv6ToUint32Array(ip net.IP) ([4]uint32, error) {
+	ip = ip.To16()
+	if ip == nil {
+		return [4]uint32{}, errors.New("invalid IPv6 address")
+	}
+
+	return [4]uint32{
+		binary.BigEndian.Uint32(ip[0:4]),
+		binary.BigEndian.Uint32(ip[4:8]),
+		binary.BigEndian.Uint32(ip[8:12]),
+		binary.BigEndian.Uint32(ip[12:16]),
+	}, nil
+}
+
 func IPToDotDecimal(ip net.IP) string {
 	ipStr := ip.String()
 	if ip.To4() != nil {
@@ -127,7 +181,7 @@ func IPToDotDecimal(ip net.IP) string {
 
 func IsDockerRelatedCommand(cmd string) (bool, string) {
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{"docker ", "docker-compose "}
+	dockerCommandPatterns := []string{"docker ", "docker-compose ", "sudo docker ", "sudo docker-compose "}
 	for _, pattern := range dockerCommandPatterns {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
 			return true, "docker"

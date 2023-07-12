@@ -47,14 +47,20 @@ type Hook struct {
 	userAppCmd    *exec.Cmd
 
 	// ebpf objects and events
-	stopper    chan os.Signal
-	connect4   link.Link
-	connect6   link.Link
-	gp4        link.Link
-	udpp4      link.Link
-	tcppv4     link.Link
-	tcpv4      link.Link
-	tcpv4Ret   link.Link
+	stopper  chan os.Signal
+	connect4 link.Link
+	gp4      link.Link
+	bind     link.Link
+	udpp4    link.Link
+	tcppv4   link.Link
+	tcpv4    link.Link
+	tcpv4Ret link.Link
+	connect6 link.Link
+	gp6      link.Link
+	tcppv6   link.Link
+	tcpv6    link.Link
+	tcpv6Ret link.Link
+
 	accept     link.Link
 	acceptRet  link.Link
 	accept4    link.Link
@@ -155,9 +161,9 @@ func (h *Hook) EnablePidFilter() {
 }
 
 // This function sends the IP and Port of the running proxy in the eBPF program.
-func (h *Hook) SendProxyInfo(ip, port uint32) error {
+func (h *Hook) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
 	key := 0
-	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP: ip, Port: port}, ebpf.UpdateAny)
+	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP4: ip4, Ip6: ip6, Port: port}, ebpf.UpdateAny)
 	if err != nil {
 		h.logger.Error(Emoji+"failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 		return err
@@ -182,19 +188,21 @@ func (h *Hook) CleanProxyEntry(srcPort uint16) {
 	if err != nil {
 		h.logger.Error(Emoji+"no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
 	}
+	h.logger.Debug(Emoji+"successfully removed entry from redirect proxy map", zap.Any("(Key)/SourcePort", srcPort))
 }
 
 // // printing the whole map
 func (h *Hook) PrintRedirectProxyMap() {
 	println("------Redirect Proxy map-------")
+	h.logger.Debug(Emoji + "--------Redirect Proxy Map-------")
 	itr := h.redirectProxyMap.Iterate()
 	var key uint16
 	dest := structs.DestInfo{}
 
 	for itr.Next(&key, &dest) {
-		fmt.Printf("Redirect Proxy:  [key:%v] || [value:%v]", key, dest)
+		h.logger.Debug(Emoji + fmt.Sprintf("Redirect Proxy:  [key:%v] || [value:%v]\n", key, dest))
 	}
-	println("------Redirect Proxy map-------")
+	h.logger.Debug(Emoji + "--------Redirect Proxy Map-------")
 }
 
 func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
@@ -270,19 +278,28 @@ func (h *Hook) Stop(forceStop bool) {
 	}
 
 	// closing all events
+	//egress
+	h.bind.Close()
 	h.udpp4.Close()
+	//ipv4
+	h.connect4.Close()
+	h.gp4.Close()
 	h.tcppv4.Close()
 	h.tcpv4.Close()
 	h.tcpv4Ret.Close()
+	//ipv6
+	h.connect6.Close()
+	h.gp6.Close()
+	h.tcppv6.Close()
+	h.tcpv6.Close()
+	h.tcpv6Ret.Close()
+	//ingress
 	h.accept.Close()
 	h.acceptRet.Close()
 	h.accept4.Close()
 	h.accept4Ret.Close()
 	h.close.Close()
 	h.closeRet.Close()
-	h.connect4.Close()
-	h.connect6.Close()
-	h.gp4.Close()
 	h.read.Close()
 	h.readRet.Close()
 	h.write.Close()
@@ -343,6 +360,19 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	}()
 	// ------------ For Egress -------------
 
+	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening sys_bind kprobe: %s", err)
+	}
+	h.bind = bind
+
+	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening udp_pre_connect kprobe: %s", err)
+	}
+	h.udpp4 = udpp_c4
+
+	// FOR IPV4
 	tcpp_c4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
 	if err != nil {
 		log.Fatalf(Emoji, "opening tcp_v4_pre_connect kprobe: %s", err)
@@ -360,12 +390,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 		log.Fatalf(Emoji, "opening tcp_v4_connect kretprobe: %s", err)
 	}
 	h.tcpv4Ret = tcp_r_c4
-
-	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
-	if err != nil {
-		log.Fatalf(Emoji, "opening udp_pre_connect kprobe: %s", err)
-	}
-	h.udpp4 = udpp_c4
 
 	// Get the first-mounted cgroupv2 path.
 	cgroupPath, err := detectCgroupPath()
@@ -387,6 +411,39 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.connect4 = c4
 	// defer c4.Close()
 
+	gp4, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cgroupPath,
+		Attach:  ebpf.AttachCgroupInet4GetPeername,
+		Program: objs.K_getpeername4,
+	})
+
+	if err != nil {
+		h.logger.Error(Emoji+"failed to attach GetPeername4 cgroup hook", zap.Error(err))
+		return err
+	}
+	h.gp4 = gp4
+	// defer gp4.Close()
+
+	// FOR IPV6
+
+	tcpp_c6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening tcp_v6_pre_connect kprobe: %s", err)
+	}
+	h.tcppv6 = tcpp_c6
+
+	tcp_c6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening tcp_v6_connect kprobe: %s", err)
+	}
+	h.tcpv6 = tcp_c6
+
+	tcp_r_c6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
+	if err != nil {
+		log.Fatalf(Emoji, "opening tcp_v6_connect kretprobe: %s", err)
+	}
+	h.tcpv6Ret = tcp_r_c6
+
 	c6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
 		Attach:  ebpf.AttachCGroupInet6Connect,
@@ -400,17 +457,17 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.connect6 = c6
 	// defer c6.Close()
 
-	gp4, err := link.AttachCgroup(link.CgroupOptions{
+	gp6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
-		Attach:  ebpf.AttachCgroupInet4GetPeername,
-		Program: objs.K_getpeername4,
+		Attach:  ebpf.AttachCgroupInet6GetPeername,
+		Program: objs.K_getpeername6,
 	})
 
 	if err != nil {
-		h.logger.Error(Emoji+"failed to attach GetPeername cgroup hook", zap.Error(err))
+		h.logger.Error(Emoji+"failed to attach GetPeername6 cgroup hook", zap.Error(err))
 		return err
 	}
-	h.gp4 = gp4
+	h.gp6 = gp6
 	// defer gp4.Close()
 
 	// ------------ For Ingress using Kprobes --------------

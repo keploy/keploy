@@ -47,18 +47,22 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	ys := yaml.NewYamlStore(t.logger)
 
 	// start the proxies
-	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
+	// ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	// loadedHooks := hooks.NewHook(ps.PortList, ys, t.logger)
 	loadedHooks := hooks.NewHook(path, ys, t.logger)
 	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return false
 	}
+
+	// start the proxies
+	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
+
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
 
 	//Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP, ps.Port); err != nil {
+	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return false
 	}
 

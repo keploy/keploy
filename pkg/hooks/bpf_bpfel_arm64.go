@@ -57,18 +57,24 @@ type bpfProgramSpecs struct {
 	K_connect4                       *ebpf.ProgramSpec `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
+	K_getpeername6                   *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
+	SyscallProbeEntryBind            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
+	SyscallProbeEntryTcpV6Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v6_connect"`
+	SyscallProbeEntryTcpV6PreConnect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v6_pre_connect"`
+	SyscallProbeEntryUdpPreConnect   *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_udp_pre_connect"`
 	SyscallProbeEntryWrite           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_write"`
 	SyscallProbeRetAccept            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetRead              *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_read"`
 	SyscallProbeRetTcpV4Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v4_connect"`
+	SyscallProbeRetTcpV6Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
 }
 
@@ -88,6 +94,8 @@ type bpfMapSpecs struct {
 	GlobalNsPidInfoMap        *ebpf.MapSpec `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.MapSpec `ebpf:"inode_map"`
 	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
+	KeployNsPidInfoMap        *ebpf.MapSpec `ebpf:"keploy_nsPid_info_map"`
+	KeployPidMap              *ebpf.MapSpec `ebpf:"keploy_pid_map"`
 	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
@@ -127,6 +135,8 @@ type bpfMaps struct {
 	GlobalNsPidInfoMap        *ebpf.Map `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.Map `ebpf:"inode_map"`
 	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
+	KeployNsPidInfoMap        *ebpf.Map `ebpf:"keploy_nsPid_info_map"`
+	KeployPidMap              *ebpf.Map `ebpf:"keploy_pid_map"`
 	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
@@ -149,6 +159,8 @@ func (m *bpfMaps) Close() error {
 		m.GlobalNsPidInfoMap,
 		m.InodeMap,
 		m.KeployModeMap,
+		m.KeployNsPidInfoMap,
+		m.KeployPidMap,
 		m.ProxyInfoMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
@@ -165,18 +177,24 @@ type bpfPrograms struct {
 	K_connect4                       *ebpf.Program `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.Program `ebpf:"k_getpeername4"`
+	K_getpeername6                   *ebpf.Program `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
+	SyscallProbeEntryBind            *ebpf.Program `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
+	SyscallProbeEntryTcpV6Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v6_connect"`
+	SyscallProbeEntryTcpV6PreConnect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v6_pre_connect"`
+	SyscallProbeEntryUdpPreConnect   *ebpf.Program `ebpf:"syscall__probe_entry_udp_pre_connect"`
 	SyscallProbeEntryWrite           *ebpf.Program `ebpf:"syscall__probe_entry_write"`
 	SyscallProbeRetAccept            *ebpf.Program `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.Program `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.Program `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetRead              *ebpf.Program `ebpf:"syscall__probe_ret_read"`
 	SyscallProbeRetTcpV4Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v4_connect"`
+	SyscallProbeRetTcpV6Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.Program `ebpf:"syscall__probe_ret_write"`
 }
 
@@ -185,18 +203,24 @@ func (p *bpfPrograms) Close() error {
 		p.K_connect4,
 		p.K_connect6,
 		p.K_getpeername4,
+		p.K_getpeername6,
 		p.SyscallProbeEntryAccept,
 		p.SyscallProbeEntryAccept4,
+		p.SyscallProbeEntryBind,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
 		p.SyscallProbeEntryTcpV4Connect,
 		p.SyscallProbeEntryTcpV4PreConnect,
+		p.SyscallProbeEntryTcpV6Connect,
+		p.SyscallProbeEntryTcpV6PreConnect,
+		p.SyscallProbeEntryUdpPreConnect,
 		p.SyscallProbeEntryWrite,
 		p.SyscallProbeRetAccept,
 		p.SyscallProbeRetAccept4,
 		p.SyscallProbeRetClose,
 		p.SyscallProbeRetRead,
 		p.SyscallProbeRetTcpV4Connect,
+		p.SyscallProbeRetTcpV6Connect,
 		p.SyscallProbeRetWrite,
 	)
 }
