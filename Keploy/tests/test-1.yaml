@@ -1,32 +1,30 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-5
+name: test-1
 spec:
     metadata: {}
     req:
         method: POST
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8080/api/tutorials
+        url: http://localhost:8080/url
         header:
             Accept: '*/*'
-            Content-Length: "94"
+            Content-Length: "33"
             Content-Type: application/json
             User-Agent: curl/7.81.0
         body: |-
             {
-              "title": "New Tutorial",
-              "description": "This is a new tutorial",
-              "published": false
+              "url": "https://google.com"
             }
         body_type: ""
     resp:
-        status_code: 404
+        status_code: 200
         header:
-            Content-Length: "18"
-            Content-Type: text/plain
-            Date: Thu, 29 Jun 2023 06:43:05 GMT
-        body: 404 page not found
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 14 Jul 2023 08:51:03 GMT
+        body: '{"ts":1689324663185137223,"url":"http://localhost:8080/Lhr4BWAi"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -34,4 +32,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1688020985
+    created: 1689324663

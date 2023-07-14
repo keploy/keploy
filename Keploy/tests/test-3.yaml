@@ -7,22 +7,19 @@ spec:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8080/Lhr4BWAi
+        url: http://localhost:8080/Lhr4BWAii
         header:
             Accept: '*/*'
-            User-Agent: curl/7.74.0
+            User-Agent: curl/7.81.0
         body: ""
         body_type: ""
     resp:
-        status_code: 303
+        status_code: 404
         header:
-            Content-Length: "45"
-            Content-Type: text/html; charset=utf-8
-            Date: Thu, 22 Jun 2023 18:44:56 GMT
-            Location: https://google.com
-        body: |+
-            <a href="https://google.com">See Other</a>.
-
+            Content-Length: "25"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 14 Jul 2023 08:51:19 GMT
+        body: '{"error":"url not found"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -30,4 +27,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1687459496
+    created: 1689324680
