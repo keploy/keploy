@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/helpers"
@@ -26,14 +27,14 @@ import (
 	"github.com/cloudflare/cfssl/signer/local"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
-	"go.uber.org/zap"
-
-	"time"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -780,6 +781,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// for _, v := range deps {
 		// 	ps.hook.AppendDeps(v)
 		// }
+	case grpcparser.IsOutgoingGRPC(buffer):
+		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, ps.logger)
 	default:
 		// fmt.Println("into default desp mode, before passing")
 		err = callNext(buffer, conn, dst, ps.logger)
