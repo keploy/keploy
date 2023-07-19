@@ -53,6 +53,9 @@ func Encode(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc, []Netwo
 func encodeMocks(mocks []*models.Mock, logger *zap.Logger) ([]NetworkTrafficDoc, error) {
 	yamlMocks := []NetworkTrafficDoc{}
 	for _, m := range mocks {
+		if m == nil {
+			continue
+		}
 		yamlDoc := NetworkTrafficDoc{
 			Version: m.Version,
 			Kind:    m.Kind,

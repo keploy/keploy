@@ -376,7 +376,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, lo
 		// logger.Error("failed to decode t")
 		return nil
 	}
-
+	
 	// write the request message to mongo server
 	_, err = destConn.Write(msgRequestbuffer)
 	if err != nil {
@@ -452,7 +452,9 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, lo
 		// 	return nil
 		// }
 		// mongoMock.Spec.Encode(mongoSpec)
-		deps = append(deps, mongoMock)
+		if mongoMock != nil {
+			deps = append(deps, mongoMock)
+		}
 
 		meta := map[string]string{
 			"operation": opr1.String(),
@@ -498,7 +500,9 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, lo
 		// 	return nil
 		// }
 		// mongoMock.Spec.Encode(mongoSpec)
-		deps = append(deps, mongoMock)
+		if mongoMock != nil {
+			deps = append(deps, mongoMock)
+		}
 		return deps
 	}
 
