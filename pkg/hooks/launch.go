@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/client"
 	"go.uber.org/zap"
 )
@@ -31,6 +34,11 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	ok, cmd := h.IsDockerRelatedCmd(appCmd)
 	if ok {
 		h.logger.Debug(Emoji + "Running user application on Docker")
+
+		// to notify the kernel hooks that the user application command is related to Docker.
+		key := 0
+		value := true
+		h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
 
 		if cmd == "docker-compose" {
 			if len(appContainer) == 0 {
@@ -59,16 +67,48 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			appContainer = appContainerName
 		}
 
+		dockerClient = makeDockerClient()
 		errCh := make(chan error, 1)
 		go func() {
+			// listen for the "create container" event in order to send the inode of the container to the kernel
+			go func() {
+				// listen for the docker daemon events
+				messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{})
+
+				for {
+					select {
+					case err := <-errs:
+						if err != nil && err != context.Canceled {
+							h.logger.Error("failed to listen for the docker daemon events", zap.Error(err))
+						}
+						return
+					case e := <-messages:
+						// extract the inode number of the user application container after the container is created
+						if e.Type == events.ContainerEventType && e.Action == "create" {
+							containerPid := 0
+							for {
+								inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
+								if err != nil {
+									h.logger.Error("failed to inspect the target application container after it is created", zap.Error(err))
+									continue
+								}
+								if inspect.State.Pid != 0 {
+									containerPid = inspect.State.Pid
+									break
+								}
+							}
+							inode := getInodeNumber([15]int32{int32(containerPid)})
+							// send the inode of the container to ebpf hooks to filter the network traffic
+							h.SendNameSpaceId(0, inode)
+						}
+					}
+				}
+			}()
 			err := h.runApp(appCmd, ok)
 			errCh <- err
 		}()
 
-		h.logger.Debug(Emoji + "Waiting for any error from user application")
-		time.Sleep(time.Duration(Delay) * time.Second)
-		h.logger.Debug(Emoji + "After running user application on docker")
-
+	
 		// Check if there is an error in the channel without blocking
 		select {
 		// channel for only checking for error during this instant looks
@@ -82,23 +122,13 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			// No error received yet, continue with further flow
 		}
 
-		h.logger.Debug(Emoji + "Now setting app pids")
-
-		dockerClient = makeDockerClient()
-		nsPids, hostPids := getAppNameSpacePIDs(appContainer)
-
-		h.logger.Debug(Emoji + "Namespace PIDS of application:--->")
-		pids = nsPids
-		for i, v := range pids {
-			h.logger.Debug(Emoji+"NsPid", zap.Any("index", i), zap.Any("value", v))
-		}
-
-		inode := getInodeNumber(hostPids)
-		h.logger.Debug(Emoji+"Inode of user application container", zap.Any("Inode", inode))
-		h.SendNameSpaceId(0, inode)
-
 	} else { //Supports only linux
-		h.logger.Debug(Emoji + "Running user application on Linux")
+		h.logger.Debug(Emoji + "Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
+
+		// to notify the kernel hooks that the user application command is running in native linux.
+		key := 0
+		value := false
+		h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
 
 		errCh := make(chan error, 1)
 		go func() {
@@ -130,7 +160,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 
 		pids = appPids
-		println("Pid of application:",pids[0])
+		println("Pid of application:", pids[0])
 		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
 
@@ -178,7 +208,7 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file
 func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{"docker ", "docker-compose ","sudo docker ", "sudo docker-compose "}
+	dockerCommandPatterns := []string{"docker ", "docker-compose ", "sudo docker ", "sudo docker-compose "}
 	for _, pattern := range dockerCommandPatterns {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
 			return true, "docker"
@@ -456,8 +486,9 @@ func getCmdPid(commandName string) (int, error) {
 	pidStr := strings.TrimSpace(string(output))
 	// pidStrings:= strings.Split(pidStr," ")
 	// pidStr = pidStrings[0]
-
-	pid, err := strconv.Atoi(pidStr)
+	fmt.Println(Emoji, "Output of pidof", pidStr)
+	actualPidStr := strings.Split(pidStr, " ")[0]
+	pid, err := strconv.Atoi(actualPidStr)
 	if err != nil {
 		fmt.Errorf(Emoji, "failed to convert the process id [%v] from string to int", pidStr)
 		return 0, err
@@ -473,7 +504,8 @@ func getInodeNumber(pids [15]int32) uint64 {
 
 		f, err := os.Stat(filepath)
 		if err != nil {
-			log.Fatal(Emoji, "failed to get the inode number or namespace Id:", err)
+			fmt.Errorf("%v failed to get the inode number or namespace Id:", Emoji, err)
+			continue
 		}
 		// Dev := (f.Sys().(*syscall.Stat_t)).Dev
 		Ino := (f.Sys().(*syscall.Stat_t)).Ino

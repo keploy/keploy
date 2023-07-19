@@ -66,10 +66,6 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 		return false
 	}
 
-	// Enable Pid Filtering
-	loadedHooks.EnablePidFilter()
-	ps.FilterPid = true
-
 	tcs, err := ys.Read(nil)
 	if err != nil {
 		return false

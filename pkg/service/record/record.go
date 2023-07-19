@@ -48,8 +48,8 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer
 	}
 
 	// Enable Pid Filtering
-	loadedHooks.EnablePidFilter()
-	ps.FilterPid = true
+	// loadedHooks.EnablePidFilter()
+	// ps.FilterPid = true
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop(false)

@@ -31,7 +31,6 @@ type Hook struct {
 	proxyInfoMap     *ebpf.Map
 	appPidMap        *ebpf.Map
 	inodeMap         *ebpf.Map
-	filterMap        *ebpf.Map
 	redirectProxyMap *ebpf.Map
 	keployModeMap    *ebpf.Map
 	keployPid        *ebpf.Map
@@ -49,7 +48,6 @@ type Hook struct {
 	stopper  chan os.Signal
 	connect4 link.Link
 	gp4      link.Link
-	bind     link.Link
 	udpp4    link.Link
 	tcppv4   link.Link
 	tcpv4    link.Link
@@ -140,17 +138,6 @@ func (h *Hook) PutResp(resp *models.HttpResp) error {
 func (h *Hook) GetResp() *models.HttpResp {
 	resp := <-h.respChannel
 	return resp
-}
-
-// This function enables filtering of the processes using pid in the eBPF program.
-func (h *Hook) EnablePidFilter() {
-	key := 0
-	value := true
-	err := h.filterMap.Update(uint32(key), &value, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error(Emoji+"failed to enable pid filtering in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
-	}
-
 }
 
 // This function sends the IP and Port of the running proxy in the eBPF program.
@@ -272,7 +259,6 @@ func (h *Hook) Stop(forceStop bool) {
 
 	// closing all events
 	//egress
-	h.bind.Close()
 	h.udpp4.Close()
 	//ipv4
 	h.connect4.Close()
@@ -336,7 +322,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.proxyInfoMap = objs.ProxyInfoMap
 	h.appPidMap = objs.AppPidMap
 	h.inodeMap = objs.InodeMap
-	h.filterMap = objs.FilterMap
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
 	h.keployPid = objs.KeployPidMap
@@ -352,12 +337,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 		}
 	}()
 	// ------------ For Egress -------------
-
-	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
-	if err != nil {
-		log.Fatalf(Emoji, "opening sys_bind kprobe: %s", err)
-	}
-	h.bind = bind
 
 	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 	if err != nil {

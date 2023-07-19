@@ -129,7 +129,9 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 	mocks := getDeps()
 	mockIds := []string{}
 	for i, v := range mocks {
-		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
+		if v != nil {
+			mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
+		}
 	}
 
 	// err = db.Insert(httpMock, getDeps())
