@@ -60,7 +60,6 @@ type bpfProgramSpecs struct {
 	K_getpeername6                   *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryBind            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -90,7 +89,7 @@ type bpfMapSpecs struct {
 	ConnInfoMap               *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap            *ebpf.MapSpec `ebpf:"current_sock_map"`
 	DestInfoMap               *ebpf.MapSpec `ebpf:"dest_info_map"`
-	FilterMap                 *ebpf.MapSpec `ebpf:"filter_map"`
+	DockerCmdMap              *ebpf.MapSpec `ebpf:"docker_cmd_map"`
 	GlobalNsPidInfoMap        *ebpf.MapSpec `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.MapSpec `ebpf:"inode_map"`
 	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
@@ -102,6 +101,7 @@ type bpfMapSpecs struct {
 	SocketDataEventBufferHeap *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.MapSpec `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.MapSpec `ebpf:"socket_open_events"`
+	TaskStructMap             *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -131,7 +131,7 @@ type bpfMaps struct {
 	ConnInfoMap               *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap            *ebpf.Map `ebpf:"current_sock_map"`
 	DestInfoMap               *ebpf.Map `ebpf:"dest_info_map"`
-	FilterMap                 *ebpf.Map `ebpf:"filter_map"`
+	DockerCmdMap              *ebpf.Map `ebpf:"docker_cmd_map"`
 	GlobalNsPidInfoMap        *ebpf.Map `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.Map `ebpf:"inode_map"`
 	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
@@ -143,6 +143,7 @@ type bpfMaps struct {
 	SocketDataEventBufferHeap *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.Map `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.Map `ebpf:"socket_open_events"`
+	TaskStructMap             *ebpf.Map `ebpf:"task_struct_map"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -155,7 +156,7 @@ func (m *bpfMaps) Close() error {
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
-		m.FilterMap,
+		m.DockerCmdMap,
 		m.GlobalNsPidInfoMap,
 		m.InodeMap,
 		m.KeployModeMap,
@@ -167,6 +168,7 @@ func (m *bpfMaps) Close() error {
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
+		m.TaskStructMap,
 	)
 }
 
@@ -180,7 +182,6 @@ type bpfPrograms struct {
 	K_getpeername6                   *ebpf.Program `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryBind            *ebpf.Program `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -206,7 +207,6 @@ func (p *bpfPrograms) Close() error {
 		p.K_getpeername6,
 		p.SyscallProbeEntryAccept,
 		p.SyscallProbeEntryAccept4,
-		p.SyscallProbeEntryBind,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
 		p.SyscallProbeEntryTcpV4Connect,
