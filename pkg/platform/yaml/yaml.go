@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,19 +197,33 @@ func (ys *yaml) WriteTestcase(path string, tc *models.TestCase) error {
 }
 
 // func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.Mock, error) {
-func (ys *yaml) Read(path string, options interface{}) ([]*models.TestCase, []*models.Mock, error) {
+func (ys *yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCase, error) {
 	tcs := []*models.TestCase{}
+
+	// tcsPath := filepath.Join(path, "tests")
+
+	_, err := os.Stat(path)
+	if err != nil {
+		dirNames := strings.Split(path, "/")
+		// fmt.Println(dirNames)
+		suitName := ""
+		if len(dirNames) > 1 {
+			suitName = dirNames[len(dirNames)-2]
+		}
+		ys.logger.Debug("no tests are recorded for the session", zap.String("index", suitName))
+		return tcs, nil
+	}
 
 	dir, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		ys.logger.Error(Emoji+"failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", path))
-		return nil, nil, err
+		return nil, err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
 		ys.logger.Error(Emoji+"failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", path))
-		return nil, nil, err
+		return nil, err
 	}
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" || strings.Contains(j.Name(), "mocks") {
@@ -219,7 +234,7 @@ func (ys *yaml) Read(path string, options interface{}) ([]*models.TestCase, []*m
 		yamlTestcase, err := read(path, name)
 		if err != nil {
 			ys.logger.Error(Emoji+"failed to read the testcase from yaml", zap.Error(err))
-			return nil, nil, err
+			return nil, err
 		}
 
 		// yamlMocks := []*NetworkTrafficDoc{}
@@ -236,7 +251,7 @@ func (ys *yaml) Read(path string, options interface{}) ([]*models.TestCase, []*m
 		// Unmarshal the yaml doc into Testcase
 		tc, err := Decode(yamlTestcase[0], ys.logger)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		// Append the encoded testcase
 		tcs = append(tcs, tc)
@@ -246,13 +261,16 @@ func (ys *yaml) Read(path string, options interface{}) ([]*models.TestCase, []*m
 		return tcs[i].Created < tcs[j].Created
 	})
 
-	mockYamls, err := read(path, "mocks")
-	if err != nil {
-		ys.logger.Error(Emoji+"failed to read the mocks from yaml", zap.Error(err))
-		return nil, nil, err
-	}
-	mocks, err := decodeMocks(mockYamls, ys.logger)
-	return tcs, mocks, nil
+	// if _, err := os.Stat(filepath.Join(path, "mocks.yaml")); err == nil {
+	// 	mockYamls, err := read(path, "mocks")
+	// 	if err != nil {
+	// 		ys.logger.Error(Emoji+"failed to read the mocks from yaml", zap.Error(err))
+	// 		return nil, nil, err
+	// 	}
+	// 	mocks, err := decodeMocks(mockYamls, ys.logger)
+	// 	return tcs, mocks, nil
+	// }
+	return tcs, nil
 }
 
 func read(path, name string) ([]*NetworkTrafficDoc, error) {
@@ -294,7 +312,7 @@ func (ys *yaml) WriteMock(path string, mock *models.Mock) error {
 	return nil
 }
 
-func (ys *yaml) LastSessionIndex(path string) (string, error) {
+func (ys *yaml) NewSessionIndex(path string) (string, error) {
 	indx := 0
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
@@ -308,7 +326,7 @@ func (ys *yaml) LastSessionIndex(path string) (string, error) {
 	}
 
 	for _, v := range files {
-		fmt.Println("name for the file", v.Name())
+		// fmt.Println("name for the file", v.Name())
 		fileName := filepath.Base(v.Name())
 		fileNamePackets := strings.Split(fileName, "-")
 		if len(fileNamePackets) == 3 {
@@ -323,4 +341,82 @@ func (ys *yaml) LastSessionIndex(path string) (string, error) {
 		}
 	}
 	return fmt.Sprintf("test-suite-%v", indx), nil
+}
+
+func (ys *yaml) ReadSessionIndices(path string) ([]string, error) {
+	indices := []string{}
+	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		ys.logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		return indices, nil
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return indices, err
+	}
+
+	for _, v := range files {
+		// Define the regular expression pattern
+		pattern := `^test-suite-\d{1,}$`
+
+		// Compile the regular expression
+		regex, err := regexp.Compile(pattern)
+		if err != nil {
+			return indices, err
+		}
+
+		// Check if the string matches the pattern
+		if regex.MatchString(v.Name()) {
+			// fmt.Println("name for the file", v.Name())
+
+			indices = append(indices, v.Name())
+		}
+	}
+	return indices, nil
+}
+
+func (ys *yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
+	var (
+		configMocks = []*models.Mock{}
+		tcsMocks    = []*models.Mock{}
+	)
+
+	if _, err := os.Stat(filepath.Join(path, "config.yaml")); err == nil {
+		// _, err := os.Stat(filepath.Join(path, "config.yaml"))
+		// if err != nil {
+		// 	ys.logger.Error(Emoji+"failed to find the config yaml", zap.Error(err))
+		// 	return nil, nil, err
+		// }
+		configYamls, err := read(path, "config")
+		if err != nil {
+			ys.logger.Error(Emoji+"failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			return nil, nil, err
+		}
+		configMocks, err = decodeMocks(configYamls, ys.logger)
+		if err != nil {
+			ys.logger.Error(Emoji+"failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			return nil, nil, err
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(path, "mocks.yaml")); err == nil {
+		// _, err = os.Stat(filepath.Join(path, "mocks.yaml"))
+		// if err != nil {
+		// 	ys.logger.Error(Emoji+"failed to find the mock yaml", zap.Error(err))
+		// 	return nil, nil, err
+		// }
+		mockYamls, err := read(path, "mocks")
+		if err != nil {
+			ys.logger.Error(Emoji+"failed to read the mocks from yaml for testcases", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			return nil, nil, err
+		}
+		tcsMocks, err = decodeMocks(mockYamls, ys.logger)
+		if err != nil {
+			ys.logger.Error(Emoji+"failed to decode the testcase mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			return nil, nil, err
+		}
+	}
+	return configMocks, tcsMocks, nil
+
 }

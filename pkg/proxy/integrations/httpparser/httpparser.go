@@ -37,7 +37,7 @@ func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(requestBuffer,  clientConn,  destConn, logger))
-		h.AppendDeps(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
+		h.AppendMocks(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
 		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
 	case models.MODE_TEST:
 		decodeOutgoingHttp(requestBuffer, clientConn, destConn, h, logger)
@@ -50,6 +50,7 @@ func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h 
 // decodeOutgoingHttp
 func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	// if len(deps) == 0 {
+
 	if h.GetDepsSize() == 0 {
 		// logger.Error("failed to mock the output for unrecorded outgoing http call")
 		return

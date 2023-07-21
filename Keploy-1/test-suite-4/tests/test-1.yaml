@@ -1,0 +1,35 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/url
+        header:
+            Accept: '*/*'
+            Content-Length: "33"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://google.com"
+            }
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Thu, 20 Jul 2023 10:23:01 GMT
+        body: '{"ts":1689848581224803895,"url":"http://localhost:8080/Lhr4BWAi"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1689848581

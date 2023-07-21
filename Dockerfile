@@ -69,17 +69,38 @@ RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
     sh get-docker.sh && \
     rm get-docker.sh
 
+# Set the working directory
+WORKDIR /app
+COPY go.mod /app/
+COPY go.sum /app/
+
+RUN go mod download
+
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
+# Set the working directory
+WORKDIR /app
+COPY go.mod /app/
+COPY go.sum /app/
+
+# Build the keployV2 binary
+RUN go build -o keployV2 .
+
+=======
+>>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
 # Copy the contents of the current directory into the image
 COPY . /app
 
 # Set the working directory
-WORKDIR /app
+# WORKDIR /app
 
 # Make the entrypoint.sh file executable
 RUN chmod +x /app/entrypoint.sh
 
 # Build the keployV2 binary
-RUN go build -o keployV2
+RUN go build -o keployV2 .
 
 # Change working directory
 WORKDIR /files

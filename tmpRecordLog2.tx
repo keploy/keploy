@@ -1,0 +1,1713 @@
+2023-07-13T04:11:58.439Z	INFO	hooks/loader.go:595	üê∞ Keploy:keploy initialized and probes added to the kernel.
+2023-07-13T04:11:58.439Z	DEBUG	hooks/loader.go:606	üê∞ Keploy:	{"Keploy Inode number": 4026531836}
+2023-07-13T04:11:58.439Z	DEBUG	hooks/loader.go:249	üê∞ Keploy:Sending keploy pid to kernel	{"pid": 243980}
+2023-07-13T04:11:58.439Z	DEBUG	hooks/loader.go:609	üê∞ Keploy:Keploy Pid sent successfully...
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:185	üê∞ Keploy:Running Dns Server in Test mode...
+2023-07-13T04:11:59.503Z	INFO	proxy/proxy.go:186	üê∞ Keploy:Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:194	üê∞ Keploy:Proxy IPv4:Port 2887718541:16789
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:195	üê∞ Keploy:Proxy IPV6:Port Addr [0 0 0 1]:16789
+2023-07-13T04:11:59.503Z	INFO	proxy/proxy.go:196	üê∞ Keploy:Proxy started at port:16789
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:313	üê∞ Keploy:	{"ProxyAddress4": "172.31.22.141"}
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:316	üê∞ Keploy:	{"ProxyAddress6": "::1"}
+name for the file test-suite-11
+name for the file test-suite-10
+name for the file test-suite-9
+name for the file testReports
+name for the file test-suite-1
+name for the file test-suite-12
+name for the file test-suite-0
+name for the file test-suite-8
+2023-07-13T04:11:59.503Z	DEBUG	test/test.go:76	the session indices are : 	{"": ["test-suite-11", "test-suite-10", "test-suite-9", "testReports", "test-suite-1", "test-suite-12", "test-suite-0", "test-suite-8"]}
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:325	üê∞ Keploy:Proxy server is listening on :[::]:16789
+[ home ubuntu keploy-v2 keploy Keploy test-suite-11 tests]
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:326	üê∞ Keploy:Proxy will accept both ipv4 and ipv6 connections	{"Ipv4": "172.31.22.141", "Ipv6": "::1"}
+2023-07-13T04:11:59.503Z	DEBUG	yaml/yaml.go:212	no tests are recorded for the session	{"index": "test-suite-11"}
+[ home ubuntu keploy-v2 keploy Keploy test-suite-10 tests]
+2023-07-13T04:11:59.503Z	DEBUG	yaml/yaml.go:212	no tests are recorded for the session	{"index": "test-suite-10"}
+[ home ubuntu keploy-v2 keploy Keploy test-suite-9 tests]
+2023-07-13T04:11:59.503Z	DEBUG	proxy/proxy.go:363	üê∞ Keploy:	{"ProxyAddress in dns server": "172.31.22.141:16789"}
+2023-07-13T04:11:59.503Z	DEBUG	yaml/yaml.go:212	no tests are recorded for the session	{"index": "test-suite-9"}
+[ home ubuntu keploy-v2 keploy Keploy testReports tests]
+2023-07-13T04:11:59.503Z	DEBUG	yaml/yaml.go:212	no tests are recorded for the session	{"index": "testReports"}
+2023-07-13T04:11:59.503Z	INFO	proxy/proxy.go:380	üê∞ Keploy:starting DNS server at addr:172.31.22.141:16789
+the tests are:  [0xc004654600]
+the mocks are:  [0xc000cbce60 0xc000cbcf00 0xc000cbcfa0] [0xc000cc7900]
+2023-07-13T04:12:06.505Z	DEBUG	hooks/launch.go:101	üê∞ Keploy:Running user application on Linux
+2023-07-13T04:12:06.505Z	DEBUG	hooks/launch.go:109	üê∞ Keploy:Waiting for any error from user application
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+ :: Spring Boot ::                (v3.1.0)
+
+2023-07-13T04:12:08.259Z  INFO 244795 --- [           main] b.s.d.m.SpringBootDataMongodbApplication : Starting SpringBootDataMongodbApplication v0.0.1-SNAPSHOT using Java 17.0.7 with PID 244795 (/home/ubuntu/java-worksapce/spring-boot-data-mongodb/target/spring-boot-data-mongodb-0.0.1-SNAPSHOT.jar started by root in /home/ubuntu/keploy-v2/keploy)
+2023-07-13T04:12:08.265Z  INFO 244795 --- [           main] b.s.d.m.SpringBootDataMongodbApplication : No active profile set, falling back to 1 default profile: "default"
+2023-07-13T04:12:09.725Z  INFO 244795 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data MongoDB repositories in DEFAULT mode.
+2023-07-13T04:12:09.839Z  INFO 244795 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 105 ms. Found 1 MongoDB repository interfaces.
+2023-07-13T04:12:10.816Z  INFO 244795 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port(s): 8080 (http)
+2023-07-13T04:12:10.833Z  INFO 244795 --- [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2023-07-13T04:12:10.834Z  INFO 244795 --- [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.8]
+2023-07-13T04:12:11.079Z  INFO 244795 --- [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2023-07-13T04:12:11.085Z  INFO 244795 --- [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 2629 ms
+2023-07-13T04:12:11.502Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:12:11.502Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:12:11.502Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:12:11.502Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:12:11.502Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:12:11.502Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:12:11.503Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:12:11.503Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:12:11.503Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:12:11.505Z	DEBUG	hooks/launch.go:111	üê∞ Keploy:After running user application
+2023-07-13T04:12:11.505Z	DEBUG	hooks/launch.go:124	üê∞ Keploy:Now setting app pids
+2023-07-13T04:12:11.522Z  INFO 244795 --- [           main] org.mongodb.driver.client                : MongoClient with metadata {"driver": {"name": "mongo-java-driver|sync|spring-boot", "version": "4.9.1"}, "os": {"type": "Linux", "name": "Linux", "architecture": "amd64", "version": "5.19.0-1028-aws"}, "platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"} created with settings MongoClientSettings{readPreference=primary, writeConcern=WriteConcern{w=null, wTimeout=null ms, journal=null}, retryWrites=true, retryReads=true, readConcern=ReadConcern{level=null}, credential=null, streamFactoryFactory=null, commandListeners=[], codecRegistry=ProvidersCodecRegistry{codecProviders=[ValueCodecProvider{}, BsonValueCodecProvider{}, DBRefCodecProvider{}, DBObjectCodecProvider{}, DocumentCodecProvider{}, CollectionCodecProvider{}, IterableCodecProvider{}, MapCodecProvider{}, GeoJsonCodecProvider{}, GridFSFileCodecProvider{}, Jsr310CodecProvider{}, JsonObjectCodecProvider{}, BsonCodecProvider{}, EnumCodecProvider{}, com.mongodb.client.model.mql.ExpressionCodecProvider@5cbe877d, com.mongodb.Jep395RecordCodecProvider@5c08c46a]}, loggerSettings=LoggerSettings{maxDocumentLength=1000}, clusterSettings={hosts=[mongodb:27017], srvServiceName=mongodb, mode=SINGLE, requiredClusterType=UNKNOWN, requiredReplicaSetName='null', serverSelector='null', clusterListeners='[]', serverSelectionTimeout='30000 ms', localThreshold='30000 ms'}, socketSettings=SocketSettings{connectTimeoutMS=10000, readTimeoutMS=0, receiveBufferSize=0, sendBufferSize=0}, heartbeatSocketSettings=SocketSettings{connectTimeoutMS=10000, readTimeoutMS=10000, receiveBufferSize=0, sendBufferSize=0}, connectionPoolSettings=ConnectionPoolSettings{maxSize=100, minSize=0, maxWaitTimeMS=120000, maxConnectionLifeTimeMS=0, maxConnectionIdleTimeMS=0, maintenanceInitialDelayMS=0, maintenanceFrequencyMS=60000, connectionPoolListeners=[], maxConnecting=2}, serverSettings=ServerSettings{heartbeatFrequencyMS=10000, minHeartbeatFrequencyMS=500, serverListeners='[]', serverMonitorListeners='[]'}, sslSettings=SslSettings{enabled=false, invalidHostNameAllowed=false, context=null}, applicationName='null', compressorList=[], uuidRepresentation=JAVA_LEGACY, serverApi=null, autoEncryptionSettings=null, contextProvider=null}
+üê∞ Keploy: Output of pidof [50 52 52 55 57 53 10]
+üê∞ Keploy: Output of pidof 244795
+Pid of application: 244795
+2023-07-13T04:12:11.528Z	DEBUG	hooks/launch.go:134	üê∞ Keploy:PID of application:	{"App pid": 244795}
+2023-07-13T04:12:11.528Z	INFO	hooks/launch.go:145	üê∞ Keploy:User application started successfully
+2023-07-13T04:12:11.528Z	INFO	test/test.go:155	üê∞ Keploy:	{"no of test cases": 1}
+2023-07-13T04:12:11.528Z	DEBUG	test/test.go:170	üê∞ Keploy:Before setting deps.... during testing...
+2023-07-13T04:12:11.528Z	DEBUG	test/test.go:172	üê∞ Keploy:Before simulating the request	{"Test case": {"version":"api.keploy.io/v1beta2","kind":"Http","name":"test-1","created":1688979601,"updated":0,"captured":0,"http_req":{"method":"POST","proto_major":1,"proto_minor":1,"url":"http://localhost:8080/url","url_params":null,"header":{"Accept":"*/*","Content-Length":"33","Content-Type":"application/json","User-Agent":"curl/7.74.0"},"body":"{\n  \"url\": \"https://google.com\"\n}","body_type":"","binary":"","form":null},"http_resp":{"status_code":200,"header":{"Content-Length":"65","Content-Type":"application/json; charset=utf-8","Date":"Mon, 10 Jul 2023 09:00:00 GMT"},"body":"{\"ts\":1688979600511813299,\"url\":\"http://localhost:8080/Lhr4BWAi\"}","body_type":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"all_keys":null,"anchors":null,"noise":[],"mocks":null,"type":""}}
+2023-07-13T04:12:12.502Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup mongodb.ap-south-1.compute.internal: i/o timeout"}
+2023-07-13T04:12:12.502Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:12:12.502Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:12:12.504Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup mongodb.ap-south-1.compute.internal: i/o timeout"}
+2023-07-13T04:12:12.504Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:12:12.504Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:12:12.504Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup mongodb.ap-south-1.compute.internal: i/o timeout"}
+2023-07-13T04:12:12.504Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:12:12.504Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:12:12.516Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:12:12.516Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:12:12.516Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 32970, "Time": 1689221532}
+2023-07-13T04:12:12.516Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:12:12.516Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 32970}
+2023-07-13T04:12:12.518Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:12:12.518Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:12:12.519Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 32982, "Time": 1689221532}
+2023-07-13T04:12:12.519Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:12:12.519Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 32982}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:12:12.532Z	DEBUG	proxy/proxy.go:615	the clientConnId: 52
+into processing mongo. clientConnId:  52
+into test mode. clientConnId:  52
+into decode mongo. clientConnId:  52
+2023-07-13T04:12:12.532Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 2 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  52
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{317 2 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  52
+2023-07-13T04:12:12.532Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:12:12.532Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221532
+2023-07-13T04:12:12.532Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221532"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 2 0 OP_QUERY} clientConnId: 52
+
+2023-07-13T04:12:12.532Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I                              %  connectionId    helloOk ismaster 	localTime úyØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 52}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:12:12.532Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+read bytes:  317 , err:  <nil>
+2023-07-13T04:12:12.533Z	DEBUG	proxy/proxy.go:615	the clientConnId: 38
+into processing mongo. clientConnId:  38
+into test mode. clientConnId:  38
+into decode mongo. clientConnId:  38
+2023-07-13T04:12:12.533Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 38 and destConnId: 0. requestBuffer: =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 1 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  38
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  38
+the recieved request:   header: &{317 1 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  38
+2023-07-13T04:12:12.533Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:12:12.533Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221532
+2023-07-13T04:12:12.533Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221532"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 1 0 OP_QUERY} clientConnId: 38
+
+2023-07-13T04:12:12.533Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I                              %  connectionId    helloOk ismaster 	localTime úyØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 38}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:12:12.533Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 38 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:12:12.565Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=44976467}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  38
+
+
+ the mongo msg header:  {197 3 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈          ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  38
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  38
+the recieved request:   header: &{197 3 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 3 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 3 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  38  and destConnId:  0
+2023-07-13T04:12:12.768Z  INFO 244795 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port(s): 8080 (http) with context path ''
+2023-07-13T04:12:12.794Z  INFO 244795 --- [           main] b.s.d.m.SpringBootDataMongodbApplication : Started SpringBootDataMongodbApplication in 5.439 seconds (process running for 6.284)
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 4 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 4 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 4 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 4
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:12:22.566Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 3
+2023-07-13T04:12:22.735Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 38
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  38  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 5 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 5 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 5 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 5
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:12:32.569Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 3
+2023-07-13T04:12:32.866Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 38
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  38  and destConnId:  0
+2023-07-13T04:12:32.868Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (3) in the response does not match the requestId (2) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 6 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 6 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 6 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 6
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:12:42.572Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:12:42.877Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:12:42.879Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:12:42.879Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:12:42.879Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 55482, "Time": 1689221562}
+2023-07-13T04:12:42.879Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:12:42.879Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 55482}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:12:42.879Z	DEBUG	proxy/proxy.go:615	the clientConnId: 27
+into processing mongo. clientConnId:  27
+into test mode. clientConnId:  27
+into decode mongo. clientConnId:  27
+2023-07-13T04:12:42.879Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 27 and destConnId: 0. requestBuffer: =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 7 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  27
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  27
+the recieved request:   header: &{317 7 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  27
+2023-07-13T04:12:42.879Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:12:42.879Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221562
+2023-07-13T04:12:42.879Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221562"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 7 0 OP_QUERY} clientConnId: 27
+
+2023-07-13T04:12:42.879Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I                              %  connectionId    helloOk ismaster 	localTime ∫yØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 27}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:12:42.879Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 27 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:12:42.882Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=3352460}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  27
+
+
+ the mongo msg header:  {197 8 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈          ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  27
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  27
+the recieved request:   header: &{197 8 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 8 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 8 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  27  and destConnId:  0
+the responseTo for the OpMsg: 3
+2023-07-13T04:12:42.997Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 38
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  38  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 9 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   	       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 9 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 9 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 9
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:12:52.574Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 8
+2023-07-13T04:12:53.014Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 27
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  27  and destConnId:  0
+the responseTo for the OpMsg: 3
+2023-07-13T04:12:53.127Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 38
+2023-07-13T04:12:53.127Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:32982: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:12:53.127Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40609}
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 10 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   
+       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 10 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 10 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 10
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:02.576Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 8
+2023-07-13T04:13:03.144Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 27
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  27  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 11 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 11 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 11 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 11
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:12.578Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 8
+2023-07-13T04:13:13.274Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 27
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  27  and destConnId:  0
+2023-07-13T04:13:13.275Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (8) in the response does not match the requestId (11) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 12 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 12 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 12 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 12
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:22.580Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:13:23.277Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:13:23.279Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:13:23.279Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:13:23.279Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 48390, "Time": 1689221603}
+2023-07-13T04:13:23.279Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:13:23.279Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 48390}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:13:23.279Z	DEBUG	proxy/proxy.go:615	the clientConnId: 45
+into processing mongo. clientConnId:  45
+into test mode. clientConnId:  45
+into decode mongo. clientConnId:  45
+2023-07-13T04:13:23.279Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 45 and destConnId: 0. requestBuffer: =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 13 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  45
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  45
+the recieved request:   header: &{317 13 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  45
+2023-07-13T04:13:23.279Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:13:23.279Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221603
+2023-07-13T04:13:23.279Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221603"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 13 0 OP_QUERY} clientConnId: 45
+
+2023-07-13T04:13:23.280Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I                              %  connectionId    helloOk ismaster 	localTime „yØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 45}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:23.280Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 45 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:13:23.281Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=3124711}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  45
+
+
+ the mongo msg header:  {197 14 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈          ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  45
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  45
+the recieved request:   header: &{197 14 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 14 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 14 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  45  and destConnId:  0
+the responseTo for the OpMsg: 8
+2023-07-13T04:13:23.404Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 27
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  27  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 15 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 15 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 15 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 15
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:32.582Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 14
+2023-07-13T04:13:33.415Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 45
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  45  and destConnId:  0
+the responseTo for the OpMsg: 8
+2023-07-13T04:13:33.535Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 27
+2023-07-13T04:13:33.535Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:55482: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:13:33.535Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 50656}
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 16 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 16 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 16 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 16
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:42.583Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 14
+2023-07-13T04:13:43.545Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 45
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  45  and destConnId:  0
+2023-07-13T04:13:43.546Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (14) in the response does not match the requestId (17) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 17 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 17 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 17 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 17
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:52.585Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:13:53.547Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:13:53.548Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:13:53.548Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:13:53.548Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:13:53.547Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:13:53.548Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:13:53.548Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:13:53.548Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:13:53.549Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:13:53.549Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:13:53.549Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 40578, "Time": 1689221633}
+2023-07-13T04:13:53.549Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:13:53.549Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 40578}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:13:53.549Z	DEBUG	proxy/proxy.go:615	the clientConnId: 90
+into processing mongo. clientConnId:  90
+into test mode. clientConnId:  90
+into decode mongo. clientConnId:  90
+2023-07-13T04:13:53.549Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 90 and destConnId: 0. requestBuffer: =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 18 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  90
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  90
+the recieved request:   header: &{317 18 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  90
+2023-07-13T04:13:53.549Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:13:53.550Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221633
+2023-07-13T04:13:53.550Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221633"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 18 0 OP_QUERY} clientConnId: 90
+
+2023-07-13T04:13:53.550Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I                              %  connectionId    helloOk ismaster 	localTime zØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 90}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:13:53.550Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 90 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:13:53.551Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=2269547}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  90
+
+
+ the mongo msg header:  {197 19 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈          ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  90
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  90
+the recieved request:   header: &{197 19 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 19 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 19 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  90  and destConnId:  0
+the responseTo for the OpMsg: 14
+2023-07-13T04:13:53.675Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 45
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  45  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 20 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 20 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 20 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 20
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:02.588Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 19
+2023-07-13T04:14:03.683Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 90
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  90  and destConnId:  0
+the responseTo for the OpMsg: 14
+2023-07-13T04:14:03.806Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 45
+2023-07-13T04:14:03.806Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:48390: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:14:03.806Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40527}
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 21 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 21 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 21 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 21
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:12.589Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 19
+2023-07-13T04:14:13.814Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 90
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  90  and destConnId:  0
+2023-07-13T04:14:13.815Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (19) in the response does not match the requestId (24) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 22 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 22 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 22 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 22
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:22.591Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:14:23.816Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:14:23.816Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:14:23.816Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:14:23.817Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:14:23.817Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:14:23.817Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:14:23.817Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:14:23.817Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:14:23.818Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:14:23.818Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:14:23.818Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 49990, "Time": 1689221663}
+2023-07-13T04:14:23.818Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:14:23.818Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 49990}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:14:23.819Z	DEBUG	proxy/proxy.go:615	the clientConnId: 22
+into processing mongo. clientConnId:  22
+into test mode. clientConnId:  22
+into decode mongo. clientConnId:  22
+2023-07-13T04:14:23.819Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 22 and destConnId: 0. requestBuffer: =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 23 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  22
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  22
+the recieved request:   header: &{317 23 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  22
+2023-07-13T04:14:23.819Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:14:23.819Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221663
+2023-07-13T04:14:23.819Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221663"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 23 0 OP_QUERY} clientConnId: 22
+
+2023-07-13T04:14:23.819Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I                              %  connectionId    helloOk ismaster 	localTime zØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 22}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:23.819Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 22 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:14:23.820Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=2175766}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  22
+
+
+ the mongo msg header:  {197 24 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈          ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  22
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  22
+the recieved request:   header: &{197 24 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 24 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 24 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  22  and destConnId:  0
+the responseTo for the OpMsg: 19
+2023-07-13T04:14:23.945Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 90
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  90  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 25 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 25 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 25 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 25
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:32.593Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 24
+2023-07-13T04:14:33.953Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 22
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  22  and destConnId:  0
+the responseTo for the OpMsg: 19
+2023-07-13T04:14:34.075Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 90
+2023-07-13T04:14:34.075Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:40578: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:14:34.075Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40526}
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 26 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 26 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 26 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 26
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:42.594Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 24
+2023-07-13T04:14:44.083Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 22
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  22  and destConnId:  0
+2023-07-13T04:14:44.085Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (24) in the response does not match the requestId (31) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 27 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 27 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 27 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 27
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:52.596Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:14:54.086Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:14:54.087Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:14:54.087Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:14:54.087Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:14:54.086Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:14:54.087Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:14:54.087Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:14:54.087Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:14:54.088Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:14:54.088Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:14:54.088Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 48624, "Time": 1689221694}
+2023-07-13T04:14:54.088Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:14:54.088Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 48624}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:14:54.088Z	DEBUG	proxy/proxy.go:615	the clientConnId: 16
+into processing mongo. clientConnId:  16
+into test mode. clientConnId:  16
+into decode mongo. clientConnId:  16
+2023-07-13T04:14:54.088Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 16 and destConnId: 0. requestBuffer: =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 28 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =         ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  16
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  16
+the recieved request:   header: &{317 28 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  16
+2023-07-13T04:14:54.088Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:14:54.088Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221694
+2023-07-13T04:14:54.089Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221694"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 28 0 OP_QUERY} clientConnId: 16
+
+2023-07-13T04:14:54.089Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I                              %  connectionId    helloOk ismaster 	localTime >zØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 16}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:14:54.089Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 16 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:14:54.090Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=2153895}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  16
+
+
+ the mongo msg header:  {197 29 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈          ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  16
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  16
+the recieved request:   header: &{197 29 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 29 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 29 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  16  and destConnId:  0
+the responseTo for the OpMsg: 24
+2023-07-13T04:14:54.213Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 22
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  22  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 30 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 30 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 30 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 30
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:02.598Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 29
+2023-07-13T04:15:04.221Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 16
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  16  and destConnId:  0
+the responseTo for the OpMsg: 24
+2023-07-13T04:15:04.343Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 22
+2023-07-13T04:15:04.343Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:49990: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:15:04.343Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40525}
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 31 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4          ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 31 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 31 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 31
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:12.600Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 29
+2023-07-13T04:15:14.351Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 16
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  16  and destConnId:  0
+2023-07-13T04:15:14.352Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (29) in the response does not match the requestId (38) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 32 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4           ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 32 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 32 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 32
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:22.601Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:15:24.354Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:15:24.355Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:15:24.355Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:15:24.355Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 33588, "Time": 1689221724}
+2023-07-13T04:15:24.355Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:15:24.355Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 33588}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:15:24.356Z	DEBUG	proxy/proxy.go:615	the clientConnId: 11
+into processing mongo. clientConnId:  11
+into test mode. clientConnId:  11
+into decode mongo. clientConnId:  11
+2023-07-13T04:15:24.356Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 11 and destConnId: 0. requestBuffer: =  !       ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 33 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =  !       ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  11
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  11
+the recieved request:   header: &{317 33 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  11
+2023-07-13T04:15:24.356Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:15:24.356Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221724
+2023-07-13T04:15:24.356Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221724"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 33 0 OP_QUERY} clientConnId: 11
+
+2023-07-13T04:15:24.356Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I      !                        %  connectionId    helloOk ismaster 	localTime \zØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 11}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:24.356Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 11 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:15:24.357Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=1892211}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  11
+
+
+ the mongo msg header:  {197 34 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈   "       ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  11
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  11
+the recieved request:   header: &{197 34 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 34 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 34 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  11  and destConnId:  0
+the responseTo for the OpMsg: 29
+2023-07-13T04:15:24.482Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 16
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  16  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 35 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   #       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 35 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 35 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 35
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:32.603Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 34
+2023-07-13T04:15:34.489Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 11
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  11  and destConnId:  0
+the responseTo for the OpMsg: 29
+2023-07-13T04:15:34.613Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 16
+2023-07-13T04:15:34.613Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:48624: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:15:34.613Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40525}
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 36 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   $       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 36 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 36 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 36
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:42.604Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 34
+2023-07-13T04:15:44.619Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 11
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  11  and destConnId:  0
+2023-07-13T04:15:44.620Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (34) in the response does not match the requestId (45) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 37 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   %       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 37 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 37 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 37
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:52.606Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:15:54.622Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:15:54.623Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:15:54.623Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:15:54.623Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 36204, "Time": 1689221754}
+2023-07-13T04:15:54.624Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:15:54.624Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 36204}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:15:54.624Z	DEBUG	proxy/proxy.go:615	the clientConnId: 100
+into processing mongo. clientConnId:  100
+into test mode. clientConnId:  100
+into decode mongo. clientConnId:  100
+2023-07-13T04:15:54.624Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 100 and destConnId: 0. requestBuffer: =  &       ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 38 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =  &       ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  100
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  100
+the recieved request:   header: &{317 38 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  100
+2023-07-13T04:15:54.624Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:15:54.624Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221754
+2023-07-13T04:15:54.624Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221754"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 38 0 OP_QUERY} clientConnId: 100
+
+2023-07-13T04:15:54.624Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I      &                        %  connectionId    helloOk ismaster 	localTime zzØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 100}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:15:54.624Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 100 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:15:54.625Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=2304937}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  100
+
+
+ the mongo msg header:  {197 39 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈   '       ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  100
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  100
+the recieved request:   header: &{197 39 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 39 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 39 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  100  and destConnId:  0
+the responseTo for the OpMsg: 34
+2023-07-13T04:15:54.750Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 11
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  11  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 40 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   (       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 40 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 40 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 40
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:16:02.608Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 39
+2023-07-13T04:16:04.764Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 100
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  100  and destConnId:  0
+the responseTo for the OpMsg: 34
+2023-07-13T04:16:04.880Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 11
+2023-07-13T04:16:04.880Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:33588: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:16:04.880Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40525}
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 41 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   )       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 41 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 41 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 41
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:16:12.609Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 39
+2023-07-13T04:16:14.895Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 100
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  100  and destConnId:  0
+2023-07-13T04:16:14.895Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (39) in the response does not match the requestId (52) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 42 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   *       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 42 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 42 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 42
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:16:22.611Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:16:24.897Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:24.897Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:24.897Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:16:24.897Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:24.897Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:24.898Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:24.898Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "mongodb.ap-south-1.compute.internal."}
+2023-07-13T04:16:24.898Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:24.898Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:16:24.899Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:16:24.899Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 42530, "Time": 1689221784}
+2023-07-13T04:16:24.899Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,65535,2887718541], "DestPort": 27017, "KernelPid": 244795}
+2023-07-13T04:16:24.899Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 42530}
+read bytes:  317 , err:  <nil>
+2023-07-13T04:16:24.899Z	DEBUG	proxy/proxy.go:615	the clientConnId: 62
+into processing mongo. clientConnId:  62
+into test mode. clientConnId:  62
+into decode mongo. clientConnId:  62
+2023-07-13T04:16:24.899Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 62 and destConnId: 0. requestBuffer: =  +       ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2   
+
+
+ the mongo msg header:  {317 43 0 OP_QUERY} 
+ 
+the opcode matche query. msgheader opcode:  OP_QUERY the opcode for query:  OP_QUERY
+the decoded string for the wiremessage:  { OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }
+the request buffer:  =  +       ‘      admin.$cmd     ˇˇˇˇ  isMaster    helloOk client Ò   driver E   name #   mongo-java-driver|sync|spring-boot version    4.9.1  os Z   type    Linux name    Linux architecture    amd64 version    5.19.0-1028-aws  platform 3   Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2     clientConnId:  62
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  62
+the recieved request:   header: &{317 43 0 OP_QUERY}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the request query matches. clientconnid:  62
+2023-07-13T04:16:24.899Z	DEBUG	mongoparser/mongoparser.go:425	the document string is: {"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689163831091"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}
+2023-07-13T04:16:24.899Z	DEBUG	mongoparser/mongoparser.go:439	the updated document string is: 1689221784
+2023-07-13T04:16:24.900Z	DEBUG	mongoparser/mongoparser.go:462	the elements of the reply docs: ["connectionId": {"$numberInt":"5"} "helloOk": true "ismaster": true "localTime": {"$date":{"$numberLong":"1689221784"}} "logicalSessionTimeoutMinutes": {"$numberInt":"30"} "maxBsonObjectSize": {"$numberInt":"16777216"} "maxMessageSizeBytes": {"$numberInt":"48000000"} "maxWireVersion": {"$numberInt":"17"} "maxWriteBatchSize": {"$numberInt":"100000"} "minWireVersion": {"$numberInt":"0"} "ok": {"$numberDouble":"1.0"} "readOnly": false "topologyVersion": {"counter": {"$numberLong":"0"},"processId": {"$oid":"64ae95896fd24207cd4845a1"}}]
+the index of recived request: 0. And the request header: &{317 43 0 OP_QUERY} clientConnId: 62
+
+2023-07-13T04:16:24.900Z	DEBUG	mongoparser/mongoparser.go:498	the bufffer response is: I      +                        %  connectionId    helloOk ismaster 	localTime òzØd    logicalSessionTimeoutMinutes    maxBsonObjectSize    maxMessageSizeBytes  l‹maxWireVersion    maxWriteBatchSize †Ü minWireVersion     ok       ?readOnly  topologyVersion -   counter         processId dÆïâo“BÕHE°  	{"clientconnid": 62}
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:16:24.900Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 62 and destConnId: 0. requestBuffer: read form client connection
+2023-07-13T04:16:24.900Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Monitor thread successfully connected to server with description ServerDescription{address=mongodb:27017, type=STANDALONE, state=CONNECTED, ok=true, minWireVersion=0, maxWireVersion=17, maxDocumentSize=16777216, logicalSessionTimeoutMinutes=30, roundTripTimeNanos=1739428}
+read bytes:  197 , err:  <nil>
+  the clientConnId:  62
+
+
+ the mongo msg header:  {197 44 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request buffer:  ≈   ,       ›      ∞   hello    helloOk topologyVersion -   processId dÆïâo“BÕHE°counter          maxAwaitTimeMS '      $db    admin $readPreference     mode    primaryPreferred     clientConnId:  62
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ae95896fd24207cd4845a1"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  62
+the recieved request:   header: &{197 44 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{197 44 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the recieved request:   header: &{197 44 0 OP_MSG}  
+the expected request:   header: &{197 3 0 OP_MSG}
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  62  and destConnId:  0
+the responseTo for the OpMsg: 39
+2023-07-13T04:16:25.026Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 100
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  100  and destConnId:  0
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 45 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   -       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 45 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 45 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 45
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:16:32.612Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 44
+2023-07-13T04:16:35.032Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 62
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  62  and destConnId:  0
+the responseTo for the OpMsg: 39
+2023-07-13T04:16:35.156Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 100
+2023-07-13T04:16:35.156Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:36204: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:16:35.156Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40532}
+2023-07-13T04:16:39.850Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.850Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 33}
+2023-07-13T04:16:39.850Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.download.docker.com."}
+2023-07-13T04:16:39.851Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.851Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:39.851Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.download.docker.com."}
+2023-07-13T04:16:39.851Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.851Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 33}
+2023-07-13T04:16:39.851Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_http._tcp.security.ubuntu.com."}
+2023-07-13T04:16:39.852Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.852Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:39.852Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.download.docker.com."}
+2023-07-13T04:16:39.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.853Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:39.853Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_http._tcp.security.ubuntu.com."}
+2023-07-13T04:16:39.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.853Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:39.853Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_http._tcp.security.ubuntu.com."}
+2023-07-13T04:16:39.855Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.855Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 33}
+2023-07-13T04:16:39.855Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_http._tcp.ap-south-1.ec2.archive.ubuntu.com."}
+2023-07-13T04:16:39.856Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.856Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:39.856Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_http._tcp.ap-south-1.ec2.archive.ubuntu.com."}
+2023-07-13T04:16:39.857Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:39.857Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:39.857Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_http._tcp.ap-south-1.ec2.archive.ubuntu.com."}
+2023-07-13T04:16:40.022Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.022Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 33}
+2023-07-13T04:16:40.022Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.motd.ubuntu.com."}
+2023-07-13T04:16:40.023Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.023Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.023Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.motd.ubuntu.com."}
+2023-07-13T04:16:40.024Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.024Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.024Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.motd.ubuntu.com."}
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 33}
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.esm.ubuntu.com."}
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.esm.ubuntu.com."}
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.075Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "_https._tcp.esm.ubuntu.com."}
+2023-07-13T04:16:40.851Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.download.docker.com: i/o timeout"}
+2023-07-13T04:16:40.851Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.851Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _http._tcp.security.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.download.docker.com: i/o timeout"}
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.download.docker.com: i/o timeout"}
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.852Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "download.docker.com."}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "security.ubuntu.com."}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "download.docker.com."}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _http._tcp.security.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _http._tcp.security.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "download.docker.com."}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "download.docker.com."}
+2023-07-13T04:16:40.853Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "security.ubuntu.com."}
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "security.ubuntu.com."}
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.854Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "security.ubuntu.com."}
+2023-07-13T04:16:40.856Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _http._tcp.ap-south-1.ec2.archive.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:40.856Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.856Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _http._tcp.ap-south-1.ec2.archive.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _http._tcp.ap-south-1.ec2.archive.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ap-south-1.ec2.archive.ubuntu.com."}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ap-south-1.ec2.archive.ubuntu.com."}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ap-south-1.ec2.archive.ubuntu.com."}
+2023-07-13T04:16:40.857Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:40.858Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:40.858Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ap-south-1.ec2.archive.ubuntu.com."}
+2023-07-13T04:16:41.023Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.motd.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.023Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.023Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "motd.ubuntu.com."}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.motd.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "motd.ubuntu.com."}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.motd.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "motd.ubuntu.com."}
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.024Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:41.025Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "motd.ubuntu.com."}
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.esm.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.esm.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup _https._tcp.esm.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.076Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "esm.ubuntu.com."}
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "esm.ubuntu.com."}
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "esm.ubuntu.com."}
+2023-07-13T04:16:41.077Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:16:41.078Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:16:41.078Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "esm.ubuntu.com."}
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup security.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup download.docker.com: i/o timeout"}
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup download.docker.com: i/o timeout"}
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.853Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.854Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup security.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup download.docker.com: i/o timeout"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup download.docker.com: i/o timeout"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup security.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup security.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.855Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup ap-south-1.ec2.archive.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup ap-south-1.ec2.archive.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup ap-south-1.ec2.archive.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup ap-south-1.ec2.archive.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:41.858Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup motd.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup motd.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup motd.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup motd.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.025Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup esm.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup esm.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup esm.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.078Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:16:42.079Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup esm.ubuntu.com: i/o timeout"}
+2023-07-13T04:16:42.079Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:16:42.079Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+read bytes:  52 , err:  <nil>
+  the clientConnId:  52
+
+
+ the mongo msg header:  {52 46 0 OP_MSG} 
+ 
+the opcode matche msg. msgheader opcode:  OP_MSG the opcode for msg:  OP_MSG
+the decoded string for the wiremessage:  { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request buffer:  4   .       ›          hello    $db    admin    clientConnId:  52
+check that the opmsg is heartbeat or not. operation: { OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }
+the request opmg is isMaster? : true 
+recieved a heartbeat call. Recieved requests:  len: 1  clientconnid:  52
+the recieved request:   header: &{52 46 0 OP_MSG}  
+the expected request:   header: &{317 2 0 OP_QUERY}
+the recieved request:   header: &{52 46 0 OP_MSG}  
+the expected request:   header: &{52 4 0 OP_MSG}
+the responseTo for the OpMsg: 46
+an iteration of a mongo request lifecycle is completed
+2023-07-13T04:16:42.614Z	DEBUG	mongoparser/mongoparser.go:327	the lopp starts for clientConnId: 52 and destConnId: 0. requestBuffer: read form client connection
+the responseTo for the OpMsg: 44
+2023-07-13T04:16:45.163Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 62
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  62  and destConnId:  0
+2023-07-13T04:16:45.163Z  INFO 244795 --- [}-mongodb:27017] org.mongodb.driver.cluster               : Exception in monitor thread while connecting to server mongodb:27017
+
+com.mongodb.MongoInternalException: The responseTo (44) in the response does not match the requestId (59) in the request
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:59) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.ReplyMessage.<init>(ReplyMessage.java:42) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.getCommandResult(InternalStreamConnection.java:560) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receiveCommandMessageResponse(InternalStreamConnection.java:450) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.InternalStreamConnection.receive(InternalStreamConnection.java:397) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.lookupServerDescription(DefaultServerMonitor.java:227) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at com.mongodb.internal.connection.DefaultServerMonitor$ServerMonitorRunnable.run(DefaultServerMonitor.java:159) ~[mongodb-driver-core-4.9.1.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+2023-07-13T04:16:46.913Z	DEBUG	proxy/proxy.go:564	üê∞ Keploy:	{"PID in proxy:": 243980}
+2023-07-13T04:16:46.913Z	DEBUG	proxy/proxy.go:565	üê∞ Keploy:	{"Filtering in Proxy": true}
+2023-07-13T04:16:46.913Z	DEBUG	proxy/proxy.go:572	üê∞ Keploy:Inside handleConnection of proxyServer	{"source port": 56420, "Time": 1689221806}
+2023-07-13T04:16:46.913Z	DEBUG	proxy/proxy.go:589	üê∞ Keploy:	{"DestIp6": [0,0,0,1], "DestPort": 8080, "KernelPid": 244795}
+2023-07-13T04:16:46.913Z	DEBUG	hooks/loader.go:209	üê∞ Keploy:successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 56420}
+read bytes:  0 , err:  read tcp [::1]:16789->[::1]:56420: read: connection reset by peer
+2023-07-13T04:16:46.913Z	DEBUG	proxy/proxy.go:615	the clientConnId: 97
+2023-07-13T04:16:46.914Z	ERROR	proxy/proxy.go:618	üê∞ Keploy:failed to read the request message in proxy	{"error": "read tcp [::1]:16789->[::1]:56420: read: connection reset by peer", "proxy port": 16789}
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:618
+read bytes:  0 , err:  EOF
+  the clientConnId:  52
+
+
+ the mongo msg header:  {0 0 0 <invalid opcode>} 
+ 
+2023-07-13T04:16:47.938Z	ERROR	mongoparser/mongoparser.go:349	üê∞ Keploy:failed to decode the mongo wire message from the client	{"error": "malformed wire message: insufficient bytes", "clientConnId": 52}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:349
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:16:47.939Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 275422}
+the responseTo for the OpMsg: 44
+2023-07-13T04:16:55.293Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 62
+the response cycle. delay:  10129642907  time.duration:  10.129642907s  for clientConnId:  62  and destConnId:  0
+the responseTo for the OpMsg: 44
+2023-07-13T04:17:05.423Z	DEBUG	mongoparser/mongoparser.go:593	the response lifecycle ended. clientconnid: 62
+2023-07-13T04:17:05.423Z	ERROR	mongoparser/mongoparser.go:595	failed to write the health check opmsg to mongo client	{"error": "write tcp [::1]:16789->[::1]:42530: write: broken pipe"}
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.decodeOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:595
+go.keploy.io/server/pkg/proxy/integrations/mongoparser.ProcessOutgoingMongo
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/integrations/mongoparser/mongoparser.go:49
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ubuntu/keploy-v2/keploy/pkg/proxy/proxy.go:708
+2023-07-13T04:17:05.423Z	DEBUG	proxy/proxy.go:733	üê∞ Keploy:time taken by proxy to execute the flow	{"Duration(ms)": 40524}
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:23:05.679Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:06.679Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup ip-172-31-22-141.ap-south-1.compute.internal: i/o timeout"}
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup ip-172-31-22-141.ap-south-1.compute.internal: i/o timeout"}
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup ip-172-31-22-141.ap-south-1.compute.internal: i/o timeout"}
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:23:06.680Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:12.901Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:21.586Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:21.627Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:21.628Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 12}
+2023-07-13T04:23:21.628Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "141.22.31.172.in-addr.arpa."}
+2023-07-13T04:23:21.628Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:21.628Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:23:21.628Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "141.22.31.172.in-addr.arpa."}
+2023-07-13T04:23:22.628Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup 141.22.31.172.in-addr.arpa: i/o timeout"}
+2023-07-13T04:23:22.628Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:23:22.628Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:22.629Z	DEBUG	proxy/proxy.go:475	üê∞ Keploy:failed to resolve the dns query	{"error": "lookup 141.22.31.172.in-addr.arpa: i/o timeout"}
+2023-07-13T04:23:22.629Z	DEBUG	proxy/proxy.go:437	üê∞ Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.31.22.141"}
+2023-07-13T04:23:22.629Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 1}
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:401	üê∞ Keploy:Got some Dns queries
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:403	üê∞ Keploy:	{"Record Type": 28}
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:404	üê∞ Keploy:	{"Received Query": "ip-172-31-22-141.ap-south-1.compute.internal."}
+2023-07-13T04:23:32.646Z	DEBUG	proxy/proxy.go:454	üê∞ Keploy:Writing dns info back to the client...

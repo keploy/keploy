@@ -31,7 +31,6 @@ type Hook struct {
 	proxyInfoMap     *ebpf.Map
 	appPidMap        *ebpf.Map
 	inodeMap         *ebpf.Map
-	filterMap        *ebpf.Map
 	redirectProxyMap *ebpf.Map
 	keployModeMap    *ebpf.Map
 	keployPid        *ebpf.Map
@@ -39,7 +38,8 @@ type Hook struct {
 	platform.TestCaseDB
 	logger        *zap.Logger
 	proxyPortList []uint32
-	deps          []*models.Mock
+	tcsMocks      []*models.Mock
+	configMocks   []*models.Mock
 	path          string
 	mu            *sync.Mutex
 	respChannel   chan *models.HttpResp
@@ -50,7 +50,6 @@ type Hook struct {
 	stopper  chan os.Signal
 	connect4 link.Link
 	gp4      link.Link
-	bind     link.Link
 	udpp4    link.Link
 	tcppv4   link.Link
 	tcpv4    link.Link
@@ -87,56 +86,73 @@ func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 
 func (h *Hook) GetDepsSize() int {
 	h.mu.Lock()
-	size := len(h.deps)
+	size := len(h.tcsMocks)
 	defer h.mu.Unlock()
 	return size
 }
 
-func (h *Hook) AppendDeps(m *models.Mock) error {
+func (h *Hook) AppendMocks(m *models.Mock) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// h.deps = append(h.deps, m)
+	// h.tcsMocks = append(h.tcsMocks, m)
 	err := h.TestCaseDB.WriteMock(h.path, m)
 	if err != nil {
 		return err
 	}
 	return nil
 }
-func (h *Hook) SetDeps(m []*models.Mock) {
+func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.mu.Lock()
-	h.deps = m
-	// fmt.Println("deps are set after aq ", h.deps)
+	h.tcsMocks = m
+	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
 	defer h.mu.Unlock()
-
 }
+
+func (h *Hook) SetConfigMocks(m []*models.Mock) {
+	h.mu.Lock()
+	h.configMocks = m
+	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
+	defer h.mu.Unlock()
+}
+
 func (h *Hook) PopFront() {
 	h.mu.Lock()
-	h.deps = h.deps[1:]
+	h.tcsMocks = h.tcsMocks[1:]
 	h.mu.Unlock()
 }
 func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
-	dep := h.deps[indx]
-	// fmt.Println("deps in hooks: ", dep)
+	dep := h.tcsMocks[indx]
+	// fmt.Println("tcsMocks in hooks: ", dep)
 	// h.logger.Error("called FetchDep")
 
 	defer h.mu.Unlock()
 	return dep
 }
 
-func (h *Hook) GetDeps() []*models.Mock {
+func (h *Hook) GetTcsMocks() []*models.Mock {
 	h.mu.Lock()
-	deps := h.deps
-	// fmt.Println("deps in hooks: ", deps)
+	tcsMocks := h.tcsMocks
+	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
 	// h.logger.Error("called GetDeps")
 	defer h.mu.Unlock()
-	return deps
+	return tcsMocks
 }
+
+func (h *Hook) GetConfigMocks() []*models.Mock {
+	h.mu.Lock()
+	configMocks := h.configMocks
+	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
+	// h.logger.Error("called GetDeps")
+	defer h.mu.Unlock()
+	return configMocks
+}
+
 func (h *Hook) ResetDeps() int {
 	h.mu.Lock()
-	h.deps = []*models.Mock{}
-	// h.logger.Error("called ResetDeps", zap.Any("deps: ", h.deps))
-	// fmt.Println("deps are reset")
+	h.tcsMocks = []*models.Mock{}
+	// h.logger.Error("called ResetDeps", zap.Any("tcsMocks: ", h.tcsMocks))
+	// fmt.Println("tcsMocks are reset")
 	defer h.mu.Unlock()
 	return 1
 }
@@ -147,17 +163,6 @@ func (h *Hook) PutResp(resp *models.HttpResp) error {
 func (h *Hook) GetResp() *models.HttpResp {
 	resp := <-h.respChannel
 	return resp
-}
-
-// This function enables filtering of the processes using pid in the eBPF program.
-func (h *Hook) EnablePidFilter() {
-	key := 0
-	value := true
-	err := h.filterMap.Update(uint32(key), &value, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error(Emoji+"failed to enable pid filtering in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
-	}
-
 }
 
 // This function sends the IP and Port of the running proxy in the eBPF program.
@@ -245,6 +250,18 @@ func (h *Hook) SetKeployModeInKernel(mode uint32) {
 	}
 }
 
+// StopUserApplication stops the user application
+func (h *Hook) StopUserApplication() {
+	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
+		err := h.userAppCmd.Process.Kill()
+		if err != nil {
+			h.logger.Error(Emoji+"failed to stop user application", zap.Error(err))
+		} else {
+			h.logger.Info(Emoji + "User application stopped successfully...")
+		}
+	}
+}
+
 func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
@@ -268,18 +285,10 @@ func (h *Hook) Stop(forceStop bool) {
 	}
 
 	// stop the user application cmd
-	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
-		err := h.userAppCmd.Process.Kill()
-		if err != nil {
-			h.logger.Error(Emoji+"failed to stop user application", zap.Error(err))
-		} else {
-			h.logger.Info(Emoji + "User application stopped successfully...")
-		}
-	}
+	h.StopUserApplication()
 
 	// closing all events
 	//egress
-	h.bind.Close()
 	h.udpp4.Close()
 	//ipv4
 	h.connect4.Close()
@@ -343,7 +352,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.proxyInfoMap = objs.ProxyInfoMap
 	h.appPidMap = objs.AppPidMap
 	h.inodeMap = objs.InodeMap
-	h.filterMap = objs.FilterMap
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
 	h.keployPid = objs.KeployPidMap
@@ -354,17 +362,11 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	connectionFactory := connection.NewFactory(time.Minute, h.respChannel, h.logger)
 	go func() {
 		for {
-			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB, h.GetDeps, h.ResetDeps)
+			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB)
 			time.Sleep(1 * time.Second)
 		}
 	}()
 	// ------------ For Egress -------------
-
-	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
-	if err != nil {
-		log.Fatalf(Emoji, "opening sys_bind kprobe: %s", err)
-	}
-	h.bind = bind
 
 	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 	if err != nil {

@@ -1,0 +1,193 @@
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"find":"tutorials","filter":{"_id":{"$oid":"64ba37a3af71e2506e0873e2"}},"limit":{"$numberInt":"1"},"singleBatch":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }], checksum: 0 }'
+    requests:
+        - header:
+            length: 158
+            requestId: 32
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"find":"tutorials","filter":{"_id":{"$oid":"64ba37a3af71e2506e0873e2"}},"limit":{"$numberInt":"1"},"singleBatch":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }'
+            checksum: 0
+          read_delay: 26719375
+    responses:
+        - header:
+            length: 110
+            requestId: 5
+            responseTo: 32
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"cursor":{"id":{"$numberLong":"0"},"ns":"bezkoder_db.tutorials","firstBatch":[]},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 310865
+    created: 1689936498
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"find":"tutorials","filter":{"_id":{"$oid":"64ba37a3af71e2506e0873e2"}},"limit":{"$numberInt":"1"},"singleBatch":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }], checksum: 0 }'
+    requests:
+        - header:
+            length: 158
+            requestId: 40
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"find":"tutorials","filter":{"_id":{"$oid":"64ba37a3af71e2506e0873e2"}},"limit":{"$numberInt":"1"},"singleBatch":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }'
+            checksum: 0
+          read_delay: 68570565377
+    responses:
+        - header:
+            length: 110
+            requestId: 19
+            responseTo: 40
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"cursor":{"id":{"$numberLong":"0"},"ns":"bezkoder_db.tutorials","firstBatch":[]},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 4247568
+    created: 1689936567
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"find":"tutorials","filter":{},"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }], checksum: 0 }'
+    requests:
+        - header:
+            length: 116
+            requestId: 47
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"find":"tutorials","filter":{},"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }'
+            checksum: 0
+          read_delay: 64941272082
+    responses:
+        - header:
+            length: 110
+            requestId: 33
+            responseTo: 47
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"cursor":{"id":{"$numberLong":"0"},"ns":"bezkoder_db.tutorials","firstBatch":[]},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 779153
+    created: 1689936631
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"insert":"tutorials","ordered":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }, { SectionSingle identifier: documents , msgs: [ {"_id":{"$oid":"64ba6309b31bcd5af2c407de"},"title":"New Tutorial","description":"This is a new tutorial","published":false,"_class":"com.bezkoder.spring.data.mongodb.model.Tutorial"} ] }], checksum: 0 }'
+    requests:
+        - header:
+            length: 288
+            requestId: 50
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"insert":"tutorials","ordered":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }'
+                - '{ SectionSingle identifier: documents , msgs: [ {"_id":{"$oid":"64ba6309b31bcd5af2c407de"},"title":"New Tutorial","description":"This is a new tutorial","published":false,"_class":"com.bezkoder.spring.data.mongodb.model.Tutorial"} ] }'
+            checksum: 0
+          read_delay: 17538257274
+    responses:
+        - header:
+            length: 45
+            requestId: 38
+            responseTo: 50
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"n":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 16225404
+    created: 1689936649
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"find":"tutorials","filter":{"_id":{"$oid":"64ba6309b31bcd5af2c407de"}},"limit":{"$numberInt":"1"},"singleBatch":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }], checksum: 0 }'
+    requests:
+        - header:
+            length: 158
+            requestId: 54
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"find":"tutorials","filter":{"_id":{"$oid":"64ba6309b31bcd5af2c407de"}},"limit":{"$numberInt":"1"},"singleBatch":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }'
+            checksum: 0
+          read_delay: 27387642697
+    responses:
+        - header:
+            length: 271
+            requestId: 44
+            responseTo: 54
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"cursor":{"firstBatch":[{"_id":{"$oid":"64ba6309b31bcd5af2c407de"},"title":"New Tutorial","description":"This is a new tutorial","published":false,"_class":"com.bezkoder.spring.data.mongodb.model.Tutorial"}],"id":{"$numberLong":"0"},"ns":"bezkoder_db.tutorials"},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 5911326
+    created: 1689936677
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"update":"tutorials","ordered":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }, { SectionSingle identifier: updates , msgs: [ {"q":{"_id":{"$oid":"64ba6309b31bcd5af2c407de"}},"u":{"_id":{"$oid":"64ba6309b31bcd5af2c407de"},"title":"Updated Title","description":"Updated Description","published":true,"_class":"com.bezkoder.spring.data.mongodb.model.Tutorial"},"upsert":true} ] }], checksum: 0 }'
+    requests:
+        - header:
+            length: 326
+            requestId: 55
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"update":"tutorials","ordered":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"tU/Y09GkRVS8c9xE2Da0wA==","subType":"04"}}}} }'
+                - '{ SectionSingle identifier: updates , msgs: [ {"q":{"_id":{"$oid":"64ba6309b31bcd5af2c407de"}},"u":{"_id":{"$oid":"64ba6309b31bcd5af2c407de"},"title":"Updated Title","description":"Updated Description","published":true,"_class":"com.bezkoder.spring.data.mongodb.model.Tutorial"},"upsert":true} ] }'
+            checksum: 0
+          read_delay: 123938611
+    responses:
+        - header:
+            length: 60
+            requestId: 45
+            responseTo: 55
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"n":{"$numberInt":"1"},"nModified":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 5329487
+    created: 1689936677

@@ -511,7 +511,7 @@ func isTLSHandshake(data []byte) bool {
 }
 
 func handleTLSConnection(conn net.Conn) (net.Conn, error) {
-	fmt.Println(Emoji, "Handling TLS connection from", conn.RemoteAddr().String())
+	// fmt.Println(Emoji, "Handling TLS connection from", conn.RemoteAddr().String())
 	//Load the CA certificate and private key
 
 	var err error
@@ -532,14 +532,14 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	// Wrap the TCP connection with TLS
 	tlsConn := tls.Server(conn, config)
 
-	req := make([]byte, 1024)
-	fmt.Println("before the parsed req: ", string(req))
+	// req := make([]byte, 1024)
+	// fmt.Println("before the parsed req: ", string(req))
 
 	// _, err = tlsConn.Read(req)
 	if err != nil {
 		log.Panic("failed reading the request message with error: ", err)
 	}
-	fmt.Println("after the parsed req: ", string(req))
+	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
 	// err = tlsConn.Handshake()
 	// if err != nil {
@@ -609,7 +609,10 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// 	}
 	// }
 	connEstablishedAt := time.Now()
+	rand.Seed(time.Now().UnixNano())
+	clientConnId := rand.Intn(101)
 	buffer, err := util.ReadBytes(conn)
+	ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
 	readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
@@ -626,8 +629,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	//Dialing for tls connection
-	connId := 0
+	destConnId := 0
 	if models.GetMode() != models.MODE_TEST {
+		destConnId = rand.Intn(101)
 		// if isTLS {
 		// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
 		// 	config := &tls.Config{
@@ -646,80 +650,47 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 			conn.Close()
 			return
+			// }
 		}
 		// }
 	}
 
-	// Do not capture anything until filtering is enabled
-	if !ps.FilterPid {
-		ps.logger.Debug(Emoji+"Calling Next", zap.Any("address", actualAddress))
-		var dstConn net.Conn
-		// if isTLS {
-		// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
-		// 	config := &tls.Config{
-		// 		InsecureSkipVerify: false,
-		// 		ServerName:         destinationUrl,
-		// 	}
-		// 	dstConn, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-		// 	if err != nil {
-		// 		ps.logger.Error(Emoji+"(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-		// 		conn.Close()
-		// 		return
-		// 	}
-		// } else {
-		dstConn, err = net.Dial("tcp", actualAddress)
-		if err != nil {
-			ps.logger.Error(Emoji+"(unfiltered):failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
-			return
-		}
+	switch {
+	case httpparser.IsOutgoingHTTP(buffer):
+		// capture the otutgoing http text messages]
+		// if models.GetMode() == models.MODE_RECORD {
+		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
 		// }
+		// var deps []*models.Mock = ps.hook.GetDeps()
+		// fmt.Println("before http egress call, deps array: ", deps)
+		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
+		// fmt.Println("after http egress call, deps array: ", deps)
 
-		err := callNext(buffer, conn, dstConn, ps.logger)
+		// ps.hook.SetDeps(deps)
+	case mongoparser.IsOutgoingMongo(buffer):
+		// var deps []*models.Mock = ps.hook.GetDeps()
+		// fmt.Println("before mongo egress call, deps array: ", deps)
+
+		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
+		// fmt.Println("after mongo egress call, deps array: ", deps)
+
+		// ps.hook.SetDeps(deps)
+
+		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+		// for _, v := range deps {
+		// 	ps.hook.AppendDeps(v)
+		// }
+	default:
+		// fmt.Println("into default desp mode, before passing")
+		err = callNext(buffer, conn, dst, ps.logger)
 		if err != nil {
 			ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
 			conn.Close()
 			return
 		}
-	} else {
+		// fmt.Println("into default desp mode, after passing")
 
-		switch {
-		case httpparser.IsOutgoingHTTP(buffer):
-			// capture the otutgoing http text messages]
-			// if models.GetMode() == models.MODE_RECORD {
-			// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-			// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-			// }
-			// var deps []*models.Mock = ps.hook.GetDeps()
-			// fmt.Println("before http egress call, deps array: ", deps)
-			httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
-			// fmt.Println("after http egress call, deps array: ", deps)
-
-			// ps.hook.SetDeps(deps)
-		case mongoparser.IsOutgoingMongo(buffer):
-			// var deps []*models.Mock = ps.hook.GetDeps()
-			// fmt.Println("before mongo egress call, deps array: ", deps)
-
-			mongoparser.ProcessOutgoingMongo(connId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
-			// fmt.Println("after mongo egress call, deps array: ", deps)
-
-			// ps.hook.SetDeps(deps)
-
-			// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-			// for _, v := range deps {
-			// 	ps.hook.AppendDeps(v)
-			// }
-		default:
-			fmt.Println("into default desp mode, before passing")
-			err = callNext(buffer, conn, dst, ps.logger)
-			if err != nil {
-				ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
-				conn.Close()
-				return
-			}
-			fmt.Println("into default desp mode, after passing")
-
-		}
 	}
 
 	// Closing the user client connection

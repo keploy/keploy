@@ -38,7 +38,8 @@ func NewFactory(inactivityThreshold time.Duration, respChannel chan *models.Http
 }
 
 // func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
-func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
+// func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
+func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB) {
 
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
@@ -65,7 +66,7 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 			switch models.GetMode() {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
-				capture(path, db, parsedHttpReq, parsedHttpRes, getDeps, factory.logger)
+				capture(path, db, parsedHttpReq, parsedHttpRes, factory.logger)
 				// fmt.Println("\nbefore reseting the deps array: ", getDeps())
 
 				// resetDeps()
@@ -113,7 +114,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.Response, getDeps func() []*models.Mock, logger *zap.Logger) {
+func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
 	// meta := map[string]string{
 	// 	"method": req.Method,
 	// }
@@ -137,11 +138,13 @@ func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.
 	}
 
 	// Encode the message into yaml
-	mocks := getDeps()
-	mockIds := []string{}
-	for i, v := range mocks {
-		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
-	}
+	// mocks := getDeps()
+	// mockIds := []string{}
+	// for i, v := range mocks {
+	// 	if v != nil {
+	// 		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
+	// 	}
+	// }
 
 	// err = db.Insert(httpMock, getDeps())
 	err = db.WriteTestcase(path, &models.TestCase{
@@ -166,7 +169,7 @@ func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.
 			Header:     pkg.ToYamlHttpHeader(resp.Header),
 			Body:       string(respBody),
 		},
-		Mocks: mocks,
+		// Mocks: mocks,
 	})
 	if err != nil {
 		logger.Error(Emoji+"failed to record the ingress requests", zap.Error(err))

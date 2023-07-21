@@ -1,0 +1,306 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: FAILED
+success: 3
+failure: 1
+total: 4
+tests:
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1689937145
+      completed: 1689937147
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: PUT
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials/64ba37a3af71e2506e0873e2
+        header:
+            Accept: '*/*'
+            Content-Length: "91"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "title": "Updated Title",
+              "description": "Updated Description",
+              "published": true
+            }
+        body_type: ""
+      resp:
+        status_code: 404
+        header:
+            Content-Length: "0"
+            Date: Fri, 21 Jul 2023 10:48:18 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 404
+            actual: 404
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:48:18 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:06 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1689937147
+      completed: 1689937149
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: PUT
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials/64ba37a3af71e2506e0873e2
+        header:
+            Accept: '*/*'
+            Content-Length: "91"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "title": "Updated Title",
+              "description": "Updated Description",
+              "published": true
+            }
+        body_type: ""
+      resp:
+        status_code: 404
+        header:
+            Content-Length: "0"
+            Date: Fri, 21 Jul 2023 10:49:27 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 404
+            actual: 404
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:49:27 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:07 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1689937149
+      completed: 1689937151
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 204
+        header:
+            Date: Fri, 21 Jul 2023 10:50:32 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 204
+            actual: 204
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:50:32 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:09 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: FAILED
+      started: 1689937151
+      completed: 1689937153
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-4
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials
+        header:
+            Accept: '*/*'
+            Content-Length: "94"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "title": "New Tutorial",
+              "description": "This is a new tutorial",
+              "published": false
+            }
+        body_type: ""
+      resp:
+        status_code: 201
+        header:
+            Content-Type: application/json
+            Date: Fri, 21 Jul 2023 10:50:49 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '{"id":"64ba6309b31bcd5af2c407de","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 201
+            actual: 201
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:50:49 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:11 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":"64ba6309b31bcd5af2c407de","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+              actual: '{"id":"64ba64ff0f16da54c94723af","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        dep_result: []

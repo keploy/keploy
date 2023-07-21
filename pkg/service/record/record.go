@@ -27,7 +27,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	ys := yaml.NewYamlStore(r.logger)
 	// start the proxies
 	// ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
-	dirName, err := ys.LastSessionIndex(path)
+	dirName, err := ys.NewSessionIndex(path)
 	if err != nil {
 		r.logger.Error("failed to find the directroy name for the session", zap.Error(err))
 		return
@@ -57,8 +57,8 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}
 
 	// Enable Pid Filtering
-	loadedHooks.EnablePidFilter()
-	ps.FilterPid = true
+	// loadedHooks.EnablePidFilter()
+	// ps.FilterPid = true
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop(false)

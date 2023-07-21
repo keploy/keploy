@@ -1,0 +1,99 @@
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: config
+spec:
+    metadata:
+        operation: '{ OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}, returnFieldsSelector:  }'
+    requests:
+        - header:
+            length: 317
+            requestId: 2
+            responseTo: 0
+            Opcode: 2004
+          message:
+            flags: 0
+            collection_name: admin.$cmd
+            number_to_skip: 0
+            number_to_return: -1
+            query: '{"isMaster":{"$numberInt":"1"},"helloOk":true,"client":{"driver":{"name":"mongo-java-driver|sync|spring-boot","version":"4.9.1"},"os":{"type":"Linux","name":"Linux","architecture":"amd64","version":"5.19.0-1028-aws"},"platform":"Java/Private Build/17.0.7+7-Ubuntu-0ubuntu122.04.2"}}'
+            return_fields_selector: ""
+          read_delay: 25877555
+    responses:
+        - header:
+            length: 329
+            requestId: 41
+            responseTo: 2
+            Opcode: 1
+          message:
+            response_flags: 8
+            cursor_id: 0
+            starting_from: 0
+            number_returned: 1
+            documents:
+                - '{"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64ba644f4398ac314a21be1c"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689937610862"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"4"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}'
+          read_delay: 1155325
+    created: 1689937610
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: config
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }], checksum: 0 }'
+    requests:
+        - header:
+            length: 52
+            requestId: 4
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"hello":{"$numberInt":"1"},"$db":"admin"} }'
+            checksum: 0
+          read_delay: 10056047592
+    responses:
+        - header:
+            length: 313
+            requestId: 43
+            responseTo: 4
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"isWritablePrimary":true,"topologyVersion":{"processId":{"$oid":"64ba644f4398ac314a21be1c"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689937620919"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"4"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 434836
+    created: 1689937620
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: config
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 65536, sections: [{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ba644f4398ac314a21be1c"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }], checksum: 0 }'
+    requests:
+        - header:
+            length: 197
+            requestId: 3
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 65536
+            sections:
+                - '{ SectionSingle msg: {"hello":{"$numberInt":"1"},"helloOk":true,"topologyVersion":{"processId":{"$oid":"64ba644f4398ac314a21be1c"},"counter":{"$numberLong":"0"}},"maxAwaitTimeMS":{"$numberLong":"10000"},"$db":"admin","$readPreference":{"mode":"primaryPreferred"}} }'
+            checksum: 0
+          read_delay: 74195979
+    responses:
+        - header:
+            length: 323
+            requestId: 44
+            responseTo: 3
+            Opcode: 2013
+          message:
+            flagBits: 2
+            sections:
+                - '{ SectionSingle msg: {"helloOk":true,"isWritablePrimary":true,"topologyVersion":{"processId":{"$oid":"64ba644f4398ac314a21be1c"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1689937620950"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"5"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 10011194860
+    created: 1689937620

@@ -55,7 +55,7 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 
 		// Read bytes from the Reader
 		n, err := reader.Read(buf)
-		fmt.Println("read bytes: ", n, ", err: ", err)
+		// fmt.Println("read bytes: ", n, ", err: ", err)
 		if err != nil && err != io.EOF {
 			return nil, err
 		}
@@ -64,8 +64,7 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 		buffer = append(buffer, buf[:n]...)
 
 		// If we've reached the end of the input stream, break out of the loop
-		// if err == io.EOF || n != 1024 {
-		if n != 1024 {
+		if err == io.EOF || n != 1024 {
 			break
 		}
 	}

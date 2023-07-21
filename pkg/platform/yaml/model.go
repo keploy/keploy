@@ -254,7 +254,8 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 	requests := []models.MongoRequest{}
 	for _, v := range yamlSpec.Requests {
 		req := models.MongoRequest{
-			Header: v.Header,
+			Header:    v.Header,
+			ReadDelay: v.ReadDelay,
 		}
 		// decode the yaml document to mongo request wiremessage
 		switch v.Header.Opcode {
@@ -311,7 +312,8 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 	responses := []models.MongoResponse{}
 	for _, v := range yamlSpec.Response {
 		resp := models.MongoResponse{
-			Header: v.Header,
+			Header:    v.Header,
+			ReadDelay: v.ReadDelay,
 		}
 		// decode the yaml document to mongo response wiremessage
 		switch v.Header.Opcode {

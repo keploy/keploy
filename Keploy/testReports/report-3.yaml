@@ -1,0 +1,79 @@
+version: api.keploy.io/v1beta1
+name: report-3
+status: PASSED
+success: 1
+failure: 0
+total: 1
+tests:
+    - kind: Http
+      name: report-3
+      status: PASSED
+      started: 1689937197
+      completed: 1689937199
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials/64ba37a3af71e2506e0873e2
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Fri, 21 Jul 2023 10:43:59 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '{"id":"64ba37a3af71e2506e0873e2","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:43:59 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:57 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":"64ba37a3af71e2506e0873e2","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+              actual: '{"id":"64ba37a3af71e2506e0873e2","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        dep_result: []

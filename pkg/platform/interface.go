@@ -6,7 +6,9 @@ type TestCaseDB interface {
 	WriteTestcase(path string, tc *models.TestCase) error
 	WriteMock(path string, tc *models.Mock) error
 
-	LastSessionIndex(path string) (string, error)
+	NewSessionIndex(path string) (string, error)
+	ReadSessionIndices(path string) ([]string, error)
 
-	Read(path string, options interface{}) ([]*models.TestCase, []*models.Mock, error)
+	ReadTestcase(path string, options interface{}) ([]*models.TestCase, error)
+	ReadMocks(path string) ([]*models.Mock, []*models.Mock, error)
 }
