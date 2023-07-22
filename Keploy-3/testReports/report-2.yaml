@@ -1,0 +1,361 @@
+version: api.keploy.io/v1beta1
+name: report-2
+status: FAILED
+success: 4
+failure: 1
+total: 5
+tests:
+    - kind: Http
+      name: report-2
+      status: FAILED
+      started: 1689937170
+      completed: 1689937172
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials
+        header:
+            Accept: '*/*'
+            Content-Length: "94"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "title": "New Tutorial",
+              "description": "This is a new tutorial",
+              "published": false
+            }
+        body_type: ""
+      resp:
+        status_code: 201
+        header:
+            Content-Type: application/json
+            Date: Fri, 21 Jul 2023 10:56:51 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '{"id":"64ba6472c09fa56bcba10ad6","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 201
+            actual: 201
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:56:51 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:31 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":"64ba6472c09fa56bcba10ad6","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+              actual: '{"id":"64ba6512fa6c664d8bd90fbe","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: PASSED
+      started: 1689937172
+      completed: 1689937174
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: PUT
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials/64ba6472c09fa56bcba10ad6
+        header:
+            Accept: '*/*'
+            Content-Length: "91"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "title": "Updated Title",
+              "description": "Updated Description",
+              "published": true
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Fri, 21 Jul 2023 10:57:10 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '{"id":"64ba6472c09fa56bcba10ad6","title":"Updated Title","description":"Updated Description","published":true}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:57:10 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:32 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":"64ba6472c09fa56bcba10ad6","title":"Updated Title","description":"Updated Description","published":true}'
+              actual: '{"id":"64ba6472c09fa56bcba10ad6","title":"Updated Title","description":"Updated Description","published":true}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: PASSED
+      started: 1689937174
+      completed: 1689937176
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: DELETE
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/tutorials/64ba6472c09fa56bcba10ad6
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 404
+        header:
+            Content-Type: application/json
+            Date: Fri, 21 Jul 2023 10:57:46 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '{"timestamp":"2023-07-21T10:57:46.123+00:00","status":404,"error":"Not Found","path":"/tutorials/64ba6472c09fa56bcba10ad6"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 404
+            actual: 404
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:57:46 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:34 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"timestamp":"2023-07-21T10:57:46.123+00:00","status":404,"error":"Not Found","path":"/tutorials/64ba6472c09fa56bcba10ad6"}'
+              actual: '{"timestamp":"2023-07-21T10:59:34.433+00:00","status":404,"error":"Not Found","path":"/tutorials/64ba6472c09fa56bcba10ad6"}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: PASSED
+      started: 1689937176
+      completed: 1689937178
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-4
+      req:
+        method: DELETE
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials/64ba6472c09fa56bcba10ad6
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 204
+        header:
+            Date: Fri, 21 Jul 2023 10:58:07 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 204
+            actual: 204
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:58:07 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:36 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: PASSED
+      started: 1689937178
+      completed: 1689937180
+      test_case_path: /home/ubuntu/keploy-v2/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-5
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials
+        header:
+            Accept: '*/*'
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 204
+        header:
+            Date: Fri, 21 Jul 2023 10:58:23 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 204
+            actual: 204
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:58:23 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 21 Jul 2023 10:59:38 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []

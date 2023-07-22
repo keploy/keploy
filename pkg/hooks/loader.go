@@ -49,6 +49,7 @@ type Hook struct {
 	// ebpf objects and events
 	stopper  chan os.Signal
 	connect4 link.Link
+	bind       link.Link
 	gp4      link.Link
 	udpp4    link.Link
 	tcppv4   link.Link
@@ -289,6 +290,7 @@ func (h *Hook) Stop(forceStop bool) {
 
 	// closing all events
 	//egress
+	h.bind.Close()
 	h.udpp4.Close()
 	//ipv4
 	h.connect4.Close()
@@ -354,7 +356,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.inodeMap = objs.InodeMap
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
-	h.keployPid = objs.KeployPidMap
+	h.keployPid = objs.KeployNamespacePidMap
 
 	h.stopper = stopper
 	h.objects = objs
@@ -367,6 +369,12 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 		}
 	}()
 	// ------------ For Egress -------------
+
+	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening sys_bind kprobe: %s", err)
+	}
+	h.bind = bind
 
 	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 	if err != nil {
