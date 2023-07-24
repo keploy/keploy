@@ -50,7 +50,7 @@ func (fe *testReport) GetResults(runId string) ([]models.TestResult, error) {
 }
 
 func (fe *testReport) Read(ctx context.Context, path, name string) (models.TestReport, error) {
-	
+
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return models.TestReport{}, err

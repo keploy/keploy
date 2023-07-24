@@ -7,6 +7,7 @@ import (
 	"go.keploy.io/server/pkg/service/test"
 	HistCfg "go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
+	"io/ioutil"
 )
 
 func NewCmdTest(logger *zap.Logger) *Test {
@@ -76,7 +77,18 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			t.tester.Test(tcsPath, mockPath, testReportPath, appCmd, appContainer, networkName, delay)
-			HistCfg.NewHistCfgFS().CaptureTestsEvent(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
+			files, err := ioutil.ReadDir(testReportPath)
+			if err != nil {
+				t.logger.Error("Failed to get the number of files in the folder", zap.Error((err)))
+			}
+			var testReportNames []string
+			for _, f := range files {
+				testReportNames = append(testReportNames, f.Name())
+			}
+			if err != nil {
+				t.logger.Error("Failed to get the number of files in the folder", zap.Error((err)))
+			}
+			HistCfg.NewHistCfgFS().CaptureTestsEvent(tcsPath, mockPath, appCmd, appContainer, networkName, delay, testReportPath, testReportNames )
 		},
 	}
 

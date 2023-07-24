@@ -16,6 +16,7 @@ type HistCfg struct {
 	AppContainter string         `json:"app_container" yaml:"app_container"`
 	NetworkName string           `json:"network_name" yaml:"network_name"`
 	Delay   uint64              `json:"delay" yaml:"delay"`
+	TestRuns map [string][]string `json:"test_runs" yaml:"test_runs"`
 }
 
 func NewHistCfgFS() *HistCfg {
@@ -26,10 +27,11 @@ func NewHistCfgFS() *HistCfg {
 		AppContainter: "",
 		NetworkName: "",
 		Delay:   0,
+		TestRuns: map [string][]string{},
 	}
 }
 
-func (hc *HistCfg) 	CaptureTestsEvent(tc_path, mock_path, app_cmd, appContainer, networkName string, delay uint64) error {
+func (hc *HistCfg) 	CaptureTestsEvent(tc_path, mock_path, app_cmd, appContainer, networkName string, delay uint64, testReportPath string, testReportNames []string) error {
 	HistCfg := HistCfg{
 		TcPath:   tc_path,
 		MockPath: mock_path,
@@ -37,6 +39,13 @@ func (hc *HistCfg) 	CaptureTestsEvent(tc_path, mock_path, app_cmd, appContainer,
 		AppContainter: appContainer,
 		NetworkName: networkName,
 		Delay:   delay,
+	}
+	fmt.Println("break point")
+	fmt.Println(testReportNames)
+	for _, v := range testReportNames {
+		HistCfg.TestRuns = map[string][]string{testReportPath: {v},
+	}
+	fmt.Println("working")
 	}
 	err := SetHistory(&HistCfg)
 	if err != nil {
@@ -96,6 +105,29 @@ func SetHistory(hc *HistCfg) error {
 	Write(filePath, totalHist)
 
 	return nil
+}
+
+func CreateMockFile(path string, fileName string) (bool, error) {
+	_, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("Path does not exist: %s\n", path)
+		} else {
+			fmt.Printf("Error occurred while checking path: %s\n", err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
+		err := os.MkdirAll(filepath.Join(path), os.ModePerm)
+		if err != nil {
+			return false, fmt.Errorf("failed to create a mock dir. error: %v", err.Error())
+		}
+		_, err = os.Create(filepath.Join(path, fileName+".yaml"))
+		if err != nil {
+			return false, fmt.Errorf("failed to create a yaml file. error: %v", err.Error())
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // UI can be rendered by fetching this method
