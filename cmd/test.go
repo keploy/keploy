@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"os"
+	"fmt"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/test"
@@ -79,15 +81,17 @@ func (t *Test) GetCmd() *cobra.Command {
 			t.tester.Test(tcsPath, mockPath, testReportPath, appCmd, appContainer, networkName, delay)
 			files, err := ioutil.ReadDir(testReportPath)
 			if err != nil {
-				t.logger.Error("Failed to get the number of files in the folder", zap.Error((err)))
+				t.logger.Error("Failed to read the test report directory", zap.Error((err)))
 			}
+
 			var testReportNames []string
-			for _, f := range files {
-				testReportNames = append(testReportNames, f.Name())
+			for _, file := range files {
+			if file.Mode().IsRegular() { // Skip directories and other non-regular files
+				testReportNames = append(testReportNames, file.Name())
 			}
-			if err != nil {
-				t.logger.Error("Failed to get the number of files in the folder", zap.Error((err)))
-			}
+		}
+			sort.Strings(testReportNames)
+			fmt.Println("original names:",testReportNames)
 			HistCfg.NewHistCfgFS().CaptureTestsEvent(tcsPath, mockPath, appCmd, appContainer, networkName, delay, testReportPath, testReportNames )
 		},
 	}

@@ -40,12 +40,9 @@ func (hc *HistCfg) 	CaptureTestsEvent(tc_path, mock_path, app_cmd, appContainer,
 		NetworkName: networkName,
 		Delay:   delay,
 	}
-	fmt.Println("break point")
-	fmt.Println(testReportNames)
 	for _, v := range testReportNames {
 		HistCfg.TestRuns = map[string][]string{testReportPath: {v},
 	}
-	fmt.Println("working")
 	}
 	err := SetHistory(&HistCfg)
 	if err != nil {
@@ -96,12 +93,10 @@ func SetHistory(hc *HistCfg) error {
 	if err != nil {
 		return fmt.Errorf("failed to read existing content from yaml file. error: %s", err.Error())
 	}
-
 	totalHist, err := ParseBytes(exstingData, currentHistory)
 	if err != nil {
 		return fmt.Errorf("failed to parse bytes. error: %s", err.Error())
 	}
-
 	Write(filePath, totalHist)
 
 	return nil
@@ -160,6 +155,7 @@ func Write(filePath string, data map[string][]HistCfg) error {
 }
 
 func ParseBytes(data []byte, hc map[string][]HistCfg) (map[string][]HistCfg, error) {
+
 	var exstingData map[string][]HistCfg
 	err := yaml.Unmarshal(data, &exstingData)
 	if err != nil {
@@ -177,17 +173,14 @@ func ParseBytes(data []byte, hc map[string][]HistCfg) (map[string][]HistCfg, err
 		if v.TcPath == current.TcPath && v.MockPath == current.MockPath {
 
 			// iterate over all testrun path
-			f := false
 			for j := range prev[i].TestRuns {
 				if _, ok := current.TestRuns[j]; ok {
-					prev[i].TestRuns[j] = append(current.TestRuns[j], v.TestRuns[j]...)
-					f = true
-				}
-			}
-			// test run path is new and not available in history
-			if !f {
-				for k, v := range current.TestRuns {
-					prev[i].TestRuns[k] = v
+					n := len(prev[i].TestRuns[j])
+					if prev[i].TestRuns[j][n] != current.TestRuns[j][0] {
+						fmt.Println("first", prev[i].TestRuns[j][n] )
+						fmt.Println("second", current.TestRuns[j][0])
+						prev[i].TestRuns[j] = append(prev[i].TestRuns[j], current.TestRuns[j]...)
+					}
 				}
 			}
 			//for appending after record for the first time
