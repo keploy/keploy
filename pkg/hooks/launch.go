@@ -93,6 +93,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 									continue
 								}
 								if inspect.State.Pid != 0 {
+									h.ipAddress = inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
 									containerPid = inspect.State.Pid
 									break
 								}

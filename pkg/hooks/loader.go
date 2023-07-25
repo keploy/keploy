@@ -69,6 +69,7 @@ type Hook struct {
 	close      link.Link
 	closeRet   link.Link
 	objects    bpfObjects
+	ipAddress  string
 }
 
 func NewHook(db platform.TestCaseDB, logger *zap.Logger) *Hook {
@@ -563,6 +564,11 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.logger.Debug(Emoji + "Keploy Pid sent successfully...")
 
 	return nil
+}
+
+// to access the IP address of the hook
+func (h *Hook) GetIP() string {
+	return h.ipAddress
 }
 
 // detectCgroupPath returns the first-found mount point of type cgroup2

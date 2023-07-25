@@ -110,7 +110,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	var userIp string
 	ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
 	if ok {
-		userIp = loadedHooks.GetUserIp(appContainer, appNetwork)
+		userIp = loadedHooks.GetIP()
 		t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
 	}
 
@@ -443,11 +443,8 @@ func replaceHostToIP(currentURL string, ipAddress string) string {
 		return currentURL
 	}
 
-	// Check if the URL host is "localhost"
-	if parsedURL.Hostname() == "localhost" {
-		// Replace "localhost" with the IP address
-		parsedURL.Host = strings.Replace(parsedURL.Host, "localhost", ipAddress, 1)
-	}
+	// Replace hostname with the IP address
+	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
 
 	// Return the modified URL
 	return parsedURL.String()
