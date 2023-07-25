@@ -771,6 +771,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			}
 			readRequestDelay = time.Since(started)
 			logStr += lstr
+			logger.Debug(fmt.Sprintf("the request in the mongo parser before passing to dest: %v", len(requestBuffer)), zap.Any("client connId", clientConnId), zap.Any("dest connId", destConnId))
 		}
 
 		var (
@@ -796,6 +797,8 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			logger.Error(Emoji+"failed to write the request buffer to mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
+		logger.Debug(fmt.Sprintf("the request in the mongo parser after passing to dest: %v", len(requestBuffer)), zap.Any("client connId", clientConnId), zap.Any("dest connId", destConnId))
+
 		logStr += fmt.Sprintln("after writing the request to the destination: ", time.Since(started))
 		if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for {
@@ -885,20 +888,22 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			ReadDelay: int64(readResponseDelay),
 		})
 		if val, ok := mongoResponse.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
-			for {
+			for i := 0; ; i++ {
 				// fmt.Printf("the more_to_come is a heartbeat?: %v", isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message))
-				if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
+				if i == 0 && isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 					go recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
 				}
 				// fmt.Println("into the more_to_come", logStr)
 				tmpStr := ""
 				started = time.Now()
-				responseBuffer1, tmpStr, err := util.ReadBytes1(destConn)
+				responseBuffer, err = util.ReadBytes(destConn)
 				logStr += tmpStr
 				if err != nil {
 					logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
+				logger.Debug(fmt.Sprintf("the response in the mongo parser before passing to client: %v", len(responseBuffer)), zap.Any("client connId", clientConnId), zap.Any("dest connId", destConnId))
+
 				readResponseDelay := time.Since(started)
 
 				// logStr += fmt.Sprintf("the resp buffer: %v\n", string(responseBuffer))
@@ -906,22 +911,23 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				// fmt.Println("the resp buffer: ", string(responseBuffer))
 
 				// write the reply to mongo client
-				_, err = clientConn.Write(responseBuffer1)
+				_, err = clientConn.Write(responseBuffer)
 				if err != nil {
 					// fmt.Println(logStr)
 					logger.Error(Emoji+"failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
+				logger.Debug(fmt.Sprintf("the response in the mongo parser after passing to client: %v", len(responseBuffer)), zap.Any("client connId", clientConnId), zap.Any("dest connId", destConnId))
 
 				logStr += fmt.Sprintln("after writting response to the client: ", time.Since(started), "current time is: ", time.Now())
 
-				if len(responseBuffer1) == 0 {
+				if len(responseBuffer) == 0 {
 					logger.Debug("the response from the server is complete")
 					break
 				}
 				// logStr += fmt.Sprintln("the response from the mongo server: ", string(responseBuffer1))
 				// fmt.Println("the response from the mongo server: ", string(responseBuffer1))
-				_, respHeader, mongoResp, err := Decode(responseBuffer1, logger)
+				_, respHeader, mongoResp, err := Decode(responseBuffer, logger)
 				if err != nil {
 					logger.Error(Emoji+"failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
@@ -1112,7 +1118,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 			return 0
 		}
 		score := 0.0
-		for i, _ := range expectedMsgs {
+		for i := range expectedMsgs {
 			expected := map[string]interface{}{}
 			actual := map[string]interface{}{}
 			err := bson.UnmarshalExtJSON([]byte(expectedMsgs[i]), true, &expected)

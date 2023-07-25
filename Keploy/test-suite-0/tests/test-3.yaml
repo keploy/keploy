@@ -1,0 +1,37 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-3
+spec:
+    metadata: {}
+    req:
+        method: PUT
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials/649abe1b4f6adb2eee42b5f3
+        header:
+            Accept: '*/*'
+            Content-Length: "127"
+            Content-Type: application/json
+            User-Agent: curl/7.81.0
+        body: |-
+            {                      
+              "title": "Updated Title",
+              "description": "Updated Description",
+              "published": true
+            }
+        body_type: ""
+    resp:
+        status_code: 400
+        header:
+            Content-Type: application/json
+            Date: Sat, 22 Jul 2023 09:37:14 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '{"timestamp":"2023-07-22T09:37:14.919+00:00","status":400,"error":"Bad Request","path":"/api/tutorials/649abe1b4f6adb2eee42b5f3"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: []
+    created: 1690018636

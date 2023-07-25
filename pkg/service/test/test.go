@@ -86,7 +86,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 			t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", sessionIndex))
 			continue
 		}
-		// fmt.Println("the tests are: ", tcs)
+		fmt.Println("the tests are: ", tcs)
 
 		configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, sessionIndex))
 		if err != nil {
@@ -95,7 +95,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 			// return false
 		}
 
-		// fmt.Println("the mocks are: ", configMocks, tcsMocks)
+		fmt.Println("the mocks are: ", configMocks, tcsMocks)
 		loadedHooks.SetConfigMocks(configMocks)
 		loadedHooks.SetTcsMocks(tcsMocks)
 

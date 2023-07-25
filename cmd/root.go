@@ -19,7 +19,7 @@ type Root struct {
 func newRoot() *Root {
 	// logger init
 	logCfg := zap.NewDevelopmentConfig()
-	logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 	logger, err := logCfg.Build()
 	if err != nil {
 		log.Panic(Emoji, "failed to start the logger for the CLI")
@@ -44,6 +44,9 @@ func (r *Root) execute() {
 	var rootCmd = &cobra.Command{
 		Use:   "keploy",
 		Short: "Keploy CLI",
+		// Run: func(cmd *cobra.Command, args []string) {
+
+		// },
 	}
 	// rootCmd.Flags().IntP("pid", "", 0, "Please enter the process id on which your application is running.")
 

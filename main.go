@@ -1,10 +1,34 @@
 package main
 
 import (
+	"fmt"
+	"log"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
+
+	// "os"
+	// "runtime/pprof"
+
 	"go.keploy.io/server/cmd"
 )
 
 func main() {
+	// Register profiling endpoints (this can be done in your main function)
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
+	xyz := os.Args
+	fmt.Println(xyz)
+
+	// Start CPU profiling
+	// f, err := os.Create("cpu.pprof")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// pprof.StartCPUProfile(f)
+	// defer pprof.StopCPUProfile()
 	cmd.Execute()
 }
 
