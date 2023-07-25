@@ -107,6 +107,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
+	request.Header.Set("Host", request.Host)
 	if err != nil {
 		return nil, err
 	}
