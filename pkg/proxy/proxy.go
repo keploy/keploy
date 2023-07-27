@@ -196,7 +196,7 @@ var caStorePath = map[string]string{
 	"CentOS":   "/etc/pki/ca-trust/source/anchors/",
 	"Red Hat":  "/etc/pki/ca-trust/source/anchors/",
 	"Fedora":   "/etc/pki/ca-trust/source/anchors/",
-	"Arch ":    "/etc/ca-certificates/trust-source/anchors/",
+	"Arch":    "/etc/ca-certificates/trust-source/anchors/",
 	"openSUSE": "/etc/pki/trust/anchors/",
 	"SUSE ":    "/etc/pki/trust/anchors/",
 	"Oracle ":  "/etc/pki/ca-trust/source/anchors/",

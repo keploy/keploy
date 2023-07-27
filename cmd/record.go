@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/record"
+	HistCfg "go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
 )
 
@@ -69,6 +70,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
+			HistCfg.NewHistCfgFS().CapturedRecordEvents(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 
 			// server.Server(version, kServices, conf, logger)
 			// server.Server(version)

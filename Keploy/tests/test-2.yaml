@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-14
+name: test-2
 spec:
     metadata: {}
     req:
@@ -16,10 +16,10 @@ spec:
     resp:
         status_code: 200
         header:
-            Content-Length: "121"
+            Content-Length: "133"
             Content-Type: application/json; charset=utf-8
-            Date: Mon, 19 Jun 2023 09:08:06 GMT
-        body: '{"ts":1687165686187330688,"url":"{\"fact\":\"Kittens remain with their mother till the age of 9 weeks.\",\"length\":57}"}'
+            Date: Mon, 24 Jul 2023 12:52:57 GMT
+        body: '{"ts":1690203177777788505,"url":"{\"fact\":\"Cats lap liquid from the underside of their tongue, not from the top.\",\"length\":69}"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -27,4 +27,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1687165686
+    created: 1690203178

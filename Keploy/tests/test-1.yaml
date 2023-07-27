@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-13
+name: test-1
 spec:
     metadata: {}
     req:
@@ -16,10 +16,10 @@ spec:
     resp:
         status_code: 200
         header:
-            Content-Length: "174"
+            Content-Length: "150"
             Content-Type: application/json; charset=utf-8
-            Date: Mon, 19 Jun 2023 09:04:07 GMT
-        body: '{"ts":1687165447080009230,"url":"{\"fact\":\"The way you treat kittens in the early stages of it''s life will render it''s personality traits later in life.\",\"length\":109}"}'
+            Date: Mon, 24 Jul 2023 12:52:06 GMT
+        body: '{"ts":1690203126416828815,"url":"{\"fact\":\"A cat can travel at a top speed of approximately 31 mph (49 km) over a short distance.\",\"length\":86}"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -27,4 +27,4 @@ spec:
     objects: []
     assertions:
         noise: []
-    created: 1687165447
+    created: 1690203126

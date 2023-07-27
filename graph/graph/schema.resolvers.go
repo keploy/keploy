@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"io/ioutil"
 
 	"go.keploy.io/server/graph/graph/model"
 )
@@ -16,18 +17,11 @@ var DEFAULT_INT = 0
 
 // TestSuites is the resolver for the testSuites field.
 func (r *queryResolver) TestSuites(ctx context.Context) ([]*model.TestSuite, error) {
-	testSuiteNames := []string{"e2e", "Keploy1", "Keploy2", "Keploy3"}
-	defaultPath := "/Keploy/tests"
-	var testSuites []*model.TestSuite
-	for _, name := range testSuiteNames {
-		path := defaultPath + "/" + name
-		testSuite := &model.TestSuite{
-			Name: &name,
-			Path: &(path),
-		}
-		testSuites = append(testSuites, testSuite)
+	data, err:= ioutil.ReadFile("~/.keploy-config/histCfg.yaml")
+	if err != nil {
+		return nil, err
 	}
-	return testSuites, nil
+	var histCfg model.HistCfg
 }
 
 // TestCases is the resolver for the testCases field.
