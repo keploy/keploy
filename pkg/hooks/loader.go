@@ -334,7 +334,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	go func() {
 		for {
 			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps)
-			time.Sleep(1 * time.Second)
+			time.Sleep(2 * time.Second)
 		}
 	}()
 	// ------------ For Egress -------------
