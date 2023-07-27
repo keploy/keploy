@@ -66,6 +66,9 @@ func (conn *Tracker) IsComplete() bool {
 	// Calculate the time elapsed since the last activity in nanoseconds.
 	elapsedTime := currentTimestamp - conn.lastActivityTimestamp
 
+	//Caveat: Added a timeout of 2 seconds, after this duration we assume that all the data events would have come.
+	// This will ensure that we capture the requests responses where Connection:keep-alive is enabled.
+
 	// Check if 1 second has passed since the last activity.
 	if elapsedTime >= uint64(time.Second*2) {
 		conn.logger.Debug("Either connection is alive or request is a mutlipart/file-upload")
