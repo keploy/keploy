@@ -619,7 +619,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	if destInfo.IpVersion == 4 {
 		actualAddress = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.DestIp4), destInfo.DestPort)
 	} else if destInfo.IpVersion == 6 {
-		actualAddress = fmt.Sprintf("%v:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
+		actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
 	}
 
 	//Dialing for tls connection
