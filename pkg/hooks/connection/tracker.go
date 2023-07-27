@@ -59,6 +59,20 @@ func (conn *Tracker) IsComplete() bool {
 	conn.mutex.RLock()
 	defer conn.mutex.RUnlock()
 	// log.Printf("IsComplete() called: Successfully reading the data...")
+
+	// Get the current timestamp in nanoseconds.
+	currentTimestamp := uint64(time.Now().UnixNano())
+
+	// Calculate the time elapsed since the last activity in nanoseconds.
+	elapsedTime := currentTimestamp - conn.lastActivityTimestamp
+
+	// Check if 1 second has passed since the last activity.
+	if elapsedTime >= uint64(time.Second*2) {
+		conn.logger.Debug("Either connection is alive or request is a mutlipart/file-upload")
+		return true
+	}
+
+	// Check if other conditions for completeness are met.
 	return conn.closeTimestamp != 0 &&
 		conn.totalReadBytes == conn.recvBytes &&
 		conn.totalWrittenBytes == conn.sentBytes
