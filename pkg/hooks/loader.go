@@ -58,18 +58,18 @@ type Hook struct {
 	tcpv6    link.Link
 	tcpv6Ret link.Link
 
-	accept     link.Link
-	acceptRet  link.Link
-	accept4    link.Link
-	accept4Ret link.Link
-	read       link.Link
-	readRet    link.Link
-	write      link.Link
-	writeRet   link.Link
-	close      link.Link
-	closeRet   link.Link
-	objects    bpfObjects
-	ipAddress  string
+	accept        link.Link
+	acceptRet     link.Link
+	accept4       link.Link
+	accept4Ret    link.Link
+	read          link.Link
+	readRet       link.Link
+	write         link.Link
+	writeRet      link.Link
+	close         link.Link
+	closeRet      link.Link
+	objects       bpfObjects
+	userIpAddress string
 }
 
 func NewHook(db platform.TestCaseDB, logger *zap.Logger) *Hook {
@@ -567,8 +567,8 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 }
 
 // to access the IP address of the hook
-func (h *Hook) GetIP() string {
-	return h.ipAddress
+func (h *Hook) GetUserIP() string {
+	return h.userIpAddress
 }
 
 // detectCgroupPath returns the first-found mount point of type cgroup2

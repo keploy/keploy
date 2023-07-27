@@ -110,7 +110,7 @@ func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appConta
 	var userIp string
 	ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
 	if ok {
-		userIp = loadedHooks.GetIP()
+		userIp = loadedHooks.GetUserIP()
 		t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
 	}
 
