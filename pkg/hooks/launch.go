@@ -80,12 +80,12 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 					select {
 					case err := <-errs:
 						if err != nil && err != context.Canceled {
-							fmt.Println(err)
+							h.logger.Error("failed to listen for the docker events", zap.Error(err))
 						}
 						return
 					case e := <-messages:
 						if e.Type == events.ContainerEventType && e.Action == "create" {
-							fmt.Println("Container created: ", e.ID)
+							// fmt.Println("Container created: ", e.ID)
 							containerPid := 0
 							for {
 								inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
@@ -162,7 +162,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 
 		pids = appPids
-		println("Pid of application:", pids[0])
+		// println("Pid of application:", pids[0])
 		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
 
@@ -488,7 +488,7 @@ func getCmdPid(commandName string) (int, error) {
 	cmd := exec.Command("pidof", commandName)
 
 	output, err := cmd.Output()
-	fmt.Println(Emoji, "Output of pidof", output)
+	// fmt.Println(Emoji, "Output of pidof", output)
 	if err != nil {
 		fmt.Errorf(Emoji, "failed to execute the command: %v", commandName)
 		return 0, err
@@ -497,7 +497,7 @@ func getCmdPid(commandName string) (int, error) {
 	pidStr := strings.TrimSpace(string(output))
 	// pidStrings:= strings.Split(pidStr," ")
 	// pidStr = pidStrings[0]
-	fmt.Println(Emoji, "Output of pidof", pidStr)
+	// fmt.Println(Emoji, "Output of pidof", pidStr)
 	actualPidStr := strings.Split(pidStr, " ")[0]
 	pid, err := strconv.Atoi(actualPidStr)
 	if err != nil {
