@@ -2,15 +2,20 @@ package mongoparser
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/pkg/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
+	"go.uber.org/zap"
 )
 
 type Message struct {
@@ -27,8 +32,9 @@ type TransactionDetails struct {
 type Operation interface {
 	fmt.Stringer
 	OpCode() wiremessage.OpCode
-	Encode(responseTo int32) []byte
+	Encode(responseTo, requestId int32) []byte
 	IsIsMaster() bool
+	IsIsAdminDB() bool
 	CursorID() (cursorID int64, ok bool)
 	RequestID() int32
 	Error() error
@@ -37,10 +43,12 @@ type Operation interface {
 	TransactionDetails() *TransactionDetails
 }
 
+var lOgger *zap.Logger
+
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1361-L1426
 // func Decode(wm []byte) (Operation, int32, int32, int32, int32, error) {
-func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
-
+func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, interface{}, error) {
+	lOgger = logger
 	wmLength := len(wm)
 	length, reqID, responseTo, opCode, wmBody, ok := wiremessage.ReadHeader(wm)
 	messageHeader := models.MongoHeader{
@@ -49,6 +57,8 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 		ResponseTo: responseTo,
 		Opcode:     wiremessage.OpCode(opCode),
 	}
+	logger.Debug(fmt.Sprintf("the mongo msg header: %v", messageHeader))
+	// fmt.Println("\n\n the mongo msg header: ", messageHeader, "\n ")
 	if !ok || int(length) > wmLength {
 		return nil, messageHeader, &models.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
 	}
@@ -61,8 +71,11 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 	// var err error
 	switch opCode {
 	case wiremessage.OpQuery:
+		// fmt.Println("the opcode matche query. msgheader opcode: ", opCode, "the opcode for query: ", wiremessage.OpQuery)
 		op, err = decodeQuery(reqID, wmBody)
-
+		if err != nil {
+			return nil, messageHeader, mongoMsg, err
+		}
 		jsonBytes, err := bson.MarshalExtJSON(op.(*opQuery).query, true, false)
 		if err != nil {
 			return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
@@ -82,7 +95,12 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
+		// fmt.Println("the opcode matche msg. msgheader opcode: ", opCode, "the opcode for msg: ", wiremessage.OpMsg)
+
 		op, err = decodeMsg(reqID, wmBody)
+		if err != nil {
+			return nil, messageHeader, mongoMsg, err
+		}
 		var sections []string
 		for _, section := range op.(*opMsg).sections {
 			sections = append(sections, section.String())
@@ -103,6 +121,9 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 		}
 	case wiremessage.OpReply:
 		op, err = decodeReply(reqID, wmBody)
+		if err != nil {
+			return nil, messageHeader, mongoMsg, err
+		}
 		replyDocs := []string{}
 		for _, v := range op.(*opReply).documents {
 			// replyDocs = append(replyDocs, v.String())
@@ -124,16 +145,16 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 			NumberReturned: op.(*opReply).numReturned,
 			Documents:      replyDocs,
 		}
-	case wiremessage.OpGetMore:
-		op, err = decodeGetMore(reqID, wmBody)
-	case wiremessage.OpUpdate:
-		op, err = decodeUpdate(reqID, wmBody)
-	case wiremessage.OpInsert:
-		op, err = decodeInsert(reqID, wmBody)
-	case wiremessage.OpDelete:
-		op, err = decodeDelete(reqID, wmBody)
-	case wiremessage.OpKillCursors:
-		op, err = decodeKillCursors(reqID, wmBody)
+	// case wiremessage.OpGetMore:
+	// 	op, err = decodeGetMore(reqID, wmBody)
+	// case wiremessage.OpUpdate:
+	// 	op, err = decodeUpdate(reqID, wmBody)
+	// case wiremessage.OpInsert:
+	// 	op, err = decodeInsert(reqID, wmBody)
+	// case wiremessage.OpDelete:
+	// 	op, err = decodeDelete(reqID, wmBody)
+	// case wiremessage.OpKillCursors:
+	// 	op, err = decodeKillCursors(reqID, wmBody)
 	default:
 		op = &opUnknown{
 			opCode: opCode,
@@ -144,6 +165,8 @@ func Decode(wm []byte) (Operation, models.MongoHeader, interface{}, error) {
 	if err != nil {
 		return nil, messageHeader, mongoMsg, err
 	}
+	logger.Debug(fmt.Sprintf("the decoded string for the wiremessage: %v", op.String()))
+	// fmt.Println("the decoded string for the wiremessage: ", op.String())
 	return op, messageHeader, mongoMsg, nil
 }
 
@@ -151,6 +174,10 @@ type opUnknown struct {
 	opCode wiremessage.OpCode
 	reqID  int32
 	wm     []byte
+}
+
+func (o *opUnknown) IsIsAdminDB() bool {
+	return false
 }
 
 func (o *opUnknown) TransactionDetails() *TransactionDetails {
@@ -161,7 +188,7 @@ func (o *opUnknown) OpCode() wiremessage.OpCode {
 	return o.opCode
 }
 
-func (o *opUnknown) Encode(responseTo int32) []byte {
+func (o *opUnknown) Encode(responseTo, requestId int32) []byte {
 	return o.wm
 }
 
@@ -202,6 +229,10 @@ type opQuery struct {
 	numberToReturn       int32
 	query                bsoncore.Document
 	returnFieldsSelector bsoncore.Document
+}
+
+func (opQuery) IsIsAdminDB() bool {
+	return false
 }
 
 func (q *opQuery) TransactionDetails() *TransactionDetails {
@@ -255,7 +286,7 @@ func (q *opQuery) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation_legacy.go#L179-L189
-func (q *opQuery) Encode(responseTo int32) []byte {
+func (q *opQuery) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpQuery)
 	buffer = wiremessage.AppendQueryFlags(buffer, q.flags)
@@ -314,6 +345,7 @@ type opMsgSection interface {
 	fmt.Stringer
 	cursorID() (cursorID int64, ok bool)
 	isIsMaster() bool
+	isDbAdmin() bool
 	append(buffer []byte) []byte
 	commandAndCollection() (Command, string)
 }
@@ -332,6 +364,13 @@ func (o *opMsgSectionSingle) cursorID() (cursorID int64, ok bool) {
 func (o *opMsgSectionSingle) isIsMaster() bool {
 	if db, ok := o.msg.Lookup("$db").StringValueOK(); ok && db == "admin" {
 		return IsIsMasterDoc(o.msg)
+	}
+	return false
+}
+
+func (o *opMsgSectionSingle) isDbAdmin() bool {
+	if db, ok := o.msg.Lookup("$db").StringValueOK(); ok && db == "admin" {
+		return true
 	}
 	return false
 }
@@ -373,6 +412,16 @@ func (o *opMsgSectionSequence) cursorID() (cursorID int64, ok bool) {
 func (o *opMsgSectionSequence) isIsMaster() bool {
 	return false
 }
+func (o *opMsgSectionSequence) isDbAdmin() bool {
+	res := true
+	for _, v := range o.msgs {
+		if db, ok := v.Lookup("$db").StringValueOK(); !ok || db != "admin" {
+			res = false
+			break
+		}
+	}
+	return res
+}
 
 func (o *opMsgSectionSequence) append(buffer []byte) []byte {
 	buffer = wiremessage.AppendMsgSectionType(buffer, wiremessage.DocumentSequence)
@@ -410,7 +459,172 @@ func (o *opMsgSectionSequence) String() string {
 		msgs = append(msgs, jsonString)
 		// msgs = append(msgs, msg.String())
 	}
-	return fmt.Sprintf("{ SectionSingle identifier: %s, msgs: [%s] }", o.identifier, strings.Join(msgs, ", "))
+	return fmt.Sprintf("{ SectionSingle identifier: %s , msgs: [ %s ] }", o.identifier, strings.Join(msgs, ", "))
+}
+
+func decodeOpMsgSectionSequence(section string) (string, string, error) {
+	var identifier, message = "", ""
+
+	// Define the regular expression pattern
+	pattern := `\{ SectionSingle identifier: (.+?) , msgs: \[ (.+?) \] \}`
+
+	// Compile the regular expression
+	regex := regexp.MustCompile(pattern)
+
+	// Find submatches using the regular expression
+	submatches := regex.FindStringSubmatch(section)
+	if submatches == nil || len(submatches) != 3 {
+		return identifier, message, errors.New("invalid format of message section sequence")
+	}
+	identifier = submatches[1]
+	message = submatches[2]
+	return identifier, message, nil
+
+}
+
+func decodeOpMsgSectionSingle(section string) (string, error) {
+	var message = ""
+	
+	// Define the regular expression pattern
+	pattern := `\{ SectionSingle msg: (.+?) \}`
+
+	// Compile the regular expression
+	regex := regexp.MustCompile(pattern)
+
+	// Find submatches using the regular expression
+	submatches := regex.FindStringSubmatch(section)
+	if submatches == nil || len(submatches) != 2 {
+		return message, errors.New("invalid format of message section single")
+	}
+	// expectedIdentifier = submatches[1]
+	message = submatches[1]
+	return message, nil
+}
+
+func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opMsg, error) {
+	message := &opMsg{
+		flags:    wiremessage.MsgFlag(responseOpMsg.FlagBits),
+		checksum: uint32(responseOpMsg.Checksum),
+		sections: []opMsgSection{},
+	}
+	for messageIndex, messageValue := range responseOpMsg.Sections {
+		switch {
+		case strings.HasPrefix(messageValue, "{ SectionSingle identifier:"):
+			// var identifier string
+			// var msgsStr string
+			// _, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle identifier: %s, msgs: [%s] }", &identifier, &msgsStr)
+			identifier, msgsStr, err := decodeOpMsgSectionSequence(responseOpMsg.Sections[messageIndex])
+			if err != nil {
+				logger.Error("failed to extract the msg section from recorded message", zap.Error(err))
+				return nil, err
+			}
+			msgs := strings.Split(msgsStr, ", ")
+			docs := []bsoncore.Document{}
+			for _, msg := range msgs {
+				var unmarshaledDoc bsoncore.Document
+				// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
+				err = bson.UnmarshalExtJSON([]byte(msg), true, &unmarshaledDoc)
+				if err != nil {
+					logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
+					return nil, err
+				}
+				docs = append(docs, unmarshaledDoc)
+			}
+			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
+			// msg.sections = []opMsgSection{&opMsgSectionSingle{
+			// 	msg: unmarshaledDoc,
+			// }}
+			message.sections = append(message.sections, &opMsgSectionSequence{
+				// msg: unmarshaledDoc,
+				identifier: identifier,
+				msgs:       docs,
+			})
+		case strings.HasPrefix(messageValue, "{ SectionSingle msg:"):
+			// var sectionStr string
+			// _, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle msg: %s }", &sectionStr)
+			sectionStr, err := decodeOpMsgSectionSingle(responseOpMsg.Sections[messageIndex])
+			if err != nil {
+				logger.Error("failed to extract the msg section from recorded message single section", zap.Error(err))
+				return nil, err
+			}
+
+			// logger.Info("the section in the msg response", zap.Any("", sectionStr))
+			var unmarshaledDoc bsoncore.Document
+			// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
+			err = bson.UnmarshalExtJSON([]byte(sectionStr), true, &unmarshaledDoc)
+			if err != nil {
+				logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
+				return nil, err
+			}
+			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
+			// msg.sections = []opMsgSection{&opMsgSectionSingle{
+			// 	msg: unmarshaledDoc,
+			// }}
+			message.sections = append(message.sections, &opMsgSectionSingle{
+				msg: unmarshaledDoc,
+			})
+		default:
+			logger.Error(fmt.Sprintf("failed to encode the OpMsg section into mongo wiremessage because of invalid format"), zap.Any("section", messageValue))
+		}
+		// if strings.Contains(messageValue, "SectionSingle identifier") {
+		// 	// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
+		// 	// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
+		// 	// logger.Info("the section in the msg response", zap.Any("", sectionStr))
+		// 	var identifier string
+		// 	var msgsStr string
+		// 	_, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle identifier: %s, msgs: [%s] }", &identifier, &msgsStr)
+		// 	if err != nil {
+		// 		logger.Error("failed to extract the msg section from recorded message", zap.Error(err))
+		// 		return nil, err
+		// 	}
+		// 	msgs := strings.Split(msgsStr, ", ")
+		// 	docs := []bsoncore.Document{}
+		// 	for _, msg := range msgs {
+		// 		var unmarshaledDoc bsoncore.Document
+		// 		// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
+		// 		err = bson.UnmarshalExtJSON([]byte(msg), true, &unmarshaledDoc)
+		// 		if err != nil {
+		// 			logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
+		// 			return nil, err
+		// 		}
+		// 		docs = append(docs, unmarshaledDoc)
+		// 	}
+		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
+		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{
+		// 	// 	msg: unmarshaledDoc,
+		// 	// }}
+		// 	message.sections = append(message.sections, &opMsgSectionSequence{
+		// 		// msg: unmarshaledDoc,
+		// 		identifier: identifier,
+		// 		msgs:       docs,
+		// 	})
+		// } else if strings.HasPrefix(messageValue) {
+		// 	// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
+		// 	// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
+		// 	var sectionStr string
+		// 	_, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle msg: %s }", &sectionStr)
+		// 	if err != nil {
+		// 		logger.Error("failed to extract the msg section from recorded message single section", zap.Error(err))
+		// 		return nil, err
+		// 	}
+		// 	// logger.Info("the section in the msg response", zap.Any("", sectionStr))
+		// 	var unmarshaledDoc bsoncore.Document
+		// 	// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
+		// 	err = bson.UnmarshalExtJSON([]byte(sectionStr), true, &unmarshaledDoc)
+		// 	if err != nil {
+		// 		logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
+		// 		return nil, err
+		// 	}
+		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
+		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{
+		// 	// 	msg: unmarshaledDoc,
+		// 	// }}
+		// 	message.sections = append(message.sections, &opMsgSectionSingle{
+		// 		msg: unmarshaledDoc,
+		// 	})
+		// }
+	}
+	return message, nil
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1387-L1423
@@ -470,9 +684,11 @@ func (m *opMsg) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L898-L904
-func (m *opMsg) Encode(responseTo int32) []byte {
+func (m *opMsg) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
-	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpMsg)
+	lOgger.Debug(fmt.Sprintf("the responseTo for the OpMsg: %v, for requestId: %v", responseTo, wiremessage.NextRequestID()))
+	// fmt.Printf("the responseTo for the OpMsg: %v\n", responseTo)
+	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestId, responseTo, wiremessage.OpMsg)
 	buffer = wiremessage.AppendMsgFlags(buffer, m.flags)
 	for _, section := range m.sections {
 		buffer = section.append(buffer)
@@ -483,12 +699,22 @@ func (m *opMsg) Encode(responseTo int32) []byte {
 		buffer = appendi32(buffer, int32(m.checksum))
 	}
 	buffer = bsoncore.UpdateLength(buffer, idx, int32(len(buffer[idx:])))
+	lOgger.Debug(fmt.Sprintf("opmsg string: %v", m.String()))
 	return buffer
 }
 
 func (m *opMsg) IsIsMaster() bool {
 	for _, section := range m.sections {
 		if section.isIsMaster() {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *opMsg) IsIsAdminDB() bool {
+	for _, section := range m.sections {
+		if section.isDbAdmin() {
 			return true
 		}
 	}
@@ -596,6 +822,71 @@ func (r *opReply) TransactionDetails() *TransactionDetails {
 	return nil
 }
 
+func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, error) {
+	// replyMessage := &opReply{
+	// 	flags:        wiremessage.ReplyFlag(reply.ResponseFlags),
+	// 	cursorID:     reply.CursorID,
+	// 	startingFrom: reply.StartingFrom,
+	// 	numReturned:  reply.NumberReturned,
+	// }
+	replyDocs := []bsoncore.Document{}
+	for _, v := range reply.Documents {
+		var unmarshaledDoc bsoncore.Document
+		logger.Debug(fmt.Sprintf("the document string is: %v", string(v)))
+		var result map[string]interface{}
+
+		err := json.Unmarshal([]byte(v), &result)
+		if err != nil {
+			logger.Error("failed to unmarshal string document of OpReply", zap.Error(err))
+			return nil, err
+		}
+		result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"] = strconv.FormatInt(time.Now().Unix(), 10)
+		v, err := json.Marshal(result)
+		if err != nil {
+			logger.Error("failed to marshal the updated string document of OpReply", zap.Error(err))
+			return nil, err
+		}
+		logger.Debug(fmt.Sprintf("the updated document string is: %v", result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"]))
+
+		err = bson.UnmarshalExtJSON([]byte(v), false, &unmarshaledDoc)
+		if err != nil {
+			logger.Error("failed to decode the recorded document of OpReply", zap.Error(err))
+			return nil, err
+		}
+		// unmarshaledDoc.Lookup("localTime")
+		// unmarshaledDoc = bso{}
+		// unmarshaledDoc.
+		elements, _ := unmarshaledDoc.Elements()
+		// updatedBsonDoc := bsoncore.Document{}
+		// unmarshaledDoc.look
+
+		// for _, el := range elements {
+		// 	if el.Key() == "localTime" {
+		// 		logger.Debug( fmt.Sprintf("the values of localtime: %v", el.Value()) )
+		// 		continue
+		// 	}
+		// 	el.
+
+		// 	// updatedBsonDoc = append(updatedBsonDoc, bsoncore.BuildDocumentElement()...)
+		// }
+		logger.Debug(fmt.Sprintf("the elements of the reply docs: %v", elements))
+
+		// docs, rm, ok := bsoncore.ReadDocument([]byte(v))
+		// fmt.Println("the document in healtcheck of test mode: ", docs.String(), " rm bytes: ", rm,  " ok: ", ok)
+		// replyDocs = append(replyDocs, bsoncore.Document(v))
+		replyDocs = append(replyDocs, unmarshaledDoc)
+
+		// fmt.Println("the documents in healtcheck of test mode: ", replyDocs)
+	}
+	return &opReply{
+		flags:        wiremessage.ReplyFlag(reply.ResponseFlags),
+		cursorID:     reply.CursorID,
+		startingFrom: reply.StartingFrom,
+		numReturned:  reply.NumberReturned,
+		documents:    replyDocs,
+	}, nil
+}
+
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1297-L1358
 func decodeReply(reqID int32, wm []byte) (*opReply, error) {
 	var ok bool
@@ -636,9 +927,9 @@ func (r *opReply) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/drivertest/channel_conn.go#L73-L82
-func (r *opReply) Encode(responseTo int32) []byte {
+func (r *opReply) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
-	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpReply)
+	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestId, responseTo, wiremessage.OpReply)
 	buffer = wiremessage.AppendReplyFlags(buffer, r.flags)
 	buffer = wiremessage.AppendReplyCursorID(buffer, r.cursorID)
 	buffer = wiremessage.AppendReplyStartingFrom(buffer, r.startingFrom)
@@ -651,6 +942,10 @@ func (r *opReply) Encode(responseTo int32) []byte {
 }
 
 func (r *opReply) IsIsMaster() bool {
+	return false
+}
+
+func (r *opReply) IsIsAdminDB() bool {
 	return false
 }
 
@@ -734,7 +1029,7 @@ func (g *opGetMore) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation_legacy.go#L284-L291
-func (g *opGetMore) Encode(responseTo int32) []byte {
+func (g *opGetMore) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpGetMore)
 	buffer = wiremessage.AppendGetMoreZero(buffer)
@@ -819,7 +1114,7 @@ func (u *opUpdate) OpCode() wiremessage.OpCode {
 	return wiremessage.OpUpdate
 }
 
-func (u *opUpdate) Encode(responseTo int32) []byte {
+func (u *opUpdate) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpUpdate)
 	buffer = appendCString(buffer, u.fullCollectionName)
@@ -898,7 +1193,7 @@ func (i *opInsert) OpCode() wiremessage.OpCode {
 	return wiremessage.OpInsert
 }
 
-func (i *opInsert) Encode(responseTo int32) []byte {
+func (i *opInsert) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpInsert)
 	buffer = appendi32(buffer, i.flags)
@@ -987,7 +1282,7 @@ func (d *opDelete) OpCode() wiremessage.OpCode {
 	return wiremessage.OpDelete
 }
 
-func (d *opDelete) Encode(responseTo int32) []byte {
+func (d *opDelete) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpDelete)
 	buffer = appendCString(buffer, d.fullCollectionName)
@@ -1065,7 +1360,7 @@ func (k *opKillCursors) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation_legacy.go#L378-L384
-func (k *opKillCursors) Encode(responseTo int32) []byte {
+func (k *opKillCursors) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpKillCursors)
 	buffer = wiremessage.AppendKillCursorsZero(buffer)

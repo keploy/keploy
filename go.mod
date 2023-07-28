@@ -8,13 +8,14 @@ require (
 	github.com/cilium/ebpf v0.10.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
-	github.com/docker/docker v24.0.2+incompatible
+	github.com/docker/docker v24.0.4+incompatible
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.9.0
+	github.com/go-test/deep v1.1.0
 	github.com/gorilla/mux v1.8.0
 	github.com/k0kubun/pp/v3 v3.2.0
-	github.com/miekg/dns v1.1.54
+	github.com/miekg/dns v1.1.55
 	github.com/moby/term v0.5.0 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5
@@ -27,7 +28,7 @@ require (
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.24.0
 	golang.org/x/crypto v0.7.0 // indirect
-	golang.org/x/sys v0.6.0
+	golang.org/x/sys v0.9.0
 	gopkg.in/yaml.v3 v3.0.1
-	gotest.tools/v3 v3.4.0 // indirect
+	gotest.tools/v3 v3.5.0 // indirect
 )

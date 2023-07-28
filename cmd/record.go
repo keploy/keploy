@@ -41,8 +41,8 @@ func (r *Record) GetCmd() *cobra.Command {
 				}
 			}
 			path += "/Keploy"
-			tcsPath := path + "/tests"
-			mockPath := path + "/mocks"
+			// tcsPath := path + "/tests"
+			// mockPath := path + "/mocks"
 
 			appCmd, err := cmd.Flags().GetString("c")
 
@@ -68,7 +68,8 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
 			}
 
-			r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
+			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
+			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay)
 
 			// server.Server(version, kServices, conf, logger)
 			// server.Server(version)

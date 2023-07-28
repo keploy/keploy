@@ -38,7 +38,8 @@ func NewFactory(inactivityThreshold time.Duration, respChannel chan *models.Http
 }
 
 // func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
-func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
+// func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
+func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB) {
 
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
@@ -65,8 +66,11 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 			switch models.GetMode() {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
-				capture(db, parsedHttpReq, parsedHttpRes, getDeps, factory.logger)
-				resetDeps()
+				capture(path, db, parsedHttpReq, parsedHttpRes, factory.logger)
+				// fmt.Println("\nbefore reseting the deps array: ", getDeps())
+
+				// resetDeps()
+				// fmt.Println("after reseting the deps array: ", getDeps(), "\n ")
 			case models.MODE_TEST:
 				respBody, err := io.ReadAll(parsedHttpRes.Body)
 				parsedHttpRes.Body.Close()
@@ -75,7 +79,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, getDeps f
 						zap.Any("mode", models.MODE_TEST))
 					return
 				}
-				resetDeps()
+				// resetDeps()
 				factory.respChannel <- &models.HttpResp{
 					StatusCode: parsedHttpRes.StatusCode,
 					Header:     pkg.ToYamlHttpHeader(parsedHttpRes.Header),
@@ -110,8 +114,16 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, getDeps func() []*models.Mock, logger *zap.Logger) {
-	defer req.Body.Close()
+func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
+	// meta := map[string]string{
+	// 	"method": req.Method,
+	// }
+	// httpMock := &models.Mock{
+	// 	Version: models.V1Beta2,
+	// 	Name:    "",
+	// 	Kind:    models.HTTP,
+	// }
+
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error(Emoji+"failed to read the http request body", zap.Error(err))
@@ -126,16 +138,16 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 	}
 
 	// Encode the message into yaml
-	mocks := getDeps()
-	mockIds := []string{}
-	for i, v := range mocks {
-		if v != nil {
-			mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
-		}
-	}
+	// mocks := getDeps()
+	// mockIds := []string{}
+	// for i, v := range mocks {
+	// 	if v != nil {
+	// 		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
+	// 	}
+	// }
 
 	// err = db.Insert(httpMock, getDeps())
-	err = db.Insert(&models.TestCase{
+	err = db.WriteTestcase(path, &models.TestCase{
 		Version: models.V1Beta2,
 		Name:    "",
 		Kind:    models.HTTP,
@@ -157,7 +169,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, get
 			Header:     pkg.ToYamlHttpHeader(resp.Header),
 			Body:       string(respBody),
 		},
-		Mocks: mocks,
+		// Mocks: mocks,
 	})
 	if err != nil {
 		logger.Error(Emoji+"failed to record the ingress requests", zap.Error(err))

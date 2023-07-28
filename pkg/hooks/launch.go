@@ -28,11 +28,12 @@ var (
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
-
+	time.Sleep(7 * time.Second)
 	var pids [15]int32
 	// Supports Linux, Windows
 	ok, cmd := h.IsDockerRelatedCmd(appCmd)
 	if ok {
+
 		h.logger.Debug(Emoji + "Running user application on Docker")
 
 		// to notify the kernel hooks that the user application command is related to Docker.
@@ -79,19 +80,21 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 					select {
 					case err := <-errs:
 						if err != nil && err != context.Canceled {
-							h.logger.Error("failed to listen for the docker daemon events", zap.Error(err))
+							h.logger.Error("failed to listen for the docker events", zap.Error(err))
 						}
 						return
 					case e := <-messages:
-						// extract the inode number of the user application container after the container is created
 						if e.Type == events.ContainerEventType && e.Action == "create" {
+							// fmt.Println("Container created: ", e.ID)
 							containerPid := 0
 							for {
 								inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
 								if err != nil {
-									h.logger.Error("failed to inspect the target application container after it is created", zap.Error(err))
+									// fmt.Printf("Failed to execute command: %s, duration: %v\n", err, time.Since(started))
+									// return .
 									continue
 								}
+								// fmt.Printf("PID of the docker : %v, duration: %v\n", containerPid, time.Since(started))
 								if inspect.State.Pid != 0 {
 									h.userIpAddress = inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
 									containerPid = inspect.State.Pid
@@ -109,7 +112,6 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			errCh <- err
 		}()
 
-	
 		// Check if there is an error in the channel without blocking
 		select {
 		// channel for only checking for error during this instant looks
@@ -124,7 +126,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 
 	} else { //Supports only linux
-		h.logger.Debug(Emoji + "Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
+		h.logger.Debug(Emoji+"Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
 		// to notify the kernel hooks that the user application command is running in native linux.
 		key := 0
@@ -161,7 +163,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 
 		pids = appPids
-		println("Pid of application:", pids[0])
+		// println("Pid of application:", pids[0])
 		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
 
@@ -196,6 +198,15 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	cmd.Stderr = os.Stderr
 	h.userAppCmd = cmd
 
+	// out, err := exec.Command("docker", "inspect", "-f", "{{.State.Pid}}", "0b6c6856d706").Output()
+	// if err != nil {
+	// 	fmt.Printf("Failed to execute command: %s", err)
+	// 	// return .
+	// }
+
+	// fmt.Printf("time before starting the user application: %v", time.Now())
+	// pid := strings.TrimSpace(string(out))
+	// fmt.Printf("PID of the docker : %s\n", pid)
 	// Run the command, this handles non-zero exit code get from application.
 	err := cmd.Run()
 	if err != nil {
@@ -478,7 +489,7 @@ func getCmdPid(commandName string) (int, error) {
 	cmd := exec.Command("pidof", commandName)
 
 	output, err := cmd.Output()
-	fmt.Println(Emoji, "Output of pidof", output)
+	// fmt.Println(Emoji, "Output of pidof", output)
 	if err != nil {
 		fmt.Errorf(Emoji, "failed to execute the command: %v", commandName)
 		return 0, err
@@ -487,7 +498,7 @@ func getCmdPid(commandName string) (int, error) {
 	pidStr := strings.TrimSpace(string(output))
 	// pidStrings:= strings.Split(pidStr," ")
 	// pidStr = pidStrings[0]
-	fmt.Println(Emoji, "Output of pidof", pidStr)
+	// fmt.Println(Emoji, "Output of pidof", pidStr)
 	actualPidStr := strings.Split(pidStr, " ")[0]
 	pid, err := strconv.Atoi(actualPidStr)
 	if err != nil {

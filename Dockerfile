@@ -76,6 +76,20 @@ COPY go.sum /app/
 
 RUN go mod download
 
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
+# Set the working directory
+WORKDIR /app
+COPY go.mod /app/
+COPY go.sum /app/
+
+# Build the keployV2 binary
+RUN go build -o keployV2 .
+
+=======
+>>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
 # Copy the contents of the current directory into the image
 COPY . /app
 
