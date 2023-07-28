@@ -20,13 +20,21 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer, appNetwork string, Delay uint64) {
+// func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer, appNetwork string, Delay uint64) {
+func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork string, Delay uint64) {
 	models.SetMode(models.MODE_RECORD)
 
-	ys := yaml.NewYamlStore(tcsPath, mockPath, r.logger)
-
-	// Initiate the hooks
-	loadedHooks := hooks.NewHook(ys, r.logger)
+	ys := yaml.NewYamlStore(r.logger)
+	// start the proxies
+	// ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
+	dirName, err := ys.NewSessionIndex(path)
+	if err != nil {
+		r.logger.Error("failed to find the directroy name for the session", zap.Error(err))
+		return
+	}
+	path += "/" + dirName
+	// Initiate the hooks and update the vaccant ProxyPorts map
+	loadedHooks := hooks.NewHook(path, ys, r.logger)
 	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
 		return
 	}
@@ -41,6 +49,7 @@ func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
 	}
+	// time.
 
 	// start user application
 	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {

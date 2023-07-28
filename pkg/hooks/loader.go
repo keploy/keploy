@@ -35,10 +35,12 @@ type Hook struct {
 	keployModeMap    *ebpf.Map
 	keployPid        *ebpf.Map
 
-	db            platform.TestCaseDB
+	platform.TestCaseDB
 	logger        *zap.Logger
 	proxyPortList []uint32
-	deps          []*models.Mock
+	tcsMocks      []*models.Mock
+	configMocks   []*models.Mock
+	path          string
 	mu            *sync.Mutex
 	respChannel   chan *models.HttpResp
 	mutex         sync.RWMutex
@@ -47,6 +49,7 @@ type Hook struct {
 	// ebpf objects and events
 	stopper  chan os.Signal
 	connect4 link.Link
+	bind       link.Link
 	gp4      link.Link
 	udpp4    link.Link
 	tcppv4   link.Link
@@ -72,63 +75,86 @@ type Hook struct {
 	userIpAddress string
 }
 
-func NewHook(db platform.TestCaseDB, logger *zap.Logger) *Hook {
+func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 	return &Hook{
-		logger:      logger,
-		db:          db,
+		logger: logger,
+		// db:          db,
+		TestCaseDB:  db,
 		mu:          &sync.Mutex{},
+		path:        path,
 		respChannel: make(chan *models.HttpResp),
 	}
 }
 
 func (h *Hook) GetDepsSize() int {
 	h.mu.Lock()
-	size := len(h.deps)
+	size := len(h.tcsMocks)
 	defer h.mu.Unlock()
 	return size
 }
 
-func (h *Hook) AppendDeps(m *models.Mock) {
+func (h *Hook) AppendMocks(m *models.Mock) error {
 	h.mu.Lock()
-	h.deps = append(h.deps, m)
-	h.mu.Unlock()
-
-}
-func (h *Hook) SetDeps(m []*models.Mock) {
-	h.mu.Lock()
-	h.deps = m
-	// fmt.Println("deps are set after aq ", h.deps)
 	defer h.mu.Unlock()
-
+	// h.tcsMocks = append(h.tcsMocks, m)
+	err := h.TestCaseDB.WriteMock(h.path, m)
+	if err != nil {
+		return err
+	}
+	return nil
 }
+func (h *Hook) SetTcsMocks(m []*models.Mock) {
+	h.mu.Lock()
+	h.tcsMocks = m
+	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
+	defer h.mu.Unlock()
+}
+
+func (h *Hook) SetConfigMocks(m []*models.Mock) {
+	h.mu.Lock()
+	h.configMocks = m
+	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
+	defer h.mu.Unlock()
+}
+
 func (h *Hook) PopFront() {
 	h.mu.Lock()
-	h.deps = h.deps[1:]
+	h.tcsMocks = h.tcsMocks[1:]
 	h.mu.Unlock()
 }
 func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
-	dep := h.deps[indx]
-	// fmt.Println("deps in hooks: ", dep)
+	dep := h.tcsMocks[indx]
+	// fmt.Println("tcsMocks in hooks: ", dep)
 	// h.logger.Error("called FetchDep")
 
 	defer h.mu.Unlock()
 	return dep
 }
 
-func (h *Hook) GetDeps() []*models.Mock {
+func (h *Hook) GetTcsMocks() []*models.Mock {
 	h.mu.Lock()
-	deps := h.deps
-	// fmt.Println("deps in hooks: ", deps)
+	tcsMocks := h.tcsMocks
+	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
 	// h.logger.Error("called GetDeps")
 	defer h.mu.Unlock()
-	return deps
+	return tcsMocks
 }
+
+func (h *Hook) GetConfigMocks() []*models.Mock {
+	h.mu.Lock()
+	configMocks := h.configMocks
+	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
+	// h.logger.Error("called GetDeps")
+	defer h.mu.Unlock()
+	return configMocks
+}
+
 func (h *Hook) ResetDeps() int {
 	h.mu.Lock()
-	h.deps = []*models.Mock{}
-	// h.logger.Error("called ResetDeps", zap.Any("deps: ", h.deps))
-	// fmt.Println("deps are reset")
+	h.tcsMocks = []*models.Mock{}
+	// h.logger.Error("called ResetDeps", zap.Any("tcsMocks: ", h.tcsMocks))
+	// fmt.Println("tcsMocks are reset")
 	defer h.mu.Unlock()
 	return 1
 }
@@ -226,6 +252,18 @@ func (h *Hook) SetKeployModeInKernel(mode uint32) {
 	}
 }
 
+// StopUserApplication stops the user application
+func (h *Hook) StopUserApplication() {
+	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
+		err := h.userAppCmd.Process.Kill()
+		if err != nil {
+			h.logger.Error(Emoji+"failed to stop user application", zap.Error(err))
+		} else {
+			h.logger.Info(Emoji + "User application stopped successfully...")
+		}
+	}
+}
+
 func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
@@ -249,17 +287,11 @@ func (h *Hook) Stop(forceStop bool) {
 	}
 
 	// stop the user application cmd
-	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
-		err := h.userAppCmd.Process.Kill()
-		if err != nil {
-			h.logger.Error(Emoji+"failed to stop user application", zap.Error(err))
-		} else {
-			h.logger.Info(Emoji + "User application stopped successfully...")
-		}
-	}
+	h.StopUserApplication()
 
 	// closing all events
 	//egress
+	h.bind.Close()
 	h.udpp4.Close()
 	//ipv4
 	h.connect4.Close()
@@ -305,7 +337,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	}
 
 	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -325,7 +357,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.inodeMap = objs.InodeMap
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
-	h.keployPid = objs.KeployPidMap
+	h.keployPid = objs.KeployNamespacePidMap
 
 	h.stopper = stopper
 	h.objects = objs
@@ -333,11 +365,17 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	connectionFactory := connection.NewFactory(time.Minute, h.respChannel, h.logger)
 	go func() {
 		for {
-			connectionFactory.HandleReadyConnections(h.db, h.GetDeps, h.ResetDeps)
-			time.Sleep(2 * time.Second)
+			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB)
+			time.Sleep(1 * time.Second)
 		}
 	}()
 	// ------------ For Egress -------------
+
+	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening sys_bind kprobe: %s", err)
+	}
+	h.bind = bind
 
 	udpp_c4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 	if err != nil {
