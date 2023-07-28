@@ -96,6 +96,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 								}
 								// fmt.Printf("PID of the docker : %v, duration: %v\n", containerPid, time.Since(started))
 								if inspect.State.Pid != 0 {
+									h.userIpAddress = inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
 									containerPid = inspect.State.Pid
 									break
 								}
