@@ -1,18 +1,9 @@
 type TestCase{
-  id: String
+  testCaseName: String
   created: String
-  updated: String
-  captured: String
   cid: String
-  appID: String
-  uri: String
   httpReq: HttpReq
   httpResp: HttpResp
-  grpcReq: GrpcReq
-  grpcResp: GrpcResp
-  deps: [Dependency]
-  allKeys: [KV]
-  anchors: [KV!]
   noise: [String!]
   mocks: [Mock]
   type: String
@@ -42,15 +33,6 @@ type HttpResp {
   binary: String
 }
 
-type GrpcReq {
-  body: String
-  method: String
-}
-
-type GrpcResp {
-  body: String
-  error: String
-}
 
 type FormData {
   key: String
@@ -61,70 +43,59 @@ type FormData {
 type Mock {
   version: Version
   kind: Kind
-  name: String
+  mockName: String
   spec: String
 }
 
 type TestSuite {
-  name: String
-  path: String
+  testSuiteName: String
+  testSuitePath: String
 }
 
 type TestReport {
   id: String
   version: Version
-  kind: Kind
   name: String
   status: String
   success: Int
-  completed: Int
-  started: Int
   failure: Int
   total: Int
-  testCasePath: String
-  mockPath: String
   tests: [Test]
 }
 
 type Test {
-  id: String
   status: TestStatus
   started: String
   completed: String
-  runId: String
   testCaseId: String
   uri: String
-  dep: [Dependency]
-  mocks: [String]
   req: HttpReq
   http_resp: HttpResp
   noise: [String]
   result: Result
-  grpc_req: GrpcReq
-  grpc_resp: GrpcResp
 }
 
 type Result {
   statusCode: IntResult
   headersResult: [HeaderResult]
   bodyResult: [BodyResult]
-  depResult: [DepResult]
+  mockResult: [mockResult]
 }
 
 type BodyResult {
-  path: String
+  type: String
   normal: Boolean
   expected: String
   actual: String
 }
 
-type DepResult {
+type mockResult {
   name: String
-  type: DependencyType
-  meta: [DepMetaResult]
+  type: mockType
+  meta: [mockMetaResult]
 }
 
-type DepMetaResult {
+type mockMetaResult {
   normal: Boolean
   key: String
   expected: String
@@ -148,19 +119,12 @@ type Header {
   value: [String]
 }
 
-type Dependency {
-  name: String
-  type: DependencyType
-  meta: MetaKeyValue
-  data: String
-}
-
 type MetaKeyValue {
   key: String
   value: String
 }
 
-enum DependencyType {
+enum mockType {
   NoSqlDB
   SqlDB
   GRPC
@@ -204,10 +168,10 @@ enum Kind {
 
 type Query {
   testSuites: [TestSuite]
-  testCases: [TestCase]
+  testCases(testSuiteName:  ID!): [TestCase]
   testCase(testCaseId: ID!): TestCase
   testReports: [TestReport]
-  testReport(testReportId: ID!): TestReport
+  testReport(testSuiteName: ID! testReportId: ID!): TestReport
   testReportCase(testCaseId: ID!): [Test]
 }
 

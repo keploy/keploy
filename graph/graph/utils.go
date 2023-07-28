@@ -1,10 +1,14 @@
 package graph
 
 import (
+	"fmt"
+	"gopkg.in/yaml.v3"
+	"os"
 	"strconv"
 
-	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/graph/graph/model"
+	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/fs"
 )
 
 func convertStringToPointer(s string) *string {
@@ -65,10 +69,10 @@ func convertMocks(m []*models.Mock) []*model.Mock {
 	var spec string
 	for _, v := range m {
 		newMock := &model.Mock{
-			Version: (*model.Version)(&v.Version),
-			Kind:    (*model.Kind)(&v.Kind),
-			Name:    &v.Name,
-			Spec:    &(spec),
+			Version:  (*model.Version)(&v.Version),
+			Kind:     (*model.Kind)(&v.Kind),
+			MockName: &v.Name,
+			Spec:     &(spec),
 		}
 		mocks = append(mocks, newMock)
 	}
@@ -121,17 +125,17 @@ func convertToArrayBodyResult(m []models.BodyResult) []*model.BodyResult {
 				Expected: &v.Expected,
 				Actual:   &v.Actual,
 				Normal:   &v.Normal,
-				Path:     &DEFAULT_STRING,
+				//TODO: add Type
 			}
 			bodyResult = append(bodyResult, body)
 		}
 	}
 	return bodyResult
 }
-func convertToArrayDepMetaResult(m []models.DepMetaResult) []*model.DepMetaResult {
-	var dep []*model.DepMetaResult
+func convertToArrayMockMetaResult(m []models.DepMetaResult) []*model.MockMetaResult {
+	var dep []*model.MockMetaResult
 	for _, v := range m {
-		newDep := &model.DepMetaResult{
+		newDep := &model.MockMetaResult{
 			Normal:   &v.Normal,
 			Expected: (*string)(&v.Expected),
 			Actual:   (*string)(&v.Actual),
@@ -141,13 +145,13 @@ func convertToArrayDepMetaResult(m []models.DepMetaResult) []*model.DepMetaResul
 	}
 	return dep
 }
-func convertToArrayDepResult(m []models.DepResult) []*model.DepResult {
-	var dep []*model.DepResult
+func convertToArrayDepResult(m []models.DepResult) []*model.MockResult {
+	var dep []*model.MockResult
 	for _, v := range m {
-		newDep := &model.DepResult{
+		newDep := &model.MockResult{
 			Name: &v.Name,
-			Type: (*model.DependencyType)(&v.Type),
-			Meta: convertToArrayDepMetaResult(v.Meta),
+			Type: (*model.MockType)(&v.Type),
+			Meta: convertToArrayMockMetaResult(v.Meta),
 		}
 		dep = append(dep, newDep)
 	}
@@ -160,15 +164,12 @@ func convertModelsTests(m []models.TestResult) []*model.Test {
 		completed := strconv.FormatInt(v.Completed, 10)
 		newTest := &model.Test{
 			//Did not set Dep
-			ID:         &DEFAULT_STRING,
-			Status:     (*model.TestStatus)(&v.Status),
-			Started:    &(started),
-			Completed:  &(completed),
-			RunID:      &DEFAULT_STRING,
+			Status:    (*model.TestStatus)(&v.Status),
+			Started:   &(started),
+			Completed: &(completed),
+
 			TestCaseID: &v.TestCaseID,
 			URI:        &v.Req.URL,
-			Dep:        []*model.Dependency{},
-			Mocks:      []*string{},
 			Req: &model.HTTPReq{
 				Method:     (*model.Method)(&v.Req.Method),
 				ProtoMajor: convertInttoPointer(v.Req.ProtoMajor),
@@ -200,12 +201,30 @@ func convertModelsTests(m []models.TestResult) []*model.Test {
 				},
 				HeadersResult: convertToArrayHeadersResult(v.Result.HeadersResult),
 				BodyResult:    convertToArrayBodyResult(v.Result.BodyResult),
-				DepResult:     convertToArrayDepResult(v.Result.DepResult),
+				MockResult:    convertToArrayDepResult(v.Result.DepResult),
 			},
-			GrpcReq:  &model.GrpcReq{},
-			GrpcResp: &model.GrpcResp{},
 		}
 		tests = append(tests, newTest)
 	}
 	return tests
+}
+func getHistCfg()[]fs.HistCfg {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Errorf(" Error getting home directory. Error: ", err)
+		return nil
+	}
+	filepath := homeDir + "/.keploy-config/histCfg.yaml"
+	existingData, err := os.ReadFile(filepath)
+	if err != nil {
+		fmt.Errorf("Error reading histCfg.yaml. Error: ", err)
+		return nil
+	}
+	var histCfgList map[string][]fs.HistCfg
+	err = yaml.Unmarshal(existingData, &histCfgList)
+	if err != nil {
+		fmt.Errorf("Error unmarshalling histCfg.yaml. Error: ", err)
+		return nil
+	}
+	return histCfgList["histCfg"]
 }

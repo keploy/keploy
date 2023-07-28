@@ -9,46 +9,16 @@ import (
 )
 
 type BodyResult struct {
-	Path     *string `json:"path,omitempty"`
+	Type     *string `json:"type,omitempty"`
 	Normal   *bool   `json:"normal,omitempty"`
 	Expected *string `json:"expected,omitempty"`
 	Actual   *string `json:"actual,omitempty"`
-}
-
-type DepMetaResult struct {
-	Normal   *bool   `json:"normal,omitempty"`
-	Key      *string `json:"key,omitempty"`
-	Expected *string `json:"expected,omitempty"`
-	Actual   *string `json:"actual,omitempty"`
-}
-
-type DepResult struct {
-	Name *string          `json:"name,omitempty"`
-	Type *DependencyType  `json:"type,omitempty"`
-	Meta []*DepMetaResult `json:"meta,omitempty"`
-}
-
-type Dependency struct {
-	Name *string         `json:"name,omitempty"`
-	Type *DependencyType `json:"type,omitempty"`
-	Meta *MetaKeyValue   `json:"meta,omitempty"`
-	Data *string         `json:"data,omitempty"`
 }
 
 type FormData struct {
 	Key    *string   `json:"key,omitempty"`
 	Values []*string `json:"values,omitempty"`
 	Paths  []*string `json:"paths,omitempty"`
-}
-
-type GrpcReq struct {
-	Body   *string `json:"body,omitempty"`
-	Method *string `json:"method,omitempty"`
-}
-
-type GrpcResp struct {
-	Body  *string `json:"body,omitempty"`
-	Error *string `json:"error,omitempty"`
 }
 
 type Header struct {
@@ -103,121 +73,69 @@ type MetaKeyValue struct {
 }
 
 type Mock struct {
-	Version *Version `json:"version,omitempty"`
-	Kind    *Kind    `json:"kind,omitempty"`
-	Name    *string  `json:"name,omitempty"`
-	Spec    *string  `json:"spec,omitempty"`
+	Version  *Version `json:"version,omitempty"`
+	Kind     *Kind    `json:"kind,omitempty"`
+	MockName *string  `json:"mockName,omitempty"`
+	Spec     *string  `json:"spec,omitempty"`
 }
 
 type Result struct {
 	StatusCode    *IntResult      `json:"statusCode,omitempty"`
 	HeadersResult []*HeaderResult `json:"headersResult,omitempty"`
 	BodyResult    []*BodyResult   `json:"bodyResult,omitempty"`
-	DepResult     []*DepResult    `json:"depResult,omitempty"`
+	MockResult    []*MockResult   `json:"mockResult,omitempty"`
 }
 
 type Test struct {
-	ID         *string       `json:"id,omitempty"`
-	Status     *TestStatus   `json:"status,omitempty"`
-	Started    *string       `json:"started,omitempty"`
-	Completed  *string       `json:"completed,omitempty"`
-	RunID      *string       `json:"runId,omitempty"`
-	TestCaseID *string       `json:"testCaseId,omitempty"`
-	URI        *string       `json:"uri,omitempty"`
-	Dep        []*Dependency `json:"dep,omitempty"`
-	Mocks      []*string     `json:"mocks,omitempty"`
-	Req        *HTTPReq      `json:"req,omitempty"`
-	HTTPResp   *HTTPResp     `json:"http_resp,omitempty"`
-	Noise      []*string     `json:"noise,omitempty"`
-	Result     *Result       `json:"result,omitempty"`
-	GrpcReq    *GrpcReq      `json:"grpc_req,omitempty"`
-	GrpcResp   *GrpcResp     `json:"grpc_resp,omitempty"`
+	Status     *TestStatus `json:"status,omitempty"`
+	Started    *string     `json:"started,omitempty"`
+	Completed  *string     `json:"completed,omitempty"`
+	TestCaseID *string     `json:"testCaseId,omitempty"`
+	URI        *string     `json:"uri,omitempty"`
+	Req        *HTTPReq    `json:"req,omitempty"`
+	HTTPResp   *HTTPResp   `json:"http_resp,omitempty"`
+	Noise      []*string   `json:"noise,omitempty"`
+	Result     *Result     `json:"result,omitempty"`
 }
 
 type TestCase struct {
-	ID       *string       `json:"id,omitempty"`
-	Created  *string       `json:"created,omitempty"`
-	Updated  *string       `json:"updated,omitempty"`
-	Captured *string       `json:"captured,omitempty"`
-	Cid      *string       `json:"cid,omitempty"`
-	AppID    *string       `json:"appID,omitempty"`
-	URI      *string       `json:"uri,omitempty"`
-	HTTPReq  *HTTPReq      `json:"httpReq,omitempty"`
-	HTTPResp *HTTPResp     `json:"httpResp,omitempty"`
-	GrpcReq  *GrpcReq      `json:"grpcReq,omitempty"`
-	GrpcResp *GrpcResp     `json:"grpcResp,omitempty"`
-	Deps     []*Dependency `json:"deps,omitempty"`
-	AllKeys  []*Kv         `json:"allKeys,omitempty"`
-	Anchors  []*Kv         `json:"anchors,omitempty"`
-	Noise    []string      `json:"noise,omitempty"`
-	Mocks    []*Mock       `json:"mocks,omitempty"`
-	Type     *string       `json:"type,omitempty"`
+	TestCaseName *string   `json:"testCaseName,omitempty"`
+	Created      *string   `json:"created,omitempty"`
+	Cid          *string   `json:"cid,omitempty"`
+	HTTPReq      *HTTPReq  `json:"httpReq,omitempty"`
+	HTTPResp     *HTTPResp `json:"httpResp,omitempty"`
+	Noise        []string  `json:"noise,omitempty"`
+	Mocks        []*Mock   `json:"mocks,omitempty"`
+	Type         *string   `json:"type,omitempty"`
 }
 
 type TestReport struct {
-	ID           *string  `json:"id,omitempty"`
-	Version      *Version `json:"version,omitempty"`
-	Kind         *Kind    `json:"kind,omitempty"`
-	Name         *string  `json:"name,omitempty"`
-	Status       *string  `json:"status,omitempty"`
-	Success      *int     `json:"success,omitempty"`
-	Completed    *int     `json:"completed,omitempty"`
-	Started      *int     `json:"started,omitempty"`
-	Failure      *int     `json:"failure,omitempty"`
-	Total        *int     `json:"total,omitempty"`
-	TestCasePath *string  `json:"testCasePath,omitempty"`
-	MockPath     *string  `json:"mockPath,omitempty"`
-	Tests        []*Test  `json:"tests,omitempty"`
+	ID      *string  `json:"id,omitempty"`
+	Version *Version `json:"version,omitempty"`
+	Name    *string  `json:"name,omitempty"`
+	Status  *string  `json:"status,omitempty"`
+	Success *int     `json:"success,omitempty"`
+	Failure *int     `json:"failure,omitempty"`
+	Total   *int     `json:"total,omitempty"`
+	Tests   []*Test  `json:"tests,omitempty"`
 }
 
 type TestSuite struct {
-	Name *string `json:"name,omitempty"`
-	Path *string `json:"path,omitempty"`
+	TestSuiteName *string `json:"testSuiteName,omitempty"`
+	TestSuitePath *string `json:"testSuitePath,omitempty"`
 }
 
-type DependencyType string
-
-const (
-	DependencyTypeNoSQLDb    DependencyType = "NoSqlDB"
-	DependencyTypeSQLDb      DependencyType = "SqlDB"
-	DependencyTypeGrpc       DependencyType = "GRPC"
-	DependencyTypeHTTPClient DependencyType = "HttpClient"
-)
-
-var AllDependencyType = []DependencyType{
-	DependencyTypeNoSQLDb,
-	DependencyTypeSQLDb,
-	DependencyTypeGrpc,
-	DependencyTypeHTTPClient,
+type MockMetaResult struct {
+	Normal   *bool   `json:"normal,omitempty"`
+	Key      *string `json:"key,omitempty"`
+	Expected *string `json:"expected,omitempty"`
+	Actual   *string `json:"actual,omitempty"`
 }
 
-func (e DependencyType) IsValid() bool {
-	switch e {
-	case DependencyTypeNoSQLDb, DependencyTypeSQLDb, DependencyTypeGrpc, DependencyTypeHTTPClient:
-		return true
-	}
-	return false
-}
-
-func (e DependencyType) String() string {
-	return string(e)
-}
-
-func (e *DependencyType) UnmarshalGQL(v interface{}) error {
-	str, ok := v.(string)
-	if !ok {
-		return fmt.Errorf("enums must be strings")
-	}
-
-	*e = DependencyType(str)
-	if !e.IsValid() {
-		return fmt.Errorf("%s is not a valid DependencyType", str)
-	}
-	return nil
-}
-
-func (e DependencyType) MarshalGQL(w io.Writer) {
-	fmt.Fprint(w, strconv.Quote(e.String()))
+type MockResult struct {
+	Name *string           `json:"name,omitempty"`
+	Type *MockType         `json:"type,omitempty"`
+	Meta []*MockMetaResult `json:"meta,omitempty"`
 }
 
 type Kind string
@@ -401,5 +319,50 @@ func (e *Version) UnmarshalGQL(v interface{}) error {
 }
 
 func (e Version) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type MockType string
+
+const (
+	MockTypeNoSQLDb    MockType = "NoSqlDB"
+	MockTypeSQLDb      MockType = "SqlDB"
+	MockTypeGrpc       MockType = "GRPC"
+	MockTypeHTTPClient MockType = "HttpClient"
+)
+
+var AllMockType = []MockType{
+	MockTypeNoSQLDb,
+	MockTypeSQLDb,
+	MockTypeGrpc,
+	MockTypeHTTPClient,
+}
+
+func (e MockType) IsValid() bool {
+	switch e {
+	case MockTypeNoSQLDb, MockTypeSQLDb, MockTypeGrpc, MockTypeHTTPClient:
+		return true
+	}
+	return false
+}
+
+func (e MockType) String() string {
+	return string(e)
+}
+
+func (e *MockType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = MockType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid mockType", str)
+	}
+	return nil
+}
+
+func (e MockType) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }

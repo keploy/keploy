@@ -1,0 +1,32 @@
+[GIN-debug] [WARNING] Creating an Engine instance with the Logger and Recovery middleware already attached.
+
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] GET    /:param                   --> main.getURL (3 handlers)
+[GIN-debug] POST   /url                      --> main.putURL (3 handlers)
+[GIN-debug] GET    /wiki                     --> main.getWiki (3 handlers)
+[GIN-debug] GET    /                         --> main.get (3 handlers)
+[GIN-debug] [WARNING] You trusted all proxies, this is NOT safe. We recommend you to set a value.
+Please check https://pkg.go.dev/github.com/gin-gonic/gin#readme-don-t-trust-all-proxies for details.
+[GIN-debug] Listening and serving HTTP on :8081
+Handling TLS connection from 172.31.31.147:36386
+[GIN-debug] [WARNING] Headers were already written. Wanted to override status code 400 with 200
+[GIN] 2023/07/27 - 13:07:45 | 200 |  2.074422036s |       127.0.0.1 | GET      "/wiki"
+Handling TLS connection from 172.31.31.147:36394
+[GIN-debug] [WARNING] Headers were already written. Wanted to override status code 400 with 200
+[GIN] 2023/07/27 - 13:07:47 | 200 |  2.007389361s |       127.0.0.1 | GET      "/wiki"
+Handling TLS connection from 172.31.31.147:34084
+[GIN-debug] [WARNING] Headers were already written. Wanted to override status code 400 with 200
+[GIN] 2023/07/27 - 13:07:50 | 200 |  2.007002634s |       127.0.0.1 | GET      "/wiki"
+Handling TLS connection from 172.31.31.147:34086
+[GIN-debug] [WARNING] Headers were already written. Wanted to override status code 400 with 200
+[GIN] 2023/07/27 - 13:07:53 | 200 |   2.00667245s |       127.0.0.1 | GET      "/wiki"
+Handling TLS connection from 172.31.31.147:34088
+[GIN-debug] [WARNING] Headers were already written. Wanted to override status code 400 with 200
+[GIN] 2023/07/27 - 13:07:56 | 200 |  2.006168474s |       127.0.0.1 | GET      "/wiki"
+Handling TLS connection from 172.31.31.147:34096
+[GIN-debug] [WARNING] Headers were already written. Wanted to override status code 400 with 200
+[GIN] 2023/07/27 - 13:07:59 | 200 |  2.008168482s |       127.0.0.1 | GET      "/wiki"
+original names: [report-1.yaml report-2.yaml report-3.yaml report-4.yaml report-5.yaml report-6.yaml report-7.yaml]
