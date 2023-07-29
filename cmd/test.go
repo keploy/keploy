@@ -40,7 +40,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					return
 				}
 			}
-			path += "/Keploy"
+			path += "/keploy"
 			// tcsPath := path + "/tests"
 			// mockPath := path + "/mocks"
 
@@ -49,7 +49,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error(Emoji+"failed to get the path of current directory", zap.Error(err))
 				return
 			}
-			testReportPath += "/Keploy/testReports"
+			testReportPath += "/keploy/testReports"
 			appCmd, err := cmd.Flags().GetString("c")
 
 			if err != nil {

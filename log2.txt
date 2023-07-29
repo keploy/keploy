@@ -1,0 +1,996 @@
+2023-07-29T11:39:03.880Z	INFO	hooks/loader.go:589	🐰 Keploy:keploy initialized and probes added to the kernel.
+2023-07-29T11:39:03.880Z	DEBUG	hooks/loader.go:600	🐰 Keploy:	{"Keploy Inode number": 4026531836}
+2023-07-29T11:39:03.880Z	DEBUG	hooks/loader.go:239	🐰 Keploy:Sending keploy pid to kernel	{"pid": 22233}
+2023-07-29T11:39:03.880Z	DEBUG	hooks/loader.go:603	🐰 Keploy:Keploy Pid sent successfully...
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:185	🐰 Keploy:Running Dns Server in Test mode...
+2023-07-29T11:39:04.393Z	INFO	proxy/proxy.go:186	🐰 Keploy:Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:194	🐰 Keploy:Proxy IPv4:Port 2886926339:16789
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:195	🐰 Keploy:Proxy IPV6:Port Addr [0 0 0 1]:16789
+2023-07-29T11:39:04.393Z	INFO	proxy/proxy.go:196	🐰 Keploy:Proxy started at port:16789
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:313	🐰 Keploy:	{"ProxyAddress4": "172.19.0.3"}
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:316	🐰 Keploy:	{"ProxyAddress6": "::1"}
+2023-07-29T11:39:04.393Z	DEBUG	test/test.go:75	the session indices are : 	{"": ["test-suite-0"]}
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:325	🐰 Keploy:Proxy server is listening on :[::]:16789
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:326	🐰 Keploy:Proxy will accept both ipv4 and ipv6 connections	{"Ipv4": "172.19.0.3", "Ipv6": "::1"}
+2023-07-29T11:39:04.393Z	DEBUG	proxy/proxy.go:363	🐰 Keploy:	{"ProxyAddress in dns server": "172.19.0.3:16789"}
+2023-07-29T11:39:04.393Z	INFO	proxy/proxy.go:380	🐰 Keploy:starting DNS server at addr:172.19.0.3:16789
+2023-07-29T11:39:04.394Z	DEBUG	test/test.go:89	the testcases for test-suite-0 are: [0xc001cd8d80 0xc001cd9080 0xc001cd9200]
+2023-07-29T11:39:04.394Z	DEBUG	test/test.go:99	the config mocks for test-suite-0 are: [0xc0019d7540 0xc0019d75e0 0xc0019d7680 0xc0019d7720]
+the testcase mocks are: [0xc0019e90e0 0xc0019e9180 0xc0019e9220]
+2023-07-29T11:39:04.394Z	DEBUG	hooks/launch.go:35	🐰 Keploy:Running user application on Docker
+2023-07-29T11:39:04.394Z	DEBUG	hooks/launch.go:56	🐰 Keploy:	{"Parsed container name": "ginApp"}
+2023-07-29T11:39:04.394Z	DEBUG	hooks/launch.go:57	🐰 Keploy:	{"Parsed docker network": "keploy-network"}
+2023-07-29T11:39:04.394Z	INFO	hooks/launch.go:176	🐰 Keploy:User application started successfully
+Container created:  4c2affa41ca44af22f7d6aaf5bb0ecc5241a24cbe2e782288099a29d4afea819
+[GIN-debug] [WARNING] Creating an Engine instance with the Logger and Recovery middleware already attached.
+
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] GET    /:param                   --> main.getURL (3 handlers)
+[GIN-debug] POST   /url                      --> main.putURL (3 handlers)
+[GIN-debug] [WARNING] You trusted all proxies, this is NOT safe. We recommend you to set a value.
+Please check https://pkg.go.dev/github.com/gin-gonic/gin#readme-don-t-trust-all-proxies for details.
+[GIN-debug] Listening and serving HTTP on :8080
+PID: 1
+2023-07-29T11:39:04.721Z	DEBUG	hooks/launch.go:97	the ip of the docker container: 172.19.0.4
+2023-07-29T11:39:04.721Z	DEBUG	test/test.go:157	the userip of the user docker container	{"": "172.19.0.4"}
+2023-07-29T11:39:04.721Z	DEBUG	test/test.go:158	🐰 Keploy:	{"User Ip": "172.19.0.4"}
+2023-07-29T11:39:04.721Z	INFO	test/test.go:161	🐰 Keploy:	{"no of test cases": 3}
+2023-07-29T11:39:04.721Z	DEBUG	test/test.go:162	the delay is 10s
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:04.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:04.977Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mongodb: i/o timeout"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mongodb: i/o timeout"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mongodb: i/o timeout"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mongodb: i/o timeout"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.722Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup chat.google.com: i/o timeout"}
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup chat.google.com: i/o timeout"}
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup chat.google.com: i/o timeout"}
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.978Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup chat.google.com: i/o timeout"}
+2023-07-29T11:39:05.979Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:05.979Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:05.979Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:05.979Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:05.979Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:05.979Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:39:05.979Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:05.980Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:39:05.980Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:05.980Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:05.980Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:39:05.980Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:05.980Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:05.980Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.730Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.731Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "example.org."}
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "example.org."}
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "example.org."}
+2023-07-29T11:39:06.746Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.747Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.747Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "example.org."}
+2023-07-29T11:39:06.747Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.747Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.747Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "example.org."}
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ssl.gstatic.com: i/o timeout"}
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ssl.gstatic.com: i/o timeout"}
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ssl.gstatic.com: i/o timeout"}
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ssl.gstatic.com: i/o timeout"}
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.980Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.981Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.982Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:39:06.982Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.982Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.982Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:39:06.982Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:06.984Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ipv4only.arpa: i/o timeout"}
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ipv4only.arpa: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup detectportal.firefox.com: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ipv4only.arpa: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup detectportal.firefox.com: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup detectportal.firefox.com: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup ipv4only.arpa: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup detectportal.firefox.com: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup detectportal.firefox.com: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.733Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup detectportal.firefox.com: i/o timeout"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.734Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.735Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ipv4only.arpa."}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "detectportal.firefox.com."}
+2023-07-29T11:39:07.736Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.747Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup example.org: i/o timeout"}
+2023-07-29T11:39:07.747Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup example.org: i/o timeout"}
+2023-07-29T11:39:07.747Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup example.org: i/o timeout"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.747Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup example.org: i/o timeout"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.747Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup example.org: i/o timeout"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.747Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.747Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "example.org."}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "example.org."}
+2023-07-29T11:39:07.748Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:09.738Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:14.722Z	DEBUG	test/test.go:180	🐰 Keploy:Before setting deps.... during testing...
+2023-07-29T11:39:14.722Z	DEBUG	test/test.go:182	🐰 Keploy:Before simulating the request	{"Test case": {"version":"api.keploy.io/v1beta2","kind":"Http","name":"test-1","created":1690619149,"updated":0,"captured":0,"http_req":{"method":"POST","proto_major":1,"proto_minor":1,"url":"http://localhost:8080/url","url_params":null,"header":{"Accept":"*/*","Content-Length":"33","Content-Type":"application/json","Host":"localhost:8080","User-Agent":"curl/7.81.0"},"body":"{\n  \"url\": \"https://google.com\"\n}","body_type":"","binary":"","form":null},"http_resp":{"status_code":200,"header":{"Content-Length":"65","Content-Type":"application/json; charset=utf-8","Date":"Sat, 29 Jul 2023 08:25:48 GMT"},"body":"{\"ts\":1690619148747092423,\"url\":\"http://localhost:8080/Lhr4BWAi\"}","body_type":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"all_keys":null,"anchors":null,"noise":["body.ts"],"mocks":null,"type":""}}
+2023-07-29T11:39:14.722Z	DEBUG	test/test.go:189	the url of the testcase: http://172.19.0.4:8080/url
+2023-07-29T11:39:14.727Z	DEBUG	connection/tracker.go:101	🐰 Keploy:Got a data event from eBPF	{"Direction": 1, "current event size": 234}
+2023-07-29T11:39:15.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:15.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:15.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:15.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:15.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:15.222Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:15.222Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:15.222Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:16.822Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:17.825Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:18.828Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:18.943Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:19.832Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:19.943Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mobile.events.data.microsoft.com: i/o timeout"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mobile.events.data.microsoft.com: i/o timeout"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mobile.events.data.microsoft.com: i/o timeout"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup mobile.events.data.microsoft.com: i/o timeout"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:19.944Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:20.244Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:20.834Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:21.838Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:22.527Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:22.528Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:22.528Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:22.528Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:22.527Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:22.528Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:22.528Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:22.528Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:22.530Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:22.839Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:23.842Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:24.843Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:25.721Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:25.844Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:26.845Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:27.845Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:28.849Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:29.851Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:30.742Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:30.743Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:30.743Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:30.743Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:30.743Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:30.743Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:30.743Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:30.743Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:30.851Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:31.854Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:32.855Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:33.858Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:34.009Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:34.009Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:34.009Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:34.009Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:34.009Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:34.010Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:34.010Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:34.010Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:34.859Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:35.862Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:36.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:36.862Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.528Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.529Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.530Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.531Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:37.862Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:38.866Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:39.867Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:40.870Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:41.242Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:41.871Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:42.875Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:43.878Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+[GIN] 2023/07/29 - 11:39:44 | 500 | 30.001841681s |      172.19.0.3 | POST     "/url"
+2023-07-29T11:39:44.725Z	DEBUG	connection/tracker.go:136	🐰 Keploy:Got a close event from eBPF	{"TotalReadBytes": 234, "TotalWrittenBytes": 1065}
+2023-07-29T11:39:44.725Z	DEBUG	connection/tracker.go:101	🐰 Keploy:Got a data event from eBPF	{"Direction": 0, "current event size": 1065}
+Testrun failed for testcase with id: [31m[1m"[0m[31mtest-1[0m[31m[1m"[0m
+
+--------------------------------------------------------------------
+
++-------------------------------------------------------------------------------------------------------------+
+| [91m                                               DIFFS TEST-1                                                [0m |
++-------------------------------------------------------------------------------------------------------------+
+|                     EXPECT STATUS                    |                   ACTUAL STATUS                      |
+| -----------------------------------------------------+----------------------------------------------------- |
+|                          [91m200[0m                         |                        [92m500[0m                           |
+|                                                      |                                                      |
+|                                                                                                             |
+|                     EXPECT HEADER                    |                   ACTUAL HEADER                      |
+| -----------------------------------------------------+----------------------------------------------------- |
+|                          [[91m65][0m                        |                       [[92m903][0m                          |
+|                                                      |                                                      |
+|                                                                                                             |
+|                      EXPECT BODY                     |                    ACTUAL BODY                       |
+| -----------------------------------------------------+----------------------------------------------------- |
+|    {                                                 |  {                                                   |
+|      "ts": 1.6906191487470925e+18,                   | +  "[32merror": {[0m                                        |
+|   -  "[31murl": "http://localhost:8080/Lhr4BWAi"[0m         | [32m+    "Desc": {[0m                                       |
+|    }                                                 | [32m+      "CompatibilityErr": null,[0m                     |
+|                                                      | [32m+      "Kind": 0,[0m                                    |
+|                                                      | [32m+      "Servers": [[0m                                  |
+|                                                      | [32m+        : {[0m                                         |
+|                                                      | [32m+          "Addr": "mongodb:27017",[0m                  |
+|                                                      | [32m+          "Arbiters": null,[0m                         |
+|                                                      | [32m+          "AverageRTT": 0,[0m                          |
+|                                                      | [32m+          "AverageRTTSet": false,[0m                   |
+|                                                      | [32m+          "CanonicalAddr": "",[0m                      |
+|                                                      | [32m+          "Compression": null,[0m                      |
+|                                                      | [32m+          "ElectionID": "000000000000000000000000[0m   |
+|                                                      | [32m",[0m                                                   |
+|                                                      | [32m+          "HeartbeatInterval": 0,[0m                   |
+|                                                      | [32m+          "HelloOK": false,[0m                         |
+|                                                      |            "Hosts": null,                            |
+|                                                      | [32m+          "Kind": 0,[0m                                |
+|                                                      | [32m+          "LastError": {[0m                            |
+|                                                      | [32m+            "ConnectionID": "",[0m                     |
+|                                                      | [32m+            "Wrapped": {[0m                            |
+|                                                      | [32m+              "Addr": null,[0m                         |
+|                                                      | [32m+              "Err": {[0m                              |
+|                                                      | [32m+                "Err": "Temporary failure in name[0m   |
+|                                                      | [32m resolution",[0m                                        |
+|                                                      | [32m+                "IsNotFound": false,[0m                |
+|                                                      | [32m+                "IsTemporary": true,[0m                |
+|                                                      | [32m+                "IsTimeout": false,[0m                 |
+|                                                      | [32m+                "Name": "mongodb",[0m                  |
+|                                                      | [32m+                "Server": ""[0m                        |
+|                                                      | [32m+              },[0m                                    |
+|                                                      | [32m+              "Net": "tcp",[0m                         |
+|                                                      | [32m+              "Op": "dial",[0m                         |
+|                                                      | [32m+              "Source": null[0m                        |
+|                                                      | [32m+            }[0m                                       |
+|                                                      | [32m+          },[0m                                        |
+|                                                      | [32m+          "LastUpdateTime": "0001-01-01T00:00:00Z[0m   |
+|                                                      | [32m",[0m                                                   |
+|                                                      | [32m+          "LastWriteTime": "0001-01-01T00:00:00Z"[0m   |
+|                                                      | [32m,[0m                                                    |
+|                                                      | [32m+          "MaxBatchCount": 0,[0m                       |
+|                                                      | [32m+          "MaxDocumentSize": 0,[0m                     |
+|                                                      | [32m+          "MaxMessageSize": 0,[0m                      |
+|                                                      | [32m+          "Members": null,[0m                          |
+|                                                      | [32m+          "Passive": false,[0m                         |
+|                                                      | [32m+          "Passives": null,[0m                         |
+|                                                      | [32m+          "Primary": "",[0m                            |
+|                                                      | [32m+          "ReadOnly": false,[0m                        |
+|                                                      | [32m+          "ServiceID": null,[0m                        |
+|                                                      | [32m+          "SessionTimeoutMinutes": 0,[0m               |
+|                                                      | [32m+          "SetName": "",[0m                            |
+|                                                      | [32m+          "SetVersion": 0,[0m                          |
+|                                                      | [32m+          "Tags": null,[0m                             |
+|                                                      | [32m+          "TopologyVersion": null,[0m                  |
+|                                                      | [32m+          "WireVersion": null[0m                       |
+|                                                      | [32m+        }[0m                                           |
+|                                                      | [32m+      ],[0m                                            |
+|                                                      | [32m+      "SessionTimeoutMinutes": 0,[0m                   |
+|                                                      | [32m+      "SetName": ""[0m                                 |
+|                                                      | [32m+    },[0m                                              |
+|                                                      | [32m+    "Wrapped": {[0m                                    |
+|                                                      | [32m+    }[0m                                               |
+|                                                      | [32m+  }[0m                                                 |
+|                                                      |  }                                                   |
+|                                                      |                                                      |
+|                                                                                                             |
++-------------------------------------------------------------------------------------------------------------+
+2023-07-29T11:39:44.883Z	INFO	test/test.go:203	🐰 Keploy:result	{"testcase id": "test-1", "passed": false}
+2023-07-29T11:39:44.883Z	DEBUG	test/test.go:180	🐰 Keploy:Before setting deps.... during testing...
+2023-07-29T11:39:44.883Z	DEBUG	test/test.go:182	🐰 Keploy:Before simulating the request	{"Test case": {"version":"api.keploy.io/v1beta2","kind":"Http","name":"test-2","created":1690619155,"updated":0,"captured":0,"http_req":{"method":"GET","proto_major":1,"proto_minor":1,"url":"http://localhost:8080/Lhr4BWAi","url_params":null,"header":{"Accept":"*/*","Host":"localhost:8080","User-Agent":"curl/7.81.0"},"body":"","body_type":"","binary":"","form":null},"http_resp":{"status_code":303,"header":{"Content-Length":"45","Content-Type":"text/html; charset=utf-8","Date":"Sat, 29 Jul 2023 08:25:54 GMT","Location":"https://google.com"},"body":"<a href=\"https://google.com\">See Other</a>.\n\n","body_type":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"all_keys":null,"anchors":null,"noise":[],"mocks":null,"type":""}}
+2023-07-29T11:39:44.883Z	DEBUG	test/test.go:189	the url of the testcase: http://172.19.0.4:8080/Lhr4BWAi
+2023-07-29T11:39:44.884Z	DEBUG	connection/tracker.go:101	🐰 Keploy:Got a data event from eBPF	{"Direction": 1, "current event size": 153}
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:46.720Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:47.882Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:48.119Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:48.883Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:49.069Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:49.887Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:50.890Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:51.535Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:51.535Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:51.535Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "signaler-pa.clients6.google.com."}
+2023-07-29T11:39:51.535Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:51.535Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:51.535Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "signaler-pa.clients6.google.com."}
+2023-07-29T11:39:51.536Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:51.536Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:51.536Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:51.536Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "signaler-pa.clients6.google.com."}
+2023-07-29T11:39:51.536Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:51.536Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "signaler-pa.clients6.google.com."}
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:51.742Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:51.891Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup signaler-pa.clients6.google.com: i/o timeout"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup signaler-pa.clients6.google.com: i/o timeout"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup signaler-pa.clients6.google.com: i/o timeout"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup signaler-pa.clients6.google.com: i/o timeout"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:52.536Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.539Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:52.539Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:52.539Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:52.539Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.539Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:52.540Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:52.540Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:39:52.540Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:52.892Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:53.894Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:54.895Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:55.899Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:56.901Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:39:57.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:57.902Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:58.769Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:39:58.903Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:39:59.906Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:00.907Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:01.910Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:02.243Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:02.911Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:03.914Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:04.132Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:04.132Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:04.132Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:40:04.133Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:04.132Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:04.133Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:04.133Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:40:04.133Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:04.915Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:05.917Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:06.918Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:07.198Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "ssl.gstatic.com."}
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.543Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.544Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.544Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:07.544Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:07.545Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.544Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.545Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:07.545Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:07.545Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:07.547Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.720Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:07.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:07.721Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.720Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:07.721Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:07.721Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:07.721Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:07.918Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup 204.pop-os.org: i/o timeout"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup 204.pop-os.org: i/o timeout"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup 204.pop-os.org: i/o timeout"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup 204.pop-os.org: i/o timeout"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup 204.pop-os.org: i/o timeout"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:475	🐰 Keploy:failed to resolve the dns query	{"error": "lookup 204.pop-os.org: i/o timeout"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:437	🐰 Keploy:failed to resolve dns query hence sending proxy ip	{"proxy Ip": "172.19.0.3"}
+2023-07-29T11:40:08.199Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:08.919Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:09.566Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:09.570Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:09.919Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:10.922Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:11.922Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:12.742Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:12.742Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:12.742Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:12.743Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:12.743Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:12.743Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:12.743Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:12.743Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:12.923Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:13.926Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+[GIN] 2023/07/29 - 11:40:14 | 404 | 30.000300624s |      172.19.0.3 | GET      "/Lhr4BWAi"
+{"level":"error","ts":1690630814.884473,"caller":"app/handler.go:59","msg":"failed to find url in the database","error":"server selection error: server selection timeout, current topology: { Type: Unknown, Servers: [{ Addr: mongodb:27017, Type: Unknown, Last error: connection() error occured during connection handshake: dial tcp: lookup mongodb: Temporary failure in name resolution }, ] }","hash":"Lhr4BWAi","stacktrace":"main.getURL\n\t/app/handler.go:59\ngithub.com/gin-gonic/gin.(*Context).Next\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/context.go:168\ngithub.com/gin-gonic/gin.CustomRecoveryWithWriter.func1\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/recovery.go:99\ngithub.com/gin-gonic/gin.(*Context).Next\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/context.go:168\ngithub.com/gin-gonic/gin.LoggerWithConfig.func1\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/logger.go:241\ngithub.com/gin-gonic/gin.(*Context).Next\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/context.go:168\ngithub.com/gin-gonic/gin.(*Engine).handleHTTPRequest\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/gin.go:555\ngithub.com/gin-gonic/gin.(*Engine).ServeHTTP\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/gin.go:511\nnet/http.serverHandler.ServeHTTP\n\t/usr/local/go/src/net/http/server.go:2947\nnet/http.(*conn).serve\n\t/usr/local/go/src/net/http/server.go:1991"}
+2023-07-29T11:40:14.884Z	DEBUG	connection/tracker.go:136	🐰 Keploy:Got a close event from eBPF	{"TotalReadBytes": 153, "TotalWrittenBytes": 174}
+2023-07-29T11:40:14.884Z	DEBUG	connection/tracker.go:101	🐰 Keploy:Got a data event from eBPF	{"Direction": 0, "current event size": 174}
+2023-07-29T11:40:14.927Z	ERROR	test/match.go:15	🐰 Keploy:cannot convert json string into json object	{"error": "invalid character '<' looking for beginning of value"}
+go.keploy.io/server/pkg/service/test.unmarshallJson
+	/app/pkg/service/test/match.go:15
+go.keploy.io/server/pkg/service/test.Match
+	/app/pkg/service/test/match.go:33
+go.keploy.io/server/pkg/service/test.(*tester).testHttp
+	/app/pkg/service/test/test.go:385
+go.keploy.io/server/pkg/service/test.(*tester).Test
+	/app/pkg/service/test/test.go:201
+go.keploy.io/server/cmd.(*Test).GetCmd.func1
+	/app/cmd/test.go:77
+github.com/spf13/cobra.(*Command).execute
+	/root/go/pkg/mod/github.com/spf13/cobra@v1.7.0/command.go:944
+github.com/spf13/cobra.(*Command).ExecuteC
+	/root/go/pkg/mod/github.com/spf13/cobra@v1.7.0/command.go:1068
+github.com/spf13/cobra.(*Command).Execute
+	/root/go/pkg/mod/github.com/spf13/cobra@v1.7.0/command.go:992
+go.keploy.io/server/cmd.(*Root).execute
+	/app/cmd/root.go:60
+go.keploy.io/server/cmd.Execute
+	/app/cmd/root.go:38
+main.main
+	/app/main.go:8
+runtime.main
+	/usr/local/go/src/runtime/proc.go:250
+2023-07-29T11:40:14.927Z	INFO	test/test.go:203	🐰 Keploy:result	{"testcase id": "test-2", "passed": false}
+2023-07-29T11:40:14.927Z	DEBUG	test/test.go:180	🐰 Keploy:Before setting deps.... during testing...
+2023-07-29T11:40:14.927Z	DEBUG	test/test.go:182	🐰 Keploy:Before simulating the request	{"Test case": {"version":"api.keploy.io/v1beta2","kind":"Http","name":"test-3","created":1690619163,"updated":0,"captured":0,"http_req":{"method":"GET","proto_major":1,"proto_minor":1,"url":"http://localhost:8080/Lhr4BWAii","url_params":null,"header":{"Accept":"*/*","Host":"localhost:8080","User-Agent":"curl/7.81.0"},"body":"","body_type":"","binary":"","form":null},"http_resp":{"status_code":404,"header":{"Content-Length":"25","Content-Type":"application/json; charset=utf-8","Date":"Sat, 29 Jul 2023 08:26:02 GMT"},"body":"{\"error\":\"url not found\"}","body_type":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"all_keys":null,"anchors":null,"noise":[],"mocks":null,"type":""}}
+2023-07-29T11:40:14.927Z	DEBUG	test/test.go:189	the url of the testcase: http://172.19.0.4:8080/Lhr4BWAii
+2023-07-29T11:40:14.929Z	DEBUG	connection/tracker.go:101	🐰 Keploy:Got a data event from eBPF	{"Direction": 1, "current event size": 154}
+2023-07-29T11:40:16.930Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:17.934Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:18.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:18.935Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:40:19.203Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:19.938Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:20.942Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:21.944Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:22.571Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:22.577Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:22.945Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:23.242Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:23.946Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:24.948Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:25.950Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:26.954Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:27.955Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:28.403Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:28.719Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:28.956Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:29.959Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:30.960Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:31.962Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:32.963Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:33.742Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:33.742Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:33.742Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:33.742Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:33.742Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:33.742Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:33.742Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:33.743Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:33.964Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:34.261Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:34.262Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:34.262Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:34.262Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:34.262Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:40:34.262Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mobile.events.data.microsoft.com."}
+2023-07-29T11:40:34.262Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:34.262Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:34.964Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:35.966Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:36.967Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:37.571Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:37.572Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:37.572Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:37.571Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:37.572Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:37.572Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:37.572Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:37.572Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "chat.google.com."}
+2023-07-29T11:40:37.575Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:37.969Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:38.973Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:39.221Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:39.974Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:40.978Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:41.982Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:42.986Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:43.990Z	DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "mongodb."}
+2023-07-29T11:40:44.242Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+{"level":"error","ts":1690630844.928569,"caller":"app/handler.go:59","msg":"failed to find url in the database","error":"server selection error: server selection timeout, current topology: { Type: Unknown, Servers: [{ Addr: mongodb:27017, Type: Unknown, Last error: connection() error occured during connection handshake: dial tcp: lookup mongodb: Temporary failure in name resolution }, ] }","hash":"Lhr4BWAii","stacktrace":"main.getURL\n\t/app/handler.go:59\ngithub.com/gin-gonic/gin.(*Context).Next\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/context.go:168\ngithub.com/gin-gonic/gin.CustomRecoveryWithWriter.func1\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/recovery.go:99\ngithub.com/gin-gonic/gin.(*Context).Next\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/context.go:168\ngithub.com/gin-gonic/gin.LoggerWithConfig.func1\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/logger.go:241\ngithub.com/gin-gonic/gin.(*Context).Next\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/context.go:168\ngithub.com/gin-gonic/gin.(*Engine).handleHTTPRequest\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/gin.go:555\ngithub.com/gin-gonic/gin.(*Engine).ServeHTTP\n\t/go/pkg/mod/github.com/gin-gonic/gin@v1.7.7/gin.go:511\nnet/http.serverHandler.ServeHTTP\n\t/usr/local/go/src/net/http/server.go:2947\nnet/http.(*conn).serve\n\t/usr/local/go/src/net/http/server.go:1991"}
+[GIN] 2023/07/29 - 11:40:44 | 404 |   30.0010142s |             ::1 | GET      "/Lhr4BWAii"
+2023-07-29T11:40:44.928Z	DEBUG	connection/tracker.go:136	🐰 Keploy:Got a close event from eBPF	{"TotalReadBytes": 154, "TotalWrittenBytes": 174}
+2023-07-29T11:40:44.929Z	DEBUG	connection/tracker.go:101	🐰 Keploy:Got a data event from eBPF	{"Direction": 0, "current event size": 174}
+Testrun passed for testcase with id: [32m[1m"[0m[32mtest-3[0m[32m[1m"[0m
+
+--------------------------------------------------------------------
+
+2023-07-29T11:40:44.991Z	INFO	test/test.go:203	🐰 Keploy:result	{"testcase id": "test-3", "passed": true}
+2023-07-29T11:40:44.992Z	DEBUG	test/test.go:296	the result before	{"": true, "testreport name": "report-23"}
+2023-07-29T11:40:44.992Z	DEBUG	test/test.go:298	the result after	{"": false, "testreport name": "report-23"}
+2023-07-29T11:40:44.992Z	INFO	hooks/loader.go:263	🐰 Keploy:User application stopped successfully...
+2023-07-29T11:40:44.992Z	INFO	test/test.go:302	🐰 Keploy:test run completed	{"passed overall": false}
+2023-07-29T11:40:44.992Z	INFO	hooks/loader.go:274	🐰 Keploy:Received signal, exiting program..
+2023-07-29T11:40:44.992Z	ERROR	hooks/ringBufReader.go:89	🐰 Keploy:failed to receive signal from ringbuf socketDataEvent reader	{"error": "epoll wait: file already closed"}
+go.keploy.io/server/pkg/hooks.socketDataEventCallback
+	/app/pkg/hooks/ringBufReader.go:89
+2023-07-29T11:40:44.993Z	ERROR	hooks/loader.go:261	🐰 Keploy:failed to stop user application	{"error": "os: process already finished"}
+go.keploy.io/server/pkg/hooks.(*Hook).StopUserApplication
+	/app/pkg/hooks/loader.go:261
+go.keploy.io/server/pkg/hooks.(*Hook).Stop
+	/app/pkg/hooks/loader.go:291
+go.keploy.io/server/pkg/service/test.(*tester).Test
+	/app/pkg/service/test/test.go:305
+go.keploy.io/server/cmd.(*Test).GetCmd.func1
+	/app/cmd/test.go:77
+github.com/spf13/cobra.(*Command).execute
+	/root/go/pkg/mod/github.com/spf13/cobra@v1.7.0/command.go:944
+github.com/spf13/cobra.(*Command).ExecuteC
+	/root/go/pkg/mod/github.com/spf13/cobra@v1.7.0/command.go:1068
+github.com/spf13/cobra.(*Command).Execute
+	/root/go/pkg/mod/github.com/spf13/cobra@v1.7.0/command.go:992
+go.keploy.io/server/cmd.(*Root).execute
+	/app/cmd/root.go:60
+go.keploy.io/server/cmd.Execute
+	/app/cmd/root.go:38
+main.main
+	/app/main.go:8
+runtime.main
+	/usr/local/go/src/runtime/proc.go:250
+2023-07-29T11:40:45.183Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:45.183Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:45.183Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:45.183Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 28}
+2023-07-29T11:40:45.183Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "pixie-community.slack.com."}
+2023-07-29T11:40:45.183Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "204.pop-os.org."}
+2023-07-29T11:40:45.184Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:45.183Z	DEBUG	proxy/proxy.go:401	🐰 Keploy:Got some Dns queries
+2023-07-29T11:40:45.184Z	DEBUG	proxy/proxy.go:403	🐰 Keploy:	{"Record Type": 1}
+2023-07-29T11:40:45.184Z	DEBUG	proxy/proxy.go:404	🐰 Keploy:	{"Received Query": "pixie-community.slack.com."}
+2023-07-29T11:40:45.222Z	DEBUG	proxy/proxy.go:496	🐰 Keploy:net.LookupIP resolved the ip address...
+2023-07-29T11:40:45.222Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:45.222Z	DEBUG	proxy/proxy.go:496	🐰 Keploy:net.LookupIP resolved the ip address...
+2023-07-29T11:40:45.222Z	DEBUG	proxy/proxy.go:454	🐰 Keploy:Writing dns info back to the client...
+2023-07-29T11:40:45.627Z	INFO	hooks/loader.go:322	🐰 Keploy:eBPF resources released successfully...
+2023-07-29T11:40:45.627Z	ERROR	proxy/proxy.go:338	🐰 Keploy:failed to accept connection to the proxy	{"error": "accept tcp [::]:16789: use of closed network connection"}
+go.keploy.io/server/pkg/proxy.(*ProxySet).startProxy
+	/app/pkg/proxy/proxy.go:338
+2023-07-29T11:40:45.627Z	INFO	proxy/proxy.go:746	🐰 Keploy:Dns server stopped
+2023-07-29T11:40:45.627Z	INFO	proxy/proxy.go:386	🐰 Keploy:DNS server started at port:16789
+2023-07-29T11:40:45.627Z	INFO	proxy/proxy.go:748	🐰 Keploy:proxy stopped...

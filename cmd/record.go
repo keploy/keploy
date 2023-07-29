@@ -40,7 +40,7 @@ func (r *Record) GetCmd() *cobra.Command {
 					return
 				}
 			}
-			path += "/Keploy"
+			path += "/keploy"
 			// tcsPath := path + "/tests"
 			// mockPath := path + "/mocks"
 
