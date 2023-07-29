@@ -153,12 +153,16 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		var userIp string
 		ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
 		if ok {
-			userIp = loadedHooks.GetUserIp(appContainer, appNetwork)
+			userIp = loadedHooks.GetUserIP()
+			t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
 			t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
 		}
 
 		t.logger.Info(Emoji, zap.Any("no of test cases", len(tcs)))
-		time.Sleep(time.Duration(Delay))
+		t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(Delay)*time.Second)))
+
+		// added delay to hold running keploy tests until application starts
+		time.Sleep(time.Duration(Delay) * time.Second)
 		for _, tc := range tcs {
 			switch tc.Kind {
 			case models.HTTP:
@@ -182,6 +186,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 					//changing Ip address only in case of docker
 					tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
 				}
+				t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
 				// time.Sleep(10 * time.Second)
 				resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
 				resp = loadedHooks.GetResp()

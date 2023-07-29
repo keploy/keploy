@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/docker/docker/api/types"
@@ -28,7 +27,6 @@ var (
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
-	time.Sleep(7 * time.Second)
 	var pids [15]int32
 	// Supports Linux, Windows
 	ok, cmd := h.IsDockerRelatedCmd(appCmd)
@@ -85,7 +83,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 						return
 					case e := <-messages:
 						if e.Type == events.ContainerEventType && e.Action == "create" {
-							// fmt.Println("Container created: ", e.ID)
+							fmt.Println("Container created: ", e.ID)
 							containerPid := 0
 							for {
 								inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
@@ -96,11 +94,13 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 								}
 								// fmt.Printf("PID of the docker : %v, duration: %v\n", containerPid, time.Since(started))
 								if inspect.State.Pid != 0 {
-									h.userIpAddress = inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
+									h.logger.Debug(fmt.Sprintf("the ip of the docker container: %v", inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress))
+									h.userIpAddress <- inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
 									containerPid = inspect.State.Pid
 									break
 								}
 							}
+							h.logger.Debug(fmt.Sprintf("the container id: %v", containerPid))
 							inode := getInodeNumber([15]int32{int32(containerPid)})
 							// send the inode of the container to ebpf hooks to filter the network traffic
 							h.SendNameSpaceId(0, inode)
@@ -140,8 +140,6 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}()
 
 		h.logger.Debug(Emoji + "Waiting for any error from user application")
-		time.Sleep(time.Duration(Delay) * time.Second)
-		h.logger.Debug(Emoji + "After running user application")
 
 		// Check if there is an error in the channel without blocking
 		select {
@@ -154,6 +152,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			// No error received yet, continue with further flow
 		}
 
+		h.logger.Debug(Emoji + "After running user application")
 		h.logger.Debug(Emoji + "Now setting app pids")
 
 		appPids, err := getAppPIDs(appCmd)
@@ -269,37 +268,6 @@ func makeDockerClient() *client.Client {
 		log.Fatalf(Emoji, "failed to make a docker client:", err)
 	}
 	return cli
-}
-
-func (h *Hook) GetUserIp(containerName, networkName string) string {
-
-	// If both containerName, networkName are not provided then it must not be a docker compose file,
-	// And it is checked at the time of launching the applicaton
-
-	if len(containerName) == 0 {
-		containerName = appContainerName
-	}
-
-	if len(networkName) == 0 {
-		networkName = appDockerNetwork
-	}
-
-	cli := dockerClient
-	// Create a new context
-	ctx := context.Background()
-
-	// Inspect the specified container
-	inspect, err := cli.ContainerInspect(ctx, containerName)
-	if err != nil {
-		log.Fatalf(Emoji, "failed to inspect container:%v,", containerName, err)
-	}
-
-	// Find the IP address of the container in the network
-	ipAddress := inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
-
-	h.logger.Debug(Emoji, zap.Any("Container Ip Address", ipAddress))
-
-	return ipAddress
 }
 
 func getAppNameSpacePIDs(containerName string) ([15]int32, [15]int32) {

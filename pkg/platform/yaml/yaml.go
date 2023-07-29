@@ -47,7 +47,7 @@ func createYamlFile(path string, fileName string, logger *zap.Logger) (bool, err
 			return false, err
 		}
 		// Changes the permission of created "Keploy" folder to 777
-		if strings.Contains(path, "Keploy/test-suite-") {
+		if strings.Contains(path, "keploy/test-suite-") {
 			err = os.Chmod(filepath.Join(strings.TrimSuffix(path, filepath.Base(path))), fs.ModePerm)
 			if err != nil {
 				logger.Error(Emoji+"failed to change the ./Keploy directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
