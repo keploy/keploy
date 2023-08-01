@@ -32,7 +32,7 @@ func ProcessOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h 
 
 func decodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	framer := http2.NewFramer(clientConn, clientConn)
-	srv := NewFakeServer(framer, logger, h)
+	srv := NewTranscoder(framer, logger, h)
 	err := srv.ListenAndServe()
 	if err != nil {
 		logger.Error("could not serve grpc request")

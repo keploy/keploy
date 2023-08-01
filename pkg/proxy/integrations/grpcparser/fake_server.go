@@ -11,7 +11,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 )
 
-type fakeServer struct {
+type transcoder struct {
 	sic     *StreamInfoCollection
 	hook    *hooks.Hook
 	logger  *zap.Logger
@@ -19,8 +19,8 @@ type fakeServer struct {
 	decoder *hpack.Decoder
 }
 
-func NewFakeServer(framer *http2.Framer, logger *zap.Logger, h *hooks.Hook) *fakeServer {
-	return &fakeServer{
+func NewTranscoder(framer *http2.Framer, logger *zap.Logger, h *hooks.Hook) *transcoder {
+	return &transcoder{
 		logger:  logger,
 		framer:  framer,
 		hook:    h,
@@ -29,7 +29,7 @@ func NewFakeServer(framer *http2.Framer, logger *zap.Logger, h *hooks.Hook) *fak
 	}
 }
 
-func (srv *fakeServer) WriteInitialSettingsFrame() error {
+func (srv *transcoder) WriteInitialSettingsFrame() error {
 	var settings []http2.Setting
 	// TODO : Get Settings from config file.
 	settings = append(settings, http2.Setting{
@@ -39,7 +39,7 @@ func (srv *fakeServer) WriteInitialSettingsFrame() error {
 	return srv.framer.WriteSettings(settings...)
 }
 
-func (srv *fakeServer) ProcessPingFrame(pingFrame *http2.PingFrame) error {
+func (srv *transcoder) ProcessPingFrame(pingFrame *http2.PingFrame) error {
 	if pingFrame.IsAck() {
 		// An endpoint MUST NOT respond to PING frames containing this flag.
 		return nil
@@ -61,7 +61,7 @@ func (srv *fakeServer) ProcessPingFrame(pingFrame *http2.PingFrame) error {
 
 }
 
-func (srv *fakeServer) ProcessDataFrame(dataFrame *http2.DataFrame) error {
+func (srv *transcoder) ProcessDataFrame(dataFrame *http2.DataFrame) error {
 	id := dataFrame.Header().StreamID
 	// DATA frame must be associated with a stream
 	if id == 0 {
@@ -191,18 +191,18 @@ func (srv *fakeServer) ProcessDataFrame(dataFrame *http2.DataFrame) error {
 	return nil
 }
 
-func (srv *fakeServer) ProcessWindowUpdateFrame(windowUpdateFrame *http2.WindowUpdateFrame) error {
+func (srv *transcoder) ProcessWindowUpdateFrame(windowUpdateFrame *http2.WindowUpdateFrame) error {
 	// Silently ignore Window update frames, as we already know the mock payloads that we would send.
 	srv.logger.Info("Received Window Update Frame. Skipping it...")
 	return nil
 }
 
-func (srv *fakeServer) ProcessResetStreamFrame(resetStreamFrame *http2.RSTStreamFrame) error {
+func (srv *transcoder) ProcessResetStreamFrame(resetStreamFrame *http2.RSTStreamFrame) error {
 	srv.sic.ResetStream(resetStreamFrame.StreamID)
 	return nil
 }
 
-func (srv *fakeServer) ProcessSettingsFrame(settingsFrame *http2.SettingsFrame) error {
+func (srv *transcoder) ProcessSettingsFrame(settingsFrame *http2.SettingsFrame) error {
 	// ACK the settings and silently skip the processing.
 	// There is no actual server to tune the settings on. We already know the default settings from record mode.
 	// TODO : Add support for dynamically updating the settings.
@@ -212,21 +212,21 @@ func (srv *fakeServer) ProcessSettingsFrame(settingsFrame *http2.SettingsFrame) 
 	return nil
 }
 
-func (srv *fakeServer) ProcessGoAwayFrame(goAwayFrame *http2.GoAwayFrame) error {
+func (srv *transcoder) ProcessGoAwayFrame(goAwayFrame *http2.GoAwayFrame) error {
 	// We do not support a client that requests a server to shut down during test mode. Warn the user.
 	// TODO : Add support for dynamically shutting down mock server using a channel to send close request.
 	srv.logger.Warn("Received GoAway Frame. Ideally, clients should not close server during test mode.")
 	return nil
 }
 
-func (srv *fakeServer) ProcessPriorityFrame(priorityFrame *http2.PriorityFrame) error {
+func (srv *transcoder) ProcessPriorityFrame(priorityFrame *http2.PriorityFrame) error {
 	// We do not support reordering of frames based on priority, because we flush after each response.
 	// Silently skip it.
 	srv.logger.Info("Received PRIORITY frame, Skipping it...")
 	return nil
 }
 
-func (srv *fakeServer) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) error {
+func (srv *transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) error {
 	id := headersFrame.StreamID
 	// Streams initiated by a client MUST use odd-numbered stream identifiers
 	if id%2 != 1 {
@@ -247,14 +247,14 @@ func (srv *fakeServer) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) err
 	return nil
 }
 
-func (srv *fakeServer) ProcessPushPromise(pushPromiseFrame *http2.PushPromiseFrame) error {
+func (srv *transcoder) ProcessPushPromise(pushPromiseFrame *http2.PushPromiseFrame) error {
 	// A client cannot push. Thus, servers MUST treat the receipt of a PUSH_PROMISE
 	// frame as a connection error (Section 5.4.1) of type PROTOCOL_ERROR.
 	srv.logger.Error("As per HTTP/2 spec, client cannot send PUSH_PROMISE.")
 	return http2.ConnectionError(http2.ErrCodeProtocol)
 }
 
-func (srv *fakeServer) ProcessContinuationFrame(ContinuationFrame *http2.ContinuationFrame) error {
+func (srv *transcoder) ProcessContinuationFrame(ContinuationFrame *http2.ContinuationFrame) error {
 	// Continuation frame support is overkill currently because the headers won't exceed the frame size
 	// used by our mock server.
 	// However, if we really need this feature, we can implement it later.
@@ -262,7 +262,7 @@ func (srv *fakeServer) ProcessContinuationFrame(ContinuationFrame *http2.Continu
 	return fmt.Errorf("continuation frame is unsupported in the current implementation")
 }
 
-func (srv *fakeServer) ProcessGenericFrame(frame http2.Frame) error {
+func (srv *transcoder) ProcessGenericFrame(frame http2.Frame) error {
 	//PrintFrame(frame)
 	var err error
 	switch frame.(type) {
@@ -294,7 +294,7 @@ func (srv *fakeServer) ProcessGenericFrame(frame http2.Frame) error {
 }
 
 // ListenAndServe is a forever blocking call that reads one frame at a time, and responds to them.
-func (srv *fakeServer) ListenAndServe() error {
+func (srv *transcoder) ListenAndServe() error {
 	err := srv.WriteInitialSettingsFrame()
 	if err != nil {
 		srv.logger.Error("error writing initial settings frame", zap.Error(err))
