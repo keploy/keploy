@@ -24,7 +24,6 @@ import (
 	"go.keploy.io/server/grpc/grpcserver"
 	"go.keploy.io/server/http/browserMock"
 	"go.keploy.io/server/http/regression"
-	historyConfig "go.keploy.io/server/pkg/platform/fs"
 	mockPlatform "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -200,7 +199,7 @@ func Server(ver string) *chi.Mux {
 	httpListener := m.Match(cmux.HTTP1Fast())
 
 	//log.Printf("👍 connect to http://localhost:%s for GraphQL playground\n ", port)
-	hs := historyConfig.NewHistCfgFS()
+	hs := mockPlatform.NewHistCfgFS()
 	g := new(errgroup.Group)
 	g.Go(func() error {
 		return grpcserver.New(k, logger, regSrv, mockSrv, tcSvc, hs, grpcListener, conf.EnableTestExport, conf.ReportPath, analyticsConfig, client)
