@@ -57,7 +57,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 
 	// start the proxies
-	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
+	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd, appContainer)
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
@@ -104,6 +104,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		// start user application
 		if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
 			result = false
+			t.logger.Debug(Emoji + "failed to process the user application")
 			continue
 			// return false
 		}
@@ -189,6 +190,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 				t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
 				// time.Sleep(10 * time.Second)
 				resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
+				t.logger.Debug(Emoji+"After simulating the request", zap.Any("test case id", tc.Name))
 				resp = loadedHooks.GetResp()
 				if err != nil {
 					t.logger.Info(Emoji+"result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))

@@ -1,10 +1,11 @@
 package pkg
 
 import (
+	"bufio"
 	"bytes"
 	"net/http"
 	"strings"
-	"bufio"
+
 	"github.com/araddon/dateparse"
 	"github.com/gorilla/mux"
 	"go.keploy.io/server/pkg/models"
@@ -59,7 +60,6 @@ func ToHttpHeader(mockHeader map[string]string) http.Header {
 	return header
 }
 
-
 // IsTime verifies whether a given string represents a valid date or not.
 func IsTime(stringDate string) bool {
 	s := strings.TrimSpace(stringDate)
@@ -76,6 +76,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models
 	// 	logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
 	// 	return nil, err
 	// }
+	logger.Info(Emoji+"making a http request", zap.Any("test case id", tc.Name))
 	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
 		logger.Error(Emoji+"failed to create a http request from the yaml document", zap.Error(err))
@@ -107,10 +108,10 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
-	request.Header.Set("Host", request.Host)
 	if err != nil {
 		return nil, err
 	}
+	request.Header.Set("Host", request.Host)
 
 	return request, nil
 }

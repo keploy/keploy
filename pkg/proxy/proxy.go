@@ -115,7 +115,7 @@ var caPKey []byte
 var caFolder embed.FS
 
 // BootProxies starts proxy servers on the idle local port, Default:16789
-func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
+func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -169,13 +169,15 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd string) *ProxySet {
 
 	//check if the user application is running inside docker container
 	dCmd, _ := util.IsDockerRelatedCommand(appCmd)
+	//check if the user application is running docker container using IDE
+	dIDE := (appCmd == "" && len(appContainer) != 0)
 
 	var proxySet = ProxySet{
 		Port:         opt.Port,
 		IP4:          proxyAddr4,
 		IP6:          proxyAddr6,
 		logger:       logger,
-		dockerAppCmd: dCmd,
+		dockerAppCmd: (dCmd || dIDE),
 	}
 
 	if isPortAvailable(opt.Port) {
@@ -393,64 +395,71 @@ var cache = struct {
 	m map[string][]dns.RR
 }{m: make(map[string][]dns.RR)}
 
+func generateCacheKey(name string, qtype uint16) string {
+	return fmt.Sprintf("%s-%s", name, dns.TypeToString[qtype])
+}
+
 func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
+	ps.logger.Debug(Emoji, zap.Any("Source socket info", w.RemoteAddr().String()))
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
 	ps.logger.Debug(Emoji + "Got some Dns queries")
 	for _, question := range r.Question {
-		ps.logger.Debug(Emoji, zap.Any("Record Type", question.Qtype))
-		ps.logger.Debug(Emoji, zap.Any("Received Query", question.Name))
+		ps.logger.Debug(Emoji, zap.Any("Record Type", question.Qtype), zap.Any("Received Query", question.Name))
 
-		// 	answers := resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
-		// 	println("[ServeDNS]: answers:", answers)
-		// 	if answers == nil {
-		// 		fmt.Println("answers is nil because failed dns resolution")
-		// 		answers = []dns.RR{}
-		// 	} else {
-		// 		println("[ServeDNS]: length of answers:", len(answers))
-		// 	}
-		// 	// var answers []dns.RR
-		// 	if len(answers) == 0 {
-		// 		// If resolution failed, return a default A record with Proxy IP
-		// 		defaultAnswer := &dns.A{
-		// 			Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-		// 			A:   net.ParseIP(util.ToIP4AddressStr(ps.IP)),
-		// 		}
-		// 		answers = append(answers, defaultAnswer)
-		// 		fmt.Printf("\nSending our proxy ip address:%+v\n", answers)
-		// 	}
-		// 	msg.Answer = append(msg.Answer, answers...)
-		// }
+		key := generateCacheKey(question.Name, question.Qtype)
 
 		// Check if the answer is cached
 		cache.RLock()
-		answers, found := cache.m[question.Name]
+		answers, found := cache.m[key]
 		cache.RUnlock()
 
 		if !found {
-			// If not, resolve the DNS query
-			answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
+			// If not found in cache, resolve the DNS query
+			// answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
 
 			if answers == nil || len(answers) == 0 {
-				ps.logger.Debug(Emoji+"failed to resolve dns query hence sending proxy ip", zap.Any("proxy Ip", util.ToIP4AddressStr(ps.IP4)))
 				// If the resolution failed, return a default A record with Proxy IP
-				answers = []dns.RR{&dns.A{
-					Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-					A:   net.ParseIP(util.ToIP4AddressStr(ps.IP4)),
-				}}
+				if question.Qtype == dns.TypeA {
+					answers = []dns.RR{&dns.A{
+						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+						A:   net.ParseIP(util.ToIP4AddressStr(ps.IP4)),
+					}}
+					ps.logger.Debug(Emoji+"failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", util.ToIP4AddressStr(ps.IP4)))
+				} else if question.Qtype == dns.TypeAAAA {
+					if ps.dockerAppCmd {
+						// answers = []dns.RR{&dns.AAAA{
+						// 	Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+						// 	AAAA: net.ParseIP(""),
+						// }}
+						ps.logger.Debug(Emoji + "failed to resolve dns query (in docker case) hence sending empty record")
+					} else {
+						answers = []dns.RR{&dns.AAAA{
+							Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+							AAAA: net.ParseIP(util.ToIPv6AddressStr(ps.IP6)),
+						}}
+						ps.logger.Debug(Emoji+"failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", util.ToIPv6AddressStr(ps.IP6)))
+					}
+				}
+
+				fmt.Printf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers)
 			}
 
 			// Cache the answer
 			cache.Lock()
-			cache.m[question.Name] = answers
+			cache.m[key] = answers
 			cache.Unlock()
+			fmt.Printf("Answers[after caching it]:\n%v\n", answers)
 		}
 
+		fmt.Printf("Answers[before appending to msg]:\n%v\n", answers)
 		msg.Answer = append(msg.Answer, answers...)
+		fmt.Printf("Answers[After appending to msg]:\n%v\n", msg.Answer)
 	}
 
+	fmt.Printf(Emoji+"dns msg sending back:\n%v\n", msg)
 	ps.logger.Debug(Emoji + "Writing dns info back to the client...")
 	err := w.WriteMsg(msg)
 	if err != nil {
@@ -472,7 +481,7 @@ func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) [
 	// Perform the lookup with the context
 	ips, err := resolver.LookupIPAddr(ctx, domain)
 	if err != nil {
-		logger.Debug(Emoji+"failed to resolve the dns query", zap.Error(err))
+		logger.Debug(Emoji+fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
 		return nil
 	}
 
@@ -654,7 +663,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 		// }
 	}
-
+	fmt.Println(Emoji+"isMongo():%v", mongoparser.IsOutgoingMongo(buffer))
+	fmt.Println(Emoji+"Req buffer:%v", buffer)
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]

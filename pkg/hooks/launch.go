@@ -7,16 +7,19 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/client"
+	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -29,15 +32,31 @@ var (
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
 	var pids [15]int32
 	// Supports Linux, Windows
+
+	if appCmd == "" && len(appContainer) == 0 {
+		return fmt.Errorf(Emoji + "please provide containerName when trying to run using IDE")
+	}
+
+	if appCmd == "" && len(appContainer) != 0 {
+
+		if len(appNetwork) == 0 {
+			h.logger.Error(Emoji + "please provide docker network name when running with IDE")
+			return fmt.Errorf(Emoji + "docker network name not found")
+		}
+
+		h.logger.Debug(Emoji + "User Application is running inside docker using IDE")
+		//search for the container and process it
+		err := h.processDockerEnv("", appContainer, appNetwork)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
 	ok, cmd := h.IsDockerRelatedCmd(appCmd)
 	if ok {
 
 		h.logger.Debug(Emoji + "Running user application on Docker")
-
-		// to notify the kernel hooks that the user application command is related to Docker.
-		key := 0
-		value := true
-		h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
 
 		if cmd == "docker-compose" {
 			if len(appContainer) == 0 {
@@ -65,66 +84,10 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 			appContainer = appContainerName
 		}
-
-		dockerClient = makeDockerClient()
-		errCh := make(chan error, 1)
-		go func() {
-			// listen for the "create container" event in order to send the inode of the container to the kernel
-			go func() {
-				// listen for the docker daemon events
-				messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{})
-
-				for {
-					select {
-					case err := <-errs:
-						if err != nil && err != context.Canceled {
-							h.logger.Error("failed to listen for the docker events", zap.Error(err))
-						}
-						return
-					case e := <-messages:
-						if e.Type == events.ContainerEventType && e.Action == "create" {
-							fmt.Println("Container created: ", e.ID)
-							containerPid := 0
-							for {
-								inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
-								if err != nil {
-									// fmt.Printf("Failed to execute command: %s, duration: %v\n", err, time.Since(started))
-									// return .
-									continue
-								}
-								// fmt.Printf("PID of the docker : %v, duration: %v\n", containerPid, time.Since(started))
-								if inspect.State.Pid != 0 {
-									h.logger.Debug(fmt.Sprintf("the ip of the docker container: %v", inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress))
-									h.userIpAddress <- inspect.NetworkSettings.Networks[appDockerNetwork].IPAddress
-									containerPid = inspect.State.Pid
-									break
-								}
-							}
-							h.logger.Debug(fmt.Sprintf("the container id: %v", containerPid))
-							inode := getInodeNumber([15]int32{int32(containerPid)})
-							// send the inode of the container to ebpf hooks to filter the network traffic
-							h.SendNameSpaceId(0, inode)
-						}
-					}
-				}
-			}()
-			err := h.runApp(appCmd, ok)
-			errCh <- err
-		}()
-
-		// Check if there is an error in the channel without blocking
-		select {
-		// channel for only checking for error during this instant looks
-		// like an overkill. TODO refactor
-		case err := <-errCh:
-			if err != nil {
-				h.logger.Error(Emoji+"failed to launch the user application", zap.Any("err", err.Error()))
-				return err
-			}
-		default:
-			// No error received yet, continue with further flow
+		err = h.processDockerEnv(appCmd, appContainer, appNetwork)
+		if err != nil {
+			return err
 		}
-
 	} else { //Supports only linux
 		h.logger.Debug(Emoji+"Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
@@ -149,6 +112,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				return err
 			}
 		default:
+			h.logger.Debug(Emoji + "no error found while running user application")
 			// No error received yet, continue with further flow
 		}
 
@@ -166,15 +130,156 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
 
-	err := h.SendApplicationPIDs(pids)
-	if err != nil {
-		h.logger.Error(Emoji+"failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
-		return err
-	}
+	// err := h.SendApplicationPIDs(pids)
+	// if err != nil {
+	// 	h.logger.Error(Emoji+"failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
+	// 	return err
+	// }
 
 	// h.EnablePidFilter() // can enable here also
 
 	h.logger.Info(Emoji + "User application started successfully")
+	return nil
+}
+
+func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
+
+	// to notify the kernel hooks that the user application is related to Docker.
+	key := 0
+	value := true
+	h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
+
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+
+	dockerClient := makeDockerClient()
+	appErrCh := make(chan error, 1)
+
+	//User is using keploy with IDE when appCmd is empty
+	if len(appCmd) != 0 {
+		go func() {
+			err := h.runApp(appCmd, true)
+			appErrCh <- err
+		}()
+
+		select {
+		case err := <-appErrCh:
+			if err != nil {
+				h.logger.Error(Emoji+"failed to launch the user application container", zap.Any("err", err.Error()))
+				return err
+			}
+		default:
+			h.logger.Debug(Emoji + "no error found while running user application container")
+			// No error received yet, continue with further flow
+		}
+	}
+
+	dockerErrCh := make(chan error, 1)
+	done := make(chan bool, 1)
+
+	// listen for the "create container" event in order to send the inode of the container to the kernel
+	go func() {
+		// listen for the docker daemon events
+		defer func() {
+			h.logger.Debug(Emoji + "exiting from goroutine of docker daemon event listener")
+		}()
+
+		endTime := time.Now().Add(30 * time.Second)
+		logTicker := time.NewTicker(1 * time.Second)
+		defer logTicker.Stop()
+
+		messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{})
+		for {
+			if time.Now().After(endTime) {
+				dockerErrCh <- fmt.Errorf("no container found for :%v", appContainer)
+				return
+			}
+
+			select {
+			case err := <-errs:
+				if err != nil && err != context.Canceled {
+					h.logger.Error("failed to listen for the docker events", zap.Error(err))
+				}
+				return
+			case <-stopper:
+				dockerErrCh <- fmt.Errorf("found sudden interrupt")
+				return
+			case <-logTicker.C:
+				h.logger.Info(Emoji+"Still waiting for the container to start.", zap.String("containerName", appContainer))
+			case e := <-messages:
+				if e.Type == events.ContainerEventType && e.Action == "create" {
+					fmt.Println(Emoji+"Container created: ", e.ID)
+					containerPid := 0
+					containerIp := ""
+					containerFound := false
+					for {
+						if time.Now().After(endTime) {
+							h.logger.Error(Emoji+"failed to find the user application container", zap.Any("appContainer", appContainer))
+							break
+						}
+						inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
+						if err != nil {
+							// h.logger.Debug(Emoji+fmt.Sprintf("failed to get inspect:%v", inspect), zap.Error(err))
+							continue
+						}
+
+						h.logger.Debug(Emoji+"checking for container pid", zap.Any("inspect.State.Pid", inspect.State.Pid))
+						if inspect.State.Pid != 0 {
+							h.logger.Debug(Emoji, zap.Any("inspect.State.Pid", inspect.State.Pid))
+
+							if inspect.NetworkSettings != nil && inspect.NetworkSettings.Networks != nil {
+								networkDetails, ok := inspect.NetworkSettings.Networks[appDockerNetwork]
+								if ok && networkDetails != nil {
+									h.logger.Debug(Emoji + fmt.Sprintf("the ip of the docker container: %v", networkDetails.IPAddress))
+									if models.GetMode() == models.MODE_TEST {
+										h.logger.Debug(Emoji + "setting container ip address")
+										containerIp = networkDetails.IPAddress
+										h.logger.Debug(Emoji + "receiver channel received the ip address")
+									}
+								} else {
+									h.logger.Debug(Emoji + "Network details for given network not found")
+								}
+							} else {
+								h.logger.Debug(Emoji + "Network settings or networks not available in inspect data")
+							}
+							containerPid = inspect.State.Pid
+							containerFound = true
+							h.logger.Debug(Emoji + "container and ip found...")
+							break
+						}
+					}
+					if containerFound {
+						h.logger.Debug(Emoji + fmt.Sprintf("the user application container pid: %v", containerPid))
+						inode := getInodeNumber([15]int32{int32(containerPid)})
+						h.logger.Debug(Emoji, zap.Any("user inode", inode))
+						// send the inode of the container to ebpf hooks to filter the network traffic
+						err := h.SendNameSpaceId(0, inode)
+						if err == nil {
+							h.logger.Debug(Emoji+"application inode sent to kernel successfully", zap.Any("user inode", inode))
+						}
+						done <- true
+						if models.GetMode() == models.MODE_TEST {
+							h.userIpAddress <- containerIp
+						}
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	select {
+	case err := <-dockerErrCh:
+		if err != nil {
+			h.logger.Error(Emoji+"failed to find the user application container", zap.Any("err", err.Error()))
+			return err
+		}
+	case <-done:
+		h.logger.Debug(Emoji + "container found and processed successfully")
+		// No error received yet, continue with further flow
+	}
+
+	h.logger.Debug(Emoji + "processDockerEnv executed successfully")
 	return nil
 }
 

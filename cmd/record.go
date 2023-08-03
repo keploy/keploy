@@ -83,7 +83,7 @@ func (r *Record) GetCmd() *cobra.Command {
 	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
 
 	recordCmd.Flags().String("c", "", "Command to start the user application")
-	recordCmd.MarkFlagRequired("c")
+	// recordCmd.MarkFlagRequired("c")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
 	// recordCmd.MarkFlagRequired("containerName")
