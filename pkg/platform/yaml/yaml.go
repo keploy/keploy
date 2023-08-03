@@ -47,7 +47,7 @@ func createYamlFile(path string, fileName string, logger *zap.Logger) (bool, err
 			return false, err
 		}
 		// Changes the permission of created "Keploy" folder to 777
-		if strings.Contains(path, "Keploy/test-suite-") {
+		if strings.Contains(path, "Keploy/test-set-") {
 			err = os.Chmod(filepath.Join(strings.TrimSuffix(path, filepath.Base(path))), fs.ModePerm)
 			if err != nil {
 				logger.Error(Emoji+"failed to change the ./Keploy directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
@@ -317,7 +317,7 @@ func (ys *yaml) NewSessionIndex(path string) (string, error) {
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		ys.logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return fmt.Sprintf("test-suite-%v", indx), nil
+		return fmt.Sprintf("test-set-%v", indx), nil
 	}
 
 	files, err := dir.ReadDir(0)
@@ -340,7 +340,7 @@ func (ys *yaml) NewSessionIndex(path string) (string, error) {
 			}
 		}
 	}
-	return fmt.Sprintf("test-suite-%v", indx), nil
+	return fmt.Sprintf("test-set-%v", indx), nil
 }
 
 func (ys *yaml) ReadSessionIndices(path string) ([]string, error) {
@@ -358,7 +358,7 @@ func (ys *yaml) ReadSessionIndices(path string) ([]string, error) {
 
 	for _, v := range files {
 		// Define the regular expression pattern
-		pattern := `^test-suite-\d{1,}$`
+		pattern := `^test-set-\d{1,}$`
 
 		// Compile the regular expression
 		regex, err := regexp.Compile(pattern)
