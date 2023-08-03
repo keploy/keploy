@@ -83,7 +83,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().String("path", "", "Path to local directory where generated testcases/mocks are stored")
 	testCmd.Flags().String("c", "", "Command to start the user application")
-	testCmd.MarkFlagRequired("c")
+	// testCmd.MarkFlagRequired("c")
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 	testCmd.Flags().String("networkName", "", "Name of the application's docker network")
 	// recordCmd.MarkFlagRequired("networkName")

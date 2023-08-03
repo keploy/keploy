@@ -79,10 +79,10 @@ func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 	return &Hook{
 		logger: logger,
 		// db:          db,
-		TestCaseDB:  db,
-		mu:          &sync.Mutex{},
-		path:        path,
-		respChannel: make(chan *models.HttpResp),
+		TestCaseDB:    db,
+		mu:            &sync.Mutex{},
+		path:          path,
+		respChannel:   make(chan *models.HttpResp),
 		userIpAddress: make(chan string),
 	}
 }
@@ -607,6 +607,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 
 // to access the IP address of the hook
 func (h *Hook) GetUserIP() string {
+	h.logger.Debug(Emoji + "getting user ip address...")
 	return <-h.userIpAddress
 }
 
