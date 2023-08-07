@@ -40,7 +40,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					return
 				}
 			}
-			path += "/Keploy"
+			path += "/keploy"
 			// tcsPath := path + "/tests"
 			// mockPath := path + "/mocks"
 
@@ -49,7 +49,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error(Emoji+"failed to get the path of current directory", zap.Error(err))
 				return
 			}
-			testReportPath += "/Keploy/testReports"
+			testReportPath += "/keploy/testReports"
 			appCmd, err := cmd.Flags().GetString("c")
 
 			if err != nil {
@@ -83,7 +83,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().String("path", "", "Path to local directory where generated testcases/mocks are stored")
 	testCmd.Flags().String("c", "", "Command to start the user application")
-	testCmd.MarkFlagRequired("c")
+	// testCmd.MarkFlagRequired("c")
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 	testCmd.Flags().String("networkName", "", "Name of the application's docker network")
 	// recordCmd.MarkFlagRequired("networkName")
