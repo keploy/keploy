@@ -64,13 +64,13 @@ jobs:
 #       - uses: codecov/codecov-action@v2
 #         with:
 #           files: ./coverage.txt
-      - name: Install goveralls
-        run: go install github.com/mattn/goveralls@latest
-      - name: Send coverage
-        env:
-          COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          goveralls -coverprofile=coverage.txt -service=github
+      # - name: Install goveralls
+      #   run: go install github.com/mattn/goveralls@latest
+      # - name: Send coverage
+      #   env:
+      #     COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: |
+      #     goveralls -coverprofile=coverage.txt -service=github
 
 
 
