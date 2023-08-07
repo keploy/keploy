@@ -19,45 +19,11 @@ type TestResult struct {
 	TestCasePath string       `json:"testCasePath" yaml:"test_case_path"`
 	MockPath     string       `json:"mockPath" yaml:"mock_path"`
 	TestCaseID   string       `json:"testCaseID" yaml:"test_case_id"`
-	Req          MockHttpReq  `json:"req" yaml:"req,omitempty"`
-	Mocks        []string     `json:"mocks" yaml:"mocks"`
-	Res          MockHttpResp `json:"resp" yaml:"resp,omitempty"`
+	Req          HttpReq  `json:"req" yaml:"req,omitempty"`
+	// Mocks        []string     `json:"mocks" yaml:"mocks"`
+	Res          HttpResp `json:"resp" yaml:"resp,omitempty"`
 	Noise        []string     `json:"noise" yaml:"noise,omitempty"`
 	Result       Result       `json:"result" yaml:"result"`
-	GrpcReq      GrpcReq      `json:"grpc_req" yaml:"grpc_req,omitempty"`
-	GrpcResp     GrpcResp     `json:"grpc_resp" yaml:"grpc_resp,omitempty"`
-}
-
-type TestRun struct {
-	ID      string        `json:"id" bson:"_id"`
-	Created int64         `json:"created" bson:"created,omitempty"`
-	Updated int64         `json:"updated" bson:"updated,omitempty"`
-	Status  TestRunStatus `json:"status" bson:"status"`
-	CID     string        `json:"cid" bson:"cid,omitempty"`
-	App     string        `json:"app" bson:"app,omitempty"`
-	User    string        `json:"user" bson:"user,omitempty"`
-	Success int           `json:"success" bson:"success,omitempty"`
-	Failure int           `json:"failure" bson:"failure,omitempty"`
-	Total   int           `json:"total" bson:"total,omitempty"`
-	Tests   []Test        `json:"tests" bson:"-"`
-}
-
-type Test struct {
-	ID         string       `json:"id" bson:"_id"`
-	Status     TestStatus   `json:"status" bson:"status"`
-	Started    int64        `json:"started" bson:"started"`
-	Completed  int64        `json:"completed" bson:"completed"`
-	RunID      string       `json:"run_id" bson:"run_id"`
-	TestCaseID string       `json:"testCaseID" bson:"test_case_id"`
-	URI        string       `json:"uri" bson:"uri"`
-	Req        HttpReq      `json:"req" bson:"req"`
-	Dep        []Dependency `json:"dep" bson:"dep"`
-	Resp       HttpResp     `json:"http_resp" bson:"http_resp,omitempty"`
-	Noise      []string     `json:"noise" bson:"noise"`
-	Result     Result       `json:"result" bson:"result"`
-	// GrpcMethod string       `json:"grpc_method" bson:"grpc_method"`
-	GrpcReq  GrpcReq  `json:"grpc_req" bson:"grpc_req"`
-	GrpcResp GrpcResp `json:"grpc_resp" bson:"grpc_resp,omitempty"`
 }
 
 type TestRunStatus string
@@ -77,7 +43,7 @@ type Result struct {
 
 type DepResult struct {
 	Name string          `json:"name" bson:"name" yaml:"name"`
-	Type DependencyType  `json:"type" bson:"type" yaml:"type"`
+	Type string  `json:"type" bson:"type" yaml:"type"`
 	Meta []DepMetaResult `json:"meta" bson:"meta" yaml:"meta"`
 }
 
@@ -111,14 +77,6 @@ type BodyResult struct {
 	Expected string   `json:"expected" bson:"expected" yaml:"expected"`
 	Actual   string   `json:"actual" bson:"actual" yaml:"actual"`
 }
-
-type BodyType string
-
-const (
-	BodyTypePlain BodyType = "PLAIN"
-	BodyTypeJSON  BodyType = "JSON"
-	BodyTypeError BodyType = "ERROR"
-)
 
 type TestStatus string
 
