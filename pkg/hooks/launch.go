@@ -85,6 +85,12 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 			appContainer = appContainerName
 		}
+
+		if len(appNetwork) == 0 {
+
+			appNetwork = appDockerNetwork
+		}
+
 		err = h.processDockerEnv(appCmd, appContainer, appNetwork)
 		if err != nil {
 			return err
