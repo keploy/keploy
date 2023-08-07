@@ -152,8 +152,12 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		// })
 
 		var userIp string
+
+		//check if the user application is running docker container using IDE
+		dIDE := (appCmd == "" && len(appContainer) != 0)
+
 		ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-		if ok {
+		if ok || dIDE {
 			userIp = loadedHooks.GetUserIP()
 			t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
 			t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
@@ -183,7 +187,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 				t.logger.Debug(Emoji+"Before simulating the request", zap.Any("Test case", tc))
 
 				ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-				if ok {
+				if ok || dIDE {
 					//changing Ip address only in case of docker
 					tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
 				}
@@ -192,6 +196,8 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 				resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
 				t.logger.Debug(Emoji+"After simulating the request", zap.Any("test case id", tc.Name))
 				resp = loadedHooks.GetResp()
+				t.logger.Debug(Emoji+"After GetResp of the request", zap.Any("test case id", tc.Name))
+
 				if err != nil {
 					t.logger.Info(Emoji+"result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 					continue

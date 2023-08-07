@@ -36,13 +36,14 @@ func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cl
 	case models.MODE_RECORD:
 		// capturedDeps := encodeOutgoingMongo(requestBuffer, clientConn, destConn, logger)
 		encodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
-
+		
 		// *deps = append(*deps, capturedDeps...)
 		// for _, v := range capturedDeps {
-		// 	h.AppendDeps(v)
-		// 	// h.WriteMock(v)
-		// }
-	case models.MODE_TEST:
+			// 	h.AppendDeps(v)
+			// 	// h.WriteMock(v)
+			// }
+		case models.MODE_TEST:
+			logger.Debug("the outgoing mongo in test mode")
 		// fmt.Println("into test mode. clientConnId: ", clientConnId)
 		decodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
 	default:
@@ -338,6 +339,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				logger.Error(Emoji+"failed to read request from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
 				return
 			}
+			logger.Debug("the request from the mongo client", zap.Any("buffer", requestBuffer))
 			readRequestDelay = time.Since(started)
 			// fmt.Println(lstr, " the clientConnId: ", clientConnId)
 			// logStr += lstr
@@ -362,6 +364,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				// fmt.Println("into the more_to_come", logStr)
 				// tmpStr := ""
 				started = time.Now()
+				logger.Debug("into the for loop for request stream")
 				requestBuffer1, err := util.ReadBytes(clientConn)
 				// logStr += tmpStr
 				if err != nil {
@@ -395,6 +398,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			}
 		}
 		if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
+			logger.Debug("recieved a heartbeat request for mongo")
 			// fmt.Println("recieved a heartbeat call. Recieved requests: ", fmt.Sprintf("len: %v", len(mongoRequests)), " clientconnid: ", clientConnId)
 			configResponseWritten := false
 			for _, configMock := range configMocks {
@@ -765,6 +769,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			lstr := ""
 			started := time.Now()
 			requestBuffer, lstr, err = util.ReadBytes1(clientConn)
+			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
 				logger.Error(Emoji+"failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 				return
@@ -857,6 +862,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		tmpStr := ""
 		started = time.Now()
 		responseBuffer, tmpStr, err := util.ReadBytes1(destConn)
+		logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
 		logStr += tmpStr
 		if err != nil {
 			logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))

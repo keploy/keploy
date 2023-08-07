@@ -19,7 +19,7 @@ type Root struct {
 func newRoot() *Root {
 	// logger init
 	logCfg := zap.NewDevelopmentConfig()
-	logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	logger, err := logCfg.Build()
 	if err != nil {
 		log.Panic(Emoji, "failed to start the logger for the CLI")
