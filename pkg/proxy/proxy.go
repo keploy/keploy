@@ -664,8 +664,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 		// }
 	}
-	fmt.Println(Emoji+"isMongo():%v", mongoparser.IsOutgoingMongo(buffer))
-	fmt.Println(Emoji+"Req buffer:%v", buffer)
+
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
