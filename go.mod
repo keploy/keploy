@@ -63,3 +63,14 @@ require (
 	google.golang.org/protobuf v1.28.1 // indirect
 	k8s.io/klog/v2 v2.80.1 // indirect
 )
+
+require (
+	github.com/Microsoft/go-winio v0.6.0 // indirect
+	github.com/ProtonMail/go-crypto v0.0.0-20230321155629-9a39f2531310 // indirect
+	github.com/cloudflare/circl v1.3.2 // indirect
+	github.com/mattn/go-runewidth v0.0.14 // indirect
+	github.com/sergi/go-diff v1.3.1 // indirect
+	github.com/stretchr/testify v1.8.0 // indirect
+	github.com/yudai/pp v2.0.1+incompatible // indirect
+	golang.org/x/tools v0.7.0 // indirect
+)
