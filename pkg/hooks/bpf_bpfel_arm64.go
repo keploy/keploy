@@ -71,6 +71,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeEntryTcpV6PreConnect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v6_pre_connect"`
 	SyscallProbeEntryUdpPreConnect   *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_udp_pre_connect"`
 	SyscallProbeEntryWrite           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_write"`
+	SyscallProbeEntryWritev          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_writev"`
 	SyscallProbeRetAccept            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_close"`
@@ -80,6 +81,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetTcpV4Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v4_connect"`
 	SyscallProbeRetTcpV6Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
+	SyscallProbeRetWritev            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_writev"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
@@ -201,6 +203,7 @@ type bpfPrograms struct {
 	SyscallProbeEntryTcpV6PreConnect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v6_pre_connect"`
 	SyscallProbeEntryUdpPreConnect   *ebpf.Program `ebpf:"syscall__probe_entry_udp_pre_connect"`
 	SyscallProbeEntryWrite           *ebpf.Program `ebpf:"syscall__probe_entry_write"`
+	SyscallProbeEntryWritev          *ebpf.Program `ebpf:"syscall__probe_entry_writev"`
 	SyscallProbeRetAccept            *ebpf.Program `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.Program `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.Program `ebpf:"syscall__probe_ret_close"`
@@ -210,6 +213,7 @@ type bpfPrograms struct {
 	SyscallProbeRetTcpV4Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v4_connect"`
 	SyscallProbeRetTcpV6Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.Program `ebpf:"syscall__probe_ret_write"`
+	SyscallProbeRetWritev            *ebpf.Program `ebpf:"syscall__probe_ret_writev"`
 }
 
 func (p *bpfPrograms) Close() error {
@@ -231,6 +235,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeEntryTcpV6PreConnect,
 		p.SyscallProbeEntryUdpPreConnect,
 		p.SyscallProbeEntryWrite,
+		p.SyscallProbeEntryWritev,
 		p.SyscallProbeRetAccept,
 		p.SyscallProbeRetAccept4,
 		p.SyscallProbeRetClose,
@@ -240,6 +245,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetTcpV4Connect,
 		p.SyscallProbeRetTcpV6Connect,
 		p.SyscallProbeRetWrite,
+		p.SyscallProbeRetWritev,
 	)
 }
 

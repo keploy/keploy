@@ -77,6 +77,8 @@ type Hook struct {
 	recvfromRet   link.Link
 	objects       bpfObjects
 	userIpAddress chan string
+	writev        link.Link
+	writevRet     link.Link
 }
 
 func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
@@ -311,7 +313,8 @@ func (h *Hook) Stop(forceStop bool) {
 	h.write.Close()
 	h.writeRet.Close()
 	h.objects.Close()
-
+	h.writev.Close()
+	h.writevRet.Close()
 	h.logger.Info(Emoji + "eBPF resources released successfully...")
 }
 
@@ -574,6 +577,24 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	}
 	h.writeRet = wt_
 	// defer wt_.Close()
+
+	// Open a Kprobe at the entry point of the kernel function and attach the
+	// pre-compiled program for writev.
+	wtv, err := link.Kprobe("sys_writev", objs.SyscallProbeEntryWritev, nil)
+	if err != nil {
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_writev", zap.Error(err))
+		return err
+	}
+	h.writev = wtv
+
+	// Open a Kprobe at the exit point of the kernel function and attach the
+	// pre-compiled program for writev.
+	wtv_, err := link.Kretprobe("sys_writev", objs.SyscallProbeRetWritev, &link.KprobeOptions{RetprobeMaxActive: 1024})
+	if err != nil {
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_writev", zap.Error(err))
+		return err
+	}
+	h.writevRet = wtv_
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
