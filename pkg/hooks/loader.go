@@ -49,7 +49,7 @@ type Hook struct {
 	// ebpf objects and events
 	stopper  chan os.Signal
 	connect4 link.Link
-	bind       link.Link
+	bind     link.Link
 	gp4      link.Link
 	udpp4    link.Link
 	tcppv4   link.Link
@@ -72,17 +72,18 @@ type Hook struct {
 	close         link.Link
 	closeRet      link.Link
 	objects       bpfObjects
-	userIpAddress string
+	userIpAddress chan string
 }
 
 func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 	return &Hook{
 		logger: logger,
 		// db:          db,
-		TestCaseDB:  db,
-		mu:          &sync.Mutex{},
-		path:        path,
-		respChannel: make(chan *models.HttpResp),
+		TestCaseDB:    db,
+		mu:            &sync.Mutex{},
+		path:          path,
+		respChannel:   make(chan *models.HttpResp),
+		userIpAddress: make(chan string),
 	}
 }
 
@@ -606,7 +607,8 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 
 // to access the IP address of the hook
 func (h *Hook) GetUserIP() string {
-	return h.userIpAddress
+	h.logger.Debug(Emoji + "getting user ip address...")
+	return <-h.userIpAddress
 }
 
 // detectCgroupPath returns the first-found mount point of type cgroup2

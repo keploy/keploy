@@ -40,7 +40,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}
 
 	// start the proxies
-	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
+	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd, appContainer)
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)
@@ -53,6 +53,9 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	// start user application
 	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
+		r.logger.Error("failed to process user application hence stopping keploy", zap.Error(err))
+		loadedHooks.Stop(true)
+		ps.StopProxyServer()
 		return
 	}
 

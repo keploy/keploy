@@ -57,7 +57,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 
 	// start the proxies
-	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd)
+	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd, appContainer)
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
@@ -104,6 +104,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		// start user application
 		if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
 			result = false
+			t.logger.Debug(Emoji + "failed to process the user application")
 			continue
 			// return false
 		}
@@ -151,14 +152,22 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		// })
 
 		var userIp string
+
+		//check if the user application is running docker container using IDE
+		dIDE := (appCmd == "" && len(appContainer) != 0)
+
 		ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-		if ok {
-			userIp = loadedHooks.GetUserIp(appContainer, appNetwork)
+		if ok || dIDE {
+			userIp = loadedHooks.GetUserIP()
+			t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
 			t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
 		}
 
 		t.logger.Info(Emoji, zap.Any("no of test cases", len(tcs)))
-		time.Sleep(time.Duration(Delay))
+		t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(Delay)*time.Second)))
+
+		// added delay to hold running keploy tests until application starts
+		time.Sleep(time.Duration(Delay) * time.Second)
 		for _, tc := range tcs {
 			switch tc.Kind {
 			case models.HTTP:
@@ -178,13 +187,17 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 				t.logger.Debug(Emoji+"Before simulating the request", zap.Any("Test case", tc))
 
 				ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-				if ok {
+				if ok || dIDE {
 					//changing Ip address only in case of docker
 					tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
 				}
+				t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
 				// time.Sleep(10 * time.Second)
 				resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
+				t.logger.Debug(Emoji+"After simulating the request", zap.Any("test case id", tc.Name))
 				resp = loadedHooks.GetResp()
+				t.logger.Debug(Emoji+"After GetResp of the request", zap.Any("test case id", tc.Name))
+
 				if err != nil {
 					t.logger.Info(Emoji+"result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 					continue
