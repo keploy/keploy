@@ -8,7 +8,7 @@ require (
 	github.com/cilium/ebpf v0.10.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
-	github.com/docker/docker v24.0.4+incompatible
+	github.com/docker/docker v24.0.5+incompatible
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.15.0
