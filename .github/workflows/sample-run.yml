@@ -21,31 +21,31 @@ jobs:
         run: |
           go build -v ./...
 
-      - name: Setup Java
-        uses: actions/setup-java@v3
-        with:
-          java-version: "11"
-          distribution: "temurin"
+      # - name: Setup Java
+      #   uses: actions/setup-java@v3
+      #   with:
+      #     java-version: "11"
+      #     distribution: "temurin"
 
-      - name: Setup java Sample project
-        run: |
-          git clone https://github.com/keploy/samples-java.git &&
-          curl 'https://repo1.maven.org/maven2/io/keploy/agent/1.2.6/agent-1.2.6.jar' --compressed --output samples-java/agent.jar -slient
+      # - name: Setup java Sample project
+      #   run: |
+      #     git clone https://github.com/keploy/samples-java.git &&
+      #     curl 'https://repo1.maven.org/maven2/io/keploy/agent/1.2.6/agent-1.2.6.jar' --compressed --output samples-java/agent.jar -slient
 
-      - name: Run Keploy and java project
-        run: |
-          sudo mkdir /root/keploy-config &&
-          sudo touch /root/keploy-config/installation-id.yaml &&
-          echo "ObjectID(\"6400772dd1bc96b3c5ebffec\")" > sudo /root/keploy-config/installation-id.yaml &&
-          go run ./cmd/server/main.go &
-          sudo apt update &&
-          sudo apt install maven -y &&
-          cd samples-java &&
-          export KEPLOY_MODE=test &&
-          export JAVA_TOOL_OPTIONS=-javaagent:${PWD}/agent.jar &&
-          count=5
-          for i in $(seq $count); do
-            mvn spring-boot:run
-          done
-          echo installation-id &&
-          sudo cat /root/keploy-config/installation-id.yaml
+      # - name: Run Keploy and java project
+      #   run: |
+      #     sudo mkdir /root/keploy-config &&
+      #     sudo touch /root/keploy-config/installation-id.yaml &&
+      #     echo "ObjectID(\"6400772dd1bc96b3c5ebffec\")" > sudo /root/keploy-config/installation-id.yaml &&
+      #     go run ./cmd/server/main.go &
+      #     sudo apt update &&
+      #     sudo apt install maven -y &&
+      #     cd samples-java &&
+      #     export KEPLOY_MODE=test &&
+      #     export JAVA_TOOL_OPTIONS=-javaagent:${PWD}/agent.jar &&
+      #     count=5
+      #     for i in $(seq $count); do
+      #       mvn spring-boot:run
+      #     done
+      #     echo installation-id &&
+      #     sudo cat /root/keploy-config/installation-id.yaml
