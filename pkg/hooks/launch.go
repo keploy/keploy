@@ -50,6 +50,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		if err != nil {
 			return err
 		}
+		h.logger.Info(Emoji + "User application container fetced successfully")
 		return nil
 	}
 
@@ -228,7 +229,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 							h.logger.Debug(Emoji, zap.Any("inspect.State.Pid", inspect.State.Pid))
 
 							if inspect.NetworkSettings != nil && inspect.NetworkSettings.Networks != nil {
-								networkDetails, ok := inspect.NetworkSettings.Networks[appDockerNetwork]
+								networkDetails, ok := inspect.NetworkSettings.Networks[appNetwork]
 								if ok && networkDetails != nil {
 									h.logger.Debug(Emoji + fmt.Sprintf("the ip of the docker container: %v", networkDetails.IPAddress))
 									if models.GetMode() == models.MODE_TEST {
@@ -237,7 +238,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 										h.logger.Debug(Emoji + "receiver channel received the ip address")
 									}
 								} else {
-									h.logger.Debug(Emoji + "Network details for given network not found")
+									h.logger.Debug(Emoji+"Network details for given network not found", zap.Any("network", appNetwork))
 								}
 							} else {
 								h.logger.Debug(Emoji + "Network settings or networks not available in inspect data")
@@ -255,7 +256,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 						// send the inode of the container to ebpf hooks to filter the network traffic
 						err := h.SendNameSpaceId(0, inode)
 						if err == nil {
-							h.logger.Debug(Emoji+"application inode sent to kernel successfully", zap.Any("user inode", inode))
+							h.logger.Debug(Emoji+"application inode sent to kernel successfully", zap.Any("user inode", inode), zap.Any("time", time.Now().UnixNano()))
 						}
 						done <- true
 						if models.GetMode() == models.MODE_TEST {
@@ -275,7 +276,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			return err
 		}
 	case <-done:
-		h.logger.Debug(Emoji + "container found and processed successfully")
+		h.logger.Debug(Emoji+"container found and processed successfully", zap.Any("time", time.Now().UnixNano()))
 		// No error received yet, continue with further flow
 	}
 

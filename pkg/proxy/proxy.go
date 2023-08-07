@@ -460,6 +460,7 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	fmt.Printf(Emoji+"dns msg sending back:\n%v\n", msg)
+	fmt.Printf(Emoji+"dns msg RCODE sending back:\n%v\n", msg.Rcode)
 	ps.logger.Debug(Emoji + "Writing dns info back to the client...")
 	err := w.WriteMsg(msg)
 	if err != nil {
@@ -681,7 +682,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	case mongoparser.IsOutgoingMongo(buffer):
 		// var deps []*models.Mock = ps.hook.GetDeps()
 		// fmt.Println("before mongo egress call, deps array: ", deps)
-
+		ps.logger.Debug("into mongo parsing mode")
 		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
 		// fmt.Println("after mongo egress call, deps array: ", deps)
 

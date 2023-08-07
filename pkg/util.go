@@ -3,6 +3,7 @@ package pkg
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -89,6 +90,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models
 	req.Close = true
 
 	// httpresp, err := k.client.Do(req)
+	logger.Debug(Emoji + fmt.Sprintf("Sending request to user app:%v", req))
 	client := &http.Client{}
 	client.Do(req)
 	if err != nil {
