@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"embed"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -47,6 +48,15 @@ type ProxySet struct {
 	DnsServer        *dns.Server
 	DnsServerTimeout time.Duration
 	dockerAppCmd     bool
+}
+
+type CustomConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c *CustomConn) Read(p []byte) (int, error) {
+	return c.r.Read(p)
 }
 
 type Conn struct {
@@ -603,21 +613,25 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
 
 	reader := bufio.NewReader(conn)
-	// initialData := make([]byte, 5)
-	// testBuffer, err := reader.Peek(len(initialData))
-	// if err != nil {
-	// 	ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-	// 	return
-	// }
-	// isTLS := isTLSHandshake(testBuffer)
-	conn = &Conn{r: *reader, Conn: conn}
-	// if isTLS {
-	// 	conn, err = handleTLSConnection(conn)
-	// 	if err != nil {
-	// 		ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
-	// 		return
-	// 	}
-	// }
+	initialData := make([]byte, 5)
+	testBuffer, err := reader.Peek(len(initialData))
+	if err != nil {
+		ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+		return
+	}
+	isTLS := isTLSHandshake(testBuffer)
+	multiReader := io.MultiReader(reader, conn)
+	customConn := &CustomConn{
+		Conn: conn,
+		r:    multiReader,
+	}
+	if isTLS {
+		conn, err = handleTLSConnection(customConn)
+		if err != nil {
+			ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
+			return
+		}
+	}
 	connEstablishedAt := time.Now()
 	rand.Seed(time.Now().UnixNano())
 	clientConnId := rand.Intn(101)
@@ -642,27 +656,27 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	destConnId := 0
 	if models.GetMode() != models.MODE_TEST {
 		destConnId = rand.Intn(101)
-		// if isTLS {
-		// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
-		// 	config := &tls.Config{
-		// 		InsecureSkipVerify: false,
-		// 		ServerName:         destinationUrl,
-		// 	}
-		// 	dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-		// 	if err != nil {
-		// 		ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-		// 		conn.Close()
-		// 		return
-		// 	}
-		// } else {
-		dst, err = net.Dial("tcp", actualAddress)
-		if err != nil {
-			ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
-			return
-			// }
+		if isTLS {
+			ps.logger.Debug(Emoji, zap.Any("isTLS", isTLS))
+			config := &tls.Config{
+				InsecureSkipVerify: false,
+				ServerName:         destinationUrl,
+			}
+			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			if err != nil {
+				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		} else {
+			dst, err = net.Dial("tcp", actualAddress)
+			if err != nil {
+				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+				// }
+			}
 		}
-		// }
 	}
 
 	switch {
