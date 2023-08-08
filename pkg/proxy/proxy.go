@@ -287,7 +287,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 
 	serverCsr, serverKey, err := csr.ParseRequest(serverReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create server CSR: %v", err)
+		return nil, fmt.Errorf(Emoji+"failed to create server CSR: %v", err)
 	}
 	cryptoSigner, ok := caPrivKey.(crypto.Signer)
 	if !ok {
@@ -295,7 +295,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	}
 	signerd, err := local.NewSigner(cryptoSigner, caCertParsed, signer.DefaultSigAlgo(cryptoSigner), nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create signer: %v", err)
+		return nil, fmt.Errorf(Emoji+"failed to create signer: %v", err)
 	}
 
 	serverCert, err := signerd.Sign(signer.SignRequest{
@@ -304,13 +304,13 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		Profile: "web",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign server certificate: %v", err)
+		return nil, fmt.Errorf(Emoji+"failed to sign server certificate: %v", err)
 	}
 
 	// Load the server certificate and private key
 	serverTlsCert, err := tls.X509KeyPair(serverCert, serverKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
+		return nil, fmt.Errorf(Emoji+"failed to load server certificate and key: %v", err)
 	}
 
 	return &serverTlsCert, nil
@@ -557,7 +557,7 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 	// _, err = tlsConn.Read(req)
 	if err != nil {
-		log.Panic("failed reading the request message with error: ", err)
+		log.Panic(Emoji+"failed reading the request message with error: ", err)
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
@@ -636,7 +636,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	rand.Seed(time.Now().UnixNano())
 	clientConnId := rand.Intn(101)
 	buffer, err := util.ReadBytes(conn)
-	ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
+	ps.logger.Debug(Emoji + fmt.Sprintf("the clientConnId: %v", clientConnId))
 	readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
