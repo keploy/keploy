@@ -60,6 +60,7 @@ type bpfProgramSpecs struct {
 	K_getpeername6                   *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
+	SyscallProbeEntryBind            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -92,9 +93,10 @@ type bpfMapSpecs struct {
 	DockerCmdMap              *ebpf.MapSpec `ebpf:"docker_cmd_map"`
 	GlobalNsPidInfoMap        *ebpf.MapSpec `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.MapSpec `ebpf:"inode_map"`
+	KeployKernelPidMap        *ebpf.MapSpec `ebpf:"keploy_kernel_pid_map"`
 	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
+	KeployNamespacePidMap     *ebpf.MapSpec `ebpf:"keploy_namespace_pid_map"`
 	KeployNsPidInfoMap        *ebpf.MapSpec `ebpf:"keploy_nsPid_info_map"`
-	KeployPidMap              *ebpf.MapSpec `ebpf:"keploy_pid_map"`
 	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
@@ -134,9 +136,10 @@ type bpfMaps struct {
 	DockerCmdMap              *ebpf.Map `ebpf:"docker_cmd_map"`
 	GlobalNsPidInfoMap        *ebpf.Map `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.Map `ebpf:"inode_map"`
+	KeployKernelPidMap        *ebpf.Map `ebpf:"keploy_kernel_pid_map"`
 	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
+	KeployNamespacePidMap     *ebpf.Map `ebpf:"keploy_namespace_pid_map"`
 	KeployNsPidInfoMap        *ebpf.Map `ebpf:"keploy_nsPid_info_map"`
-	KeployPidMap              *ebpf.Map `ebpf:"keploy_pid_map"`
 	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
@@ -159,9 +162,10 @@ func (m *bpfMaps) Close() error {
 		m.DockerCmdMap,
 		m.GlobalNsPidInfoMap,
 		m.InodeMap,
+		m.KeployKernelPidMap,
 		m.KeployModeMap,
+		m.KeployNamespacePidMap,
 		m.KeployNsPidInfoMap,
-		m.KeployPidMap,
 		m.ProxyInfoMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
@@ -182,6 +186,7 @@ type bpfPrograms struct {
 	K_getpeername6                   *ebpf.Program `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
+	SyscallProbeEntryBind            *ebpf.Program `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -207,6 +212,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_getpeername6,
 		p.SyscallProbeEntryAccept,
 		p.SyscallProbeEntryAccept4,
+		p.SyscallProbeEntryBind,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
 		p.SyscallProbeEntryTcpV4Connect,
@@ -235,6 +241,5 @@ func _BpfClose(closers ...io.Closer) error {
 }
 
 // Do not access this directly.
-//
 //go:embed bpf_bpfel_arm64.o
 var _BpfBytes []byte
