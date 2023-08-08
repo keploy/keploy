@@ -1,0 +1,22 @@
+name: sample-run
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: "1.20"
+
+      - name: Build Keploy
+        run: |
+          go build -v ./...

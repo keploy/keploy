@@ -1,0 +1,31 @@
+name: Go
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  build:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: "1.20"
+
+      - name: Build
+        run: go build -v ./...
+
+      - uses: codfish/semantic-release-action@v1
+        with:
+          dry_run: true
+          additional_packages: |
+            ['@semantic-release/exec']
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
