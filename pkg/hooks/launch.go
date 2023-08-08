@@ -30,7 +30,6 @@ var (
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
-	var pids [15]int32
 	// Supports Linux, Windows
 
 	if appCmd == "" && len(appContainer) == 0 {
@@ -122,28 +121,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			h.logger.Debug(Emoji + "no error found while running user application")
 			// No error received yet, continue with further flow
 		}
-
-		h.logger.Debug(Emoji + "After running user application")
-		h.logger.Debug(Emoji + "Now setting app pids")
-
-		appPids, err := getAppPIDs(appCmd)
-		if err != nil {
-			h.logger.Error(Emoji+"failed to get the pid of user application", zap.Any("err", err.Error()))
-			return err
-		}
-
-		pids = appPids
-		// println("Pid of application:", pids[0])
-		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
-
-	// err := h.SendApplicationPIDs(pids)
-	// if err != nil {
-	// 	h.logger.Error(Emoji+"failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
-	// 	return err
-	// }
-
-	// h.EnablePidFilter() // can enable here also
 
 	h.logger.Info(Emoji + "User application started successfully")
 	return nil
@@ -489,80 +467,6 @@ func parseToInt32(str string) (int32, error) {
 		return 0, err
 	}
 	return int32(num), nil
-}
-
-// An application can launch as many child processes as it wants but here we are only handling for 15 child process.
-func getAppPIDs(appCmd string) ([15]int32, error) {
-	// Getting pid of the command
-	parts := strings.Fields(appCmd)
-	cmdPid, err := getCmdPid(parts[0])
-
-	// cmdPid, err := getCmdPid(appCmd)
-	if err != nil {
-		return [15]int32{}, fmt.Errorf(Emoji, "failed to get the pid of the running command: %v\n", err)
-	}
-
-	if cmdPid == 0 {
-		return [15]int32{}, fmt.Errorf(Emoji, "The command '%s' is not running.: %v\n", appCmd, err)
-	} else {
-		// log.Printf("The command '%s' is running with PID: %d\n", appCmd, pid)
-	}
-
-	// for i, pid := range cmdPids {
-
-	// 	println("PID-", i, ":", pid)
-	// }
-
-	const maxChildProcesses = 15
-	var pids [maxChildProcesses]int32
-
-	for i := 0; i < len(pids); i++ {
-		pids[i] = -1
-	}
-	pids[0] = int32(cmdPid)
-	// for i, pid := range cmdPids {
-
-	// 	if i >= maxChildProcesses {
-	// 		log.Fatalf("Error: More than %d child processes of cmd:[%v] are running", maxChildProcesses, appCmd)
-	// 	}
-	// 	pids[i] = pid
-	// 	println("PID-", i, ":", pids[i])
-	// }
-
-	return pids, nil
-
-	//---------------------------------------------------------------//
-	// Getting child pids
-	// cmdPid := "/usr/bin/sudo /usr/bin/pgrep -P " + strconv.Itoa(pid)
-	// out, err := exec.Command("sh", "-c", cmdPid).Output()
-	// if err != nil {
-	// 	log.Fatal("failed to get the application pid:", err)
-	// }
-
-	// s := strings.TrimSuffix(string(out), "\n")
-	// if s == "" {
-	// 	log.Fatal("unable to retrieve the application pid")
-	// }
-
-	// const maxChildProcesses = 15
-	// var pids [maxChildProcesses]int32
-
-	// for i := 0; i < len(pids); i++ {
-	// 	pids[i] = -1
-	// }
-
-	// for i, pidStr := range strings.Split(s, "\n") {
-	// 	pid, err := strconv.Atoi(pidStr)
-	// 	if err != nil {
-	// 		log.Fatalf("failed to convert the process id [%v] from string to int", pidStr)
-	// 	}
-	// 	if i >= maxChildProcesses {
-	// 		log.Fatalf("Error: More than %d child processes of cmd:[%v] are running", maxChildProcesses, appCmd)
-	// 	}
-	// 	pids[i] = int32(pid)
-	// 	println("PID-", i, ":", pids[i])
-	// }
-	// return pids
 }
 
 func getCmdPid(commandName string) (int, error) {

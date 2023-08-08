@@ -224,17 +224,6 @@ func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	return &destInfo, nil
 }
 
-func (h *Hook) SendApplicationPIDs(appPids [15]int32) error {
-	for i, v := range appPids {
-		err := h.appPidMap.Update(uint32(i), &v, ebpf.UpdateAny)
-		if err != nil {
-			// h.logger.Error("failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
-			return err
-		}
-	}
-	return nil
-}
-
 func (h *Hook) SendKeployPid(kPid uint32) error {
 	h.logger.Debug(Emoji+"Sending keploy pid to kernel", zap.Any("pid", kPid))
 	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
