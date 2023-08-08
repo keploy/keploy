@@ -1,7 +1,6 @@
 package hooks
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -30,7 +29,6 @@ var (
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
-	var pids [15]int32
 	// Supports Linux, Windows
 
 	if appCmd == "" && len(appContainer) == 0 {
@@ -122,28 +120,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			h.logger.Debug(Emoji + "no error found while running user application")
 			// No error received yet, continue with further flow
 		}
-
-		h.logger.Debug(Emoji + "After running user application")
-		h.logger.Debug(Emoji + "Now setting app pids")
-
-		appPids, err := getAppPIDs(appCmd)
-		if err != nil {
-			h.logger.Error(Emoji+"failed to get the pid of user application", zap.Any("err", err.Error()))
-			return err
-		}
-
-		pids = appPids
-		// println("Pid of application:", pids[0])
-		h.logger.Debug(Emoji+"PID of application:", zap.Any("App pid", pids[0]))
 	}
-
-	// err := h.SendApplicationPIDs(pids)
-	// if err != nil {
-	// 	h.logger.Error(Emoji+"failed to send the application pids to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
-	// 	return err
-	// }
-
-	// h.EnablePidFilter() // can enable here also
 
 	h.logger.Info(Emoji + "User application started successfully")
 	return nil
@@ -380,213 +357,6 @@ func makeDockerClient() *client.Client {
 		log.Fatalf(Emoji, "failed to make a docker client:", err)
 	}
 	return cli
-}
-
-func getAppNameSpacePIDs(containerName string) ([15]int32, [15]int32) {
-
-	// Get the docker client
-	cli := dockerClient
-
-	// Create a new context
-	ctx := context.Background()
-
-	// Inspect the specified container
-	inspect, err := cli.ContainerInspect(ctx, containerName)
-	if err != nil {
-		log.Fatalf(Emoji, "failed to inspect container:%v,", containerName, err)
-	}
-
-	containerID := inspect.ID
-
-	// Retrieve the PIDs of the container's processes
-	processes, err := cli.ContainerTop(context.Background(), containerID, []string{})
-	if err != nil {
-		log.Fatalf(Emoji, "failed to retrieve processes inside the app container:", err)
-	}
-
-	if len(processes.Processes) > 15 {
-		log.Fatalf(Emoji, "Error: More than 15 processes are running inside the application container.")
-	}
-
-	var hostPids [15]int32
-	var nsPids [15]int32
-
-	for i := 0; i < len(hostPids); i++ {
-		hostPids[i] = -1
-		nsPids[i] = -1
-	}
-
-	// Extract the PIDs from the processes
-	for idx, process := range processes.Processes {
-		if len(process) < 2 {
-			log.Fatalln(Emoji, "failed to get the process IDs from the app container")
-		}
-
-		pid, err := parseToInt32(process[1])
-		if err != nil {
-			log.Fatalf(Emoji, "failed to convert the process id [%v] from string to int32", process[1])
-		}
-		hostPids[idx] = pid
-	}
-
-	for i, v := range hostPids {
-		if v == -1 {
-			break
-		}
-		nsPids[i] = getNStgids(int(v))
-	}
-
-	return nsPids, hostPids
-}
-
-// This function fetches the actual pids from container point of view.
-func getNStgids(pid int) int32 {
-	fName := "/proc/" + strconv.Itoa(pid) + "/status"
-
-	file, err := os.Open(fName)
-	if err != nil {
-		log.Fatalf(Emoji, "failed to open file /proc/%v/status:", pid, err)
-	}
-	defer file.Close()
-
-	var lastNStgid string
-
-	// Read the file line by line
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "NStgid:") {
-			// Extract the values from the line
-			// println(line)
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				lastNStgid = fields[len(fields)-1]
-			}
-		}
-	}
-
-	// Check if any error occurred during scanning the file
-	if err := scanner.Err(); err != nil {
-		log.Fatal(Emoji, "failed to scan the file:", err)
-	}
-
-	// Print the last NStgid value
-	if lastNStgid == "" {
-		log.Fatal(Emoji, "NStgid value not found in the file")
-	}
-	// fmt.Println("Last NStgid:", lastNStgid)
-	NStgid, err := parseToInt32(strings.TrimSpace(lastNStgid))
-	if err != nil {
-		log.Fatalf(Emoji, "failed to convert the NStgid[%v] from string to int32", lastNStgid)
-	}
-
-	return NStgid
-}
-
-func parseToInt32(str string) (int32, error) {
-	num, err := strconv.ParseInt(str, 10, 32)
-	if err != nil {
-		return 0, err
-	}
-	return int32(num), nil
-}
-
-// An application can launch as many child processes as it wants but here we are only handling for 15 child process.
-func getAppPIDs(appCmd string) ([15]int32, error) {
-	// Getting pid of the command
-	parts := strings.Fields(appCmd)
-	cmdPid, err := getCmdPid(parts[0])
-
-	// cmdPid, err := getCmdPid(appCmd)
-	if err != nil {
-		return [15]int32{}, fmt.Errorf(Emoji, "failed to get the pid of the running command: %v\n", err)
-	}
-
-	if cmdPid == 0 {
-		return [15]int32{}, fmt.Errorf(Emoji, "The command '%s' is not running.: %v\n", appCmd, err)
-	} else {
-		// log.Printf("The command '%s' is running with PID: %d\n", appCmd, pid)
-	}
-
-	// for i, pid := range cmdPids {
-
-	// 	println("PID-", i, ":", pid)
-	// }
-
-	const maxChildProcesses = 15
-	var pids [maxChildProcesses]int32
-
-	for i := 0; i < len(pids); i++ {
-		pids[i] = -1
-	}
-	pids[0] = int32(cmdPid)
-	// for i, pid := range cmdPids {
-
-	// 	if i >= maxChildProcesses {
-	// 		log.Fatalf("Error: More than %d child processes of cmd:[%v] are running", maxChildProcesses, appCmd)
-	// 	}
-	// 	pids[i] = pid
-	// 	println("PID-", i, ":", pids[i])
-	// }
-
-	return pids, nil
-
-	//---------------------------------------------------------------//
-	// Getting child pids
-	// cmdPid := "/usr/bin/sudo /usr/bin/pgrep -P " + strconv.Itoa(pid)
-	// out, err := exec.Command("sh", "-c", cmdPid).Output()
-	// if err != nil {
-	// 	log.Fatal("failed to get the application pid:", err)
-	// }
-
-	// s := strings.TrimSuffix(string(out), "\n")
-	// if s == "" {
-	// 	log.Fatal("unable to retrieve the application pid")
-	// }
-
-	// const maxChildProcesses = 15
-	// var pids [maxChildProcesses]int32
-
-	// for i := 0; i < len(pids); i++ {
-	// 	pids[i] = -1
-	// }
-
-	// for i, pidStr := range strings.Split(s, "\n") {
-	// 	pid, err := strconv.Atoi(pidStr)
-	// 	if err != nil {
-	// 		log.Fatalf("failed to convert the process id [%v] from string to int", pidStr)
-	// 	}
-	// 	if i >= maxChildProcesses {
-	// 		log.Fatalf("Error: More than %d child processes of cmd:[%v] are running", maxChildProcesses, appCmd)
-	// 	}
-	// 	pids[i] = int32(pid)
-	// 	println("PID-", i, ":", pids[i])
-	// }
-	// return pids
-}
-
-func getCmdPid(commandName string) (int, error) {
-	cmd := exec.Command("pidof", commandName)
-
-	output, err := cmd.Output()
-	// fmt.Println(Emoji, "Output of pidof", output)
-	if err != nil {
-		fmt.Errorf(Emoji, "failed to execute the command: %v", commandName)
-		return 0, err
-	}
-
-	pidStr := strings.TrimSpace(string(output))
-	// pidStrings:= strings.Split(pidStr," ")
-	// pidStr = pidStrings[0]
-	// fmt.Println(Emoji, "Output of pidof", pidStr)
-	actualPidStr := strings.Split(pidStr, " ")[0]
-	pid, err := strconv.Atoi(actualPidStr)
-	if err != nil {
-		fmt.Errorf(Emoji, "failed to convert the process id [%v] from string to int", pidStr)
-		return 0, err
-	}
-
-	return pid, nil
 }
 
 func getInodeNumber(pids [15]int32) uint64 {
