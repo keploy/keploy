@@ -1,12 +1,20 @@
-#! /bin/sh
+#!/bin/sh
 
-export BPF_CLANG=clang-14
-export BPF_CFLAGS="-I/usr/include/x86_64-linux-gnu -D__x86_64__ -O2 -g -Wall -Werror"
-export TARGET=amd64
-#for arm64
-export BPF_CLANG=clang-14
-export BPF_CFLAGS="-I/usr/include/aarch64-linux-gnu -D__aarch64__ -O2 -g -Wall -Werror"
-export TARGET=arm64
+# Determine the architecture
+ARCH=$(uname -m)
 
-# To compile and run the ebpf program...
-go generate ./... && go run -exec "sudo -E" <main file containing the ebpf program>
+if [ "$ARCH" = "x86_64" ]; then
+    export BPF_CLANG=clang-14
+    export BPF_CFLAGS="-I/usr/include/x86_64-linux-gnu -D__x86_64__ -O2 -g -Wall -Werror"
+    export TARGET=amd64
+elif [ "$ARCH" = "aarch64" ]; then
+    export BPF_CLANG=clang-14
+    export BPF_CFLAGS="-I/usr/include/aarch64-linux-gnu -D__aarch64__ -O2 -g -Wall -Werror"
+    export TARGET=arm64
+else
+    echo "Unsupported architecture: $ARCH"
+    exit 1
+fi
+
+# To compile the ebpf program...
+go generate ./...
