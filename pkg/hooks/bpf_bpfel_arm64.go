@@ -63,6 +63,8 @@ type bpfProgramSpecs struct {
 	SyscallProbeEntryBind            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
+	SyscallProbeEntryRecvfrom        *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_recvfrom"`
+	SyscallProbeEntrySendto          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_sendto"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
 	SyscallProbeEntryTcpV6Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v6_connect"`
@@ -73,6 +75,8 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetAccept4           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetRead              *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_read"`
+	SyscallProbeRetRecvfrom          *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_recvfrom"`
+	SyscallProbeRetSendto            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_sendto"`
 	SyscallProbeRetTcpV4Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v4_connect"`
 	SyscallProbeRetTcpV6Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
@@ -189,6 +193,8 @@ type bpfPrograms struct {
 	SyscallProbeEntryBind            *ebpf.Program `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
+	SyscallProbeEntryRecvfrom        *ebpf.Program `ebpf:"syscall__probe_entry_recvfrom"`
+	SyscallProbeEntrySendto          *ebpf.Program `ebpf:"syscall__probe_entry_sendto"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
 	SyscallProbeEntryTcpV6Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v6_connect"`
@@ -199,6 +205,8 @@ type bpfPrograms struct {
 	SyscallProbeRetAccept4           *ebpf.Program `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.Program `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetRead              *ebpf.Program `ebpf:"syscall__probe_ret_read"`
+	SyscallProbeRetRecvfrom          *ebpf.Program `ebpf:"syscall__probe_ret_recvfrom"`
+	SyscallProbeRetSendto            *ebpf.Program `ebpf:"syscall__probe_ret_sendto"`
 	SyscallProbeRetTcpV4Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v4_connect"`
 	SyscallProbeRetTcpV6Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.Program `ebpf:"syscall__probe_ret_write"`
@@ -215,6 +223,8 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeEntryBind,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
+		p.SyscallProbeEntryRecvfrom,
+		p.SyscallProbeEntrySendto,
 		p.SyscallProbeEntryTcpV4Connect,
 		p.SyscallProbeEntryTcpV4PreConnect,
 		p.SyscallProbeEntryTcpV6Connect,
@@ -225,6 +235,8 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetAccept4,
 		p.SyscallProbeRetClose,
 		p.SyscallProbeRetRead,
+		p.SyscallProbeRetRecvfrom,
+		p.SyscallProbeRetSendto,
 		p.SyscallProbeRetTcpV4Connect,
 		p.SyscallProbeRetTcpV6Connect,
 		p.SyscallProbeRetWrite,
@@ -241,5 +253,6 @@ func _BpfClose(closers ...io.Closer) error {
 }
 
 // Do not access this directly.
+//
 //go:embed bpf_bpfel_arm64.o
 var _BpfBytes []byte
