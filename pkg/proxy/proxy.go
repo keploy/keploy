@@ -621,12 +621,12 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 	isTLS := isTLSHandshake(testBuffer)
 	multiReader := io.MultiReader(reader, conn)
-	customConn := &CustomConn{
+	conn = &CustomConn{
 		Conn: conn,
 		r:    multiReader,
 	}
 	if isTLS {
-		conn, err = handleTLSConnection(customConn)
+		conn, err = handleTLSConnection(conn)
 		if err != nil {
 			ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
 			return
