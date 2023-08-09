@@ -1,0 +1,88 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: FAILED
+success: 0
+failure: 1
+total: 1
+tests:
+    - kind: Http
+      name: report-1
+      status: FAILED
+      started: 1691575304
+      completed: 1691575305
+      test_case_path: /home/pranshu.linux/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/url
+        header:
+            Accept: '*/*'
+            Content-Length: "35"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://facebook.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Wed, 09 Aug 2023 08:21:12 GMT
+        body: '{"ts":1691569272382067965,"url":"http://localhost:8080/CJBKJd92"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value: []
+            - normal: false
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 09 Aug 2023 08:21:12 GMT
+              actual:
+                key: Date
+                value:
+                    - Wed, 09 Aug 2023 10:01:44 GMT
+            - normal: false
+              expected:
+                key: Server
+                value: []
+              actual:
+                key: Server
+                value:
+                    - BaseHTTP/0.6 Python/3.10.12
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"ts":1691569272382067965,"url":"http://localhost:8080/CJBKJd92"}'
+              actual: '{"message": "Received POST request", "data": {"url": "https://facebook.com"}}'
+        dep_result: []

@@ -1,0 +1,150 @@
+version: api.keploy.io/v1beta1
+name: report-2
+status: PASSED
+success: 2
+failure: 0
+total: 2
+tests:
+    - kind: Http
+      name: report-2
+      status: PASSED
+      started: 1691575308
+      completed: 1691575309
+      test_case_path: /home/pranshu.linux/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Wed, 09 Aug 2023 10:00:30 GMT
+            Server: BaseHTTP/0.6 Python/3.10.12
+        body: '{"message": "Hello, World!"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 09 Aug 2023 10:00:30 GMT
+              actual:
+                key: Date
+                value:
+                    - Wed, 09 Aug 2023 10:01:48 GMT
+            - normal: true
+              expected:
+                key: Server
+                value:
+                    - BaseHTTP/0.6 Python/3.10.12
+              actual:
+                key: Server
+                value:
+                    - BaseHTTP/0.6 Python/3.10.12
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"message": "Hello, World!"}'
+              actual: '{"message": "Hello, World!"}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: PASSED
+      started: 1691575309
+      completed: 1691575310
+      test_case_path: /home/pranshu.linux/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/url
+        header:
+            Accept: '*/*'
+            Content-Length: "35"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://facebook.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Wed, 09 Aug 2023 10:00:43 GMT
+            Server: BaseHTTP/0.6 Python/3.10.12
+        body: '{"message": "Received POST request", "data": {"url": "https://facebook.com"}}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 09 Aug 2023 10:00:43 GMT
+              actual:
+                key: Date
+                value:
+                    - Wed, 09 Aug 2023 10:01:49 GMT
+            - normal: true
+              expected:
+                key: Server
+                value:
+                    - BaseHTTP/0.6 Python/3.10.12
+              actual:
+                key: Server
+                value:
+                    - BaseHTTP/0.6 Python/3.10.12
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"message": "Received POST request", "data": {"url": "https://facebook.com"}}'
+              actual: '{"message": "Received POST request", "data": {"url": "https://facebook.com"}}'
+        dep_result: []

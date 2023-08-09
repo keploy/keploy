@@ -71,6 +71,10 @@ type Hook struct {
 	writeRet      link.Link
 	close         link.Link
 	closeRet      link.Link
+	sendto 	  	  link.Link
+	sendtoRet 	  link.Link
+	recvfrom 	  link.Link
+	recvfromRet   link.Link
 	objects       bpfObjects
 	userIpAddress chan string
 }
@@ -471,6 +475,24 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.gp6 = gp6
 	// defer gp4.Close()
 
+	//Open a kprobe at the entry of sendto syscall
+	snd, err := link.Kprobe("sys_sendto", objs.SyscallProbeEntrySendto, nil)
+	if err != nil {
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_sendto", zap.Error(err))
+		return err
+	}
+	h.sendto = snd
+	// defer snd.Close()
+
+	//Opening a kretprobe at the exit of sendto syscall
+	sndr, err := link.Kretprobe("sys_sendto", objs.SyscallProbeRetSendto, &link.KprobeOptions{RetprobeMaxActive: 1024})
+	if err != nil {
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_sendto", zap.Error(err))
+		return err
+	}
+	h.sendtoRet = sndr
+	// defer sndr.Close()
+
 	// ------------ For Ingress using Kprobes --------------
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
@@ -562,6 +584,25 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	}
 	h.close = cl
 	// defer cl.Close()
+
+
+	//Attaching a kprobe at the entry of recvfrom syscall
+	rcv, err := link.Kprobe("sys_recvfrom", objs.SyscallProbeEntryRecvfrom, nil)
+	if err != nil {
+		h.logger.Error(Emoji+"failed to attach the kprobe hook on sys_recvfrom", zap.Error(err))
+		return err
+	}
+	h.recvfrom = rcv
+	// defer rcv.Close()
+
+	//Attaching a kretprobe at the exit of recvfrom syscall
+	rcvr, err := link.Kretprobe("sys_recvfrom", objs.SyscallProbeRetRecvfrom, &link.KprobeOptions{RetprobeMaxActive: 1024})
+	if err != nil {
+		h.logger.Error(Emoji+"failed to attach the kretprobe hook on sys_recvfrom", zap.Error(err))
+		return err
+	}
+	h.recvfromRet = rcvr
+	// defer rcvr.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
