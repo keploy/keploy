@@ -190,13 +190,12 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 				if ok || dIDE {
 					//changing Ip address only in case of docker
 					tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
-					t.logger.Debug(Emoji,zap.Any("replaced URL in case of docker env",tc.HttpReq.URL))
+					t.logger.Debug(Emoji, zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
 				}
 				t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
 				// time.Sleep(10 * time.Second)
-				resp, err := pkg.SimulateHttp(*tc, t.logger, loadedHooks.GetResp)
+				resp, err := pkg.SimulateHttp(*tc, t.logger)
 				t.logger.Debug(Emoji+"After simulating the request", zap.Any("test case id", tc.Name))
-				resp = loadedHooks.GetResp()
 				t.logger.Debug(Emoji+"After GetResp of the request", zap.Any("test case id", tc.Name))
 
 				if err != nil {
