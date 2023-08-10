@@ -729,30 +729,57 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 
 	defer destConn.Close()
 
-	// write the request message to the actual destination server
+	// channels for writing messages from proxy to destination or client
+	destinationWriteChannel := make(chan []byte)
+	clientWriteChannel := make(chan []byte)
+
 	_, err := destConn.Write(requestBuffer)
 	if err != nil {
-		logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+		logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 		return err
 	}
 
-	// read the response from the actual server
-	respBuffer, err := util.ReadBytes(destConn)
-	if err != nil {
-		logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-		return err
+	for {
+		fmt.Println("inside connection")
+		// go routine to read from client
+		go func() {
+			buffer, err := util.ReadBytes(clientConn)
+			if err != nil {
+				logger.Error(Emoji+"failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
+				return
+			}
+			destinationWriteChannel <- buffer
+		}()
+
+		// go routine to read from destination
+		go func() {
+			buffer, err := util.ReadBytes(destConn)
+			if err != nil {
+				logger.Error(Emoji+"failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+				return
+			}
+
+			clientWriteChannel <- buffer
+		}()
+
+		select {
+		case requestBuffer := <-destinationWriteChannel:
+			// Write the request message to the actual destination server
+			_, err := destConn.Write(requestBuffer)
+			if err != nil {
+				logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+				return err
+			}
+		case responseBuffer := <-clientWriteChannel:
+			// Write the response message to the client
+			_, err := clientConn.Write(responseBuffer)
+			if err != nil {
+				logger.Error(Emoji+"failed to write response to the client", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
+				return err
+			}
+		}
 	}
 
-	// write the response message to the user client
-	_, err = clientConn.Write(respBuffer)
-	if err != nil {
-		logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
-		return err
-	}
-
-	logger.Debug(Emoji+"Successfully wrote response to the user client", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-
-	return nil
 }
 
 func (ps *ProxySet) StopProxyServer() {
