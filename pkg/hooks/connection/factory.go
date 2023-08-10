@@ -70,7 +70,7 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 				// resetDeps()
 				// fmt.Println("after reseting the deps array: ", getDeps(), "\n ")
 			default:
-				factory.logger.Warn(Emoji+"Keploy mode is not set to record/test. Tracker is being skipped.",
+				factory.logger.Warn(Emoji+"Keploy mode is not set to record. Tracker is being skipped.",
 					zap.Any("current mode", models.GetMode()))
 			}
 
