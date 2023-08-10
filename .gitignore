@@ -42,3 +42,6 @@ test-reports
 #Ignore the c and header files
 *.c
 *.h
+
+# Ignore the debug_bin
+__debug_bin*

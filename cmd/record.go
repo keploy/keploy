@@ -44,7 +44,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			// tcsPath := path + "/tests"
 			// mockPath := path + "/mocks"
 
-			appCmd, err := cmd.Flags().GetString("c")
+			appCmd, err := cmd.Flags().GetString("command")
 
 			if err != nil {
 				r.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
@@ -79,19 +79,19 @@ func (r *Record) GetCmd() *cobra.Command {
 	// recordCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
 	// recordCmd.MarkFlagRequired("pid")
 
-	recordCmd.Flags().String("path", "", "Path to the local directory where generated testcases/mocks should be stored")
+	recordCmd.Flags().StringP("path", "p", "", "Path to the local directory where generated testcases/mocks should be stored")
 	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
 
-	recordCmd.Flags().String("c", "", "Command to start the user application")
+	recordCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 	// recordCmd.MarkFlagRequired("c")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
 	// recordCmd.MarkFlagRequired("containerName")
 
-	recordCmd.Flags().String("networkName", "", "Name of the application's docker network")
+	recordCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	// recordCmd.MarkFlagRequired("networkName")
 
-	recordCmd.Flags().Uint64("delay", 5, "User provided time to run its application")
+	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	// recordCmd.MarkFlagRequired("delay")
 
 	return recordCmd
