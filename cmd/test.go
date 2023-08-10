@@ -50,7 +50,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				return
 			}
 			testReportPath += "/keploy/testReports"
-			appCmd, err := cmd.Flags().GetString("c")
+			appCmd, err := cmd.Flags().GetString("command")
 
 			if err != nil {
 				t.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
@@ -81,13 +81,15 @@ func (t *Test) GetCmd() *cobra.Command {
 	// testCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
 	// testCmd.MarkFlagRequired("pid")
 
-	testCmd.Flags().String("path", "", "Path to local directory where generated testcases/mocks are stored")
-	testCmd.Flags().String("c", "", "Command to start the user application")
+	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+
+	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 	// testCmd.MarkFlagRequired("c")
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
-	testCmd.Flags().String("networkName", "", "Name of the application's docker network")
+
+	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	// recordCmd.MarkFlagRequired("networkName")
-	testCmd.Flags().Uint64("delay", 5, "User provided time to run its application")
+	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
 	return testCmd
 }
