@@ -42,7 +42,6 @@ type Hook struct {
 	configMocks   []*models.Mock
 	path          string
 	mu            *sync.Mutex
-	respChannel   chan *models.HttpResp
 	mutex         sync.RWMutex
 	userAppCmd    *exec.Cmd
 
@@ -71,9 +70,9 @@ type Hook struct {
 	writeRet      link.Link
 	close         link.Link
 	closeRet      link.Link
-	sendto 	  	  link.Link
-	sendtoRet 	  link.Link
-	recvfrom 	  link.Link
+	sendto        link.Link
+	sendtoRet     link.Link
+	recvfrom      link.Link
 	recvfromRet   link.Link
 	objects       bpfObjects
 	userIpAddress chan string
@@ -88,7 +87,6 @@ func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
 		path:          path,
-		respChannel:   make(chan *models.HttpResp),
 		userIpAddress: make(chan string),
 	}
 }
@@ -164,14 +162,6 @@ func (h *Hook) ResetDeps() int {
 	// fmt.Println("tcsMocks are reset")
 	defer h.mu.Unlock()
 	return 1
-}
-func (h *Hook) PutResp(resp *models.HttpResp) error {
-	h.respChannel <- resp
-	return nil
-}
-func (h *Hook) GetResp() *models.HttpResp {
-	resp := <-h.respChannel
-	return resp
 }
 
 // This function sends the IP and Port of the running proxy in the eBPF program.
@@ -359,7 +349,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.stopper = stopper
 	h.objects = objs
 
-	connectionFactory := connection.NewFactory(time.Minute, h.respChannel, h.logger)
+	connectionFactory := connection.NewFactory(time.Minute, h.logger)
 	go func() {
 		for {
 			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB)
@@ -605,7 +595,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	}
 	h.close = cl
 	// defer cl.Close()
-
 
 	//Attaching a kprobe at the entry of recvfrom syscall
 	rcv, err := link.Kprobe("sys_recvfrom", objs.SyscallProbeEntryRecvfrom, nil)

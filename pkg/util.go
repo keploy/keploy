@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -68,7 +69,7 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models.HttpResp) (*models.HttpResp, error) {
+func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, error) {
 	resp := &models.HttpResp{}
 
 	// httpSpec := &spec.HttpSpec{}
@@ -92,10 +93,22 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, getResp func() *models
 	// httpresp, err := k.client.Do(req)
 	logger.Debug(Emoji + fmt.Sprintf("Sending request to user app:%v", req))
 	client := &http.Client{}
-	client.Do(req)
+	httpResp, err := client.Do(req)
 	if err != nil {
 		logger.Error(Emoji+"failed sending testcase request to app", zap.Error(err))
 		return nil, err
+	}
+
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		logger.Error(Emoji+"failed reading response body", zap.Error(err))
+		return nil, err
+	}
+
+	resp = &models.HttpResp{
+		StatusCode: httpResp.StatusCode,
+		Body:       string(respBody),
+		Header:     ToYamlHttpHeader(httpResp.Header),
 	}
 
 	// get the response from the hooks

@@ -22,17 +22,15 @@ type Factory struct {
 	connections         map[structs.ConnID]*Tracker
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
-	respChannel         chan *models.HttpResp
 	logger              *zap.Logger
 }
 
 // NewFactory creates a new instance of the factory.
-func NewFactory(inactivityThreshold time.Duration, respChannel chan *models.HttpResp, logger *zap.Logger) *Factory {
+func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory {
 	return &Factory{
 		connections:         make(map[structs.ConnID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
-		respChannel:         respChannel,
 		logger:              logger,
 	}
 }
@@ -71,22 +69,8 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 
 				// resetDeps()
 				// fmt.Println("after reseting the deps array: ", getDeps(), "\n ")
-			case models.MODE_TEST:
-				respBody, err := io.ReadAll(parsedHttpRes.Body)
-				parsedHttpRes.Body.Close()
-				if err != nil {
-					factory.logger.Error(Emoji+"failed to read the http response body", zap.Error(err),
-						zap.Any("mode", models.MODE_TEST))
-					return
-				}
-				// resetDeps()
-				factory.respChannel <- &models.HttpResp{
-					StatusCode: parsedHttpRes.StatusCode,
-					Header:     pkg.ToYamlHttpHeader(parsedHttpRes.Header),
-					Body:       string(respBody),
-				}
 			default:
-				factory.logger.Warn(Emoji+"Keploy mode is not set to record/test. Tracker is being skipped.",
+				factory.logger.Warn(Emoji+"Keploy mode is not set to record. Tracker is being skipped.",
 					zap.Any("current mode", models.GetMode()))
 			}
 
