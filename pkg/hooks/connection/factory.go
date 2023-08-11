@@ -64,13 +64,12 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 			switch models.GetMode() {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
+				factory.logger.Debug(Emoji + "capturing ingress call from tracker in record mode")
 				capture(path, db, parsedHttpReq, parsedHttpRes, factory.logger)
-				// fmt.Println("\nbefore reseting the deps array: ", getDeps())
-
-				// resetDeps()
-				// fmt.Println("after reseting the deps array: ", getDeps(), "\n ")
+			case models.MODE_TEST:
+				factory.logger.Debug(Emoji + "skipping tracker in test mode")
 			default:
-				factory.logger.Warn(Emoji+"Keploy mode is not set to record. Tracker is being skipped.",
+				factory.logger.Warn(Emoji+"Keploy mode is not set to record or test. Tracker is being skipped.",
 					zap.Any("current mode", models.GetMode()))
 			}
 
