@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/record"
@@ -27,20 +28,33 @@ func (r *Record) GetCmd() *cobra.Command {
 		Use:   "record",
 		Short: "record the keploy testcases from the API calls",
 		Run: func(cmd *cobra.Command, args []string) {
+
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				r.logger.Error(Emoji + "failed to read the testcase path input")
 				return
 			}
 
-			if path == "" {
-				path, err = os.Getwd()
+			//if user provides relative path
+			if len(path) > 0 && path[0] != '/' {
+				absPath, err := filepath.Abs(path)
 				if err != nil {
-					r.logger.Error(Emoji+"failed to get the path of current directory", zap.Error(err))
-					return
+					r.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
 				}
+				path = absPath
+			} else if len(path) == 0 { // if user doesn't provide any path
+				cdirPath, err := os.Getwd()
+				if err != nil {
+					r.logger.Error("failed to get the path of current directory", zap.Error(err))
+				}
+				path = cdirPath
+			} else {
+				// user provided the absolute path
 			}
+
 			path += "/keploy"
+
+			r.logger.Info(Emoji, zap.Any("keploy test and mock path", path))
 			// tcsPath := path + "/tests"
 			// mockPath := path + "/mocks"
 
