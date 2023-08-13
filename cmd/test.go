@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/test"
@@ -33,25 +34,33 @@ func (t *Test) GetCmd() *cobra.Command {
 				return
 			}
 
-			if path == "" {
-				path, err = os.Getwd()
+			//if user provides relative path
+			if len(path) > 0 && path[0] != '/' {
+				absPath, err := filepath.Abs(path)
 				if err != nil {
-					t.logger.Error(Emoji+"failed to get the path of current directory", zap.Error(err))
-					return
+					t.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
 				}
+				path = absPath
+			} else if len(path) == 0 { // if user doesn't provide any path
+				cdirPath, err := os.Getwd()
+				if err != nil {
+					t.logger.Error("failed to get the path of current directory", zap.Error(err))
+				}
+				path = cdirPath
+			} else {
+				// user provided the absolute path
 			}
+
 			path += "/keploy"
+
 			// tcsPath := path + "/tests"
 			// mockPath := path + "/mocks"
 
-			testReportPath, err := os.Getwd()
-			if err != nil {
-				t.logger.Error(Emoji+"failed to get the path of current directory", zap.Error(err))
-				return
-			}
-			testReportPath += "/keploy/testReports"
-			appCmd, err := cmd.Flags().GetString("command")
+			testReportPath := path + "/testReports"
 
+			t.logger.Info(Emoji, zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
+
+			appCmd, err := cmd.Flags().GetString("command")
 			if err != nil {
 				t.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
 			}
@@ -74,7 +83,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
 			}
 
-			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay)
+				t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay)
 		},
 	}
 
