@@ -49,7 +49,8 @@ jobs:
 #          rm -rf $GITHUB_WORKSPACE/ui
 
   build-go:
-    runs-on: macos-latest
+    # runs-on: macos-latest
+    runs-on: ubuntu-latest
 #    needs: build-ui
     steps:
       - uses: actions/checkout@v2
@@ -72,17 +73,17 @@ jobs:
 #        with:
 #          path: web
 #          key: ${{ hashFiles('ui/src') }}
-      - name: Import Code-Signing Certificates
-        uses: Apple-Actions/import-codesign-certs@v1
-        with:
-          # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
-          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
-          # The password used to import the PKCS12 file.
-          p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}  
-      - name: Install gon via HomeBrew for code signing and app notarization
-        run: |
-          brew tap mitchellh/gon
-          brew install mitchellh/gon/gon
+      # - name: Import Code-Signing Certificates
+      #   uses: Apple-Actions/import-codesign-certs@v1
+      #   with:
+      #     # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
+      #     p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
+      #     # The password used to import the PKCS12 file.
+      #     p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}  
+      # - name: Install gon via HomeBrew for code signing and app notarization
+      #   run: |
+      #     brew tap mitchellh/gon
+      #     brew install mitchellh/gon/gon
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v2
         with:
@@ -90,5 +91,5 @@ jobs:
           version: latest
           args: release --rm-dist
         env:
-          APPLE_ACCOUNT_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
+          # APPLE_ACCOUNT_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
