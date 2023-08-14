@@ -270,14 +270,6 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 // It runs the application using the given command
 func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	// Create a new command with your appCmd
-	// var cmd *exec.Cmd
-	// if isDocker {
-	// 	parts := strings.Fields(appCmd)
-	// 	cmd = exec.Command(parts[0], parts[1:]...)
-	// } else {
-	// 	cmd = exec.Command(appCmd)
-	// }
-
 	parts := strings.Fields(appCmd)
 	cmd := exec.Command(parts[0], parts[1:]...)
 
@@ -286,15 +278,6 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	cmd.Stderr = os.Stderr
 	h.userAppCmd = cmd
 
-	// out, err := exec.Command("docker", "inspect", "-f", "{{.State.Pid}}", "0b6c6856d706").Output()
-	// if err != nil {
-	// 	fmt.Printf("Failed to execute command: %s", err)
-	// 	// return .
-	// }
-
-	// fmt.Printf("time before starting the user application: %v", time.Now())
-	// pid := strings.TrimSpace(string(out))
-	// fmt.Printf("PID of the docker : %s\n", pid)
 	// Run the command, this handles non-zero exit code get from application.
 	err := cmd.Run()
 	if err != nil {
