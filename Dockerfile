@@ -7,9 +7,9 @@ RUN apt-get update
 RUN apt-get install -y llvm-14 clang-14 linux-tools-common libbpf-dev ca-certificates wget sudo nano curl
 
 # Install Go 1.19
-RUN wget https://golang.org/dl/go1.19.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.19.linux-amd64.tar.gz && \
-    rm go1.19.linux-amd64.tar.gz
+RUN wget https://golang.org/dl/go1.19.linux-arm64.tar.gz && \
+    tar -C /usr/local -xzf go1.19.linux-arm64.tar.gz && \
+    rm go1.19.linux-arm64.tar.gz
 
 # Add Go binary path to the environment variable
 ENV PATH="/usr/local/go/bin:${PATH}"
