@@ -104,9 +104,11 @@ func FindNoisyFields(m map[string][]string, comparator func(string, []string) bo
 	var noise []string
 	for k, v := range m {
 		if comparator(k, v) {
+			fmt.Println("YOYOYO",k)
 			noise = append(noise, k)
 		}
 	}
+	
 	return noise
 }
 

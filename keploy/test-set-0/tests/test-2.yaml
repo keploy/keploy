@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-2
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "74"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: '{"title":"Second Note","content":"This is the content of the first note."}'
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Thu, 10 Aug 2023 11:21:03 GMT
+        body: '{"id":"64d4c81f7241cc501635f961","title":"Second Note","content":"This is the content of the first note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise: ["body.id"]
+    created: 1691666465

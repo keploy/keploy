@@ -1,0 +1,22 @@
+Error: unknown flag: --c
+Usage:
+  keploy record [flags]
+
+Flags:
+  -c, --command string         Command to start the user application
+      --containerName string   Name of the application's docker container
+  -d, --delay uint             User provided time to run its application (default 5)
+  -h, --help                   help for record
+  -n, --networkName string     Name of the application's docker network
+  -p, --path string            Path to the local directory where generated testcases/mocks should be stored
+
+2023-08-11T15:12:20.668+0530	ERROR	cmd/root.go:61	🐰 Keploy:failed to start the CLI.	{"error": "unknown flag: --c"}
+go.keploy.io/server/cmd.(*Root).execute
+	/home/keploy/project/keploy/cmd/root.go:61
+go.keploy.io/server/cmd.Execute
+	/home/keploy/project/keploy/cmd/root.go:38
+main.main
+	/home/keploy/project/keploy/main.go:8
+runtime.main
+	/usr/local/go/src/runtime/proc.go:250
+exit status 1

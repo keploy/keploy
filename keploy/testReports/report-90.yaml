@@ -1,0 +1,188 @@
+version: api.keploy.io/v1beta1
+name: report-90
+status: FAILED
+success: 2
+failure: 1
+total: 3
+tests:
+    - kind: Http
+      name: report-90
+      status: PASSED
+      started: 1691937367
+      completed: 1691937369
+      test_case_path: /home/keploy/project/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "73"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: '{"title":"First Note","content":"This is the content of the first note."}'
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Thu, 10 Aug 2023 11:20:53 GMT
+        body: '{"id":"64d4c8157241cc501635f960","title":"First Note","content":"This is the content of the first note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 10 Aug 2023 11:20:53 GMT
+              actual:
+                key: Date
+                value:
+                    - Sun, 13 Aug 2023 14:36:07 GMT
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":"64d4c8157241cc501635f960","title":"First Note","content":"This is the content of the first note."}'
+              actual: '{"id":"64d8ea57c34b37030ceaa45e","title":"First Note","content":"This is the content of the first note."}'
+        dep_result: []
+    - kind: Http
+      name: report-90
+      status: PASSED
+      started: 1691937369
+      completed: 1691937371
+      test_case_path: /home/keploy/project/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "74"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: '{"title":"Second Note","content":"This is the content of the first note."}'
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Thu, 10 Aug 2023 11:21:03 GMT
+        body: '{"id":"64d4c81f7241cc501635f961","title":"Second Note","content":"This is the content of the first note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 10 Aug 2023 11:21:03 GMT
+              actual:
+                key: Date
+                value:
+                    - Sun, 13 Aug 2023 14:36:09 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":"64d4c81f7241cc501635f961","title":"Second Note","content":"This is the content of the first note."}'
+              actual: '{"id":"64d8ea59c34b37030ceaa45f","title":"Second Note","content":"This is the content of the first note."}'
+        dep_result: []
+    - kind: Http
+      name: report-90
+      status: FAILED
+      started: 1691937371
+      completed: 1691937373
+      test_case_path: /home/keploy/project/keploy/keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/notes
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Thu, 10 Aug 2023 11:21:07 GMT
+        body: '[{"id":"64d4c8157241cc501635f960","title":"First Note","content":"This is the content of the first note."},{"id":"64d4c81f7241cc501635f961","title":"Second Note","content":"This is the content of the first note."}]'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 10 Aug 2023 11:21:07 GMT
+              actual:
+                key: Date
+                value:
+                    - Sun, 13 Aug 2023 14:36:11 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '[{"id":"64d4c8157241cc501635f960","title":"First Note","content":"This is the content of the first note."},{"id":"64d4c81f7241cc501635f961","title":"Second Note","content":"This is the content of the first note."}]'
+              actual: '[{"id":"64d4c8157241cc501635f960","title":"First Note","content":"This is the content of the first note."},{"id":"64d4c81f7241cc501635f961","title":"Third Note","content":"This is the content of the first note."}]'
+        dep_result: []

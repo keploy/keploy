@@ -355,10 +355,12 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	}
 	// noise := httpSpec.Assertions["noise"]
 	noise := tc.Noise
+	fmt.Println("By default noisy fields .. ",noise)
 	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
 		// check if k is date
 		for _, v := range vals {
 			if pkg.IsTime(v) {
+				fmt.Println(v,"is the time value***")
 				return true
 			}
 		}
@@ -367,11 +369,14 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 		return pkg.IsTime(strings.Join(vals, ", "))
 	})...)
 
+	fmt.Println("After Find noisy method .. .",noise)
+
 	var (
 		bodyNoise   []string
 		headerNoise = map[string]string{}
 	)
 
+	// check here .. 
 	for _, n := range noise {
 		a := strings.Split(n, ".")
 		if len(a) > 1 && a[0] == "body" {
@@ -469,7 +474,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 						keyStr = keyStr[1:]
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
-
+					
 				}
 			} else {
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)

@@ -3,6 +3,7 @@ package test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 
 	"go.uber.org/zap"
@@ -77,13 +78,24 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string]boo
 	}
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
-		if expected != actual && !noiseMap[key] {
+		fmt.Println("expected:: ", expected, "actual:: ", actual)
+		fmt.Println("This is the noisy map -> ", noiseMap, "Key: ", key)
+
+		if expected != actual{
+			fmt.Println("Inside Title...")
+			fmt.Println("expected-->", expected, "actual-->", actual)
+			
+			if expected != actual {
+				return false, nil
+			}
+
 			return false, nil
 		}
 
 	case reflect.Map:
 		expMap := expected.(map[string]interface{})
 		actMap := actual.(map[string]interface{})
+		fmt.Println("Expected map ", expMap, "Actual map", actMap)
 		for k, v := range expMap {
 			val, ok := actMap[k]
 			if !ok {
@@ -113,6 +125,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string]boo
 		}
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
+		fmt.Println("expslice", expSlice)
+		fmt.Println("actSlice", actSlice)
+		fmt.Println("After Slice compare ..")
 		if expSlice.Len() != actSlice.Len() {
 			return false, nil
 		}

@@ -130,7 +130,10 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 	// assign default values if not provided
 	distro := getDistroInfo()
 
-	fs, err := os.Create(filepath.Join(caStorePath[distro], "ca.crt"))
+	path := filepath.Join(caStorePath[distro], "keployCA.crt")
+
+	fs, err := os.Create(path)
+	logger.Info(Emoji+"added keploy custom ca to path: "+ path)
 	if err != nil {
 		logger.Error(Emoji+"failed to create custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
 		return nil

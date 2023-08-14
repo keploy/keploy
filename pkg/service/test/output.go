@@ -59,7 +59,12 @@ func (d *DiffsPrinter) Render() {
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
 		if json.Valid(bE) && json.Valid(bA) {
-			diffs = append(diffs, sprintJSONDiff(bE, bA, "body", d.bodyNoise))
+			difference,err:=sprintJSONDiff(bE, bA, "body", d.bodyNoise)
+			if err!=nil {
+				fmt.Println("Errorrrr",err)
+				difference = sprintDiff(d.bodyExp, d.bodyAct, "body")
+			}
+			diffs = append(diffs, difference)
 		} else {
 			diffs = append(diffs, sprintDiff(d.bodyExp, d.bodyAct, "body"))
 		}
@@ -106,11 +111,14 @@ func sprintDiff(expect, actual, field string) string {
  * the body isnt in the rest-api formats (what means it is not json-based)
  * its better to use a generic diff output as the SprintDiff.
  */
-func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise []string) string {
-	diffString := calculateJSONDiffs(json1, json2)
+func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise []string) (string,error) {
+	diffString,err := calculateJSONDiffs(json1, json2)
+	if err!=nil {
+		return "",err
+	}
 	expect, actual := separateAndColorize(diffString, noise)
 	result := expectActualTable(expect, actual, field, false)
-	return result
+	return result,nil
 }
 
 // Find the diff between two strings returning index where
@@ -142,26 +150,31 @@ func diffIndex(s1, s2 string) (int, bool) {
  * containes the lines that does not match represented by either a
  * minus or add symbol followed by the respective line.
  */
-func calculateJSONDiffs(json1 []byte, json2 []byte) string {
+func calculateJSONDiffs(json1 []byte, json2 []byte) (string,error) {
 	var diff = gojsondiff.New()
 	dObj, _ := diff.Compare(json1, json2)
 
 	var jsonObject map[string]interface{}
-	json.Unmarshal([]byte(json1), &jsonObject)
+	err := json.Unmarshal([]byte(json1), &jsonObject)
+	if err!=nil {
+		return "",err
+	}
 
 	diffString, _ := formatter.NewAsciiFormatter(jsonObject, formatter.AsciiFormatterConfig{
 		ShowArrayIndex: true,
 		Coloring:       false, // We will color our way
 	}).Format(dObj)
 
-	return diffString
+	return diffString,nil
 }
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
 func separateAndColorize(diffStr string, noise []string) (string, string) {
 	expect, actual := "", ""
-
+	fmt.Println("diffStr---->",diffStr)
+	fmt.Println("Noise-->",noise)
+	noise = []string{}
 	diffLines := strings.Split(diffStr, "\n")
 
 	for i, line := range diffLines {
