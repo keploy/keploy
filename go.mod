@@ -25,7 +25,7 @@ require (
 	github.com/wI2L/jsondiff v0.4.0
 	github.com/yudai/gojsondiff v1.0.0
 	go.mongodb.org/mongo-driver v1.11.6
-	go.uber.org/zap v1.24.0
+	go.uber.org/zap v1.25.0
 	golang.org/x/crypto v0.11.0 // indirect
 	golang.org/x/sys v0.10.0
 	google.golang.org/protobuf v1.28.1 // indirect
@@ -59,8 +59,7 @@ require (
 	github.com/yudai/pp v2.0.1+incompatible // indirect
 	github.com/zmap/zcrypto v0.0.0-20210511125630-18f1e0152cfc // indirect
 	github.com/zmap/zlint/v3 v3.1.0 // indirect
-	go.uber.org/atomic v1.9.0 // indirect
-	go.uber.org/multierr v1.8.0 // indirect
+	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/mod v0.10.0 // indirect
 	golang.org/x/net v0.12.0 // indirect
 	golang.org/x/text v0.11.0 // indirect
