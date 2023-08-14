@@ -19,7 +19,7 @@ FROM debian:bookworm-slim
 
 # Update the package lists and install required packages
 RUN apt-get update && \
-    apt-get install -y ca-certificates curl && \
+    apt-get install -y ca-certificates curl sudo && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
