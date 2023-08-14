@@ -3,11 +3,14 @@ package yaml
 import (
 	"errors"
 
+	"fmt"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml/spec"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
+	"strings"
 )
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
@@ -26,6 +29,28 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		Name:    tc.Name,
 	}
 	// mocks := []NetworkTrafficDoc{}
+	// find noisy fields
+	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
+	if err != nil {
+		msg := "error in flattening http response"
+		logger.Error(Emoji+msg, zap.Error(err))
+	}
+	// noise := httpSpec.Assertions["noise"]
+	noise := tc.Noise
+	fmt.Println("By default noisy fields .. ", noise)
+	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
+		// check if k is date
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+
+		// maybe we need to concatenate the values
+		return pkg.IsTime(strings.Join(vals, ", "))
+	})...)
+
+	fmt.Println("After Find noisy method .. .", noise)
 	switch tc.Kind {
 	case models.HTTP:
 		err := doc.Spec.Encode(spec.HttpSpec{
@@ -33,7 +58,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			Response: tc.HttpResp,
 			Created:  tc.Created,
 			Assertions: map[string][]string{
-				"noise": tc.Noise,
+				"noise": noise,
 			},
 		})
 		if err != nil {
