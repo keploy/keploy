@@ -5,7 +5,7 @@ go 1.20
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
-	github.com/cilium/ebpf v0.10.0
+	github.com/cilium/ebpf v0.11.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/docker v24.0.4+incompatible
@@ -89,5 +89,6 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
+	golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
