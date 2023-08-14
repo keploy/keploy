@@ -1,44 +1,42 @@
-FROM ubuntu:latest
+# === Build Stage ===
+FROM golang:1.21 AS build
 
-# Update the package lists
-RUN apt-get update
+# Set the working directory
+WORKDIR /app
 
-# Install required packages
-RUN apt-get install -y llvm-14 clang-14 linux-tools-common libbpf-dev ca-certificates wget sudo nano curl
+# Copy the Go module files and download dependencies
+COPY go.mod go.sum /app/
+RUN go mod download
 
-# Install Go 1.19
-RUN wget https://golang.org/dl/go1.19.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.19.linux-amd64.tar.gz && \
-    rm go1.19.linux-amd64.tar.gz
+# Copy the contents of the current directory into the build container
+COPY . /app
 
-# Add Go binary path to the environment variable
-ENV PATH="/usr/local/go/bin:${PATH}"
+# Build the keploy binary
+RUN go build -o keploy .
+
+# === Runtime Stage ===
+FROM debian:bookworm-slim
+
+# Update the package lists and install required packages
+RUN apt-get update && \
+    apt-get install -y ca-certificates curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (docker-compose)
 RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
     sh get-docker.sh && \
     rm get-docker.sh
 
-# Set the working directory
-WORKDIR /app
-
-# To cache go modules
-COPY go.mod /app/
-COPY go.sum /app/
-
-RUN go mod download
-
-# Copy the contents of the current directory into the image
-COPY . /app
+# Copy the keploy binary and the entrypoint script from the build container
+COPY --from=build /app/keploy /app/keploy
+COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
 
 # Make the entrypoint.sh file executable
 RUN chmod +x /app/entrypoint.sh
 
-# Build the keployV2 binary
-RUN go build -o keployV2 .
-
-# Change working directory
+# Change working directory (optional depending on your needs)
 WORKDIR /files
 
 # Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh", "/app/keployV2"]
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy"]
