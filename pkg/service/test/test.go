@@ -302,7 +302,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		}
 
 		t.logger.Debug("the result before", zap.Any("", result), zap.Any("testreport name", testReport.Name))
-		result = result && passed
+	result = result && passed
 		t.logger.Debug("the result after", zap.Any("", result), zap.Any("testreport name", testReport.Name))
 		// stop the user application
 		loadedHooks.StopUserApplication()
