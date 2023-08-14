@@ -3,7 +3,6 @@ package yaml
 import (
 	"errors"
 
-	"fmt"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml/spec"
@@ -37,7 +36,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 	}
 	// noise := httpSpec.Assertions["noise"]
 	noise := tc.Noise
-	fmt.Println("By default noisy fields .. ", noise)
+
 	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
 		// check if k is date
 		for _, v := range vals {
@@ -50,7 +49,6 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		return pkg.IsTime(strings.Join(vals, ", "))
 	})...)
 
-	fmt.Println("After Find noisy method .. .", noise)
 	switch tc.Kind {
 	case models.HTTP:
 		err := doc.Spec.Encode(spec.HttpSpec{

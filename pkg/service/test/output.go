@@ -171,8 +171,7 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string,error) {
 // by a plus or a minus sign and separate it. Just works with json
 func separateAndColorize(diffStr string, noise []string) (string, string) {
 	expect, actual := "", ""
-	fmt.Println("diffStr---->",diffStr)
-	fmt.Println("Noise-->",noise)
+
 	noise = []string{}
 	diffLines := strings.Split(diffStr, "\n")
 
