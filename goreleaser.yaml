@@ -16,7 +16,6 @@ builds:
       # - windows
     goarch:
       - amd64
-      # - 386
       - arm64
   # - binary: keploy
   #   id: keploy-macos
@@ -48,7 +47,7 @@ builds:
   # amd64, arm64 and all.
   #
   # Defaults to false.
-  replace: true
-  hooks:
-    post: gon -log-level=info -log-json ./gon.json
+  # replace: true
+  # hooks:
+  #   post: gon -log-level=info -log-json ./gon.json
 
