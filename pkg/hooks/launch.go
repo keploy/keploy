@@ -179,7 +179,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 		eventFilter.Add("event", "create")
 
 		messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{
-			// Filters: eventFilter,
+			Filters: eventFilter,
 		})
 
 		for {
