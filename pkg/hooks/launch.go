@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
@@ -55,7 +56,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	ok, cmd := h.IsDockerRelatedCmd(appCmd)
 	if ok {
 
-		h.logger.Debug(Emoji + "Running user application on Docker")
+		h.logger.Debug(Emoji+"Running user application on Docker", zap.Any("Docker env", cmd))
 
 		if cmd == "docker-compose" {
 			if len(appContainer) == 0 {
@@ -67,29 +68,30 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				h.logger.Error(Emoji+"please provide docker network name in case of docker-compose file", zap.Any("AppCmd", appCmd))
 				return fmt.Errorf(Emoji + "docker network name not found")
 			}
+			h.logger.Debug(Emoji, zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork))
+		} else if cmd == "docker" {
+			var err error
+			appContainerName, appDockerNetwork, err = parseDockerCommand(appCmd)
+			h.logger.Debug(Emoji, zap.String("Parsed container name", appContainerName))
+			h.logger.Debug(Emoji, zap.String("Parsed docker network", appDockerNetwork))
+
+			if err != nil {
+				h.logger.Error(Emoji+"failed to parse container or network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+				return err
+			}
+
+			if len(appContainer) == 0 {
+
+				appContainer = appContainerName
+			}
+
+			if len(appNetwork) == 0 {
+
+				appNetwork = appDockerNetwork
+			}
 		}
 
-		var err error
-		appContainerName, appDockerNetwork, err = parseDockerCommand(appCmd)
-		h.logger.Debug(Emoji, zap.String("Parsed container name", appContainerName))
-		h.logger.Debug(Emoji, zap.String("Parsed docker network", appDockerNetwork))
-
-		if err != nil {
-			h.logger.Error(Emoji+"failed to parse container or network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
-			return err
-		}
-
-		if len(appContainer) == 0 {
-
-			appContainer = appContainerName
-		}
-
-		if len(appNetwork) == 0 {
-
-			appNetwork = appDockerNetwork
-		}
-
-		err = h.processDockerEnv(appCmd, appContainer, appNetwork)
+		err := h.processDockerEnv(appCmd, appContainer, appNetwork)
 		if err != nil {
 			return err
 		}
@@ -172,7 +174,14 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 		logTicker := time.NewTicker(1 * time.Second)
 		defer logTicker.Stop()
 
-		messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{})
+		eventFilter := filters.NewArgs()
+		eventFilter.Add("type", "container")
+		eventFilter.Add("event", "create")
+
+		messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{
+			Filters: eventFilter,
+		})
+
 		for {
 			if time.Now().After(endTime) {
 				dockerErrCh <- fmt.Errorf("no container found for :%v", appContainer)
@@ -189,10 +198,24 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 				dockerErrCh <- fmt.Errorf("found sudden interrupt")
 				return
 			case <-logTicker.C:
-				h.logger.Info(Emoji+"Still waiting for the container to start.", zap.String("containerName", appContainer))
+				h.logger.Info(Emoji+"still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
 				if e.Type == events.ContainerEventType && e.Action == "create" {
-					fmt.Println(Emoji+"Container created: ", e.ID)
+					// Fetch container details
+					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
+					if err != nil {
+						h.logger.Debug(Emoji+"failed to inspect container", zap.Error(err))
+						continue
+					}
+
+					// Check if the container's name matches the desired name
+					if containerDetails.Name != "/"+appContainer {
+						h.logger.Debug(Emoji+"ignoring container creation for unrelated container", zap.String("containerName", containerDetails.Name))
+						continue
+					}
+
+					h.logger.Debug(Emoji+"container created for desired app", zap.Any("ID", e.ID))
+
 					containerPid := 0
 					containerIp := ""
 					containerFound := false
@@ -218,7 +241,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 									if models.GetMode() == models.MODE_TEST {
 										h.logger.Debug(Emoji + "setting container ip address")
 										containerIp = networkDetails.IPAddress
-										h.logger.Debug(Emoji + "receiver channel received the ip address")
+										h.logger.Debug(Emoji+"receiver channel received the ip address", zap.Any("containerIp found", containerIp))
 									}
 								} else {
 									h.logger.Debug(Emoji+"Network details for given network not found", zap.Any("network", appNetwork))
@@ -228,7 +251,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 							}
 							containerPid = inspect.State.Pid
 							containerFound = true
-							h.logger.Debug(Emoji + "container and ip found...")
+							h.logger.Debug(Emoji + "container found...")
 							break
 						}
 					}
@@ -278,6 +301,8 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	cmd.Stderr = os.Stderr
 	h.userAppCmd = cmd
 
+	h.logger.Debug(Emoji, zap.Any("executing cmd", cmd.String()))
+
 	// Run the command, this handles non-zero exit code get from application.
 	err := cmd.Run()
 	if err != nil {
@@ -291,9 +316,20 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file
 func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{"docker ", "docker-compose ", "sudo docker ", "sudo docker-compose "}
+	dockerCommandPatterns := []string{
+		"docker-compose ",
+		"sudo docker-compose ",
+		"docker compose ",
+		"sudo docker compose ",
+		"docker ",
+		"sudo docker ",
+	}
+
 	for _, pattern := range dockerCommandPatterns {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
+			if strings.Contains(pattern, "compose") {
+				return true, "docker-compose"
+			}
 			return true, "docker"
 		}
 	}
