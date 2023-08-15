@@ -178,11 +178,23 @@ func IPToDotDecimal(ip net.IP) string {
 	return ipStr
 }
 
+// It checks if the cmd is related to docker or not, it also returns if its a docker compose file
 func IsDockerRelatedCommand(cmd string) (bool, string) {
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{"docker ", "docker-compose ", "sudo docker ", "sudo docker-compose "}
+	dockerCommandPatterns := []string{
+		"docker-compose ",
+		"sudo docker-compose ",
+		"docker compose ",
+		"sudo docker compose ",
+		"docker ",
+		"sudo docker ",
+	}
+
 	for _, pattern := range dockerCommandPatterns {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
+			if strings.Contains(pattern, "compose") {
+				return true, "docker-compose"
+			}
 			return true, "docker"
 		}
 	}
