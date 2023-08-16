@@ -72,12 +72,6 @@ func IsTime(stringDate string) bool {
 func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, error) {
 	resp := &models.HttpResp{}
 
-	// httpSpec := &spec.HttpSpec{}
-	// err := tc.Spec.Decode(httpSpec)
-	// if err!=nil {
-	// 	logger.Error("failed to unmarshal yaml doc for simulation of http request", zap.Error(err))
-	// 	return nil, err
-	// }
 	logger.Info(Emoji+"making a http request", zap.Any("test case id", tc.Name))
 	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
@@ -90,9 +84,15 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 	req.ProtoMinor = tc.HttpReq.ProtoMinor
 	req.Close = true
 
-	// httpresp, err := k.client.Do(req)
 	logger.Debug(Emoji + fmt.Sprintf("Sending request to user app:%v", req))
-	client := &http.Client{}
+
+	// Creating the client and disabling redirects
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
 	httpResp, err := client.Do(req)
 	if err != nil {
 		logger.Error(Emoji+"failed sending testcase request to app", zap.Error(err))
@@ -111,14 +111,9 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 		Header:     ToYamlHttpHeader(httpResp.Header),
 	}
 
-	// get the response from the hooks
-	// resp = getResp()
-
-	// defer httpresp.Body.Close()
-	// println("before blocking simulate")
-
 	return resp, nil
 }
+
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
