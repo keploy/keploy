@@ -89,37 +89,43 @@ Ensures that redundant testcases are not generated.
 <img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Docker </img>
 -
 
-Keploy can be used on Linux and Windows through Docker. 
+Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="10" height="10"> Linux</img> & <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"> Windows</img> through Docker. 
 
 > Support for MacOS is work in progress.
 
 
 ### Creating Alias
 
-We need to create the Alias for Keploy since we are using the Docker.
+We need to create a custom network for Keploy since we are using the Docker.  
+
+```zsh
+docker network create keploy-network
+```
+
+Once the Custom Network is created, now we have to create the alias for the Keploy.
 
 ```shell
-alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 ```
 
 ### Capture the Testcases
 
-Now, we will use the newly created Alias `keployV2` to record the testcases.
+Now, we will use the newly created Alias `keploy` to record the testcases. Run the following command in root directory of the you're application.
 
 ```shell
-keploy record --c "Docker_CMD_to_run_user_container" --containerName "<contianerName>"
+keploy record -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<contianerName>"
 ```
 
 Make API Calls using [Hoppscotch](https://hoppscotch.io/), [Postman](https://www.postman.com/) or cURL command.
 
-Keploy with capture the API calls you have made to generate the test-suites which will contain the testcases and data mocks into `YAML` format.
+Keploy will capture the API calls you had made to generate the test-suites which will contain the testcases and data mocks into `YAML` format.
 
 ### Run the Testcases
 
-Now, we will use the newly created Alias `keployV2` to test the testcases.
+Now, we will use the newly created Alias `keployV2` to test the testcases.Run the following command in root directory of the you're application.
 
 ```shell
-keploy test --c "Docker_CMD_to_run_user_container" --containerName "<contianerName>" --delay 20
+keploy test -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<contianerName>" --delay 20
 ```
 
 > **Docker_CMD_to_run_user_container** is the docker command to run the application.
