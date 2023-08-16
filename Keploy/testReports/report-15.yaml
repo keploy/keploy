@@ -1,0 +1,81 @@
+version: api.keploy.io/v1beta1
+name: report-15
+status: FAILED
+success: 0
+failure: 1
+total: 1
+tests:
+    - kind: Http
+      name: report-15
+      status: FAILED
+      started: 1690969303
+      completed: 1690969304
+      test_case_path: /home/pranshu.linux/keploy/Keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/url
+        header:
+            Accept: '*/*'
+            Content-Length: "35"
+            Content-Type: application/json
+            Host: localhost:8081
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://facebook.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Wed, 02 Aug 2023 06:54:31 GMT
+        body: '{"ts":1690959271400518424,"url":"http://localhost:8080/CJBKJd92"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 02 Aug 2023 06:54:31 GMT
+              actual:
+                key: Date
+                value:
+                    - Wed, 02 Aug 2023 09:41:43 GMT
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "65"
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"ts":1690959271400518424,"url":"http://localhost:8080/CJBKJd92"}'
+              actual: '{"ts":1690969303220614704,"url":"http://localhost:8080/CJBKJd92"}'
+        dep_result: []
