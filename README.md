@@ -84,11 +84,17 @@ Filters noisy fields in API responses like (timestamps, random values) to ensure
 ### 4. Statistical De-duplication 
 Ensures that redundant testcases are not generated.
 
-## Quick Installation
+# Quick Installation
 
-### **Docker**
+<img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Docker </img>
+-
 
-#### Creating Alias
+Keploy can be used on Linux and Windows through Docker. 
+
+> Support for MacOS is work in progress.
+
+
+### Creating Alias
 
 We need to create the Alias for Keploy since we are using the Docker.
 
@@ -96,7 +102,7 @@ We need to create the Alias for Keploy since we are using the Docker.
 alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 ```
 
-#### Run the Record Mode
+### Capture the Testcases
 
 Now, we will use the newly created Alias `keployV2` to record the testcases.
 
@@ -108,7 +114,7 @@ Make API Calls using [Hoppscotch](https://hoppscotch.io/), [Postman](https://www
 
 Keploy with capture the API calls you have made to generate the test-suites which will contain the testcases and data mocks into `YAML` format.
 
-#### Run the Test Mode
+### Run the Testcases
 
 Now, we will use the newly created Alias `keployV2` to test the testcases.
 
@@ -122,6 +128,44 @@ keploy test --c "Docker_CMD_to_run_user_container" --containerName "<contianerNa
 
 Voilà! 🧑🏻‍💻 We have the server running!
 
+ Using **Binary** (<img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="20" height="20"> Linux</img> / <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="20" height="20"> Windows</img>)
+-
+
+Keploy can be used on Linux and Windows natively. Support for `MacOS` using Colima is work in progress.
+
+<details>
+<summary>Guide for native Installation</summary>
+
+> **Note**:- In Windows, **WSL** should be present on the system.
+
+### Download the Keploy Binary.
+```zsh
+docker pull ghcr.io/keploy/keploy
+```
+### Capture the Testcases. 
+Run this command on your terminal to start the recording of API calls:-
+
+```zsh
+sudo -E keploy record -c "CMD_TO_RUN_APP"
+```
+for example, if you are golang framework then the command would be:-
+
+```zsh
+sudo -E keploy record -c "relative_path_of_go_binary of your application"
+```
+### Run the Testcases.
+Run this command on your terminal to run the testcases and generate the test coverage report:-
+
+```zsh
+sudo -E keploy test -c "CMD_TO_RUN_APP" --delay 10
+```
+
+for example, if you are golang framework then the command would be:-
+
+```zsh
+sudo -E keploy test -c "relative_path_of_go_binary of your application" --delay 10
+```
+</details>
 
 ## Keploy Modes
 There are 2 Keploy modes:
