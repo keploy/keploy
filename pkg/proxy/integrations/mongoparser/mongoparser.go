@@ -108,8 +108,8 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		}
 		if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 			logger.Debug("recieved a heartbeat request for mongo")
-			maximumMatchingScore := 0.0
-			indxOfMostlyMatchedMock := -1
+			maxMatchScore := 0.0
+			bestMatchIndex := -1
 			for configIndex, configMock := range configMocks {
 				if len(configMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range configMock.Spec.MongoRequests {
@@ -142,9 +142,9 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 							}
 							logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
 							score := calculateMatchingScore(expected, actual)
-							if score > maximumMatchingScore {
-								maximumMatchingScore = score
-								indxOfMostlyMatchedMock = configIndex
+							if score > maxMatchScore {
+								maxMatchScore = score
+								bestMatchIndex = configIndex
 							}
 							
 						case wiremessage.OpMsg:
@@ -157,9 +157,9 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 								scoreSum += score
 							}
 							currentScore := scoreSum / float64(len(mongoRequests))
-							if currentScore > maximumMatchingScore {
-								maximumMatchingScore = currentScore
-								indxOfMostlyMatchedMock = configIndex
+							if currentScore > maxMatchScore {
+								maxMatchScore = currentScore
+								bestMatchIndex = configIndex
 							}
 						default:
 							logger.Error("the OpCode of the mongo wiremessage is invalid.")
@@ -168,11 +168,11 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				}
 			}
 			responseTo := mongoRequests[0].Header.RequestID
-			if indxOfMostlyMatchedMock == -1 || maximumMatchingScore == 0.0 {
+			if bestMatchIndex == -1 || maxMatchScore == 0.0 {
 				logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
 				continue
 			}
-			for _, mongoResponse := range configMocks[indxOfMostlyMatchedMock].Spec.MongoResponses {
+			for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
 				switch mongoResponse.Header.Opcode {
 				case wiremessage.OpReply:
 					replySpec := mongoResponse.Message.(*models.MongoOpReply)
@@ -227,8 +227,8 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				}
 			}
 		} else {
-			maximumMatchingScore := 0.0
-			indxOfMostlyMatchedMock := -1
+			maxMatchScore := 0.0
+			bestMatchIndex := -1
 			for tcsIndx, tcsMock := range tcsMocks {
 				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range tcsMock.Spec.MongoRequests {
@@ -242,9 +242,9 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 							}
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
 								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-								if score > maximumMatchingScore {
-									maximumMatchingScore = score
-									indxOfMostlyMatchedMock = tcsIndx
+								if score > maxMatchScore {
+									maxMatchScore = score
+									bestMatchIndex = tcsIndx
 								}
 							}
 						default:
@@ -254,8 +254,8 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				}
 			}
 			responseTo := mongoRequests[0].Header.RequestID
-			logger.Debug("the index mostly matched with the current request", zap.Any("indx", indxOfMostlyMatchedMock), zap.Any("responseTo", responseTo))
-			for _, resp := range tcsMocks[indxOfMostlyMatchedMock].Spec.MongoResponses {
+			logger.Debug("the index mostly matched with the current request", zap.Any("indx", bestMatchIndex), zap.Any("responseTo", responseTo))
+			for _, resp := range tcsMocks[bestMatchIndex].Spec.MongoResponses {
 				respMessage := resp.Message.(*models.MongoOpMessage)
 
 				message, err := encodeOpMsg(respMessage, logger)
@@ -272,8 +272,8 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				responseTo = requestId
 			}
 			logger.Debug(fmt.Sprintf("the length of tcsMocks before filtering matched: %v\n", len(tcsMocks)))
-			if maximumMatchingScore > 0.0 && indxOfMostlyMatchedMock >= 0 && indxOfMostlyMatchedMock < len(tcsMocks) {
-				tcsMocks = append(tcsMocks[:indxOfMostlyMatchedMock], tcsMocks[indxOfMostlyMatchedMock+1:]...)
+			if maxMatchScore > 0.0 && bestMatchIndex >= 0 && bestMatchIndex < len(tcsMocks) {
+				tcsMocks = append(tcsMocks[:bestMatchIndex], tcsMocks[bestMatchIndex+1:]...)
 				h.SetTcsMocks(tcsMocks)
 			}
 			logger.Debug(fmt.Sprintf("the length of tcsMocks after filtering matched: %v\n", len(tcsMocks)))
