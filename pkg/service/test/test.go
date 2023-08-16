@@ -346,25 +346,15 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	// 	return false, res
 	// }
 	// find noisy fields
-	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
-	if err != nil {
-		msg := "error in flattening http response"
-		t.logger.Error(Emoji+msg, zap.Error(err))
-		return false, res
-	}
+	// _, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
+	// if err != nil {
+	// 	msg := "error in flattening http response"
+	// 	t.logger.Error(Emoji+msg, zap.Error(err))
+	// 	return false, res
+	// }
 	// noise := httpSpec.Assertions["noise"]
 	noise := tc.Noise
-	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
-		// check if k is date
-		for _, v := range vals {
-			if pkg.IsTime(v) {
-				return true
-			}
-		}
 
-		// maybe we need to concatenate the values
-		return pkg.IsTime(strings.Join(vals, ", "))
-	})...)
 
 	var (
 		bodyNoise   []string
@@ -388,12 +378,15 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
-
+	var err error
 	if !Contains(noise, "body") && bodyType == models.BodyTypeJSON {
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
 		}
+		// debug log for cleanExp and cleanAct
+		t.logger.Debug(Emoji+"cleanExp", zap.Any("", cleanExp))
+		t.logger.Debug(Emoji+"cleanAct", zap.Any("", cleanAct))
 	} else {
 		if !Contains(noise, "body") && tc.HttpResp.Body != actualResponse.Body {
 			pass = false
