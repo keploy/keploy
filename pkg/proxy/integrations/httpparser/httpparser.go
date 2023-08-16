@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"time"
@@ -19,6 +18,10 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+type Response struct {
+
+}
 
 // IsOutgoingHTTP function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
@@ -86,7 +89,35 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 
 	// Concatenate the status line, headers, and body
 	responseString := statusLine + headers + "\r\n" + body
-	_, err := clienConn.Write([]byte(responseString))
+	// originalString := "This is my name"
+	var compressedBuffer bytes.Buffer
+	gw := gzip.NewWriter(&compressedBuffer)
+	_, err := gw.Write([]byte(responseString))
+	if err != nil {
+		logger.Error(Emoji+"failed to compress the response body", zap.Error(err))
+		return
+	}
+	err = gw.Close()
+	if err != nil {
+		logger.Error(Emoji+"failed to close the gzip writer", zap.Error(err))
+		return
+	}
+	// fmt.Println("This is the compressed buffer:", compressedBuffer.Bytes())
+
+	// gr, err := gzip.NewReader(&compressedBuffer)
+	// if err != nil {
+	// 	logger.Error(Emoji+"failed to create a gzip reader", zap.Error(err))
+	// 	return
+	// }
+	// defer gr.Close()
+	// var decompressedBuffer bytes.Buffer
+	// _, err = io.Copy(&decompressedBuffer, gr)
+	// if err != nil {
+	// 	logger.Error(Emoji+"failed to decompress the response body", zap.Error(err))
+	// 	return
+	// }
+	// fmt.Println("This is the decompressed buffer:", decompressedBuffer.String())
+	_, err = clienConn.Write(compressedBuffer.Bytes())
 	if err != nil {
 		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
 		return
@@ -100,29 +131,43 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) *models.Mock {
 	defer destConn.Close()
 
+	var respBuffer []byte
+	var finalRespBuffer []byte
+	var err error
 	// write the request message to the actual destination server
-	_, err := destConn.Write(requestBuffer)
+	_, err = destConn.Write(requestBuffer)
 	if err != nil {
 		logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
 		return nil
 	}
-
-	// read the response from the actual server
-	respBuffer, err := util.ReadBytes(destConn)
-	if err != nil {
-		logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-		return nil
+	for {
+		destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		// read the response from the actual server
+		respBuffer, err= util.ReadBytes(destConn)
+		//Check if the deadline has been reached
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout(){
+				break
+			}else{
+				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+				return nil
+			}
+		}
+		finalRespBuffer = append(finalRespBuffer, respBuffer...)
+		fmt.Println("This is the length of the respBuffer:", len(respBuffer))
+		if len(respBuffer) == 0 {
+			break
+		}
+		// write the response message to the user client
+		_, err = clientConn.Write(respBuffer)
+		if err != nil {
+			logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+			return nil
+		}
 	}
-
-	// write the response message to the user client
-	_, err = clientConn.Write(respBuffer)
-	if err != nil {
-		logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
-		return nil
-	}
-
+	var req *http.Request
 	// converts the request message buffer to http request
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
+	req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
 	if err != nil {
 		logger.Error(Emoji+"failed to parse the http request message", zap.Error(err))
 		return nil
@@ -138,30 +183,29 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 			return nil
 		}
 	}
-
 	// converts the response message buffer to http response
-	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(respBuffer)), req)
+	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalRespBuffer)), req)
 	if err != nil {
 		logger.Error(Emoji+"failed to parse the http response message", zap.Error(err))
 		return nil
 	}
+	fmt.Println("This is the resp headers:", resp.Header)
 	var respBody []byte
 	if resp.Body != nil { // Read
 		if resp.Header.Get("Content-Encoding") == "gzip" {
 			resp.Body, err = gzip.NewReader(resp.Body)
 			if err != nil {
-				logger.Error(Emoji+"failed to read the the http repsonse body", zap.Error(err))
+				logger.Error(Emoji+"failed to read the the http response body", zap.Error(err))
 				return nil
 			}
 		}
-		var err error
-		respBody, err = ioutil.ReadAll(resp.Body)
+		respBody, err = io.ReadAll(resp.Body)
 		if err != nil {
 			logger.Error(Emoji+"failed to read the the http repsonse body", zap.Error(err))
 			return nil
 		}
+		fmt.Println("This is the respBody", respBody)
 	}
-
 	// store the request and responses as mocks
 	meta := map[string]string{
 		"name":      "Http",

@@ -1,0 +1,85 @@
+version: api.keploy.io/v1beta1
+name: report-11
+status: FAILED
+success: 0
+failure: 1
+total: 1
+tests:
+    - kind: Http
+      name: report-11
+      status: FAILED
+      started: 1692177984
+      completed: 1692177985
+      test_case_path: /home/pranshu.linux/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/proxy
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "66"
+            Content-Type: application/json
+            Date: Wed, 16 Aug 2023 08:22:26 GMT
+        body: '{"completed":false,"id":1,"title":"delectus aut autem","userId":1}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 500
+        headers_result:
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "66"
+              actual:
+                key: Content-Length
+                value:
+                    - "21"
+            - normal: false
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - text/plain; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 08:22:26 GMT
+              actual:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 09:26:24 GMT
+            - normal: false
+              expected:
+                key: X-Content-Type-Options
+                value: []
+              actual:
+                key: X-Content-Type-Options
+                value:
+                    - nosniff
+        body_result:
+            - normal: false
+              type: PLAIN
+              expected: '{"completed":false,"id":1,"title":"delectus aut autem","userId":1}'
+              actual: |
+                Failed to fetch data
+        dep_result: []
