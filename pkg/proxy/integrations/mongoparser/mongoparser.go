@@ -31,308 +31,27 @@ func IsOutgoingMongo(buffer []byte) bool {
 }
 
 func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
-	// fmt.Println("into processing mongo. clientConnId: ", clientConnId)
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		// capturedDeps := encodeOutgoingMongo(requestBuffer, clientConn, destConn, logger)
+		logger.Debug("the outgoing mongo in record mode")
 		encodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
-		
-		// *deps = append(*deps, capturedDeps...)
-		// for _, v := range capturedDeps {
-			// 	h.AppendDeps(v)
-			// 	// h.WriteMock(v)
-			// }
-		case models.MODE_TEST:
-			logger.Debug("the outgoing mongo in test mode")
-		// fmt.Println("into test mode. clientConnId: ", clientConnId)
+	case models.MODE_TEST:
+		logger.Debug("the outgoing mongo in test mode")
 		decodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
 	default:
 	}
 }
 
-// func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
-// 	// var helloReply, replyMsg = []byte{}, []byte{}
-// 	// _, _, _, _, _, err := Decode(buffer)
-// 	fmt.Println("into decode mongo.")
-// 	_, requestHeader, _, err := Decode(requestBuffer)
-// 	if err != nil {
-// 		logger.Error(Emoji+"failed to decode the mongo request wiremessage", zap.Error(err))
-// 		return
-// 		// log.Println("failed to decode the mongo wire message", err)
-// 		// break
-// 	}
-// 	// if len(deps) <= 1 {
-// 	if h.GetDepsSize() <= 1 {
-// 		// logger.Error("failed to mock the output for unrecorded outgoing mongo query")
-// 		// log.Println("the dep call is not mocked during record")
-// 		return
-// 		// } else {
-// 		// 	helloReply = deps[0].Spec.Objects[1].Data
-// 		// 	replyMsg = deps[1].Spec.Objects[1].Data
-// 	}
-// 	// fmt.Println("deps: ", *deps[0], "\n", *deps[1], "\n\n ")
-// 	// mongoSpec := deps[0]
-// 	mongoSpec := h.FetchDep(0)
-// 	// var mongoSpec spec.MongoSpec
-// 	// err = deps[0].Spec.Decode(&mongoSpec)
-// 	// if err != nil {
-// 	// 	logger.Error("failed to decode the yaml spec for the outgoing mongo call")
-// 	// 	return
-// 	// }
-// 	// fmt.Printf("mongoSpec: %v\n", mongoSpec)
-// 	// querySpec, ok := mongoSpec.Spec.MongoRequest.(models.MongoOpQuery)
-// 	// if !ok {
-// 	// 	logger.Error("failed to decode the yaml spec for the outgoing mongo request")
-// 	// 	return
-// 	// }
-// 	// var querySpec spec.MongoOpQuery
-// 	// err = mongoSpec.Request.Decode(&querySpec)
-// 	// if err != nil {
-// 	// 	logger.Error("failed to decode the yaml spec for the outgoing mongo request", ap.Error(err))
-// 	// 	return
-// 	// }
-// 	replySpec, ok := mongoSpec.Spec.MongoResponse.(*models.MongoOpReply)
-// 	if !ok {
-// 		logger.Error(Emoji + "failed to decode the yaml for mongo OpReply wiremessage")
-// 		return
-// 	}
-// 	// var replySpec spec.MongoOpReply = spec.MongoOpReply{}
-// 	// err = mongoSpec.Response.Decode(&replySpec)
-// 	// if err != nil {
-// 	// 	logger.Error("failed to decode the yaml spec for the outgoing mongo reply")
-// 	// 	return
-// 	// }
-// 	// println("the replyspec is: ", replySpec.ResponseFlags)
-// 	// opReply
-// 	replyDocs := []bsoncore.Document{}
-// 	for _, v := range replySpec.Documents {
-// 		var unmarshaledDoc bsoncore.Document
-// 		err = bson.UnmarshalExtJSON([]byte(v), false, &unmarshaledDoc)
-// 		if err != nil {
-// 			logger.Error(Emoji+"failed to unmarshal the recorded document string of OpReply", zap.Error(err))
-// 			return
-// 		}
-// 		// docs, rm, ok := bsoncore.ReadDocument([]byte(v))
-// 		// fmt.Println("the document in healtcheck of test mode: ", docs.String(), " rm bytes: ", rm,  " ok: ", ok)
-// 		// replyDocs = append(replyDocs, bsoncore.Document(v))
-// 		replyDocs = append(replyDocs, unmarshaledDoc)
-// 		// fmt.Println("the documents in healtcheck of test mode: ", replyDocs)
-// 	}
-// 	// fmt.Println("the documents in healtcheck of test mode: ", replyDocs)
-// 	// reply := &opReply{
-// 	// 	flags: wiremessage.ReplyFlag(replySpec.ResponseFlags),
-// 	// 	cursorID: replySpec.CursorID,
-// 	// 	startingFrom: replySpec.StartingFrom,
-// 	// 	numReturned: replySpec.NumberReturned,
-// 	// 	documents: replyDocs,
-// 	// 	reqID: requestHeader.RequestID,
-// 	// }
-// 	// println("string format for the created opcode msg: ", reply.String())
-// 	var heathCheckReplyBuffer []byte
-// 	heathCheckReplyBuffer = wiremessage.AppendHeader(heathCheckReplyBuffer, mongoSpec.Spec.MongoResponseHeader.Length, requestHeader.RequestID+1, requestHeader.RequestID, mongoSpec.Spec.MongoResponseHeader.Opcode)
-// 	heathCheckReplyBuffer = wiremessage.AppendReplyFlags(heathCheckReplyBuffer, wiremessage.ReplyFlag(replySpec.ResponseFlags))
-// 	heathCheckReplyBuffer = wiremessage.AppendReplyCursorID(heathCheckReplyBuffer, replySpec.CursorID)
-// 	heathCheckReplyBuffer = wiremessage.AppendReplyStartingFrom(heathCheckReplyBuffer, replySpec.StartingFrom)
-// 	heathCheckReplyBuffer = wiremessage.AppendReplyNumberReturned(heathCheckReplyBuffer, replySpec.NumberReturned)
-// 	for _, doc := range replyDocs {
-// 		heathCheckReplyBuffer = append(heathCheckReplyBuffer, doc...)
-// 	}
-// 	// heathCheckReplyBuffer = append(heathCheckReplyBuffer, reply.Encode(requestHeader.ResponseTo)...)
-// 	// opr, _, _, err = Decode(heathCheckReplyBuffer)
-// 	// println("the healthcheck response : ", opr.String())
-// 	_, err = clientConn.Write(heathCheckReplyBuffer)
-// 	if err != nil {
-// 		logger.Error(Emoji+"failed to write the health check reply to mongo client", zap.Error(err))
-// 		return
-// 		// log.Printf("failed to write response to the client conn. error: %v \n", err.Error())
-// 	}
-// 	// _, _, _, _, _, err = Decode(helloReply)
-// 	// if err != nil {
-// 	// 	log.Println("failed to decode the mongo wire message", err)
-// 	// 	// break
-// 	// }
-// 	// if !strings.Contains(op.String(), "hello") {
-// 	// 	log.Printf("the decoded response wire message: length: %v, reqId: %v, respTo: %v, opCode: %v, body: %v on mode: %v", l, reqId, respTo, opCode, op.String(), os.Getenv("KEPLOY_MODE"))
-// 	// }
-// 	operationBuffer, err := util.ReadBytes(clientConn)
-// 	if err != nil {
-// 		logger.Error(Emoji+"failed to read the mongo wiremessage for operation query", zap.Error(err))
-// 		return
-// 		// log.Printf("failed to read the message. error: %v\n", err)
-// 		// break
-// 	}
-// 	fmt.Println("after hertbeat interchange in decode.")
-// 	opr1, _, _, err := Decode(operationBuffer)
-// 	if err != nil {
-// 		logger.Error(Emoji+"failed to decode the mongo operation query", zap.Error(err))
-// 		// panic("stop due to invalid mongo wiremessage")
-// 		return
-// 		// log.Printf("failed to decode the mongo wire message. error: %v", err.Error())
-// 		// break
-// 	}
-// 	// logger.Error(Emoji + "the operation buffer: ", zap.String("", opr1.String()))
-// 	// panic("stop recuring loop")
-// 	if strings.Contains(opr1.String(), "hello") {
-// 		return
-// 	}
-// 	// if !strings.Contains(opr1.String(), "hello") {
-// 	// 	log.Printf("the decoded wire message: length: %v, reqId: %v, respTo: %v, opCode: %v, body: %v on mode: %v", lr, reqIdr, respTor, opCoder, opr1.String(), os.Getenv("KEPLOY_MODE"))
-// 	// }
-// 	// log.Println("length of deps: ", len(deps))
-// 	// log.Println(", length of objects: ", len(deps[1].Spec.Objects))
-// 	// mongoSpec1 := deps[1]
-// 	mongoSpec1 := h.FetchDep(1)
-// 	// 	var mongoSpec1 spec.MongoSpec
-// 	// err = deps[1].Spec.Decode(&mongoSpec1)
-// 	// if err != nil {
-// 	// 	logger.Error("failed to decode the yaml spec for the outgoing mongo call")
-// 	// 	return
-// 	// }
-// 	// msgQuerySpec, ok := mongoSpec1.Spec.MongoRequest.(models.MongoOpMessage)
-// 	// if !ok {
-// 	// 	logger.Error("failed to decode the yaml for mongo OpMessage wiremessage request")
-// 	// 	return
-// 	// }
-// 	// var msgQuerySpec spec.MongoOpMessage
-// 	// err = mongoSpec1.Request.Decode(&msgQuerySpec)
-// 	// if err != nil {
-// 	// 	logger.Error("failed to decode the yaml spec for the outgoing mongo request")
-// 	// 	return
-// 	// }
-// 	msgSpec, ok := mongoSpec1.Spec.MongoResponse.(*models.MongoOpMessage)
-// 	// fmt.Println("mock for the opmsg: ", mongoSpec1.Spec.MongoResponse, "\n ")
-// 	if !ok {
-// 		logger.Error(Emoji + "failed to decode the yaml for mongo OpMessage wiremessage response")
-// 		return
-// 	}
-// 	// var msgSpec spec.MongoOpMessage
-// 	// err = mongoSpec1.Response.Decode(&msgSpec)
-// 	// if err != nil {
-// 	// 	logger.Error("failed to decode the yaml spec for the outgoing mongo reply")
-// 	// 	return
-// 	// }
-// 	// fmt.Println("the msg spec: ", msgSpec)
-// 	// wiremessage.
-// 	msg := &opMsg{
-// 		flags:    wiremessage.MsgFlag(msgSpec.FlagBits),
-// 		checksum: uint32(msgSpec.Checksum),
-// 		sections: []opMsgSection{},
-// 	}
-// 	// if len(msgSpec.Sections) == 1 {
-// 	// 	// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
-// 	// 	// sectionStr := msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-2]
-// 	// 	var sectionStr string
-// 	// 	_, err := fmt.Sscanf(msgSpec.Sections[0], "{ SectionSingle msg: %s }", &sectionStr)
-// 	// 	if err != nil {
-// 	// 		logger.Error("failed to scan the message section from the recorded section string", zap.Error(err))
-// 	// 		return
-// 	// 	}
-// 	// 	// logger.Info("the section in the msg response", zap.Any("", sectionStr))
-// 	// 	var unmarshaledDoc bsoncore.Document
-// 	// 	// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
-// 	// 	err = bson.UnmarshalExtJSON([]byte(sectionStr), false, &unmarshaledDoc)
-// 	// 	if err != nil {
-// 	// 		logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
-// 	// 		return
-// 	// 	}
-// 	// 	// fmt.Println("the unmarshaled doc: ", unmarshaledDoc)
-// 	// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-// 	// 	msg.sections = []opMsgSection{&opMsgSectionSingle{
-// 	// 		msg: unmarshaledDoc,
-// 	// 	}}
-// 	// } else {
-// 	for i, v := range msgSpec.Sections {
-// 		if strings.Contains(v, "SectionSingle identifier") {
-// 			// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
-// 			// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
-// 			// logger.Info("the section in the msg response", zap.Any("", sectionStr))
-// 			var identifier string
-// 			var msgsStr string
-// 			_, err := fmt.Sscanf(msgSpec.Sections[i], "{ SectionSingle identifier: %s, msgs: [%s] }", &identifier, &msgsStr)
-// 			if err != nil {
-// 				logger.Error(Emoji+"failed to extract the msg section from recorded message", zap.Error(err))
-// 				return
-// 			}
-// 			msgs := strings.Split(msgsStr, ", ")
-// 			docs := []bsoncore.Document{}
-// 			for _, v := range msgs {
-// 				var unmarshaledDoc bsoncore.Document
-// 				// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
-// 				err = bson.UnmarshalExtJSON([]byte(v), false, &unmarshaledDoc)
-// 				if err != nil {
-// 					logger.Error(Emoji+"failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
-// 					return
-// 				}
-// 				docs = append(docs, unmarshaledDoc)
-// 			}
-// 			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-// 			// msg.sections = []opMsgSection{&opMsgSectionSingle{
-// 			// 	msg: unmarshaledDoc,
-// 			// }}
-// 			msg.sections = append(msg.sections, &opMsgSectionSequence{
-// 				// msg: unmarshaledDoc,
-// 				identifier: identifier,
-// 				msgs:       docs,
-// 			})
-// 		} else {
-// 			// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
-// 			// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
-// 			var sectionStr string
-// 			_, err := fmt.Sscanf(msgSpec.Sections[0], "{ SectionSingle msg: %s }", &sectionStr)
-// 			if err != nil {
-// 				logger.Error(Emoji+"failed to extract the msg section from recorded message single section", zap.Error(err))
-// 				return
-// 			}
-// 			// logger.Info("the section in the msg response", zap.Any("", sectionStr))
-// 			var unmarshaledDoc bsoncore.Document
-// 			// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
-// 			err = bson.UnmarshalExtJSON([]byte(sectionStr), false, &unmarshaledDoc)
-// 			if err != nil {
-// 				logger.Error(Emoji+"failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
-// 				return
-// 			}
-// 			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-// 			// msg.sections = []opMsgSection{&opMsgSectionSingle{
-// 			// 	msg: unmarshaledDoc,
-// 			// }}
-// 			msg.sections = append(msg.sections, &opMsgSectionSingle{
-// 				msg: unmarshaledDoc,
-// 			})
-// 		}
-// 	}
-// 	// }
-// 	_, err = clientConn.Write(msg.Encode(mongoSpec1.Spec.MongoRequestHeader.ResponseTo))
-// 	if err != nil {
-// 		logger.Error(Emoji+"failed to write the OpMsg response for the mongo operation", zap.Error(err))
-// 		return
-// 		// log.Printf("failed to write response to the client conn. error: %v \n", err.Error())
-// 	}
-// 	// _, _, _, _, _, err = Decode(replyMsg)
-// 	// if err != nil {
-// 	// 	log.Println("failed to decode the mongo wire message", err)
-// 	// 	// break
-// 	// }
-// 	// if !strings.Contains(op.String(), "hello") {
-// 	// 	log.Printf("the decoded response wire message: length: %v, reqId: %v, respTo: %v, opCode: %v, body: %v on mode: %v", l, reqId, respTo, opCode, op.String(), os.Getenv("KEPLOY_MODE"))
-// 	// }
-// 	// deps = deps[2:]
-// 	h.PopFront()
-// 	h.PopFront()
-// }
-
 func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
-	// fmt.Println("into decode mongo. clientConnId: ", clientConnId)
 	startedDecoding := time.Now()
 	for {
 		configMocks := h.GetConfigMocks()
 		tcsMocks := h.GetTcsMocks()
 		var (
 			mongoRequests = []models.MongoRequest{}
-			// mongoResponses = []models.MongoResponse{}
 			err error
 		)
 		if string(requestBuffer) == "read form client connection" {
-			// lstr := ""
 			started := time.Now()
 			requestBuffer, err = util.ReadBytes(clientConn)
 			if err != nil {
@@ -341,8 +60,6 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			}
 			logger.Debug("the request from the mongo client", zap.Any("buffer", requestBuffer))
 			readRequestDelay = time.Since(started)
-			// fmt.Println(lstr, " the clientConnId: ", clientConnId)
-			// logStr += lstr
 		}
 		if len(requestBuffer) == 0 {
 			return
@@ -358,28 +75,21 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			Message:   mongoRequest,
 			ReadDelay: int64(readRequestDelay),
 		})
-		// fmt.Println("the request buffer: ", string(requestBuffer), " clientConnId: ", clientConnId)
 		if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for {
-				// fmt.Println("into the more_to_come", logStr)
-				// tmpStr := ""
 				started = time.Now()
 				logger.Debug("into the for loop for request stream")
 				requestBuffer1, err := util.ReadBytes(clientConn)
-				// logStr += tmpStr
 				if err != nil {
 					logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 					return
 				}
-				// fmt.Println(tmpStr, " the clientConnId: ", clientConnId)
 				readRequestDelay = time.Since(started)
 
 				if len(requestBuffer1) == 0 {
 					logger.Debug("the response from the server is complete")
 					break
 				}
-				// logStr += fmt.Sprintln("the response from the mongo server: ", string(responseBuffer1))
-				// fmt.Println("the response from the mongo server: ", string(requestBuffer1))
 				_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 				if err != nil {
 					logger.Error(Emoji+"failed to decode the mongo wire message from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
@@ -389,7 +99,6 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 					logger.Debug("the request from the client is complete since the more_to_come flagbit is 0")
 					break
 				}
-				// fmt.Println("the docoded responseHeader: ", reqHeader, " || and the response: ", mongoReq.(*models.MongoOpMessage))
 				mongoRequests = append(mongoRequests, models.MongoRequest{
 					Header:    &reqHeader,
 					Message:   mongoReq,
@@ -399,246 +108,131 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		}
 		if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 			logger.Debug("recieved a heartbeat request for mongo")
-			// fmt.Println("recieved a heartbeat call. Recieved requests: ", fmt.Sprintf("len: %v", len(mongoRequests)), " clientconnid: ", clientConnId)
-			configResponseWritten := false
-			for _, configMock := range configMocks {
+			maxMatchScore := 0.0
+			bestMatchIndex := -1
+			for configIndex, configMock := range configMocks {
 				if len(configMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range configMock.Spec.MongoRequests {
-						// fmt.Println()
-						// fmt.Println("the recieved request: ", fmt.Sprintf(" header: %v", mongoRequests[i].Header), " \nthe expected request: ", fmt.Sprintf(" header: %v", req.Header))
-						if req.Header.Length != mongoRequests[i].Header.Length || req.Header.Opcode != mongoRequests[i].Header.Opcode {
+						if len(configMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
 							continue
 						}
 						switch req.Header.Opcode {
 						case wiremessage.OpQuery:
 							expectedQuery := req.Message.(*models.MongoOpQuery)
 							actualQuery := mongoRequests[i].Message.(*models.MongoOpQuery)
-							// fmt.Println("the actual request query :", fmt.Sprintf("%v", actualQuery), "\n expected query: ", fmt.Sprintf("%v", expectedQuery))
 							if actualQuery.FullCollectionName != expectedQuery.FullCollectionName ||
 								actualQuery.ReturnFieldsSelector != expectedQuery.ReturnFieldsSelector ||
 								actualQuery.Flags != expectedQuery.Flags ||
 								actualQuery.NumberToReturn != expectedQuery.NumberToReturn ||
-								actualQuery.NumberToSkip != expectedQuery.NumberToSkip ||
-								actualQuery.Query != expectedQuery.Query {
+								actualQuery.NumberToSkip != expectedQuery.NumberToSkip {
 								continue
 							}
-							// fmt.Println("the request query matches. clientconnid: ", clientConnId)
 
-							replySpec := configMock.Spec.MongoResponses[0].Message.(*models.MongoOpReply)
-							replyMessage, err := encodeOpReply(replySpec, logger)
+							expected := map[string]interface{}{}
+							actual := map[string]interface{}{}
+							err = bson.UnmarshalExtJSON([]byte(expectedQuery.Query), true, &expected)
 							if err != nil {
-								logger.Error(fmt.Sprintf("failed to encode the recorded OpReply yaml"), zap.Error(err), zap.Any("for request with id", mongoRequests[i].Header.RequestID))
-								return
+								logger.Error(fmt.Sprintf("failed to unmarshal the section of recorded request to bson document"), zap.Error(err))
+								continue
 							}
-							// replyDocs := []bsoncore.Document{}
-							// for _, v := range replySpec.Documents {
-							// 	var unmarshaledDoc bsoncore.Document
-							// 	logger.Debug(fmt.Sprintf("the document string is: %v", string(v)))
-							// 	var result map[string]interface{}
-							// 	err := json.Unmarshal([]byte(v), &result)
-							// 	if err != nil {
-							// 		logger.Error("failed to unmarshal string document of OpReply", zap.Error(err))
-							// 		return
-							// 	}
-							// 	result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"] = strconv.FormatInt(time.Now().Unix(), 10)
-							// 	v, err := json.Marshal(result)
-							// 	if err != nil {
-							// 		logger.Error("failed to marshal the updated string document of OpReply", zap.Error(err))
-							// 		return
-							// 	}
-							// 	logger.Debug(fmt.Sprintf("the updated document string is: %v", result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"]))
-							// 	err = bson.UnmarshalExtJSON([]byte(v), false, &unmarshaledDoc)
-							// 	if err != nil {
-							// 		logger.Error("failed to decode the recorded document of OpReply", zap.Error(err))
-							// 		return
-							// 	}
-							// 	// unmarshaledDoc.Lookup("localTime")
-							// 	// unmarshaledDoc = bso{}
-							// 	// unmarshaledDoc.
-							// 	elements, _ := unmarshaledDoc.Elements()
-							// 	// updatedBsonDoc := bsoncore.Document{}
-							// 	// unmarshaledDoc.look
-							// 	// for _, el := range elements {
-							// 	// 	if el.Key() == "localTime" {
-							// 	// 		logger.Debug( fmt.Sprintf("the values of localtime: %v", el.Value()) )
-							// 	// 		continue
-							// 	// 	}
-							// 	// 	el.
-							// 	// 	// updatedBsonDoc = append(updatedBsonDoc, bsoncore.BuildDocumentElement()...)
-							// 	// }
-							// 	logger.Debug(fmt.Sprintf("the elements of the reply docs: %v", elements))
-							// 	// docs, rm, ok := bsoncore.ReadDocument([]byte(v))
-							// 	// fmt.Println("the document in healtcheck of test mode: ", docs.String(), " rm bytes: ", rm,  " ok: ", ok)
-							// 	// replyDocs = append(replyDocs, bsoncore.Document(v))
-							// 	replyDocs = append(replyDocs, unmarshaledDoc)
-							// 	// fmt.Println("the documents in healtcheck of test mode: ", replyDocs)
-							// }
-							// fmt.Println("the documents in healtcheck of test mode: ", replyDocs)
-							// reply := &opReply{
-							// 	flags: wiremessage.ReplyFlag(replySpec.ResponseFlags),
-							// 	cursorID: replySpec.CursorID,
-							// 	startingFrom: replySpec.StartingFrom,
-							// 	numReturned: replySpec.NumberReturned,
-							// 	documents: replyDocs,
-							// 	reqID: requestHeader.RequestID,
-							// }
-							// println("string format for the created opcode msg: ", reply.String())
-
-							heathCheckReplyBuffer := replyMessage.Encode(mongoRequests[i].Header.RequestID, wiremessage.NextRequestID())
-							// var heathCheckReplyBuffer []byte
-							// fmt.Printf("the index of recived request: %v. And the request header: %v clientConnId: %v\n\n", i, mongoRequests[i].Header, clientConnId)
-							// heathCheckReplyBuffer = wiremessage.AppendHeader(heathCheckReplyBuffer, configMock.Spec.MongoResponses[0].Header.Length, 0, mongoRequests[i].Header.RequestID, configMock.Spec.MongoResponses[0].Header.Opcode)
-							// heathCheckReplyBuffer = wiremessage.AppendReplyFlags(heathCheckReplyBuffer, wiremessage.ReplyFlag(replySpec.ResponseFlags))
-							// heathCheckReplyBuffer = wiremessage.AppendReplyCursorID(heathCheckReplyBuffer, replySpec.CursorID)
-							// heathCheckReplyBuffer = wiremessage.AppendReplyStartingFrom(heathCheckReplyBuffer, replySpec.StartingFrom)
-							// heathCheckReplyBuffer = wiremessage.AppendReplyNumberReturned(heathCheckReplyBuffer, replySpec.NumberReturned)
-							// for _, doc := range replyDocs {
-							// 	heathCheckReplyBuffer = append(heathCheckReplyBuffer, doc...)
-							// }
-							// heathCheckReplyBuffer = append(heathCheckReplyBuffer, reply.Encode(requestHeader.ResponseTo)...)
-							// opr, _, _, err = Decode(heathCheckReplyBuffer)
-							// println("the healthcheck response : ", opr.String())
-
-							logger.Debug(fmt.Sprintf("the bufffer response is: %v", string(heathCheckReplyBuffer)), zap.Any("clientconnid", clientConnId))
-							_, err = clientConn.Write(heathCheckReplyBuffer)
+							err = bson.UnmarshalExtJSON([]byte(actualQuery.Query), true, &actual)
 							if err != nil {
-								logger.Error("failed to write the health check reply to mongo client", zap.Error(err))
-								return
-								// log.Printf("failed to write response to the client conn. error: %v \n", err.Error())
+								logger.Error(fmt.Sprintf("failed to unmarshal the section of incoming request to bson document"), zap.Error(err))
+								continue
 							}
-							configResponseWritten = true
-
+							logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
+							score := calculateMatchingScore(expected, actual)
+							if score > maxMatchScore {
+								maxMatchScore = score
+								bestMatchIndex = configIndex
+							}
+							
 						case wiremessage.OpMsg:
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 								continue
 							}
-							isMatched := true
+							scoreSum := 0.0
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-								// if section != mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx] {
-								if compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger) == 0.0 {
-									isMatched = false
-									break
-								}
+								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
+								scoreSum += score
 							}
-							if isMatched {
-								for _, resp := range configMock.Spec.MongoResponses {
-									respMessage := resp.Message.(*models.MongoOpMessage)
-
-									message, err := encodeOpMsg(respMessage, logger)
-									if err != nil {
-										logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", mongoRequests[i].Header.RequestID))
-										return
-									}
-
-									// message := &opMsg{
-									// 	flags:    wiremessage.MsgFlag(respMessage.FlagBits),
-									// 	checksum: uint32(respMessage.Checksum),
-									// 	sections: []opMsgSection{},
-									// }
-									// for messageIndex, messageValue := range respMessage.Sections {
-									// 	if strings.Contains(messageValue, "SectionSingle identifier") {
-									// 		// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
-									// 		// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
-									// 		// logger.Info("the section in the msg response", zap.Any("", sectionStr))
-									// 		var identifier string
-									// 		var msgsStr string
-									// 		_, err := fmt.Sscanf(respMessage.Sections[messageIndex], "{ SectionSingle identifier: %s, msgs: [%s] }", &identifier, &msgsStr)
-									// 		if err != nil {
-									// 			logger.Error("failed to extract the msg section from recorded message", zap.Error(err))
-									// 			return
-									// 		}
-									// 		msgs := strings.Split(msgsStr, ", ")
-									// 		docs := []bsoncore.Document{}
-									// 		for _, msg := range msgs {
-									// 			var unmarshaledDoc bsoncore.Document
-									// 			// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
-									// 			err = bson.UnmarshalExtJSON([]byte(msg), true, &unmarshaledDoc)
-									// 			if err != nil {
-									// 				logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
-									// 				return
-									// 			}
-									// 			docs = append(docs, unmarshaledDoc)
-									// 		}
-									// 		// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-									// 		// msg.sections = []opMsgSection{&opMsgSectionSingle{
-									// 		// 	msg: unmarshaledDoc,
-									// 		// }}
-									// 		message.sections = append(message.sections, &opMsgSectionSequence{
-									// 			// msg: unmarshaledDoc,
-									// 			identifier: identifier,
-									// 			msgs:       docs,
-									// 		})
-									// 	} else {
-									// 		// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
-									// 		// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
-									// 		var sectionStr string
-									// 		_, err := fmt.Sscanf(respMessage.Sections[messageIndex], "{ SectionSingle msg: %s }", &sectionStr)
-									// 		if err != nil {
-									// 			logger.Error("failed to extract the msg section from recorded message single section", zap.Error(err))
-									// 			return
-									// 		}
-									// 		// logger.Info("the section in the msg response", zap.Any("", sectionStr))
-									// 		var unmarshaledDoc bsoncore.Document
-									// 		// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
-									// 		err = bson.UnmarshalExtJSON([]byte(sectionStr), true, &unmarshaledDoc)
-									// 		if err != nil {
-									// 			logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
-									// 			return
-									// 		}
-									// 		// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-									// 		// msg.sections = []opMsgSection{&opMsgSectionSingle{
-									// 		// 	msg: unmarshaledDoc,
-									// 		// }}
-									// 		message.sections = append(message.sections, &opMsgSectionSingle{
-									// 			msg: unmarshaledDoc,
-									// 		})
-									// 	}
-									// }
-									if hasSecondSetBit(respMessage.FlagBits) {
-										// the first response wiremessage have
-										responseTo := mongoRequests[i].Header.RequestID
-										for {
-											// fmt.Println("the response cycle. delay: ", resp.ReadDelay, " for clientConnId: ", clientConnId, " responseTo: ", mongoRequests[i].Header.RequestID, " length of mongorequests: ", len(mongoRequests), " the sixteenthBit in request.Msg.Flag: ", hasSixteenthBit(mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits))
-											time.Sleep(time.Duration(resp.ReadDelay))
-											// generate requestId for the mongo wiremessage
-											requestId := wiremessage.NextRequestID()
-											_, err := clientConn.Write(message.Encode(responseTo, requestId))
-											logger.Debug(fmt.Sprintf("the response lifecycle ended. clientconnid: %v", clientConnId))
-											if err != nil {
-												logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
-												return
-											}
-											// the 'responseTo' field of response wiremessage is set to requestId of currently sent wiremessage
-											responseTo = requestId
-										}
-									} else {
-
-										_, err := clientConn.Write(message.Encode(mongoRequests[i].Header.RequestID, wiremessage.NextRequestID()))
-										if err != nil {
-											logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
-											return
-										}
-									}
-									configResponseWritten = true
-								}
+							currentScore := scoreSum / float64(len(mongoRequests))
+							if currentScore > maxMatchScore {
+								maxMatchScore = currentScore
+								bestMatchIndex = configIndex
 							}
 						default:
 							logger.Error("the OpCode of the mongo wiremessage is invalid.")
 						}
 					}
 				}
-				if configResponseWritten {
-					break
+			}
+			responseTo := mongoRequests[0].Header.RequestID
+			if bestMatchIndex == -1 || maxMatchScore == 0.0 {
+				logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
+				continue
+			}
+			for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
+				switch mongoResponse.Header.Opcode {
+				case wiremessage.OpReply:
+					replySpec := mongoResponse.Message.(*models.MongoOpReply)
+					replyMessage, err := encodeOpReply(replySpec, logger)
+					if err != nil {
+						logger.Error(fmt.Sprintf("failed to encode the recorded OpReply yaml"), zap.Error(err), zap.Any("for request with id", responseTo))
+						return
+					}
+					requestId := wiremessage.NextRequestID()
+					heathCheckReplyBuffer := replyMessage.Encode(responseTo, requestId)
+					responseTo = requestId
+					logger.Debug(fmt.Sprintf("the bufffer response is: %v", string(heathCheckReplyBuffer)), zap.Any("clientconnid", clientConnId))
+					_, err = clientConn.Write(heathCheckReplyBuffer)
+					if err != nil {
+						logger.Error("failed to write the health check reply to mongo client", zap.Error(err))
+						return
+						// log.Printf("failed to write response to the client conn. error: %v \n", err.Error())
+					}
+				case wiremessage.OpMsg:
+					respMessage := mongoResponse.Message.(*models.MongoOpMessage)
+
+					message, err := encodeOpMsg(respMessage, logger)
+					if err != nil {
+						logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", responseTo))
+						return
+					}
+					if hasSecondSetBit(respMessage.FlagBits) {
+						// the first response wiremessage have
+						for {
+							// fmt.Println("the response cycle. delay: ", resp.ReadDelay, " for clientConnId: ", clientConnId, " responseTo: ", mongoRequests[i].Header.RequestID, " length of mongorequests: ", len(mongoRequests), " the sixteenthBit in request.Msg.Flag: ", hasSixteenthBit(mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits))
+							time.Sleep(time.Duration(mongoResponse.ReadDelay))
+							// generate requestId for the mongo wiremessage
+							requestId := wiremessage.NextRequestID()
+							_, err := clientConn.Write(message.Encode(responseTo, requestId))
+							logger.Debug(fmt.Sprintf("the response lifecycle ended. clientconnid: %v", clientConnId))
+							if err != nil {
+								logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
+								return
+							}
+							// the 'responseTo' field of response wiremessage is set to requestId of currently sent wiremessage
+							responseTo = requestId
+						}
+					} else {
+
+						_, err := clientConn.Write(message.Encode(responseTo, wiremessage.NextRequestID()))
+						if err != nil {
+							logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
+							return
+						}
+					}
+
 				}
 			}
 		} else {
-			// mockedResponseWritten := false
-			maximumMatchingScore := 0.0
-			indxOfMostlyMatchedMock := -1
+			maxMatchScore := 0.0
+			bestMatchIndex := -1
 			for tcsIndx, tcsMock := range tcsMocks {
 				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range tcsMock.Spec.MongoRequests {
-						if req.Header.Length != mongoRequests[i].Header.Length || req.Header.Opcode != mongoRequests[i].Header.Opcode {
+						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
 							continue
 						}
 						switch req.Header.Opcode {
@@ -646,69 +240,22 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 								continue
 							}
-							// isMatched := true
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-								// if section != mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx] {
-
-								// if !compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger) {
-								// 	logger.Debug("the sections are not matched. ", zap.Any("expected", section), zap.Any("actual", mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx]))
-								// 	isMatched = false
-								// 	break
-								// }
 								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-								if score > maximumMatchingScore {
-									maximumMatchingScore = score
-									indxOfMostlyMatchedMock = tcsIndx
+								if score > maxMatchScore {
+									maxMatchScore = score
+									bestMatchIndex = tcsIndx
 								}
 							}
-							// if isMatched {
-							// 	for _, resp := range tcsMock.Spec.MongoResponses {
-							// 		respMessage := resp.Message.(*models.MongoOpMessage)
-
-							// 		message, err := encodeOpMsg(respMessage, logger)
-							// 		if err != nil {
-							// 			logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", mongoRequests[i].Header.RequestID))
-							// 			return
-							// 		}
-							// 		// if hasSecondSetBit(respMessage.FlagBits) {
-							// 		// 	responseTo := mongoRequests[i].Header.RequestID
-							// 		// 	for {
-							// 		// 		fmt.Println("the response cycle. delay: ", resp.ReadDelay, " for clientConnId: ", clientConnId, " responseTo: ", mongoRequests[i].Header.RequestID, " length of mongorequests: ", len(mongoRequests), " the sixteenthBit in request.Msg.Flag: ", hasSixteenthBit(mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits))
-							// 		// 		time.Sleep(time.Duration(resp.ReadDelay))
-							// 		// 		requestId := wiremessage.NextRequestID()
-							// 		// 		_, err := clientConn.Write(message.Encode(responseTo, requestId))
-							// 		// 		logger.Debug(fmt.Sprintf("the response lifecycle ended. clientconnid: %v", clientConnId))
-							// 		// 		if err != nil {
-							// 		// 			logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
-							// 		// 			return
-							// 		// 		}
-							// 		// 		// the 'responseTo' field of response wiremessage is set to requestId of sent r
-							// 		// 		responseTo = requestId
-							// 		// 		// time.Sleep(10*time.Minute)
-							// 		// 	}
-							// 		// } else {
-							// 		_, err = clientConn.Write(message.Encode(mongoRequests[i].Header.RequestID, wiremessage.NextRequestID()))
-							// 		if err != nil {
-							// 			logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err), zap.Any("for request with id", mongoRequests[i].Header.RequestID))
-							// 			return
-							// 		}
-							// 		// }
-							// 		mockedResponseWritten = true
-							// 	}
-							// }
 						default:
 							logger.Error("the OpCode of the mongo wiremessage is invalid.")
 						}
 					}
 				}
-				// if mockedResponseWritten {
-				// 	break
-				// }
 			}
-			// responseTo := tcsMocks[indxOfMostlyMatchedMock].Spec.MongoRequests[0].Header.RequestID
 			responseTo := mongoRequests[0].Header.RequestID
-			logger.Debug("the index mostly matched with the current request", zap.Any("indx", indxOfMostlyMatchedMock), zap.Any("responseTo", responseTo))
-			for _, resp := range tcsMocks[indxOfMostlyMatchedMock].Spec.MongoResponses {
+			logger.Debug("the index mostly matched with the current request", zap.Any("indx", bestMatchIndex), zap.Any("responseTo", responseTo))
+			for _, resp := range tcsMocks[bestMatchIndex].Spec.MongoResponses {
 				respMessage := resp.Message.(*models.MongoOpMessage)
 
 				message, err := encodeOpMsg(respMessage, logger)
@@ -716,23 +263,6 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 					logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", responseTo))
 					return
 				}
-				// if hasSecondSetBit(respMessage.FlagBits) {
-				// 	responseTo := mongoRequests[i].Header.RequestID
-				// 	for {
-				// 		fmt.Println("the response cycle. delay: ", resp.ReadDelay, " for clientConnId: ", clientConnId, " responseTo: ", mongoRequests[i].Header.RequestID, " length of mongorequests: ", len(mongoRequests), " the sixteenthBit in request.Msg.Flag: ", hasSixteenthBit(mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits))
-				// 		time.Sleep(time.Duration(resp.ReadDelay))
-				// 		requestId := wiremessage.NextRequestID()
-				// 		_, err := clientConn.Write(message.Encode(responseTo, requestId))
-				// 		logger.Debug(fmt.Sprintf("the response lifecycle ended. clientconnid: %v", clientConnId))
-				// 		if err != nil {
-				// 			logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
-				// 			return
-				// 		}
-				// 		// the 'responseTo' field of response wiremessage is set to requestId of sent r
-				// 		responseTo = requestId
-				// 		// time.Sleep(10*time.Minute)
-				// 	}
-				// } else {
 				requestId := wiremessage.NextRequestID()
 				_, err = clientConn.Write(message.Encode(responseTo, requestId))
 				if err != nil {
@@ -740,18 +270,15 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 					return
 				}
 				responseTo = requestId
-				// }
-				// mockedResponseWritten = true
 			}
 			logger.Debug(fmt.Sprintf("the length of tcsMocks before filtering matched: %v\n", len(tcsMocks)))
-			if maximumMatchingScore > 0.0 && indxOfMostlyMatchedMock >= 0 && indxOfMostlyMatchedMock < len(tcsMocks) {
-				tcsMocks = append(tcsMocks[:indxOfMostlyMatchedMock], tcsMocks[indxOfMostlyMatchedMock+1:]...)
+			if maxMatchScore > 0.0 && bestMatchIndex >= 0 && bestMatchIndex < len(tcsMocks) {
+				tcsMocks = append(tcsMocks[:bestMatchIndex], tcsMocks[bestMatchIndex+1:]...)
 				h.SetTcsMocks(tcsMocks)
 			}
 			logger.Debug(fmt.Sprintf("the length of tcsMocks after filtering matched: %v\n", len(tcsMocks)))
 		}
 		requestBuffer = []byte("read form client connection")
-		// fmt.Printf("an iteration of a mongo request lifecycle is completed. clientconnid: %v\n", clientConnId)
 	}
 }
 
