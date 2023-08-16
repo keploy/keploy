@@ -86,17 +86,37 @@ Ensures that redundant testcases are not generated.
 
 ## Quick Installation
 
-### MacOS 
+### **Docker**
 
-- Link to MacOS Installation Guide
+#### Creating Alias
 
-### Linux
+We need to create the Alias for Keploy since we are using the Docker.
 
-- Link to Linux Installation Guide
+```shell
+alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm <keployV2-image>'
+```
 
-### Windows
+#### Run the Record Mode
 
-- Link to Windows Installation Guide  
+Now, we will use the newly created Alias `keployV2` to record the testcases.
+
+```shell
+keploy record --c "CMD_to_run_user_container" --containerName "<contianerName>"
+```
+
+#### Run the Test Mode
+
+Now, we will use the newly created Alias `keployV2` to test the testcases.
+
+```shell
+keploy test --c "CMD_to_run_user_container" --containerName "<contianerName>" --delay 20
+```
+
+> **CMD_to_run_user_container** is the docker command to run the application.
+> If you are using `docker-compose` command to start the application, `--containerName` is required.
+
+Voilà! 🧑🏻‍💻 We have the server running!
+
 
 ## Keploy Modes
 There are 2 Keploy modes:
