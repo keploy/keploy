@@ -112,6 +112,8 @@ alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --network keploy-n
 
 Now, we will use the newly created Alias `keploy` to record the testcases. Run the following command in root directory of the you're application.
 
+> *Note* :- add the `container_name` under your application service  inside the 'docker-compose.yaml'if you are running via `docker-compose up`.
+
 ```shell
 keploy record -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<contianerName>"
 ```
@@ -130,7 +132,9 @@ keploy test -c "Docker_CMD_to_run_user_container --network keploy-network" --con
 
 > **Docker_CMD_to_run_user_container** is the docker command to run the application.
 
-> If you are using `docker-compose` command to start the application, `--containerName` is required.
+> If you are using `docker-compose` command to start the application, `--containerName` is required. 
+
+> *Note* :- add the `container_name` under your application service  inside the 'docker-compose.yaml'if you are running via `docker-compose up`.
 
 Voilà! 🧑🏻‍💻 We have the server running!
 
