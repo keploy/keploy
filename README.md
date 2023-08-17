@@ -141,6 +141,7 @@ Voilà! 🧑🏻‍💻 We have the server running!
  Using **Binary** (<img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="20" height="20"> Linux</img> / <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="20" height="20"> Windows</img>)
 -
 
+
 Keploy can be used on Linux and Windows natively. Support for <img src="https://www.pngplay.com/wp-content/uploads/3/Apple-Logo-Transparent-Images.png" width="15" height="15"> MacOS</img> using Colima is work in progress.
 
 <details>
@@ -149,6 +150,7 @@ Keploy can be used on Linux and Windows natively. Support for <img src="https://
 > **Note**:- In Windows, **WSL** should be present on the system.
 
 ### Download the Keploy Binary.
+
 
 <details>
 <summary> AMD Architecture </summary>
@@ -188,8 +190,8 @@ Run this command on your terminal to run the testcases and generate the test cov
 
 ```zsh
 sudo -E keploy test -c "CMD_TO_RUN_APP" --delay 10
-```
 
+```
 for example, if you are golang framework then the command would be:-
 
 ```zsh

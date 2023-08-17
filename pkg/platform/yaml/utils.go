@@ -1,5 +1,4 @@
-package test
-
+package yaml
 import (
 	"encoding/json"
 	"fmt"
@@ -100,6 +99,15 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 	return nil
 }
 
+func FindNoisyFields(m map[string][]string, comparator func(string, []string) bool) []string {
+	var noise []string
+	for k, v := range m {
+		if comparator(k, v) {
+			noise = append(noise, k)
+		}
+	}
+	return noise
+}
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
 	if res == nil {
