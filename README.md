@@ -150,9 +150,27 @@ Keploy can be used on Linux and Windows natively. Support for <img src="https://
 
 ### Download the Keploy Binary.
 
-Download the latest version of Keploy from [here](https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz) and extract the files from the zip.
+<details>
+<summary> AMD Architecture </summary>
 
-Now, Run the `keploy.exe` file.
+```zsh
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+</details>
+
+---
+
+<details>
+<summary> ARM Architecture </summary>
+
+```zsh
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+</details>
 
 ### Capture the Testcases. 
 Run this command on your terminal to start the recording of API calls:-
