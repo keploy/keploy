@@ -211,7 +211,7 @@ There are 2 Keploy modes:
 ### Contributors
 
 <p>
-  <img src="https://api.vaunt.dev/v1/github/entities/keploy/repositories/keploy/contributors?format=svg&limit=12" width="200" />
+  <img src="https://api.vaunt.dev/v1/github/entities/keploy/repositories/keploy/contributors?format=svg&limit=15" width="450" />
 </p>
 
 ## Community Support  ❤️
