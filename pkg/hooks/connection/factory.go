@@ -45,17 +45,15 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 	for connID, tracker := range factory.connections {
 		if tracker.IsComplete() {
 			trackersToDelete = append(trackersToDelete, connID)
-			if len(tracker.sentBuf) == 0 && len(tracker.recvBuf) == 0 {
+			if len(tracker.SentBuf) == 0 && len(tracker.RecvBuf) == 0 {
 				continue
 			}
-
-			parsedHttpReq, err := pkg.ParseHTTPRequest(tracker.recvBuf)
+			parsedHttpReq, err := pkg.ParseHTTPRequest(tracker.RecvBuf)
 			if err != nil {
 				factory.logger.Error(Emoji+"failed to parse the http request from byte array", zap.Error(err))
 				continue
 			}
-
-			parsedHttpRes, err := pkg.ParseHTTPResponse(tracker.sentBuf, parsedHttpReq)
+			parsedHttpRes, err := pkg.ParseHTTPResponse(tracker.SentBuf, parsedHttpReq)
 			if err != nil {
 				factory.logger.Error(Emoji+"failed to parse the http response from byte array", zap.Error(err))
 				continue
