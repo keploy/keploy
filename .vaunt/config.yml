@@ -17,4 +17,4 @@ achievements:
         - trigger:
             actor: author
             action: pull_request
-            condition: merged = true , count () >= 4
+            condition: count(merged = true) >= 5
