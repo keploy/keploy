@@ -177,6 +177,16 @@ sudo -E keploy test -c "relative_path_of_go_binary of your application" --delay 
 ```
 </details>
 
+## Using a Custom Docker Compose File Path
+
+You can specify a custom Docker Compose file path by using the `--docker-compose-file-path` flag when running Keploy. This allows you to use a Docker Compose file that is located anywhere on your system, not just in the current directory.
+
+Here is an example command that uses the `--docker-compose-file-path` flag:
+
+```shell
+keploy --docker-compose-file-path /path/to/your/docker-compose.yml
+```
+
 ## Keploy Modes
 There are 2 Keploy modes:
 
