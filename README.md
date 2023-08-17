@@ -224,10 +224,10 @@ There are 2 Keploy modes:
 
 📖 [Contribution Guide](https://docs.keploy.io/docs/devtools/server-contrib-guide/)
 
-### Contributors
+### Top Contributors
 
 <p>
-  <img src="https://api.vaunt.dev/v1/github/entities/keploy/repositories/keploy/contributors?format=svg&limit=15" width="450" />
+  <img src="https://api.vaunt.dev/v1/github/entities/keploy/repositories/keploy/contributors?format=svg&limit=18" width="100%" />
 </p>
 
 ## Community Support  ❤️
