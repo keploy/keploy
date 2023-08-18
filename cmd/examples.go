@@ -34,24 +34,28 @@ Golang Application
 
 Node Application
 	Record:
-	go run -exec "sudo -E"  <pathToKeployBinary> record -c “npm start --prefix /path/to/node/app"
+	sudo -E keploy record -c “npm start --prefix /path/to/node/app"
 	
 	Test:
-	go run -exec "sudo -E"  <pathToKeployBinary> test -c “npm start --prefix /path/to/node/app" --delay 2
+	sudo -E keploy test -c “npm start --prefix /path/to/node/app" --delay 2
 
 Java 
 	Record:
-	sudo -E keploy <pathToKeployBinary> record -c "java -jar /path/to/java-project/target/jar"
+	sudo -E keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E keploy <pathToKeployBinary> test -c "java -jar  /path/to/java-project/target/jar" --delay 2
+	sudo -E keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
 
 Docker
+	Alias:
+	alias keploy='sudo docker run --name keploy-ebpf -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup
+	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+
 	Record:
-	keployV2 record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName --rm myApplicationImage"
+	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName --rm myApplicationImage"
 
 	Test:
-	keployV2 test -c "docker run -p 8080:8080  --name myContainerName --network myNetworkName --rm myApplicationImage" --delay 1
+	keploy test -c "docker run -p 8080:8080  --name myContainerName --network myNetworkName --rm myApplicationImage" --delay 1
 `
 
 type Example struct {

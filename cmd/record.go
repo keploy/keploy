@@ -70,7 +70,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keployV2 record -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6\n`)
 				}
 				fmt.Println("Example usage:\n", cmd.Example, "\n")
 
@@ -92,7 +92,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag")
 					if isDockerCmd {
-						fmt.Println("\nExample usage:\n", `keployV2 record -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6`)
+						fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6`)
 					} else {
 						fmt.Println("Example usage:\n", cmd.Example, "\n")
 					}
