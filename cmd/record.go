@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/record"
@@ -25,14 +28,16 @@ type Record struct {
 func (r *Record) GetCmd() *cobra.Command {
 	// record the keploy testcases/mocks for the user application
 	var recordCmd = &cobra.Command{
-		Use:   "record",
-		Short: "record the keploy testcases from the API calls",
-		Run: func(cmd *cobra.Command, args []string) {
+		Use:     "record",
+		Short:   "record the keploy testcases from the API calls",
+		Example: `sudo -E keploy record -c "/path/to/user/app"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				r.logger.Error(Emoji + "failed to read the testcase path input")
-				return
+				return err
 			}
 
 			//if user provides relative path
@@ -54,7 +59,6 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path += "/keploy"
 
-			r.logger.Info(Emoji, zap.Any("keploy test and mock path", path))
 			// tcsPath := path + "/tests"
 			// mockPath := path + "/mocks"
 
@@ -63,13 +67,38 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
 			}
+			if appCmd == "" {
+				fmt.Println("Error: missing required -c flag\n")
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6\n`)
+				}
+				fmt.Println("Example usage:\n", cmd.Example, "\n")
 
+				return errors.New("missing required -c flag")
+			}
 			appContainer, err := cmd.Flags().GetString("containerName")
 
 			if err != nil {
 				r.logger.Error(Emoji+"Failed to get the application's docker container name", zap.Error((err)))
 			}
-
+			var hasContainerName bool
+			if isDockerCmd {
+				for _, arg := range os.Args {
+					if strings.Contains(arg, "--name") {
+						hasContainerName = true
+						break
+					}
+				}
+				if !hasContainerName && appContainer == "" {
+					fmt.Println("Error: missing required --containerName flag")
+					if isDockerCmd {
+						fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6`)
+					} else {
+						fmt.Println("Example usage:\n", cmd.Example, "\n")
+					}
+					return errors.New("missing required --containerName flag")
+				}
+			}
 			networkName, err := cmd.Flags().GetString("networkName")
 
 			if err != nil {
@@ -82,9 +111,11 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
 			}
 
+			r.logger.Info(Emoji, zap.Any("keploy test and mock path", path))
+
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay)
-
+			return nil
 			// server.Server(version, kServices, conf, logger)
 			// server.Server(version)
 		},
@@ -107,6 +138,8 @@ func (r *Record) GetCmd() *cobra.Command {
 
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	// recordCmd.MarkFlagRequired("delay")
+	recordCmd.SilenceUsage = true
+	recordCmd.SilenceErrors = true
 
 	return recordCmd
 }
