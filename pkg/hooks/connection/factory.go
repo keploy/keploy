@@ -48,7 +48,6 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 			if len(tracker.sentBuf) == 0 && len(tracker.recvBuf) == 0 {
 				continue
 			}
-
 			parsedHttpReq, err := pkg.ParseHTTPRequest(tracker.recvBuf)
 			if err != nil {
 				factory.logger.Error(Emoji+"failed to parse the http request from byte array", zap.Error(err))
