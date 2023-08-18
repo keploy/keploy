@@ -5,7 +5,6 @@ import (
 	"net"
 	"strconv"
 	"time"
-	"unicode"
 
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -24,7 +23,10 @@ func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hook
 }
 
 func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+	for {
+		tcsMocks := h.GetTcsMocks()
 
+	}
 	return nil
 }
 
@@ -34,10 +36,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	// errChannel := make(chan error)
 	// checkInitialRequest := true
 	genericRequests := []models.GenericPayload{}
-	bufStr := string(requestBuffer)
-	if !IsAsciiPrintable(bufStr) {
-		bufStr = base64.StdEncoding.EncodeToString(requestBuffer)
-	}
+	// bufStr := string(requestBuffer)
+	// if !IsAsciiPrintable(bufStr) {
+		bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
+	// }
 	if bufStr != "" {
 
 		genericRequests = append(genericRequests, models.GenericPayload{
@@ -404,14 +406,4 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 	})
 		// }
 	}
-}
-
-// checks if s is ascii and printable, aka doesn't include tab, backspace, etc.
-func IsAsciiPrintable(s string) bool {
-	for _, r := range s {
-		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
-			return false
-		}
-	}
-	return true
 }
