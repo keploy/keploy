@@ -27,6 +27,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -706,13 +707,15 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 	ps.hook.AppendDeps(v)
 		// }
 	default:
+		ps.logger.Debug(Emoji + "the external dependecy call is not supported")
+		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
 		// fmt.Println("into default desp mode, before passing")
-		err = callNext(buffer, conn, dst, ps.logger)
-		if err != nil {
-			ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
-			conn.Close()
-			return
-		}
+		// err = callNext(buffer, conn, dst, ps.logger)
+		// if err != nil {
+		// 	ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
+		// 	conn.Close()
+		// 	return
+		// }
 		// fmt.Println("into default desp mode, after passing")
 
 	}

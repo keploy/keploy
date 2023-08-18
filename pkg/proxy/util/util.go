@@ -1,15 +1,16 @@
 package util
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+
+	// "math/rand"
 	"net"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ToIP4AddressStr converts the integer IP4 Address to the octet format
@@ -43,6 +44,33 @@ func ToIPv6AddressStr(ip [4]uint32) string {
 	return ipv6Addr.String()
 }
 
+func PeekBytes(reader *bufio.Reader) ([]byte, error) {
+	var buffer []byte
+
+	// for {
+	// Create a temporary buffer to hold the incoming bytes
+	buf := make([]byte, 1024)
+
+	// Read bytes from the Reader
+	reader.Peek(1)
+	buf, err := reader.Peek(reader.Buffered())
+	// fmt.Println("read bytes: ", n, ", err: ", err)
+	if err != nil && err != io.EOF && err != bufio.ErrBufferFull {
+		return nil, err
+	}
+
+	// Append the bytes to the buffer
+	buffer = append(buffer, buf[:]...)
+
+	// If we've reached the end of the input stream, break out of the loop
+	// if err == bufio.ErrBufferFull || len(buf) != 1024 {
+	// 	break
+	// }
+	// }
+
+	return buffer, nil
+}
+
 // ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
 func ReadBytes(reader io.Reader) ([]byte, error) {
@@ -51,7 +79,7 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 	for {
 		// Create a temporary buffer to hold the incoming bytes
 		buf := make([]byte, 1024)
-		rand.Seed(time.Now().UnixNano())
+		// rand.Seed(time.Now().UnixNano())
 
 		// Read bytes from the Reader
 		n, err := reader.Read(buf)
@@ -73,12 +101,12 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 }
 
 func ReadBytes1(reader io.Reader) ([]byte, string, error) {
-	var buffer []byte
 	logStr := ""
+	var buffer []byte
+
 	for {
 		// Create a temporary buffer to hold the incoming bytes
 		buf := make([]byte, 1024)
-		rand.Seed(time.Now().UnixNano())
 
 		// Read bytes from the Reader
 		n, err := reader.Read(buf)

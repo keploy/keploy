@@ -1,0 +1,2 @@
+1. Read from the connection until the (EOF && buffer == "") to capture the streaming calls.
+2. Peek instead of reading in the handleConnection of proxy.go for checking protocol.

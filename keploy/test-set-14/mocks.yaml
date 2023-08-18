@@ -1,0 +1,19 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: AEYAAAEAAAABPQEsDAH/////T5gAAAABAO8ARgAAAAABAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAIAAAAAAAAA==
+        - origin: client
+          message:
+            - type: binary
+              data: APkAAAYAAAAAAChERVNDUklQVElPTj0oQUREUkVTUz0oUFJPVE9DT0w9dGNwKShIT1NUPWRhdGFiYXNlLTEuY2x4dHFiMGhwZGR1LmFwLXNvdXRoLTEucmRzLmFtYXpvbmF3cy5jb20pKFBPUlQ9MTUyMSkpKENPTk5FQ1RfREFUQT0oU0VSVklDRV9OQU1FPU9SQ0wpKENJRD0oUFJPR1JBTT0vaG9tZS91YnVudHUvZGVsZXRlVGhpcy9zYW1wbGUtb3JhY2xlL29yYWNsZS1nbykoSE9TVD1pcC0xNzItMzEtMjItMTQxKShVU0VSPXJvb3QpKSkp
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: AAgAAAsAAAA=
