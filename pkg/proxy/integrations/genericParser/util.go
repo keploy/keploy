@@ -45,47 +45,57 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 	}
 	// com := PostgresEncoder(reqBuff)
 	// convert all the configmocks to string array
-	mockString := make([]string, len(tcsMocks))
-	for i := 0; i < len(tcsMocks); i++ {
-		mockString[i] = string(tcsMocks[i].Spec.PostgresReq.Payload)
-	}
-	// find the closest match
-	if IsAsciiPrintable(string(reqBuff)) {
-		fmt.Println("Inside String Match")
-		idx := findStringMatch(string(reqBuff), mockString)
-		if idx != -1 {
-			nMatch := tcsMocks[idx].Spec.PostgresResp.Payload
-			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-			h.SetConfigMocks(tcsMocks)
-			fmt.Println("Returning mock from String Match !!")
-			return true, nMatch
-		}
-	}
-	idx := findBinaryMatch(tcsMocks, reqBuff, h)
+	// mockString := make([]string, len(tcsMocks))
+	// for i := 0; i < len(tcsMocks); i++ {
+	// 	mockString[i] = string(tcsMocks[i].Spec.PostgresReq.Payload)
+	// }
+	// // find the closest match
+	// if IsAsciiPrintable(string(reqBuff)) {
+	// 	fmt.Println("Inside String Match")
+	// 	idx := findStringMatch(string(reqBuff), mockString)
+	// 	if idx != -1 {
+	// 		nMatch := tcsMocks[idx].Spec.PostgresResp.Payload
+	// 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+	// 		h.SetConfigMocks(tcsMocks)
+	// 		fmt.Println("Returning mock from String Match !!")
+	// 		return true, nMatch
+	// 	}
+	// }
+	idx := findBinaryMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
-		nMatch := tcsMocks[idx].Spec.PostgresResp.Payload
+		fmt.Println("matched in first loop")
+		bestMatch := tcsMocks[idx].Spec.GenericResponses
 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 		h.SetConfigMocks(tcsMocks)
-		return true, nMatch
+		return true, bestMatch
 	}
-	return false, ""
+	return false, nil
 }
 
-func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) int {
+func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
 	mxSim := -1.0
 	mxIdx := -1
-	// find the fuzzy hash of the mocks
-	for idx, mock := range configMocks {
-		encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
-		k := AdaptiveK(len(reqBuff), 3, 8, 5)
-		shingles1 := CreateShingles(encoded, k)
-		shingles2 := CreateShingles(reqBuff, k)
-		similarity := JaccardSimilarity(shingles1, shingles2)
-		fmt.Printf("Jaccard Similarity: %f\n", similarity)
-		if mxSim < similarity {
-			mxSim = similarity
-			mxIdx = idx
+	for idx, mock := range tcsMocks {
+		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+			for requestIndex, reqBuff := range requestBuffers {
+
+				// bufStr := string(reqBuff)
+				// if !IsAsciiPrintable(bufStr) {
+				_ = base64.StdEncoding.EncodeToString(reqBuff)
+				// }
+				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+
+				k := AdaptiveK(len(reqBuff), 3, 8, 5)
+				shingles1 := CreateShingles(encoded, k)
+				shingles2 := CreateShingles(reqBuff, k)
+				similarity := JaccardSimilarity(shingles1, shingles2)
+				fmt.Printf("Jaccard Similarity: %f\n", similarity)
+				if mxSim < similarity {
+					mxSim = similarity
+					mxIdx = idx
+				}
+			}
 		}
 	}
 	return mxIdx
