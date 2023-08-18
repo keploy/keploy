@@ -131,6 +131,7 @@ func isJavaInstalled() bool {
 	return err == nil
 }
 
+// JavaCAExists checks if the CA is already installed in the Java keystore
 func JavaCAExists(alias string) bool {
 	cmd := exec.Command("keytool", "-list", "-alias", alias, "-cacerts", "-storepass", "changeit")
 
@@ -138,6 +139,7 @@ func JavaCAExists(alias string) bool {
 	return err == nil
 }
 
+// getJavaHome returns the JAVA_HOME path
 func getJavaHome() (string, error) {
 	cmd := exec.Command("java", "-XshowSettings:properties", "-version")
 	var out bytes.Buffer
@@ -159,6 +161,7 @@ func getJavaHome() (string, error) {
 	return "", fmt.Errorf("java.home not found in command output")
 }
 
+// InstallJavaCA installs the CA in the Java keystore
 func InstallJavaCA(logger *zap.Logger, caPath string) {
 	// check if java is installed
 	if isJavaInstalled() {
@@ -211,6 +214,7 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 		return nil
 	}
 
+	// install CA in the java keystore if java is installed
 	InstallJavaCA(logger, caPath)
 
 	// Update the trusted CAs store
