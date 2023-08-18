@@ -1,0 +1,149 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: FAILED
+success: 0
+failure: 2
+total: 2
+tests:
+    - kind: Http
+      name: report-1
+      status: FAILED
+      started: 1692357442
+      completed: 1692357442
+      test_case_path: /home/pranshu.linux/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            Host: localhost:8081
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "179"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:16:54 GMT
+        body: '{"ts":1692357414436196214,"url":"{\"fact\":\"Grown cats have 30 teeth. Kittens have about 26 temporary teeth, which they lose when they are about 6 months old.\",\"length\":114}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 400
+        headers_result:
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "179"
+              actual:
+                key: Content-Length
+                value:
+                    - "104"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:16:54 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:17:22 GMT
+        body_result:
+            - normal: false
+              type: PLAIN
+              expected: '{"ts":1692357414436196214,"url":"{\"fact\":\"Grown cats have 30 teeth. Kittens have about 26 temporary teeth, which they lose when they are about 6 months old.\",\"length\":114}"}'
+              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692357442984643173,"url":""}'
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: FAILED
+      started: 1692357442
+      completed: 1692357443
+      test_case_path: /home/pranshu.linux/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            Host: localhost:8081
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "230"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:16:59 GMT
+        body: '{"ts":1692357419053282996,"url":"{\"fact\":\"It may take as long as 2 weeks for a kitten to be able to hear well.  Their eyes usually open between 7 and 10 days, but sometimes it happens in as little as 2 days.\",\"length\":165}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 400
+        headers_result:
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "230"
+              actual:
+                key: Content-Length
+                value:
+                    - "104"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:16:59 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:17:23 GMT
+        body_result:
+            - normal: false
+              type: PLAIN
+              expected: '{"ts":1692357419053282996,"url":"{\"fact\":\"It may take as long as 2 weeks for a kitten to be able to hear well.  Their eyes usually open between 7 and 10 days, but sometimes it happens in as little as 2 days.\",\"length\":165}"}'
+              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692357443013247607,"url":""}'
+        dep_result: []

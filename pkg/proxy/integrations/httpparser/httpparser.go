@@ -10,6 +10,9 @@ import (
 	"net"
 	"net/http"
 	"time"
+	"github.com/agnivade/levenshtein"
+	"unicode"
+
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
@@ -47,10 +50,189 @@ func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h 
 
 }
 
+func findStringMatch(req string, mockString []string) int {
+	minDist := int(^uint(0) >> 1) // Initialize with max int value
+	bestMatch := -1
+	for idx, req := range mockString {
+		if !IsAsciiPrintable(mockString[idx]) {
+			continue
+		}
+
+		dist := levenshtein.ComputeDistance(req, mockString[idx])
+		if dist == 0 {
+			return 0
+		}
+
+		if dist < minDist {
+			minDist = dist
+			bestMatch = idx
+		}
+	}
+	return bestMatch
+}
+
+func HttpDecoder(encoded string) ([]byte, error) {
+	// decode the string to a buffer.
+
+	data := []byte(encoded)
+	return data, nil
+}
+
+func AdaptiveK(length, kMin, kMax, N int) int {
+	k := length / N
+	if k < kMin {
+		return kMin
+	} else if k > kMax {
+		return kMax
+	}
+	return k
+}
+
+func CreateShingles(data []byte, k int) map[string]struct{} {
+	shingles := make(map[string]struct{})
+	for i := 0; i < len(data)-k+1; i++ {
+		shingle := string(data[i : i+k])
+		shingles[shingle] = struct{}{}
+	}
+	return shingles
+}
+
+// JaccardSimilarity computes the Jaccard similarity between two sets of shingles.
+func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
+	intersectionSize := 0
+	for k := range setA {
+		if _, exists := setB[k]; exists {
+			intersectionSize++
+		}
+	}
+
+	unionSize := len(setA) + len(setB) - intersectionSize
+
+	if unionSize == 0 {
+		return 0.0
+	}
+	return float64(intersectionSize) / float64(unionSize)
+}
+
+func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) int {
+
+	mxSim := -1.0
+	mxIdx := -1
+	// find the fuzzy hash of the mocks
+	for idx, mock := range configMocks {
+		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
+		k := AdaptiveK(len(reqBuff), 3, 8, 5)
+		shingles1 := CreateShingles(encoded, k)
+		shingles2 := CreateShingles(reqBuff, k)
+		similarity := JaccardSimilarity(shingles1, shingles2)
+		fmt.Printf("Jaccard Similarity: %f\n", similarity)
+		if mxSim < similarity {
+			mxSim = similarity
+			mxIdx = idx
+		}
+	}
+	return mxIdx
+}
+
+func IsAsciiPrintable(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func HttpEncoder(buffer []byte) string {
+	//Encode the buffer to string
+	encoded := string(buffer)
+	return encoded
+}
+func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, string) {
+	com := HttpEncoder(reqBuff)
+	for idx, mock := range tcsMocks {
+		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
+		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
+			fmt.Println("matched in first loop")
+			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+			h.SetConfigMocks(tcsMocks)
+			return true, mock.Spec.HttpReq.Body
+		}
+	}
+	// convert all the configmocks to string array
+	mockString := make([]string, len(tcsMocks))
+	for i := 0; i < len(tcsMocks); i++ {
+		mockString[i] = string(tcsMocks[i].Spec.HttpReq.Body)
+	}
+	// find the closest match
+	if IsAsciiPrintable(string(reqBuff)) {
+		idx := findStringMatch(string(reqBuff), mockString)
+		if idx != -1 {
+			nMatch := tcsMocks[idx].Spec.HttpReq.Body
+			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+			h.SetConfigMocks(tcsMocks)
+			fmt.Println("Returning mock from String Match !!")
+			return true, nMatch
+		}
+	}
+	idx := findBinaryMatch(tcsMocks, reqBuff, h)
+	if idx != -1 {
+		nMatch := tcsMocks[idx].Spec.HttpReq.Body
+		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+		h.SetConfigMocks(tcsMocks)
+		return true, nMatch
+	}
+	return false, ""
+}
+
 // decodeOutgoingHttp
 func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
-	// if len(deps) == 0 {
+	//Matching algorithmm
+	//Get the mocks
+	tcsMocks := h.GetTcsMocks()
+	var bestMatch string
+	//Parse the request buffer
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
+	if err != nil {
+		logger.Error(Emoji+"failed to parse the http request message", zap.Error(err))
+		return
+	}
+	for idx, mock := range tcsMocks {
+		//Check if the uri matches
+		if mock.Spec.HttpReq.URL != req.URL.String(){
+			//If it is not the same, remove the mock
+			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+		}
+		//Check if the method matches
+		if mock.Spec.HttpReq.Method != models.Method(req.Method){
+			//If it is not the same, remove the mock
+			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+		}
+		//Check if the header keys match
+		for key, _ := range mock.Spec.HttpReq.Header {
+			if _, exists := req.Header[key]; !exists {
+				//If it is not the same, remove the mock
+				tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+			}
+		}
+		//Check the query params.
+		for key, _ := range mock.Spec.HttpReq.URLParams {
+			if _, exists := req.URL.Query()[key]; !exists {
+				//If it is not the same, remove the mock
+				tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+			}
+		}
+		//Fuzzy matching for the body
+		_, bestMatch = Fuzzymatch(tcsMocks, requestBuffer, h)
+		}
 
+	findIndex := h.GetTcsMocks()
+	var getMock int
+	for idx, mock := range findIndex {
+		if mock.Spec.HttpReq.Body == bestMatch {
+			getMock = idx
+		}
+	}
 	if h.GetDepsSize() == 0 {
 		// logger.Error("failed to mock the output for unrecorded outgoing http call")
 		return
@@ -63,7 +245,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	// 	return
 	// }
 	// httpSpec := deps[0]
-	httpSpec := h.FetchDep(0)
+	httpSpec := h.FetchDep(getMock)
 	// fmt.Println("http mock in test: ", httpSpec)
 
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", httpSpec.Spec.HttpReq.ProtoMajor, httpSpec.Spec.HttpReq.ProtoMinor, httpSpec.Spec.HttpResp.StatusCode, http.StatusText(int(httpSpec.Spec.HttpResp.StatusCode)))
@@ -83,10 +265,9 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	// bodyBytes, _ := ioutil.ReadAll(bytes.NewReader(httpSpec.Response.BodyData))
 	// body := string(bodyBytes)
 	body := httpSpec.Spec.HttpResp.Body
-
 	// Concatenate the status line, headers, and body
 	responseString := statusLine + headers + "\r\n" + body
-	_, err := clienConn.Write([]byte(responseString))
+	_, err = clienConn.Write([]byte(responseString))
 	if err != nil {
 		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
 		return

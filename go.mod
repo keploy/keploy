@@ -69,6 +69,7 @@ require (
 )
 
 require (
+	github.com/agnivade/levenshtein v1.1.1
 	github.com/go-git/go-git/v5 v5.8.1
 	github.com/hashicorp/go-version v1.6.0
 )

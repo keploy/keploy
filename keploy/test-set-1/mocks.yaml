@@ -1,0 +1,85 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mocks
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Fri, 18 Aug 2023 11:16:54 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6IkdhekhBTXZ2ekpzUU4xWTZQeFpYSnc9PSIsInZhbHVlIjoiaWJtdnM5OHdpNlF2djZpdSs5NmpqSUIwMS9XWno0NytvRjlaRGtNRkhMejEwcU9CV0Rkbjh5bXJmZU41YWdqa2VCVENpQ1BqUXp3a0hIYzVuaHI2WjVaRHNwZ09nRlJhb2d5YnRia0VWcnFWa3g0VkNZTkwzbHZqMisrenhRaEEiLCJtYWMiOiI1ZGQwN2RlNTRhNTgzZWVhYzI2YTQ5MDYxYWQzNjY2OWYzZjNiYzg5ODY4NGEzZTkxMzRmNjkyYjllNzg5OWMyIiwidGFnIjoiIn0%3D; expires=Fri, 18-Aug-2023 13:16:54 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6IjVGdUpDQis3S0tEZ1cxNFREZVJsMWc9PSIsInZhbHVlIjoiZnVzU1Q4TnRYS3BDMzFmcWRZM2hlUTg0TUdDdjBhdmhTK2dRSE9XT2ZJQWpNUzd4TVlobHRQWDFZR1FpN3RtMWFUeDVxUVBKdVVoWWJaN0phRFVFKys1a3EwZEVKaVV0REVIYUdSanNzcFgrZjdRRjNLV090aWc5QnNkOG05bUgiLCJtYWMiOiI1Y2Q4MjNlYjA2ZmI0YTI2ZjU2MGExNzk1MjgyNmVjNTUwN2QyN2NkYjgwNzk5MjRlM2YyMjBlMGE0YzNlNGYxIiwidGFnIjoiIn0%3D; expires=Fri, 18-Aug-2023 13:16:54 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"Grown cats have 30 teeth. Kittens have about 26 temporary teeth, which they lose when they are about 6 months old.","length":114}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1692357414
+---
+version: api.keploy.io/v1beta2
+kind: Http
+name: mocks
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Fri, 18 Aug 2023 11:16:58 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6IjNlL0ZOVVdmeEZNcEdBOGhuTEJYRnc9PSIsInZhbHVlIjoiUzBnVlduWXFESHZYWEg3QVZlTVZRR2J1R2lYNERvWVVUZXVsaVVpUlhqV0lHRVlOREIvT3lKbUxDdVhLVkloaXk2UmtPbXQ5MzBYODl4cEVYK0F5UnpRNTdLYXZKSHBzNElJT2QrdFZDMm5xYUhSbkRldG1veElTdWZCT1ozWGQiLCJtYWMiOiIwN2Q4NjEzNTc4ZWZiOTE5NzQzNzU1NjIxZTRiMDU0YTU0NTMyZjcyMjAwYzViYTU5ZTNlN2E0YmEzNDFlNjVhIiwidGFnIjoiIn0%3D; expires=Fri, 18-Aug-2023 13:16:58 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6ImNFTU5GNnM2SGVyN0NrV1MzV3M0aEE9PSIsInZhbHVlIjoiQlJrZWhPcFRWcVJ4Q0VVb0RtdGM1alVKY2ZjYW1UT1NXaU5wZGJZNlk3czErSE45dFkzUzNMZGpRZk1lSTNsOXpJa1pxK1IvK1FRTHdEcXROd2JnNitRKzh6N3lUUU1sZWdTOGxvMTBXZGtWdUxFVzZsVGZJZFg2cXFqc3pSZ3giLCJtYWMiOiIwZGJiMmUwZThkZDFhNmRiM2EzZjkzY2U0NGQwYjAxNjk3NmEzN2MxYzRjNDhlN2RiOWY3Mjg4MTRhZmIxZTM4IiwidGFnIjoiIn0%3D; expires=Fri, 18-Aug-2023 13:16:58 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "98"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"It may take as long as 2 weeks for a kitten to be able to hear well.  Their eyes usually open between 7 and 10 days, but sometimes it happens in as little as 2 days.","length":165}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1692357419
