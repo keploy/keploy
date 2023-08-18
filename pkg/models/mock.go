@@ -22,6 +22,10 @@ type MockSpec struct {
 	// MongoResponse       interface{}     `json:"MongoResponse,omitempty"`
 	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
 	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
+
+	//for postgres
+	PostgresReq  *Backend  `json:"postgresRequest,omitempty"`
+	PostgresResp *Frontend `json:"postgresResponse,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings

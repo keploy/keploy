@@ -1,0 +1,38 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:3000/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "59"
+            Content-Type: application/json
+            Host: localhost:3000
+            User-Agent: curl/7.81.0
+        body: '{"title": "First Note", "content": "This is a first note."}'
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Connection: keep-alive
+            Content-Length: "63"
+            Content-Type: application/json; charset=utf-8
+            Date: Wed, 16 Aug 2023 12:37:00 GMT
+            Etag: W/"3f-mj0XaGG9NfvWXZEbtA1Gzgy7DBw"
+            Keep-Alive: timeout=5
+            X-Powered-By: Express
+        body: '{"id":5,"title":"First Note","content":"This is a first note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise:
+            - header.Date
+    created: 1692189420

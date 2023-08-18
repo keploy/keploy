@@ -1,0 +1,337 @@
+version: api.keploy.io/v1beta1
+name: report-28
+status: FAILED
+success: 2
+failure: 3
+total: 5
+tests:
+    - kind: Http
+      name: report-28
+      status: FAILED
+      started: 1692283211
+      completed: 1692283211
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "112"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                "firstName": "Shubham",
+                "lastName": "Jain",
+                "email": "shubham.jain@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Wed, 16 Aug 2023 10:15:49 GMT
+        body: '{"id":6,"firstName":"Shubham","lastName":"Jain","email":"shubham.jain@gmail.com","timestamp":1692180949}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 500
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 10:15:49 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 14:40:11 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":6,"firstName":"Shubham","lastName":"Jain","email":"shubham.jain@gmail.com","timestamp":1692180949}'
+              actual: '{"timestamp":"2023-08-17T14:40:11.628+00:00","message":"Could not roll back JPA transaction; nested exception is org.hibernate.TransactionException: Unable to rollback against JDBC Connection","details":"uri=/api/employees"}'
+        dep_result: []
+    - kind: Http
+      name: report-28
+      status: FAILED
+      started: 1692283211
+      completed: 1692283211
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "109"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                "firstName": "Ritik",
+                "lastName": "Jain",
+                "email": "gouravkrosx@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Wed, 16 Aug 2023 10:16:03 GMT
+        body: '{"id":7,"firstName":"Ritik","lastName":"Jain","email":"gouravkrosx@gmail.com","timestamp":1692180963}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 500
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 10:16:03 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 14:40:11 GMT
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":7,"firstName":"Ritik","lastName":"Jain","email":"gouravkrosx@gmail.com","timestamp":1692180963}'
+              actual: '{"timestamp":"2023-08-17T14:40:11.667+00:00","message":"Could not roll back JPA transaction; nested exception is org.hibernate.TransactionException: Unable to rollback against JDBC Connection","details":"uri=/api/employees"}'
+        dep_result: []
+    - kind: Http
+      name: report-28
+      status: FAILED
+      started: 1692283211
+      completed: 1692283211
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "109"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                "firstName": "Ritik",
+                "lastName": "Jain",
+                "email": "gouravkrosx@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Wed, 16 Aug 2023 10:16:12 GMT
+        body: '{"id":8,"firstName":"Ritik","lastName":"Jain","email":"gouravkrosx@gmail.com","timestamp":1692180972}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 500
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 10:16:12 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 14:40:11 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":8,"firstName":"Ritik","lastName":"Jain","email":"gouravkrosx@gmail.com","timestamp":1692180972}'
+              actual: '{"timestamp":"2023-08-17T14:40:11.682+00:00","message":"Could not roll back JPA transaction; nested exception is org.hibernate.TransactionException: Unable to rollback against JDBC Connection","details":"uri=/api/employees"}'
+        dep_result: []
+    - kind: Http
+      name: report-28
+      status: PASSED
+      started: 1692283211
+      completed: 1692283211
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-4
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees/8
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Wed, 16 Aug 2023 10:16:21 GMT
+        body: '{"id":8,"firstName":"Ritik","lastName":"Jain","email":"gouravkrosx@gmail.com","timestamp":1692180972}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 10:16:21 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 14:40:11 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":8,"firstName":"Ritik","lastName":"Jain","email":"gouravkrosx@gmail.com","timestamp":1692180972}'
+              actual: '{"id":8,"firstName":"Ritik","lastName":"Jain","email":"gouravkrosx@gmail.com","timestamp":1692180972}'
+        dep_result: []
+    - kind: Http
+      name: report-28
+      status: PASSED
+      started: 1692283211
+      completed: 1692283211
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-5
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees/1
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Wed, 16 Aug 2023 10:16:33 GMT
+        body: '{"id":1,"firstName":"Kumar","lastName":"gkrosx@gmail.com","email":"Gourav","timestamp":1661500330}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+        - body.timestamp
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 10:16:33 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 14:40:11 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":1,"firstName":"Kumar","lastName":"gkrosx@gmail.com","email":"Gourav","timestamp":1661500330}'
+              actual: '{"id":1,"firstName":"Kumar","lastName":"gkrosx@gmail.com","email":"Gourav","timestamp":1661500330}'
+        dep_result: []

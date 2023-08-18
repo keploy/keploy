@@ -716,23 +716,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 					logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", responseTo))
 					return
 				}
-				// if hasSecondSetBit(respMessage.FlagBits) {
-				// 	responseTo := mongoRequests[i].Header.RequestID
-				// 	for {
-				// 		fmt.Println("the response cycle. delay: ", resp.ReadDelay, " for clientConnId: ", clientConnId, " responseTo: ", mongoRequests[i].Header.RequestID, " length of mongorequests: ", len(mongoRequests), " the sixteenthBit in request.Msg.Flag: ", hasSixteenthBit(mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits))
-				// 		time.Sleep(time.Duration(resp.ReadDelay))
-				// 		requestId := wiremessage.NextRequestID()
-				// 		_, err := clientConn.Write(message.Encode(responseTo, requestId))
-				// 		logger.Debug(fmt.Sprintf("the response lifecycle ended. clientconnid: %v", clientConnId))
-				// 		if err != nil {
-				// 			logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
-				// 			return
-				// 		}
-				// 		// the 'responseTo' field of response wiremessage is set to requestId of sent r
-				// 		responseTo = requestId
-				// 		// time.Sleep(10*time.Minute)
-				// 	}
-				// } else {
+
 				requestId := wiremessage.NextRequestID()
 				_, err = clientConn.Write(message.Encode(responseTo, requestId))
 				if err != nil {

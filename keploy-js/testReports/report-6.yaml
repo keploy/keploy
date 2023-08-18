@@ -1,0 +1,98 @@
+version: api.keploy.io/v1beta1
+name: report-6
+status: FAILED
+success: 0
+failure: 1
+total: 1
+tests:
+    - kind: Http
+      name: report-6
+      status: FAILED
+      started: 1692192739
+      completed: 1692192740
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:3000/notes
+        header:
+            Accept: '*/*'
+            Host: localhost:3000
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Wed, 16 Aug 2023 13:16:06 GMT
+            Etag: W/"41-Yus1w6fApbLCNEZPdSRgtUUsaX8"
+            X-Powered-By: Express
+        body: '[{"id":1,"title":"First class Note","content":"This is a first note."}]'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 13:16:06 GMT
+              actual:
+                key: Date
+                value:
+                    - Wed, 16 Aug 2023 13:32:19 GMT
+            - normal: true
+              expected:
+                key: Etag
+                value:
+                    - W/"41-Yus1w6fApbLCNEZPdSRgtUUsaX8"
+              actual:
+                key: Etag
+                value:
+                    - W/"41-Yus1w6fApbLCNEZPdSRgtUUsaX8"
+            - normal: true
+              expected:
+                key: X-Powered-By
+                value:
+                    - Express
+              actual:
+                key: X-Powered-By
+                value:
+                    - Express
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "65"
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '[{"id":1,"title":"First class Note","content":"This is a first note."}]'
+              actual: '[{"id":1,"title":"First Note","content":"This is a first note."}]'
+        dep_result: []
