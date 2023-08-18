@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/tls"
@@ -124,13 +125,84 @@ var caPKey []byte
 //go:embed asset
 var caFolder embed.FS
 
+// isJavaInstalled checks if java is installed on the system
+func isJavaInstalled() bool {
+	_, err := exec.LookPath("java")
+	return err == nil
+}
+
+// JavaCAExists checks if the CA is already installed in the Java keystore
+func JavaCAExists(alias string) bool {
+	cmd := exec.Command("keytool", "-list", "-alias", alias, "-cacerts", "-storepass", "changeit")
+
+	err := cmd.Run()
+	return err == nil
+}
+
+// getJavaHome returns the JAVA_HOME path
+func getJavaHome() (string, error) {
+	cmd := exec.Command("java", "-XshowSettings:properties", "-version")
+	var out bytes.Buffer
+	cmd.Stderr = &out // The output we need is printed to STDERR
+
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "java.home") {
+			parts := strings.Split(line, "=")
+			if len(parts) > 1 {
+				return strings.TrimSpace(parts[1]), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("java.home not found in command output")
+}
+
+// InstallJavaCA installs the CA in the Java keystore
+func InstallJavaCA(logger *zap.Logger, caPath string) {
+	// check if java is installed
+	if isJavaInstalled() {
+		javaHome, err := getJavaHome()
+		if err != nil {
+			logger.Error(Emoji+"Java detected but failed to find JAVA_HOME", zap.Error(err))
+			return
+		}
+		// Assuming modern Java structure (without /jre/)
+		cacertsPath := fmt.Sprintf("%s/lib/security/cacerts", javaHome)
+		// You can modify these as per your requirements
+		storePass := "changeit"
+		alias := "keployCA"
+		if JavaCAExists(alias) {
+			logger.Info(Emoji+"Java detected and CA already exists", zap.String("path", cacertsPath))
+			return
+		}
+
+		cmd := exec.Command("keytool", "-import", "-trustcacerts", "-cacerts", "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
+
+		cmdOutput, err := cmd.CombinedOutput()
+		if err != nil {
+			logger.Error(Emoji+"Java detected but failed to import CA", zap.Error(err), zap.String("output", string(cmdOutput)))
+			return
+		}
+
+		logger.Info(Emoji+"Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
+		fmt.Printf("Successfully imported CA:\n%s\n", cmdOutput)
+
+	}
+}
+
 // BootProxies starts proxy servers on the idle local port, Default:16789
 func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
 
-	fs, err := os.Create(filepath.Join(caStorePath[distro], "ca.crt"))
+	caPath := filepath.Join(caStorePath[distro], "ca.crt")
+
+	fs, err := os.Create(caPath)
 	if err != nil {
 		logger.Error(Emoji+"failed to create custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
 		return nil
@@ -141,6 +213,9 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 		logger.Error(Emoji+"failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
 		return nil
 	}
+
+	// install CA in the java keystore if java is installed
+	InstallJavaCA(logger, caPath)
 
 	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
