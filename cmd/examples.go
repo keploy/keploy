@@ -48,10 +48,10 @@ Java
 
 Docker
 	Record:
-	keployV2 record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> --rm <applicationImage>"
+	keployV2 record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName --rm myApplicationImage"
 
 	Test:
-	keployV2 test -c "docker run -p 8080:8080  --name <containerName> --network <networkName> --rm <applicationImage>" --delay 1
+	keployV2 test -c "docker run -p 8080:8080  --name myContainerName --network myNetworkName --rm myApplicationImage" --delay 1
 `
 
 type Example struct {
