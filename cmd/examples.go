@@ -27,10 +27,10 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.
 var examples = `
 Golang Application
 	Record:
-	sudo -E keploy record -c "/path/to/user/app"
+	sudo -E keploy record -c "/path/to/user/app/binary"
 	
 	Test:
-	sudo -E keploy test -c "/path/to/user/app" --delay 2
+	sudo -E keploy test -c "/path/to/user/app/binary" --delay 2
 
 Node Application
 	Record:
@@ -41,10 +41,10 @@ Node Application
 
 Java 
 	Record:
-	sudo -E keploy <pathToKeployBinary> record -c "java -jar /path/to/java/jar"
+	sudo -E keploy <pathToKeployBinary> record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E keploy <pathToKeployBinary> test -c "java -jar /path/to/java/jar" --delay 2
+	sudo -E keploy <pathToKeployBinary> test -c "java -jar  /path/to/java-project/target/jar" --delay 2
 
 Docker
 	Record:
