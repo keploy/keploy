@@ -48,7 +48,7 @@ Java
 
 Docker
 	Alias:
-	alias keploy='sudo docker run --name keploy-ebpf -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup
+	alias keploy='sudo docker run --name keploy-ebpf -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
@@ -62,12 +62,12 @@ type Example struct {
 	logger *zap.Logger
 }
 
-func (r *Example) GetCmd() *cobra.Command {
-	var recordCmd = &cobra.Command{
+func (e *Example) GetCmd() *cobra.Command {
+	var exampleCmd = &cobra.Command{
 		Use:     "example",
 		Short:   "Example to record and test via keploy",
 		Example: examples,
 	}
-	recordCmd.SetHelpTemplate(customHelpTemplate)
-	return recordCmd
+	exampleCmd.SetHelpTemplate(customHelpTemplate)
+	return exampleCmd
 }

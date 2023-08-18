@@ -80,14 +80,6 @@ Test:
 keployV2 test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
 `
 
-// var examples = `
-// Record:
-// keployV2 record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network --rm <applicationImage>" --containerName "<containerName>" --delay 1
-
-// Test:
-// keployV2 test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
-// `
-
 func (r *Root) execute() {
 
 	// Root command
