@@ -1,0 +1,164 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: FAILED
+success: 1
+failure: 1
+total: 2
+tests:
+    - kind: Http
+      name: report-1
+      status: FAILED
+      started: 1692261909
+      completed: 1692261910
+      test_case_path: /home/ubuntu/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials
+        header:
+            Accept: '*/*'
+            Content-Length: "94"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "title": "New Tutorial",
+              "description": "This is a new tutorial",
+              "published": false
+            }
+        body_type: ""
+      resp:
+        status_code: 201
+        header:
+            Content-Type: application/json
+            Date: Thu, 17 Aug 2023 08:44:03 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '{"id":"64ddddd31826df61fde50e92","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 201
+            actual: 201
+        headers_result:
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 08:44:03 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 08:45:10 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":"64ddddd31826df61fde50e92","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+              actual: '{"id":"64ddde168a738877a3d5f795","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1692261910
+      completed: 1692261910
+      test_case_path: /home/ubuntu/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/tutorials
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Thu, 17 Aug 2023 08:44:23 GMT
+            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
+        body: '[{"id":"64dc86207d14965b8d46c400","title":"Updated Title","description":"Updated Description","published":true},{"id":"64dc9dc99220764e8804b6c5","title":"New Tutorial","description":"This is a new tutorial","published":false},{"id":"64dca2f1ed7d1f79b113ad83","title":"New Tutorial","description":"This is a new tutorial","published":false},{"id":"64ddddd31826df61fde50e92","title":"New Tutorial","description":"This is a new tutorial","published":false}]'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 08:44:23 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 17 Aug 2023 08:45:10 GMT
+            - normal: true
+              expected:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+              actual:
+                key: Vary
+                value:
+                    - Origin
+                    - Access-Control-Request-Method
+                    - Access-Control-Request-Headers
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '[{"id":"64dc86207d14965b8d46c400","title":"Updated Title","description":"Updated Description","published":true},{"id":"64dc9dc99220764e8804b6c5","title":"New Tutorial","description":"This is a new tutorial","published":false},{"id":"64dca2f1ed7d1f79b113ad83","title":"New Tutorial","description":"This is a new tutorial","published":false},{"id":"64ddddd31826df61fde50e92","title":"New Tutorial","description":"This is a new tutorial","published":false}]'
+              actual: '[{"id":"64dc86207d14965b8d46c400","title":"Updated Title","description":"Updated Description","published":true},{"id":"64dc9dc99220764e8804b6c5","title":"New Tutorial","description":"This is a new tutorial","published":false},{"id":"64dca2f1ed7d1f79b113ad83","title":"New Tutorial","description":"This is a new tutorial","published":false},{"id":"64ddddd31826df61fde50e92","title":"New Tutorial","description":"This is a new tutorial","published":false}]'
+        dep_result: []

@@ -1,0 +1,35 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-6
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/insertData
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 500
+        header:
+            Content-Length: "79"
+            Content-Type: text/plain; charset=utf-8
+            Date: Thu, 17 Aug 2023 15:49:29 GMT
+            X-Content-Type-Options: nosniff
+        body: |+
+            Can't create table: ORA-00001: unique constraint (ADMIN.SYS_C006193) violated
+
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise:
+            - header.Date
+    created: 1692287369
