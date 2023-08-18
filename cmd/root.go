@@ -16,18 +16,28 @@ type Root struct {
 	subCommands []Plugins
 }
 
-func newRoot() *Root {
-	// logger init
+var debugMode bool
+
+func setupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
-	logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	if debugMode {
+		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+		logCfg.DisableStacktrace = false
+	} else {
+		logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+		logCfg.DisableStacktrace = true
+	}
+
 	logger, err := logCfg.Build()
 	if err != nil {
 		log.Panic(Emoji, "failed to start the logger for the CLI")
 		return nil
 	}
+	return logger
+}
 
+func newRoot() *Root {
 	return &Root{
-		logger:      logger,
 		subCommands: []Plugins{},
 	}
 }
@@ -38,19 +48,68 @@ func Execute() {
 	newRoot().execute()
 }
 
-// execute creates a root command for Cobra. The root cmd will be executed after attaching the subcommmands.
+var rootCustomHelpTemplate = `{{.Short}}
+
+Usage:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+
+Available Commands:{{range .Commands}}{{if .IsAvailableCommand}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableFlags}}
+
+Flags:
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableLocalFlags}}
+
+Guided Commands:{{range .Commands}}{{if not .IsAvailableCommand}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}
+
+Examples:
+{{.Example}}
+
+Use "{{.CommandPath}} [command] --help" for more information about a command.{{end}}
+`
+
+var rootExamples = `
+Record:
+keployV2 record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network --rm <applicationImage>" --containerName "<containerName>" --delay 1
+
+Test:
+keployV2 test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
+`
+
+// var examples = `
+// Record:
+// keployV2 record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network --rm <applicationImage>" --containerName "<containerName>" --delay 1
+
+// Test:
+// keployV2 test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
+// `
+
 func (r *Root) execute() {
+
 	// Root command
 	var rootCmd = &cobra.Command{
-		Use:   "keploy",
-		Short: "Keploy CLI",
-		// Run: func(cmd *cobra.Command, args []string) {
-
-		// },
+		Use:     "keploy",
+		Short:   "Keploy CLI",
+		Example: rootExamples,
 	}
+	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
+
 	// rootCmd.Flags().IntP("pid", "", 0, "Please enter the process id on which your application is running.")
 
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger))
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
+
+	// Manually parse flags to determine debug mode early
+	args := os.Args[1:]
+	rootCmd.ParseFlags(args)
+
+	// Now that flags are parsed, set up the logger
+	r.logger = setupLogger()
+
+	r.subCommands = append(r.subCommands, NewCmdExample(r.logger), NewCmdTest(r.logger), NewCmdRecord(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {
