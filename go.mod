@@ -69,8 +69,11 @@ require (
 )
 
 require (
+	github.com/agnivade/levenshtein v1.1.1
+	github.com/glaslos/ssdeep v0.3.3
 	github.com/go-git/go-git/v5 v5.8.1
 	github.com/hashicorp/go-version v1.6.0
+	github.com/jackc/pgproto3/v2 v2.3.2
 )
 
 require (
@@ -82,6 +85,8 @@ require (
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.4.1 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
+	github.com/jackc/chunkreader/v2 v2.0.0 // indirect
+	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/pjbgf/sha1cd v0.3.0 // indirect

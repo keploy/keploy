@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	"go.keploy.io/server/pkg/proxy/integrations/psqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -705,6 +706,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// for _, v := range deps {
 		// 	ps.hook.AppendDeps(v)
 		// }
+	case psqlparser.IsOutgoingPSQL(buffer):
+		fmt.Println("into psql desp mode, before passing")
+		psqlparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
 	default:
 		// fmt.Println("into default desp mode, before passing")
 		err = callNext(buffer, conn, dst, ps.logger)

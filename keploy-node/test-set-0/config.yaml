@@ -1,0 +1,168 @@
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 62
+        payload: AAAAPgADAAB1c2VyAHBvc3RncmVzAGRhdGFiYXNlAHBvc3RncmVzAGNsaWVudF9lbmNvZGluZwBVVEY4AAA=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 13
+        payload: UgAAAAwAAAAFpAaURw==
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 41
+        payload: cAAAAChtZDViY2YxMjYyYmFhNDRlYTdlNjI1NTlmNjhmNDBlNzU4MAA=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 342
+        payload: UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADFzZXJ2ZXJfdmVyc2lvbgAxMC41IChEZWJpYW4gMTAuNS0yLnBnZGc5MCsxKQBTAAAAI3Nlc3Npb25fYXV0aG9yaXphdGlvbgBwb3N0Z3JlcwBTAAAAI3N0YW5kYXJkX2NvbmZvcm1pbmdfc3RyaW5ncwBvbgBTAAAAEVRpbWVab25lAFVUQwBLAAAADAAAACrFpK9dWgAAAAVJ
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 55
+        payload: UQAAADZTRUxFQ1QgMSBGUk9NIHBnX2RhdGFiYXNlIFdIRVJFIGRhdG5hbWU9J25vdGVzZGInAA==
+    postgresResp:
+        identfier: PostgresResponse
+        length: 66
+        payload: VAAAACEAAT9jb2x1bW4/AAAAAAAAAAAAABcABP////8AAEQAAAALAAEAAAABMUMAAAANU0VMRUNUIDEAWgAAAAVJ
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 5
+        payload: WAAAAAQ=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 0
+        payload: ""
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 61
+        payload: AAAAPQADAAB1c2VyAHBvc3RncmVzAGRhdGFiYXNlAG5vdGVzZGIAY2xpZW50X2VuY29kaW5nAFVURjgAAA==
+    postgresResp:
+        identfier: PostgresResponse
+        length: 13
+        payload: UgAAAAwAAAAFw/0nRA==
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 41
+        payload: cAAAAChtZDVlMWFjZGViZDk1ZWQ0YTkzMGE2NWM1Y2I3YmEwMzQ5NgA=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 342
+        payload: UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADFzZXJ2ZXJfdmVyc2lvbgAxMC41IChEZWJpYW4gMTAuNS0yLnBnZGc5MCsxKQBTAAAAI3Nlc3Npb25fYXV0aG9yaXphdGlvbgBwb3N0Z3JlcwBTAAAAI3N0YW5kYXJkX2NvbmZvcm1pbmdfc3RyaW5ncwBvbgBTAAAAEVRpbWVab25lAFVUQwBLAAAADAAAACvxp/8uWgAAAAVJ
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 177
+        payload: UQAAALAKICAgICAgICAgIENSRUFURSBUQUJMRSBJRiBOT1QgRVhJU1RTIG5vdGVzKAogICAgICAgICAgICAgIGlkIFNFUklBTCBQUklNQVJZIEtFWSwKICAgICAgICAgICAgICB0aXRsZSBWQVJDSEFSKDI1NSkgTk9UIE5VTEwsCiAgICAgICAgICAgICAgY29udGVudCBURVhUCiAgICAgICAgICApOwogICAgICAA
+    postgresResp:
+        identfier: PostgresResponse
+        length: 139
+        payload: TgAAAHJTTk9USUNFAFZOT1RJQ0UAQzQyUDA3AE1yZWxhdGlvbiAibm90ZXMiIGFscmVhZHkgZXhpc3RzLCBza2lwcGluZwBGcGFyc2VfdXRpbGNtZC5jAEwyMDkAUnRyYW5zZm9ybUNyZWF0ZVN0bXQAAEMAAAARQ1JFQVRFIFRBQkxFAFoAAAAFSQ==
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 5
+        payload: WAAAAAQ=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 0
+        payload: ""
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 61
+        payload: AAAAPQADAAB1c2VyAHBvc3RncmVzAGRhdGFiYXNlAG5vdGVzZGIAY2xpZW50X2VuY29kaW5nAFVURjgAAA==
+    postgresResp:
+        identfier: PostgresResponse
+        length: 13
+        payload: UgAAAAwAAAAF3KXQug==
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 41
+        payload: cAAAAChtZDVjNmIxZjc2NTU4N2YwYWMxMmE3ZTg2MWM0M2JmMWIxMgA=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 342
+        payload: UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADFzZXJ2ZXJfdmVyc2lvbgAxMC41IChEZWJpYW4gMTAuNS0yLnBnZGc5MCsxKQBTAAAAI3Nlc3Npb25fYXV0aG9yaXphdGlvbgBwb3N0Z3JlcwBTAAAAI3N0YW5kYXJkX2NvbmZvcm1pbmdfc3RyaW5ncwBvbgBTAAAAEVRpbWVab25lAFVUQwBLAAAADAAAAC1Tv6e8WgAAAAVJ
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 149
+        payload: UAAAAEQASU5TRVJUIElOVE8gbm90ZXModGl0bGUsIGNvbnRlbnQpIFZBTFVFUygkMSwgJDIpIFJFVFVSTklORyAqAAAAQgAAADkAAAACAAAAAAACAAAAC1NlY29uZCBOb3RlAAAAFlRoaXMgaXMgYSBzZWNvbmQgbm90ZS4AAEQAAAAGUABFAAAACQAAAAAAUwAAAAQ=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 163
+        payload: MQAAAAQyAAAABFQAAABNAANpZAAAAGADAAEAAAAXAAT/////AAB0aXRsZQAAAGADAAIAAAQT//8AAAEDAABjb250ZW50AAAAYAMAAwAAABn///////8AAEQAAAA0AAMAAAABNAAAAAtTZWNvbmQgTm90ZQAAABZUaGlzIGlzIGEgc2Vjb25kIG5vdGUuQwAAAA9JTlNFUlQgMCAxAFoAAAAFSQ==
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 25
+        payload: UQAAABhTRUxFQ1QgKiBGUk9NIG5vdGVzAA==
+    postgresResp:
+        identfier: PostgresResponse
+        length: 310
+        payload: VAAAAE0AA2lkAAAAYAMAAQAAABcABP////8AAHRpdGxlAAAAYAMAAgAABBP//wAAAQMAAGNvbnRlbnQAAABgAwADAAAAGf///////wAARAAAADQAAwAAAAExAAAAC1NlY29uZCBOb3RlAAAAFlRoaXMgaXMgYSBzZWNvbmQgbm90ZS5EAAAANAADAAAAATIAAAALU2Vjb25kIE5vdGUAAAAWVGhpcyBpcyBhIHNlY29uZCBub3RlLkQAAAA0AAMAAAABMwAAAAtTZWNvbmQgTm90ZQAAABZUaGlzIGlzIGEgc2Vjb25kIG5vdGUuRAAAADQAAwAAAAE0AAAAC1NlY29uZCBOb3RlAAAAFlRoaXMgaXMgYSBzZWNvbmQgbm90ZS5DAAAADVNFTEVDVCA0AFoAAAAFSQ==
+---
+version: api.keploy.io/v1beta1
+kind: Postgres
+name: config
+spec:
+    postgresReq:
+        identfier: PostgresReq
+        length: 5
+        payload: WAAAAAQ=
+    postgresResp:
+        identfier: PostgresResponse
+        length: 0
+        payload: ""
