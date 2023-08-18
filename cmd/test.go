@@ -90,11 +90,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag")
-					if isDockerCmd {
-						fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6`)
-					} else {
-						fmt.Println("Example usage:\n", cmd.Example, "\n")
-					}
+					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag")
 				}
 			}
