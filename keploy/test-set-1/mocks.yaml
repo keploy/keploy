@@ -1,32 +1,79 @@
 version: api.keploy.io/v1beta2
-kind: Mongo
+kind: Generic
 name: mocks
 spec:
-    metadata:
-        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"insert":"tutorials","ordered":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"Z8ZTFPN6QuSpAwpxXNqzyA==","subType":"04"}}}} }, { SectionSingle identifier: documents , msgs: [ {"_id":{"$oid":"64d50ff0c5ca8618660bf844"},"title":"New Tutorial","description":"This is a new tutorial","published":false,"_class":"com.bezkoder.spring.data.mongodb.model.Tutorial"} ] }], checksum: 0 }'
-    requests:
-        - header:
-            length: 288
-            requestId: 7
-            responseTo: 0
-            Opcode: 2013
+    metadata: {}
+    genericrequests:
+        - origin: client
           message:
-            flagBits: 0
-            sections:
-                - '{ SectionSingle msg: {"insert":"tutorials","ordered":true,"$db":"bezkoder_db","lsid":{"id":{"$binary":{"base64":"Z8ZTFPN6QuSpAwpxXNqzyA==","subType":"04"}}}} }'
-                - '{ SectionSingle identifier: documents , msgs: [ {"_id":{"$oid":"64d50ff0c5ca8618660bf844"},"title":"New Tutorial","description":"This is a new tutorial","published":false,"_class":"com.bezkoder.spring.data.mongodb.model.Tutorial"} ] }'
-            checksum: 0
-          read_delay: 37817894
-    responses:
-        - header:
-            length: 45
-            requestId: 13
-            responseTo: 7
-            Opcode: 2013
+            - type: binary
+              data: AAAACATSFi8=
+    genericresponses:
+        - origin: server
           message:
-            flagBits: 0
-            sections:
-                - '{ SectionSingle msg: {"n":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}} }'
-            checksum: 0
-          read_delay: 17376042
-    created: 1691684848
+            - type: binary
+              data: Tg==
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: AAAAeAADAAB1c2VyAGtlcGxveS11c2VyAGRhdGFiYXNlAGtlcGxveS10ZXN0AGNsaWVudF9lbmNvZGluZwBVVEY4AERhdGVTdHlsZQBJU08AVGltZVpvbmUARXRjL1VUQwBleHRyYV9mbG9hdF9kaWdpdHMAMgAA
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: UgAAAAwAAAAF9eJt3w==
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: cAAAAChtZDU2OWNlMTBjOTc4OWZmZDQyZTBlNmIzYWYzYWE1MjlkZAA=
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADFzZXJ2ZXJfdmVyc2lvbgAxMC41IChEZWJpYW4gMTAuNS0yLnBnZGc5MCsxKQBTAAAAJnNlc3Npb25fYXV0aG9yaXphdGlvbgBrZXBsb3ktdXNlcgBTAAAAI3N0YW5kYXJkX2NvbmZvcm1pbmdfc3RyaW5ncwBvbgBTAAAAFVRpbWVab25lAEV0Yy9VVEMASwAAAAwAAADtj+7zmVoAAAAFSQ==
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: UAAAACIAU0VUIGV4dHJhX2Zsb2F0X2RpZ2l0cyA9IDMAAABCAAAADAAAAAAAAAAARQAAAAkAAAAAAVMAAAAE
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: MQAAAAQyAAAABEMAAAAIU0VUAFoAAAAFSQ==
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: UAAAADcAU0VUIGFwcGxpY2F0aW9uX25hbWUgPSAnUG9zdGdyZVNRTCBKREJDIERyaXZlcicAAABCAAAADAAAAAAAAAAARQAAAAkAAAAAAVMAAAAE
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: MQAAAAQyAAAABFMAAAAsYXBwbGljYXRpb25fbmFtZQBQb3N0Z3JlU1FMIEpEQkMgRHJpdmVyAEMAAAAIU0VUAFoAAAAFSQ==

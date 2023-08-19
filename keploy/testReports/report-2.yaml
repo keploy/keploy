@@ -2,86 +2,339 @@ version: api.keploy.io/v1beta1
 name: report-2
 status: FAILED
 success: 0
-failure: 1
-total: 1
+failure: 3
+total: 3
 tests:
     - kind: Http
       name: report-2
       status: FAILED
-      started: 1692261925
-      completed: 1692261926
-      test_case_path: /home/ubuntu/keploy/keploy
+      started: 1692357778
+      completed: 1692357778
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
       mock_path: ""
       test_case_id: test-1
       req:
         method: POST
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8080/api/tutorials
+        url: http://localhost:3000/notes
         header:
             Accept: '*/*'
-            Content-Length: "94"
+            Content-Length: "59"
             Content-Type: application/json
-            Host: localhost:8080
+            Host: localhost:3000
             User-Agent: curl/7.81.0
-        body: |-
-            {
-              "title": "New Tutorial",
-              "description": "This is a new tutorial",
-              "published": false
-            }
+        body: '{"title": "First Note", "content": "This is a first note."}'
         body_type: ""
       resp:
-        status_code: 201
+        status_code: 200
         header:
-            Content-Type: application/json
-            Date: Thu, 10 Aug 2023 16:27:29 GMT
-            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
-        body: '{"id":"64d50ff0c5ca8618660bf844","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+            Connection: keep-alive
+            Content-Length: "63"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:21:00 GMT
+            Etag: W/"3f-pJQY3YW6M9Cntd6uqh6f3vbtiJ4"
+            Keep-Alive: timeout=5
+            X-Powered-By: Express
+        body: '{"id":1,"title":"First Note","content":"This is a first note."}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
+      noise:
+        - header.Date
       result:
         status_code:
             normal: true
-            expected: 201
-            actual: 201
+            expected: 200
+            actual: 200
         headers_result:
             - normal: true
               expected:
-                key: Vary
+                key: Date
                 value:
-                    - Origin
-                    - Access-Control-Request-Method
-                    - Access-Control-Request-Headers
+                    - Fri, 18 Aug 2023 11:21:00 GMT
               actual:
-                key: Vary
+                key: Date
                 value:
-                    - Origin
-                    - Access-Control-Request-Method
-                    - Access-Control-Request-Headers
+                    - Fri, 18 Aug 2023 11:22:58 GMT
+            - normal: false
+              expected:
+                key: Etag
+                value:
+                    - W/"3f-pJQY3YW6M9Cntd6uqh6f3vbtiJ4"
+              actual:
+                key: Etag
+                value:
+                    - W/"3f-9hp5kqj2JkZ8IvYFQzZ0akUEAZw"
+            - normal: false
+              expected:
+                key: Keep-Alive
+                value:
+                    - timeout=5
+              actual:
+                key: Keep-Alive
+                value: []
+            - normal: true
+              expected:
+                key: X-Powered-By
+                value:
+                    - Express
+              actual:
+                key: X-Powered-By
+                value:
+                    - Express
+            - normal: false
+              expected:
+                key: Connection
+                value:
+                    - keep-alive
+              actual:
+                key: Connection
+                value: []
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "63"
+              actual:
+                key: Content-Length
+                value:
+                    - "63"
             - normal: true
               expected:
                 key: Content-Type
                 value:
-                    - application/json
+                    - application/json; charset=utf-8
               actual:
                 key: Content-Type
                 value:
-                    - application/json
-            - normal: false
-              expected:
-                key: Date
-                value:
-                    - Thu, 10 Aug 2023 16:27:29 GMT
-              actual:
-                key: Date
-                value:
-                    - Thu, 17 Aug 2023 08:45:26 GMT
+                    - application/json; charset=utf-8
         body_result:
             - normal: false
               type: JSON
-              expected: '{"id":"64d50ff0c5ca8618660bf844","title":"New Tutorial","description":"This is a new tutorial","published":false}'
-              actual: '{"id":"64ddde269eb41d00383ff6ba","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+              expected: '{"id":1,"title":"First Note","content":"This is a first note."}'
+              actual: '{"id":4,"title":"First Note","content":"This is a first note."}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: FAILED
+      started: 1692357778
+      completed: 1692357778
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:3000/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "59"
+            Content-Type: application/json
+            Host: localhost:3000
+            User-Agent: curl/7.81.0
+        body: '{"title": "First Note", "content": "This is a first note."}'
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Connection: keep-alive
+            Content-Length: "63"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:21:03 GMT
+            Etag: W/"3f-2Ebd/5kh1ICxIxnlaIPqBJH54Rc"
+            Keep-Alive: timeout=5
+            X-Powered-By: Express
+        body: '{"id":2,"title":"First Note","content":"This is a first note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: X-Powered-By
+                value:
+                    - Express
+              actual:
+                key: X-Powered-By
+                value:
+                    - Express
+            - normal: false
+              expected:
+                key: Connection
+                value:
+                    - keep-alive
+              actual:
+                key: Connection
+                value: []
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "63"
+              actual:
+                key: Content-Length
+                value:
+                    - "63"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:21:03 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:22:58 GMT
+            - normal: false
+              expected:
+                key: Etag
+                value:
+                    - W/"3f-2Ebd/5kh1ICxIxnlaIPqBJH54Rc"
+              actual:
+                key: Etag
+                value:
+                    - W/"3f-mj0XaGG9NfvWXZEbtA1Gzgy7DBw"
+            - normal: false
+              expected:
+                key: Keep-Alive
+                value:
+                    - timeout=5
+              actual:
+                key: Keep-Alive
+                value: []
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":2,"title":"First Note","content":"This is a first note."}'
+              actual: '{"id":5,"title":"First Note","content":"This is a first note."}'
+        dep_result: []
+    - kind: Http
+      name: report-2
+      status: FAILED
+      started: 1692357778
+      completed: 1692357778
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:3000/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "61"
+            Content-Type: application/json
+            Host: localhost:3000
+            User-Agent: curl/7.81.0
+        body: '{"title": "Sample Note", "content": "This is a sample note."}'
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Connection: keep-alive
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:21:31 GMT
+            Etag: W/"41-JnZkQ8XQ0eap8awDYXYZpKx8L+Q"
+            Keep-Alive: timeout=5
+            X-Powered-By: Express
+        body: '{"id":3,"title":"Sample Note","content":"This is a sample note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:21:31 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:22:58 GMT
+            - normal: false
+              expected:
+                key: Etag
+                value:
+                    - W/"41-JnZkQ8XQ0eap8awDYXYZpKx8L+Q"
+              actual:
+                key: Etag
+                value:
+                    - W/"41-i5hJT86sYAyJuY71gSgFN/5o26s"
+            - normal: false
+              expected:
+                key: Keep-Alive
+                value:
+                    - timeout=5
+              actual:
+                key: Keep-Alive
+                value: []
+            - normal: true
+              expected:
+                key: X-Powered-By
+                value:
+                    - Express
+              actual:
+                key: X-Powered-By
+                value:
+                    - Express
+            - normal: false
+              expected:
+                key: Connection
+                value:
+                    - keep-alive
+              actual:
+                key: Connection
+                value: []
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "65"
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":3,"title":"Sample Note","content":"This is a sample note."}'
+              actual: '{"id":6,"title":"Sample Note","content":"This is a sample note."}'
         dep_result: []

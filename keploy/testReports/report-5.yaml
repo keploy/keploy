@@ -1,6 +1,340 @@
 version: api.keploy.io/v1beta1
 name: report-5
-status: RUNNING
+status: FAILED
 success: 0
-failure: 0
+failure: 3
 total: 3
+tests:
+    - kind: Http
+      name: report-5
+      status: FAILED
+      started: 1692358589
+      completed: 1692358589
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:3000/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "59"
+            Content-Type: application/json
+            Host: localhost:3000
+            User-Agent: curl/7.81.0
+        body: '{"title": "First Note", "content": "This is a first note."}'
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Connection: keep-alive
+            Content-Length: "63"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:21:00 GMT
+            Etag: W/"3f-pJQY3YW6M9Cntd6uqh6f3vbtiJ4"
+            Keep-Alive: timeout=5
+            X-Powered-By: Express
+        body: '{"id":1,"title":"First Note","content":"This is a first note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 500
+        headers_result:
+            - normal: false
+              expected:
+                key: Etag
+                value:
+                    - W/"3f-pJQY3YW6M9Cntd6uqh6f3vbtiJ4"
+              actual:
+                key: Etag
+                value:
+                    - W/"24-mtA1FXA8uWyK5FSJwqBYTeOybHY"
+            - normal: false
+              expected:
+                key: Keep-Alive
+                value:
+                    - timeout=5
+              actual:
+                key: Keep-Alive
+                value: []
+            - normal: true
+              expected:
+                key: X-Powered-By
+                value:
+                    - Express
+              actual:
+                key: X-Powered-By
+                value:
+                    - Express
+            - normal: false
+              expected:
+                key: Connection
+                value:
+                    - keep-alive
+              actual:
+                key: Connection
+                value: []
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "63"
+              actual:
+                key: Content-Length
+                value:
+                    - "36"
+            - normal: false
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - text/html; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:21:00 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:36:29 GMT
+        body_result:
+            - normal: false
+              type: PLAIN
+              expected: '{"id":1,"title":"First Note","content":"This is a first note."}'
+              actual: Cannot read property 'query' of null
+        dep_result: []
+    - kind: Http
+      name: report-5
+      status: FAILED
+      started: 1692358589
+      completed: 1692358589
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:3000/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "59"
+            Content-Type: application/json
+            Host: localhost:3000
+            User-Agent: curl/7.81.0
+        body: '{"title": "First Note", "content": "This is a first note."}'
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Connection: keep-alive
+            Content-Length: "63"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:21:03 GMT
+            Etag: W/"3f-2Ebd/5kh1ICxIxnlaIPqBJH54Rc"
+            Keep-Alive: timeout=5
+            X-Powered-By: Express
+        body: '{"id":2,"title":"First Note","content":"This is a first note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 500
+        headers_result:
+            - normal: false
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - text/html; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:21:03 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:36:29 GMT
+            - normal: false
+              expected:
+                key: Etag
+                value:
+                    - W/"3f-2Ebd/5kh1ICxIxnlaIPqBJH54Rc"
+              actual:
+                key: Etag
+                value:
+                    - W/"24-mtA1FXA8uWyK5FSJwqBYTeOybHY"
+            - normal: false
+              expected:
+                key: Keep-Alive
+                value:
+                    - timeout=5
+              actual:
+                key: Keep-Alive
+                value: []
+            - normal: true
+              expected:
+                key: X-Powered-By
+                value:
+                    - Express
+              actual:
+                key: X-Powered-By
+                value:
+                    - Express
+            - normal: false
+              expected:
+                key: Connection
+                value:
+                    - keep-alive
+              actual:
+                key: Connection
+                value: []
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "63"
+              actual:
+                key: Content-Length
+                value:
+                    - "36"
+        body_result:
+            - normal: false
+              type: PLAIN
+              expected: '{"id":2,"title":"First Note","content":"This is a first note."}'
+              actual: Cannot read property 'query' of null
+        dep_result: []
+    - kind: Http
+      name: report-5
+      status: FAILED
+      started: 1692358589
+      completed: 1692358589
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:3000/notes
+        header:
+            Accept: '*/*'
+            Content-Length: "61"
+            Content-Type: application/json
+            Host: localhost:3000
+            User-Agent: curl/7.81.0
+        body: '{"title": "Sample Note", "content": "This is a sample note."}'
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Connection: keep-alive
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Fri, 18 Aug 2023 11:21:31 GMT
+            Etag: W/"41-JnZkQ8XQ0eap8awDYXYZpKx8L+Q"
+            Keep-Alive: timeout=5
+            X-Powered-By: Express
+        body: '{"id":3,"title":"Sample Note","content":"This is a sample note."}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 500
+        headers_result:
+            - normal: false
+              expected:
+                key: Connection
+                value:
+                    - keep-alive
+              actual:
+                key: Connection
+                value: []
+            - normal: false
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "36"
+            - normal: false
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - text/html; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:21:31 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 11:36:29 GMT
+            - normal: false
+              expected:
+                key: Etag
+                value:
+                    - W/"41-JnZkQ8XQ0eap8awDYXYZpKx8L+Q"
+              actual:
+                key: Etag
+                value:
+                    - W/"24-mtA1FXA8uWyK5FSJwqBYTeOybHY"
+            - normal: false
+              expected:
+                key: Keep-Alive
+                value:
+                    - timeout=5
+              actual:
+                key: Keep-Alive
+                value: []
+            - normal: true
+              expected:
+                key: X-Powered-By
+                value:
+                    - Express
+              actual:
+                key: X-Powered-By
+                value:
+                    - Express
+        body_result:
+            - normal: false
+              type: PLAIN
+              expected: '{"id":3,"title":"Sample Note","content":"This is a sample note."}'
+              actual: Cannot read property 'query' of null
+        dep_result: []
