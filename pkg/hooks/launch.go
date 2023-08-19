@@ -19,14 +19,20 @@ import (
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
-	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/models"
 )
 
 var (
 	dockerClient     *client.Client
 	appDockerNetwork string
 	appContainerName string
+)
+
+const (
+	// TODO : Remove hard-coded container name.
+	KeployContainerName = "keploy-v2"
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
@@ -284,6 +290,18 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	case <-done:
 		h.logger.Debug(Emoji+"container found and processed successfully", zap.Any("time", time.Now().UnixNano()))
 		// No error received yet, continue with further flow
+	}
+
+	// Now that the application has started, inject the Keploy container into the application's network.
+	networks, err := h.idc.ExtractNetworksForContainer(appContainer)
+	if err != nil {
+		return fmt.Errorf("could not extract network names for the application container: %s with error [%v]",
+			appContainer, err)
+	}
+
+	err = h.idc.ConnectContainerToNetworks(KeployContainerName, networks)
+	if err != nil {
+		return fmt.Errorf("could not inject keploy container to the application's network with error [%v]", err)
 	}
 
 	h.logger.Debug(Emoji + "processDockerEnv executed successfully")
