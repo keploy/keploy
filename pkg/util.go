@@ -92,7 +92,13 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 
 	// httpresp, err := k.client.Do(req)
 	logger.Debug(Emoji + fmt.Sprintf("Sending request to user app:%v", req))
-	client := &http.Client{}
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
 	httpResp, err := client.Do(req)
 	if err != nil {
 		logger.Error(Emoji+"failed sending testcase request to app", zap.Error(err))
