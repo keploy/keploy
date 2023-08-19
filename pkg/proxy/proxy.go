@@ -199,8 +199,8 @@ func InstallJavaCA(logger *zap.Logger, caPath string) {
 	}
 }
 
-// BootProxies starts proxy servers on the idle local port, Default:16789
-func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
+// BootProxy starts proxy server on the idle local port, Default:16789
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -521,9 +521,6 @@ func (ps *ProxySet) startDnsServer() {
 	if err != nil {
 		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
 	}
-
-	ps.logger.Info(fmt.Sprintf("DNS server started at port:%v", ps.Port))
-
 }
 
 // For DNS caching

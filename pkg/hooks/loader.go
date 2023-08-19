@@ -33,11 +33,12 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 type Hook struct {
 	proxyInfoMap     *ebpf.Map
-	appPidMap        *ebpf.Map
 	inodeMap         *ebpf.Map
 	redirectProxyMap *ebpf.Map
 	keployModeMap    *ebpf.Map
 	keployPid        *ebpf.Map
+	appPidMap        *ebpf.Map
+	keployServerPort *ebpf.Map
 
 	platform.TestCaseDB
 	logger        *zap.Logger
@@ -182,6 +183,18 @@ func (h *Hook) ResetDeps() int {
 	return 1
 }
 
+// This function sends the keploy graphql server port to be filtered in the eBPF program.
+func (h *Hook) SendKeployServerPort(port uint32) error {
+	h.logger.Debug(Emoji+"sending keploy server port", zap.Any("port", port))
+	key := 0
+	err := h.keployServerPort.Update(uint32(key), &port, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error(Emoji+"failed to send keploy server port to the epbf program", zap.Any("Keploy server port", port), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	return nil
+}
+
 // This function sends the IP and Port of the running proxy in the eBPF program.
 func (h *Hook) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
 	key := 0
@@ -237,6 +250,17 @@ func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	return &destInfo, nil
 }
 
+// this function is used in case of running keploy tests along with unit tests of application
+func (h *Hook) SendAppPid(pid uint32) error {
+	h.logger.Debug(Emoji+"Sending app pid to kernel", zap.Any("app Pid", pid))
+	err := h.appPidMap.Update(uint32(0), &pid, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error(Emoji+"failed to send the app pid to the ebpf program", zap.Any("app Pid", pid), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	return nil
+}
+
 func (h *Hook) SendKeployPid(kPid uint32) error {
 	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", kPid))
 	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
@@ -272,8 +296,9 @@ func (h *Hook) Stop(forceStop bool) {
 		<-h.stopper
 		h.logger.Info( "Received signal, exiting program..")
 
+	} else {
+		h.logger.Info(Emoji + "Exiting keploy program gracefully.")
 	}
-	h.logger.Info( "Received signal, exiting program..")
 
 	// closing all readers.
 	for _, reader := range PerfEventReaders {
@@ -332,7 +357,7 @@ func (h *Hook) Stop(forceStop bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	// k := keploy.KeployInitializer()
 
 	if err := settings.InitRealTimeOffset(); err != nil {
@@ -356,12 +381,14 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 		return err
 	}
 
+	//getting all the ebpf maps
 	h.proxyInfoMap = objs.ProxyInfoMap
-	h.appPidMap = objs.AppPidMap
 	h.inodeMap = objs.InodeMap
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
 	h.keployPid = objs.KeployNamespacePidMap
+	h.appPidMap = objs.AppNsPidMap
+	h.keployServerPort = objs.KeployServerPort
 
 	h.stopper = stopper
 	h.objects = objs
@@ -658,6 +685,12 @@ func (h *Hook) LoadHooks(appCmd, appContainer string) error {
 	h.SendNameSpaceId(1, k_inode)
 	h.SendKeployPid(uint32(os.Getpid()))
 	h.logger.Debug( "Keploy Pid sent successfully...")
+
+	//send app pid to kernel to get filtered in case of integration with unit test file
+	// app pid here is the pid of the unit test file process or application pid
+	if pid != 0 {
+		h.SendAppPid(pid)
+	}
 
 	return nil
 }
