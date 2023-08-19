@@ -18,7 +18,7 @@ type testReport struct {
 	logger *zap.Logger
 }
 
-func NewTestReportFS(logger *zap.Logger) *testReport {
+func NewTestReportFS(logger *zap.Logger) TestReportFS {
 	return &testReport{
 		tests:  map[string][]models.TestResult{},
 		m:      sync.Mutex{},

@@ -124,8 +124,8 @@ var caPKey []byte
 //go:embed asset
 var caFolder embed.FS
 
-// BootProxies starts proxy servers on the idle local port, Default:16789
-func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
+// BootProxy starts proxy server on the idle local port, Default:16789
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -395,8 +395,6 @@ func (ps *ProxySet) startDnsServer() {
 		ps.logger.Error(Emoji+"failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
 	}
 
-	ps.logger.Info(Emoji + fmt.Sprintf("DNS server started at port:%v", ps.Port))
-
 }
 
 // For DNS caching
@@ -454,23 +452,23 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					}
 				}
 
-				fmt.Printf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers)
+				ps.logger.Debug(Emoji+fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
 			}
 
 			// Cache the answer
 			cache.Lock()
 			cache.m[key] = answers
 			cache.Unlock()
-			fmt.Printf("Answers[after caching it]:\n%v\n", answers)
+			ps.logger.Debug(Emoji+fmt.Sprintf("Answers[after caching it]:\n%v\n", answers))
 		}
 
-		fmt.Printf("Answers[before appending to msg]:\n%v\n", answers)
+		ps.logger.Debug(Emoji+fmt.Sprintf("Answers[before appending to msg]:\n%v\n", answers))
 		msg.Answer = append(msg.Answer, answers...)
-		fmt.Printf("Answers[After appending to msg]:\n%v\n", msg.Answer)
+		ps.logger.Debug(Emoji+fmt.Sprintf("Answers[After appending to msg]:\n%v\n", msg.Answer))
 	}
 
-	fmt.Printf(Emoji+"dns msg sending back:\n%v\n", msg)
-	fmt.Printf(Emoji+"dns msg RCODE sending back:\n%v\n", msg.Rcode)
+	ps.logger.Debug(Emoji+fmt.Sprintf("dns msg sending back:\n%v\n", msg))
+	ps.logger.Debug(Emoji+fmt.Sprintf("dns msg RCODE sending back:\n%v\n", msg.Rcode))
 	ps.logger.Debug(Emoji + "Writing dns info back to the client...")
 	err := w.WriteMsg(msg)
 	if err != nil {

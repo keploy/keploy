@@ -21,14 +21,13 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.2 // indirect
 	github.com/spf13/cobra v1.7.0
-	github.com/stretchr/testify v1.8.2 // indirect
 	github.com/wI2L/jsondiff v0.4.0
 	github.com/yudai/gojsondiff v1.0.0
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.24.0
 	golang.org/x/crypto v0.11.0 // indirect
 	golang.org/x/sys v0.10.0
-	google.golang.org/protobuf v1.28.1 // indirect
+	google.golang.org/protobuf v1.30.0 // indirect
 )
 
 require github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
@@ -47,7 +46,7 @@ require (
 	github.com/jmoiron/sqlx v1.3.3 // indirect
 	github.com/klauspost/compress v1.15.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
-	github.com/mattn/go-isatty v0.0.17 // indirect
+	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/mattn/go-runewidth v0.0.14 // indirect
 	github.com/onsi/ginkgo v1.16.5 // indirect
 	github.com/onsi/gomega v1.27.10 // indirect
@@ -69,7 +68,20 @@ require (
 )
 
 require (
+	github.com/99designs/gqlgen v0.17.36
+	github.com/vektah/gqlparser/v2 v2.5.8
+)
+
+require (
+	github.com/agnivade/levenshtein v1.1.1 // indirect
+	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.3 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/urfave/cli/v2 v2.25.5 // indirect
+	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )

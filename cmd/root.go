@@ -50,7 +50,7 @@ func (r *Root) execute() {
 	}
 	// rootCmd.Flags().IntP("pid", "", 0, "Please enter the process id on which your application is running.")
 
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {
