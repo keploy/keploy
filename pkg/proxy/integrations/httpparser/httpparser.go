@@ -118,7 +118,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 	}
 	//Handle chunked requests
 	for {
-		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		requestBufferChunked, err := util.ReadBytes(clientConn)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout(){
@@ -128,7 +128,6 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 				return nil
 			}
 		}
-		fmt.Println("This is the chunk string", string(requestBufferChunked))
 		finalRequestBuffer = append(finalRequestBuffer, requestBufferChunked...)
 		_, err = destConn.Write(requestBufferChunked)
 		if err != nil{
@@ -137,7 +136,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		}
 	}
 	for {
-		destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		// read the response from the actual server
 		respBuffer, err= util.ReadBytes(destConn)
 		//Check if the deadline has been reached
@@ -160,8 +159,6 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 			return nil
 		}
 	}
-	fmt.Println("This is the final req buffer", string(finalRequestBuffer))
-	fmt.Println("This is the final resp buffer", string(finalRespBuffer))
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalRequestBuffer)))
@@ -185,7 +182,6 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		logger.Error(Emoji+"failed to parse the http response message", zap.Error(err))
 		return nil
 	}
-	fmt.Println("This is the resp headers:", resp.Header)
 	var respBody []byte
 	if resp.Body != nil { // Read
 		if resp.Header.Get("Content-Encoding") == "gzip" {
@@ -200,7 +196,6 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 			logger.Error(Emoji+"failed to read the the http repsonse body", zap.Error(err))
 			return nil
 		}
-		fmt.Println("This is the respBody", respBody)
 	}
 	// store the request and responses as mocks
 	meta := map[string]string{
