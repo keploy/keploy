@@ -2,6 +2,7 @@ package genericparser
 
 import (
 	"encoding/base64"
+	"errors"
 	"net"
 	"strconv"
 	"time"
@@ -17,15 +18,62 @@ func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hook
 	case models.MODE_RECORD:
 		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	case models.MODE_TEST:
+		decodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	case models.MODE_OFF:
 	default:
 	}
 }
 
 func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+	genericRequests := [][]byte{requestBuffer}
 	for {
 		tcsMocks := h.GetTcsMocks()
+		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		if err != nil {
+			logger.Error(hooks.Emoji+"failed to set the read deadline for the client connection", zap.Error(err))
+			return err
+		}
 
+		for {
+			buffer, err := util.ReadBytes(clientConn)
+			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+				logger.Error(hooks.Emoji+"failed to read the request message in proxy for generic dependency", zap.Error(err))
+				// errChannel <- err
+				return err
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				logger.Debug(hooks.Emoji + "the timeout for the client read in generic")
+				break
+			}
+			genericRequests = append(genericRequests, buffer)
+		}
+
+		if len(genericRequests) == 0 {
+			logger.Debug(hooks.Emoji + "the generic request buffer is empty")
+			continue
+		}
+		// bestMatchedIndx := 0
+		// fuzzy match gives the index for the best matched generic mock
+		matched, genericResponses := fuzzymatch(tcsMocks, genericRequests, h)
+
+		if !matched {
+			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
+			return errors.New("failed to match the dependency call from user application")
+			// continue
+		}
+		for _, genericResponse := range genericResponses {
+			encoded, _ := PostgresDecoder(genericResponse.Message[0].Data)
+			_, err := clientConn.Write([]byte(encoded))
+			if err != nil {
+				logger.Error(hooks.Emoji+"failed to write request message to the client application", zap.Error(err))
+				// errChannel <- err
+				return err
+			}
+		}
+		// }
+
+		// update for the next dependency call
+		genericRequests = [][]byte{}
 	}
 	return nil
 }
@@ -36,9 +84,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	// errChannel := make(chan error)
 	// checkInitialRequest := true
 	genericRequests := []models.GenericPayload{}
+	// isFirstRequest := true
 	// bufStr := string(requestBuffer)
 	// if !IsAsciiPrintable(bufStr) {
-		bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
+	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
 	// }
 	if bufStr != "" {
 
@@ -62,11 +111,13 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 		// fmt.Println("inside connection")
 
+		// if isFirstRequest {
 		err := clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		if err != nil {
 			logger.Error(hooks.Emoji+"failed to set the read deadline for the client connection", zap.Error(err))
 			return err
 		}
+		// }
 
 		// if !checkInitialRequest {
 		// go routine to read from client
@@ -92,10 +143,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				// errChannel <- err
 				return err
 			}
-			bufStr := string(buffer)
-			if !IsAsciiPrintable(bufStr) {
-				bufStr = base64.StdEncoding.EncodeToString(buffer)
-			}
+			// bufStr := string(buffer)
+			// if !IsAsciiPrintable(bufStr) {
+			bufStr := base64.StdEncoding.EncodeToString(buffer)
+			// }
 			if bufStr != "" {
 
 				genericRequests = append(genericRequests, models.GenericPayload{
@@ -145,10 +196,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				// errChannel <- err
 				return err
 			}
-			bufStr := string(buffer)
-			if !IsAsciiPrintable(bufStr) {
-				bufStr = base64.StdEncoding.EncodeToString(buffer)
-			}
+			// bufStr := string(buffer)
+			// if !IsAsciiPrintable(bufStr) {
+			bufStr = base64.StdEncoding.EncodeToString(buffer)
+			// }
 			if bufStr != "" {
 
 				genericResponses = append(genericResponses, models.GenericPayload{
@@ -194,6 +245,29 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			genericResponses = []models.GenericPayload{}
 		}
 		logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
+
+		clientConn.SetReadDeadline(time.Time{})
+		buffer, err := util.ReadBytes(clientConn)
+		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+			logger.Error(hooks.Emoji+"failed to read the request message in proxy for generic dependency", zap.Error(err))
+			// errChannel <- err
+			return err
+		}
+		_, err = destConn.Write(buffer)
+		if err != nil {
+			logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+			return err
+		}
+		genericRequests = append(genericRequests,
+			models.GenericPayload{
+				Origin: models.FromClient,
+				Message: []models.OutputBinary{
+					{
+						Type: "binary",
+						Data: base64.StdEncoding.EncodeToString(buffer),
+					},
+				},
+			})
 
 		// for _, buf := range buffer {
 		// 	bufStr := string(buffer)
