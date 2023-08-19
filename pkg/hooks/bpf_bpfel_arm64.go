@@ -92,7 +92,8 @@ type bpfMapSpecs struct {
 	ActiveCloseArgsMap        *ebpf.MapSpec `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap         *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap        *ebpf.MapSpec `ebpf:"active_write_args_map"`
-	AppPidMap                 *ebpf.MapSpec `ebpf:"app_pid_map"`
+	AppKernelPidMap           *ebpf.MapSpec `ebpf:"app_kernel_pid_map"`
+	AppNsPidMap               *ebpf.MapSpec `ebpf:"app_ns_pid_map"`
 	ConnInfoMap               *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap            *ebpf.MapSpec `ebpf:"current_sock_map"`
 	DestInfoMap               *ebpf.MapSpec `ebpf:"dest_info_map"`
@@ -102,7 +103,7 @@ type bpfMapSpecs struct {
 	KeployKernelPidMap        *ebpf.MapSpec `ebpf:"keploy_kernel_pid_map"`
 	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.MapSpec `ebpf:"keploy_namespace_pid_map"`
-	KeployNsPidInfoMap        *ebpf.MapSpec `ebpf:"keploy_nsPid_info_map"`
+	KeployServerPort          *ebpf.MapSpec `ebpf:"keploy_server_port"`
 	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
@@ -135,7 +136,8 @@ type bpfMaps struct {
 	ActiveCloseArgsMap        *ebpf.Map `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap         *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap        *ebpf.Map `ebpf:"active_write_args_map"`
-	AppPidMap                 *ebpf.Map `ebpf:"app_pid_map"`
+	AppKernelPidMap           *ebpf.Map `ebpf:"app_kernel_pid_map"`
+	AppNsPidMap               *ebpf.Map `ebpf:"app_ns_pid_map"`
 	ConnInfoMap               *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap            *ebpf.Map `ebpf:"current_sock_map"`
 	DestInfoMap               *ebpf.Map `ebpf:"dest_info_map"`
@@ -145,7 +147,7 @@ type bpfMaps struct {
 	KeployKernelPidMap        *ebpf.Map `ebpf:"keploy_kernel_pid_map"`
 	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.Map `ebpf:"keploy_namespace_pid_map"`
-	KeployNsPidInfoMap        *ebpf.Map `ebpf:"keploy_nsPid_info_map"`
+	KeployServerPort          *ebpf.Map `ebpf:"keploy_server_port"`
 	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
@@ -161,7 +163,8 @@ func (m *bpfMaps) Close() error {
 		m.ActiveCloseArgsMap,
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
-		m.AppPidMap,
+		m.AppKernelPidMap,
+		m.AppNsPidMap,
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
@@ -171,7 +174,7 @@ func (m *bpfMaps) Close() error {
 		m.KeployKernelPidMap,
 		m.KeployModeMap,
 		m.KeployNamespacePidMap,
-		m.KeployNsPidInfoMap,
+		m.KeployServerPort,
 		m.ProxyInfoMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
@@ -259,5 +262,6 @@ func _BpfClose(closers ...io.Closer) error {
 }
 
 // Do not access this directly.
+//
 //go:embed bpf_bpfel_arm64.o
 var _BpfBytes []byte
