@@ -12,36 +12,36 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-type testReport struct {
+type TestReport struct {
 	tests  map[string][]models.TestResult
 	m      sync.Mutex
-	logger *zap.Logger
+	Logger *zap.Logger
 }
 
 func NewTestReportFS(logger *zap.Logger) TestReportFS {
-	return &testReport{
+	return &TestReport{
 		tests:  map[string][]models.TestResult{},
 		m:      sync.Mutex{},
-		logger: logger,
+		Logger: logger,
 	}
 }
 
-func (fe *testReport) Lock() {
+func (fe *TestReport) Lock() {
 	fe.m.Lock()
 }
 
-func (fe *testReport) Unlock() {
+func (fe *TestReport) Unlock() {
 	fe.m.Unlock()
 }
 
-func (fe *testReport) SetResult(runId string, test models.TestResult) {
-	tests, _ := fe.tests[runId]
+func (fe *TestReport) SetResult(runId string, test models.TestResult) {
+	tests := fe.tests[runId]
 	tests = append(tests, test)
 	fe.tests[runId] = tests
 	fe.m.Unlock()
 }
 
-func (fe *testReport) GetResults(runId string) ([]models.TestResult, error) {
+func (fe *TestReport) GetResults(runId string) ([]models.TestResult, error) {
 	val, ok := fe.tests[runId]
 	if !ok {
 		return nil, fmt.Errorf(Emoji, "found no test results for test report with id: %v", runId)
@@ -49,7 +49,7 @@ func (fe *testReport) GetResults(runId string) ([]models.TestResult, error) {
 	return val, nil
 }
 
-func (fe *testReport) Read(ctx context.Context, path, name string) (models.TestReport, error) {
+func (fe *TestReport) Read(ctx context.Context, path, name string) (models.TestReport, error) {
 
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -65,21 +65,21 @@ func (fe *testReport) Read(ctx context.Context, path, name string) (models.TestR
 	return doc, nil
 }
 
-func (fe *testReport) Write(ctx context.Context, path string, doc *models.TestReport) error {
+func (fe *TestReport) Write(ctx context.Context, path string, doc *models.TestReport) error {
 
 	if doc.Name == "" {
-		lastIndex, err := findLastIndex(path, fe.logger)
+		lastIndex, err := findLastIndex(path, fe.Logger)
 		if err != nil {
 			return err
 		}
 		doc.Name = fmt.Sprintf("report-%v", lastIndex)
 	}
 
-	_, err := createYamlFile(path, doc.Name, fe.logger)
+	_, err := createYamlFile(path, doc.Name, fe.Logger)
 	if err != nil {
 		return err
 	}
-
+	
 	data := []byte{}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {
