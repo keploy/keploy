@@ -17,12 +17,16 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-	"go.keploy.io/server/pkg/hooks/settings"
+
+	"go.uber.org/zap"
+
+	"go.keploy.io/server/pkg/clients"
+	"go.keploy.io/server/pkg/clients/docker"
 	"go.keploy.io/server/pkg/hooks/connection"
+	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -79,9 +83,15 @@ type Hook struct {
 	userIpAddress chan string
 	writev        link.Link
 	writevRet     link.Link
+
+	idc clients.InternalDockerClient
 }
 
 func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
+	idc, err := docker.NewInternalDockerClient(logger)
+	if err != nil {
+		logger.Fatal("failed to create internal docker client", zap.Error(err))
+	}
 	return &Hook{
 		logger: logger,
 		// db:          db,
@@ -89,6 +99,7 @@ func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 		mu:            &sync.Mutex{},
 		path:          path,
 		userIpAddress: make(chan string),
+		idc:           idc,
 	}
 }
 
