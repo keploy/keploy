@@ -79,6 +79,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			if value != "gzip" {
 			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
 			headers += headerLine
+			fmt.Println("These are the headers", headers)
 			}
 		}
 	}
@@ -88,37 +89,15 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	// body := string(bodyBytes)
 	body := httpSpec.Spec.HttpResp.Body
 	// Concatenate the status line, headers, and body
-	fmt.Println("These are the headers", headers)
 	responseString := statusLine + headers + "\r\n" + body
-	// originalString := "This is my name"
-	var compressedBuffer bytes.Buffer
-	gw := gzip.NewWriter(&compressedBuffer)
-	_, err := gw.Write([]byte(responseString))
-	if err != nil {
-		logger.Error(Emoji+"failed to compress the response body", zap.Error(err))
-		return
-	}
-	err = gw.Close()
-	if err != nil {
-		logger.Error(Emoji+"failed to close the gzip writer", zap.Error(err))
-		return
-	}
-	// fmt.Println("This is the compressed buffer:", compressedBuffer.Bytes())
-
-	// gr, err := gzip.NewReader(&compressedBuffer)
+	//Remove the content-encoded header
+	// resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader([]byte(responseString))), nil)
 	// if err != nil {
-	// 	logger.Error(Emoji+"failed to create a gzip reader", zap.Error(err))
+	// 	logger.Error(Emoji+"failed to parse the http response message", zap.Error(err))
 	// 	return
 	// }
-	// defer gr.Close()
-	// var decompressedBuffer bytes.Buffer
-	// _, err = io.Copy(&decompressedBuffer, gr)
-	// if err != nil {
-	// 	logger.Error(Emoji+"failed to decompress the response body", zap.Error(err))
-	// 	return
-	// }
-	// fmt.Println("This is the decompressed buffer:", decompressedBuffer.String())
-	_, err = clienConn.Write(compressedBuffer.Bytes())
+	// resp.Header.Del("Content-Encoding")
+	_, err := clienConn.Write([]byte(responseString))
 	if err != nil {
 		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
 		return
@@ -210,7 +189,6 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		logger.Error(Emoji+"failed to parse the http response message", zap.Error(err))
 		return nil
 	}
-	fmt.Println("This is the resp headers:", resp.Header)
 	var respBody []byte
 	if resp.Body != nil { // Read
 		if resp.Header.Get("Content-Encoding") == "gzip" {
@@ -225,7 +203,6 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 			logger.Error(Emoji+"failed to read the the http repsonse body", zap.Error(err))
 			return nil
 		}
-		fmt.Println("This is the respBody", respBody)
 	}
 	// store the request and responses as mocks
 	meta := map[string]string{
