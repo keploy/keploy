@@ -873,7 +873,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			// 	return
 			// }
 			// fmt.Println("into default desp mode, after passing")
-
 		}
 	}
 	// Closing the user client connection

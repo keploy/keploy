@@ -120,7 +120,6 @@ func encodeToBinary(packet interface{}, operation string, sequence int) ([]byte,
 }
 
 func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn) (string, MySQLPacketHeader, interface{}, error) {
-
 	data := packet.Payload
 	header := packet.Header
 

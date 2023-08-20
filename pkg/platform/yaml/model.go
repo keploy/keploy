@@ -3,9 +3,7 @@ package yaml
 import (
 	"errors"
 	"fmt"
-	"strings"
 
-	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml/spec"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -29,27 +27,6 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		Name:    tc.Name,
 	}
 	// mocks := []NetworkTrafficDoc{}
-	// find noisy fields
-	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
-	if err != nil {
-		msg := "error in flattening http response"
-		logger.Error(Emoji+msg, zap.Error(err))
-	}
-	// noise := httpSpec.Assertions["noise"]
-	noise := tc.Noise
-
-	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
-		// check if k is date
-		for _, v := range vals {
-			if pkg.IsTime(v) {
-				return true
-			}
-		}
-
-		// maybe we need to concatenate the values
-		return pkg.IsTime(strings.Join(vals, ", "))
-	})...)
-
 	switch tc.Kind {
 	case models.HTTP:
 		err := doc.Spec.Encode(spec.HttpSpec{
@@ -57,7 +34,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			Response: tc.HttpResp,
 			Created:  tc.Created,
 			Assertions: map[string][]string{
-				"noise": noise,
+				"noise": tc.Noise,
 			},
 		})
 		if err != nil {
@@ -210,7 +187,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 				PostgresResp: *mock.Spec.PostgresResp,
 			}
 		}
-		
+
 		err := yamlDoc.Spec.Encode(postgresSpec)
 		if err != nil {
 			logger.Error(Emoji+"failed to marshal postgres of external call into yaml", zap.Error(err))
@@ -326,7 +303,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				GenericRequests:  genericSpec.GenericRequests,
 				GenericResponses: genericSpec.GenericResponses,
 			}
-	
+
 		case models.Postgres:
 			postgresSpec := spec.PostgresSpec{}
 			err := m.Spec.Decode(&postgresSpec)
