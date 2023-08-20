@@ -1,15 +1,15 @@
 version: api.keploy.io/v1beta1
-name: report-1
+name: report-3
 status: FAILED
 success: 0
 failure: 3
 total: 3
 tests:
     - kind: Http
-      name: report-1
+      name: report-3
       status: FAILED
-      started: 1692510126
-      completed: 1692510126
+      started: 1692510248
+      completed: 1692510248
       test_case_path: /home/pranshu.linux/keploy/keploy
       mock_path: ""
       test_case_id: test-1
@@ -51,7 +51,7 @@ tests:
               actual:
                 key: Date
                 value:
-                    - Sun, 20 Aug 2023 05:42:06 GMT
+                    - Sun, 20 Aug 2023 05:44:08 GMT
             - normal: false
               expected:
                 key: Content-Length
@@ -74,13 +74,13 @@ tests:
             - normal: false
               type: PLAIN
               expected: '{"ts":1692508459764717022,"url":"{\"fact\":\"A cat has the ability to rotate their ears 180 degrees,with the help of 32 muscles that they use to control them.\",\"length\":113}"}'
-              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692510126529794657,"url":""}'
+              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692510248573939321,"url":""}'
         dep_result: []
     - kind: Http
-      name: report-1
+      name: report-3
       status: FAILED
-      started: 1692510126
-      completed: 1692510126
+      started: 1692510248
+      completed: 1692510248
       test_case_path: /home/pranshu.linux/keploy/keploy
       mock_path: ""
       test_case_id: test-2
@@ -114,6 +114,15 @@ tests:
             expected: 200
             actual: 400
         headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Sun, 20 Aug 2023 05:14:27 GMT
+              actual:
+                key: Date
+                value:
+                    - Sun, 20 Aug 2023 05:44:08 GMT
             - normal: false
               expected:
                 key: Content-Length
@@ -132,26 +141,17 @@ tests:
                 key: Content-Type
                 value:
                     - application/json; charset=utf-8
-            - normal: true
-              expected:
-                key: Date
-                value:
-                    - Sun, 20 Aug 2023 05:14:27 GMT
-              actual:
-                key: Date
-                value:
-                    - Sun, 20 Aug 2023 05:42:06 GMT
         body_result:
             - normal: false
               type: PLAIN
               expected: '{"ts":1692508467417100920,"url":"{\"fact\":\"A cat''s normal pulse is 140-240 beats per minute, with an average of 195.\",\"length\":73}"}'
-              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692510126562664515,"url":""}'
+              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692510248594943776,"url":""}'
         dep_result: []
     - kind: Http
-      name: report-1
+      name: report-3
       status: FAILED
-      started: 1692510126
-      completed: 1692510126
+      started: 1692510248
+      completed: 1692510248
       test_case_path: /home/pranshu.linux/keploy/keploy
       mock_path: ""
       test_case_id: test-3
@@ -211,10 +211,10 @@ tests:
               actual:
                 key: Date
                 value:
-                    - Sun, 20 Aug 2023 05:42:06 GMT
+                    - Sun, 20 Aug 2023 05:44:08 GMT
         body_result:
             - normal: false
               type: PLAIN
               expected: '{"ts":1692508478011398704,"url":"{\"fact\":\"Cats can judge within 3 inches the precise location of a sound being made 1 yard away.\",\"length\":86}"}'
-              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692510126570153788,"url":""}'
+              actual: '{"error":"failed to read http response. error: gzip: invalid header"}{"ts":1692510248602534089,"url":""}'
         dep_result: []

@@ -226,11 +226,11 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		_, bestMatch = Fuzzymatch(tcsMocks, requestBuffer, h)
 		}
 
-	findIndex := h.GetTcsMocks()
-	var getMock int
-	for idx, mock := range findIndex {
+	tcsMocks= h.GetTcsMocks()
+	var bestMatchIndex int
+	for idx, mock := range tcsMocks {
 		if mock.Spec.HttpReq.Body == bestMatch {
-			getMock = idx
+			bestMatchIndex = idx
 		}
 	}
 	if h.GetDepsSize() == 0 {
@@ -245,7 +245,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	// 	return
 	// }
 	// httpSpec := deps[0]
-	httpSpec := h.FetchDep(getMock)
+	httpSpec := h.FetchDep(bestMatchIndex)
 	// fmt.Println("http mock in test: ", httpSpec)
 
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", httpSpec.Spec.HttpReq.ProtoMajor, httpSpec.Spec.HttpReq.ProtoMinor, httpSpec.Spec.HttpResp.StatusCode, http.StatusText(int(httpSpec.Spec.HttpResp.StatusCode)))

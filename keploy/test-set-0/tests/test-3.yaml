@@ -1,6 +1,6 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-1
+name: test-3
 spec:
     metadata: {}
     req:
@@ -17,10 +17,10 @@ spec:
     resp:
         status_code: 200
         header:
-            Content-Length: "179"
+            Content-Length: "150"
             Content-Type: application/json; charset=utf-8
-            Date: Fri, 18 Aug 2023 11:16:54 GMT
-        body: '{"ts":1692357414436196214,"url":"{\"fact\":\"Grown cats have 30 teeth. Kittens have about 26 temporary teeth, which they lose when they are about 6 months old.\",\"length\":114}"}'
+            Date: Sun, 20 Aug 2023 05:14:38 GMT
+        body: '{"ts":1692508478011398704,"url":"{\"fact\":\"Cats can judge within 3 inches the precise location of a sound being made 1 yard away.\",\"length\":86}"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -29,4 +29,4 @@ spec:
     assertions:
         noise:
             - header.Date
-    created: 1692357414
+    created: 1692508478

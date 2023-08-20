@@ -1,0 +1,128 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: mocks
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Sun, 20 Aug 2023 05:14:19 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6IjMxc2dwV3pkZ25BYmUrTWplYzdpRHc9PSIsInZhbHVlIjoiYTEyb2FyMitUTDFScDhqbjFlbWpTa0FDcGhrd3BlUXVKVHF3a3Arbkt0OWo4UzNYMitwVkNsbHJPc2w1eG0yT0VheGZ0VE5xeU1RQTBHcFdaWm1Qdk9tUnN5dW93ZHlHMlVzajNOZ2gzTk5BMVhLQUg5Rk5qK25vN3hDcGRNU24iLCJtYWMiOiI1YjYwOTJhNmFlM2UyMjdiYWIwNDJiZmE0NDQwYWI0Y2NjMGZkODJkN2ZlOGM5NjRiMGU1MzZkYzY2MWUwNGVjIiwidGFnIjoiIn0%3D; expires=Sun, 20-Aug-2023 07:14:19 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6ImpUdis3OGQvOC9sSXBZMFUrL2QwU0E9PSIsInZhbHVlIjoiRGM2TWI0YU5aVWpaMkExLzlvL243SkZsZzRpMjhPd2pTT3ViNFVIeVJQbi9jQ0pydFJFMXRhb2lybzUwd3dSWUNxTEYrNW5WajBnY1ZwRStqUGF4WFFIbWN3OXU1UGluMkRFcldRWnBXLzFVeFhya3l4bW4vR0E5Mmc5bEtvNSsiLCJtYWMiOiIxMTM3ZGFkNmNkODUyYmY3NjMwYWZlOWNhNzVlZTg5NTU1YmRmMTUwNTk5OTU4MDljZGE2YjA4Y2E4MDY1NzcyIiwidGFnIjoiIn0%3D; expires=Sun, 20-Aug-2023 07:14:19 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "99"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"A cat has the ability to rotate their ears 180 degrees,with the help of 32 muscles that they use to control them.","length":113}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1692508459
+---
+version: api.keploy.io/v1beta2
+kind: Http
+name: mocks
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Sun, 20 Aug 2023 05:14:27 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6Ik5qL3pPaVF0YWNydHVkenVkNG5oZ2c9PSIsInZhbHVlIjoiNWpkOFJDMjdxZUFic09vUTZZa2gvZmNydXZockJ1MDM3elloazZ0M1FWZ0RjV25RTzQxTmt6bDV4OUN4MVhEdTNJRFpmY2s1b2FJd0ZXbWRwNWRRRkVJK216U3B6N21tYk1VcDJrSnlBNng3Tloza2xhK1NKOXdDTjhmTE9NOGQiLCJtYWMiOiIyOGFkNDQ2OGJkYzQ3OGMyYWU2MzIyMDAwYTA3N2YyZTU4YzUzY2U4NjJkMDJjNDg0MDI3M2YyZjQzMWQ3ZmQyIiwidGFnIjoiIn0%3D; expires=Sun, 20-Aug-2023 07:14:27 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6InpQY3Y2d20rbWExcUZvL0VqamdUUWc9PSIsInZhbHVlIjoianFoS0VPYStJdm5NVG9maStoeTRTaVZIQmxHdDNQQmdFa0NpYUVIcXlvTTBJaGVDVUQyREtuVElMMnZmUFNhT1lWbTIvSzlJVHN1TDNsNkJBcFlZYkYrd3V0TERWb2xuVzk2ZzRVb1dzYmtWeTJ1RXlCcmxjSDRGVktTZUJ5bUciLCJtYWMiOiJkZTkxNTYwYzJkNzA4Y2UzMjQ2MTU4YjE0NzQ1MTJhYTMzYzVkNWM5NTUzMmI0ZTMwNjZhODhlMDM2Y2U5NmQyIiwidGFnIjoiIn0%3D; expires=Sun, 20-Aug-2023 07:14:27 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "98"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"A cat''s normal pulse is 140-240 beats per minute, with an average of 195.","length":73}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1692508467
+---
+version: api.keploy.io/v1beta2
+kind: Http
+name: mocks
+spec:
+    metadata:
+        name: Http
+        operation: GET
+        type: HTTP_CLIENT
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: /fact
+        header:
+            Accept-Encoding: gzip
+            User-Agent: Go-http-client/1.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Access-Control-Allow-Origin: '*'
+            Cache-Control: no-cache, private
+            Connection: keep-alive
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Sun, 20 Aug 2023 05:14:37 GMT
+            Server: nginx
+            Set-Cookie: XSRF-TOKEN=eyJpdiI6IlRNZUVWTUttRGZFVXVvTXhOTDFqZ3c9PSIsInZhbHVlIjoiV2J4ekVqMnhOSG56RFluWFl4YXVPZWpOempvYUxOK0IxSGNnNDZRWlZOMHkvZDZQRmxrano4bGE3d0MxQzFncmkwdVBMa0U0MTJ2NnlCKzVraG9LWXAzazdjL3V6WURzazYwVEFrQWZ1OVRWYkpSYng4QVI0T1RUNmcxU2EwMi8iLCJtYWMiOiJkMDZjMjUyY2YzZjY4YjY3ZjU3NTA2NTc4M2I3NGY4MmEwODRmZTBhOWNkZjE0YWI1MDQzNTk5MDZhMjRkOTM1IiwidGFnIjoiIn0%3D; expires=Sun, 20-Aug-2023 07:14:37 GMT; path=/; samesite=lax,catfacts_session=eyJpdiI6Ilc2aWZrcUE5RkZJU0dHNzVlRitZUVE9PSIsInZhbHVlIjoiUDdWazE0d3ZwdzBTSE9PZUVUVFhtc003eDdVMktrV1k3cHg2c3ZmTFVNV0d1Z1NGc2s3UHBlUE95UTBlU3dkZWUxdCtaeXZpR0djL3lDem5vcVBKS1pyYW5QRzVQR0FNU04rUmpFZ2ZsR1JWeU1BK3FPM3B5RXhSaHJ2dFloRHMiLCJtYWMiOiI1ZjliY2RlNTA2ZjUyZjAyZWFiNzFiYmJkNTJjODAxZTM2ZDEzN2UwNDA5YTE0ZmVkZjYwYTc0ZDAyZDk1YWJhIiwidGFnIjoiIn0%3D; expires=Sun, 20-Aug-2023 07:14:37 GMT; path=/; httponly; samesite=lax
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Ratelimit-Limit: "100"
+            X-Ratelimit-Remaining: "97"
+            X-Xss-Protection: 1; mode=block
+        body: '{"fact":"Cats can judge within 3 inches the precise location of a sound being made 1 yard away.","length":86}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    created: 1692508478

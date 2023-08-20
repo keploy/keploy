@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/wiki
+        header:
+            Accept: '*/*'
+            Host: localhost:8081
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "178"
+            Content-Type: application/json; charset=utf-8
+            Date: Sun, 20 Aug 2023 05:14:19 GMT
+        body: '{"ts":1692508459764717022,"url":"{\"fact\":\"A cat has the ability to rotate their ears 180 degrees,with the help of 32 muscles that they use to control them.\",\"length\":113}"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise:
+            - header.Date
+    created: 1692508460
