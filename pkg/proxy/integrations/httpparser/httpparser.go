@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/pkg"
@@ -20,7 +22,6 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type Response struct {
-
 }
 
 // IsOutgoingHTTP function determines if the outgoing network call is HTTP by comparing the
@@ -77,9 +78,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	for key, values := range header {
 		for _, value := range values {
 			if value != "gzip" {
-			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-			headers += headerLine
-			fmt.Println("These are the headers", headers)
+				headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+				headers += headerLine
 			}
 		}
 	}
@@ -114,57 +114,173 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 	var respBuffer []byte
 	var finalRespBuffer []byte
 	var finalRequestBuffer []byte
-	finalRequestBuffer = append(finalRequestBuffer, requestBuffer...)
 	var err error
 	// write the request message to the actual destination server
-
 	_, err = destConn.Write(requestBuffer)
 	if err != nil {
 		logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
 		return nil
 	}
-	//Handle chunked requests
-	for {
-		clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		requestBufferChunked, err := util.ReadBytes(clientConn)
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout(){
-				break
-			}else{
-				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-				return nil
-			}
-		}
-		finalRequestBuffer = append(finalRequestBuffer, requestBufferChunked...)
-		_, err = destConn.Write(requestBufferChunked)
-		if err != nil{
-			logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
-			return nil
-		}
-	}
-	for {
-		destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		// read the response from the actual server
-		respBuffer, err= util.ReadBytes(destConn)
-		//Check if the deadline has been reached
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout(){
-				break
-			}else{
-				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-				return nil
-			}
-		}
-		finalRespBuffer = append(finalRespBuffer, respBuffer...)
-		if len(respBuffer) == 0 {
+	finalRequestBuffer = append(finalRequestBuffer, requestBuffer...)
+	lines := strings.Split(string(requestBuffer), "\n")
+	var contentLengthHeader string
+	var transferEncodingHeader string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Content-Length:") {
+			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			break
+		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
+			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
 			break
 		}
-		// write the response message to the user client
-		_, err = clientConn.Write(respBuffer)
+	}
+	//Handle chunked requests
+	if contentLengthHeader != ""{
+		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
 			return nil
 		}
+		for contentLength > 0 {
+			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			requestBufferChunked, err := util.ReadBytes(clientConn)
+			if err != nil {
+				if err == io.EOF {
+					logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
+					break
+				}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
+					break
+				} else {
+					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					return nil
+				}
+			}
+			finalRequestBuffer = append(finalRequestBuffer, requestBufferChunked...)
+			contentLength -= len(requestBufferChunked)
+			_, err = destConn.Write(requestBufferChunked)
+			if err != nil {
+				logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+				return nil
+			}
+		}
+	}else if transferEncodingHeader != ""{
+		for{
+			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			requestBufferChunked, err := util.ReadBytes(clientConn)
+			if err != nil {
+				if err == io.EOF {
+					logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
+					break
+				}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					break
+				} else {
+					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					return nil
+				}
+			}
+			finalRequestBuffer = append(finalRequestBuffer, requestBufferChunked...)
+			_, err = destConn.Write(requestBufferChunked)
+			if err != nil {
+				logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+				return nil
+			}
+			if string(requestBufferChunked) == "0\r\n\r\n" {
+				break
+			}
+		}
+	}
+
+	// read the response from the actual server
+	respBuffer, err = util.ReadBytes(destConn)
+	if err != nil {
+		logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+		return nil
+	}
+	// write the response message to the user client
+	_, err = clientConn.Write(respBuffer)
+	if err != nil {
+		logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+		return nil
+	}
+	finalRespBuffer = append(finalRespBuffer, respBuffer...)
+	//Getting the content-length or the transfer-encoding header
+	lines = strings.Split(string(respBuffer), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Content-Length:") {
+			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			break
+		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
+			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
+			break
+		}
+	}
+	if contentLengthHeader != "" {
+		contentLength, err := strconv.Atoi(contentLengthHeader)
+		if err != nil {
+			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+			return nil
+		}
+		for contentLength > 0 {
+			//Set deadline of 5 seconds
+			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			respBuffer, err = util.ReadBytes(destConn)
+			if err != nil {
+				//Check if the connection closed.
+				if err == io.EOF {
+					logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
+					break
+				}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
+					break
+				} else {
+					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					return nil
+				}
+			}
+			finalRespBuffer = append(finalRespBuffer, respBuffer...)
+			contentLength -= len(respBuffer)
+			// write the response message to the user client
+			_, err = clientConn.Write(respBuffer)
+			if err != nil {
+				logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+				return nil
+			}
+		}
+	}else if(transferEncodingHeader != ""){
+		//If the transfer-encoding header is chunked
+		if transferEncodingHeader == "chunked" {
+			for {
+				//Set deadline of 5 seconds
+				destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				respBuffer, err = util.ReadBytes(destConn)
+				if err != nil {
+					//Check if the connection closed.
+					if err == io.EOF {
+						logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
+						break
+					}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						//Check if the deadline is reached.
+						logger.Info(Emoji+"Stopped getting buffer from the destination server")
+						break
+					} else {
+						logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+						return nil
+					}
+				}
+				finalRespBuffer = append(finalRespBuffer, respBuffer...)
+				// write the response message to the user client
+				_, err = clientConn.Write(respBuffer)
+				if err != nil {
+					logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+					return nil
+				}
+				if string(respBuffer) == "0\r\n\r\n" {
+					break
+				}
+			}
+		}
+
 	}
 	var req *http.Request
 	// converts the request message buffer to http request
