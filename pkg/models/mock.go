@@ -22,6 +22,9 @@ type MockSpec struct {
 	// MongoResponse       interface{}     `json:"MongoResponse,omitempty"`
 	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
 	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
+	//for MySql
+	MySqlRequests  []MySQLRequest  `json:"MySqlRequests,omitempty"`
+	MySqlResponses []MySQLResponse `json:"MySqlResponses,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings

@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -687,36 +688,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
 
-	reader := bufio.NewReader(conn)
-	initialData := make([]byte, 5)
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
-	isTLS := isTLSHandshake(testBuffer)
-	multiReader := io.MultiReader(reader, conn)
-	conn = &CustomConn{
-		Conn: conn,
-		r:    multiReader,
-	}
-	if isTLS {
-		conn, err = handleTLSConnection(conn)
-		if err != nil {
-			ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
-			return
-		}
-	}
 	connEstablishedAt := time.Now()
 	rand.Seed(time.Now().UnixNano())
 	clientConnId := rand.Intn(101)
-	buffer, err := util.ReadBytes(conn)
-	ps.logger.Debug(Emoji + fmt.Sprintf("the clientConnId: %v", clientConnId))
-	readRequestDelay := time.Since(connEstablishedAt)
-	if err != nil {
-		ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
 
 	// dst stores the connection with actual destination for the outgoing network call
 	var dst net.Conn
@@ -726,24 +700,24 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	} else if destInfo.IpVersion == 6 {
 		actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
 	}
-
-	//Dialing for tls connection
-	destConnId := 0
-	if models.GetMode() != models.MODE_TEST {
-		destConnId = rand.Intn(101)
-		if isTLS {
-			ps.logger.Debug(Emoji, zap.Any("isTLS", isTLS))
-			config := &tls.Config{
-				InsecureSkipVerify: false,
-				ServerName:         destinationUrl,
-			}
-			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-			if err != nil {
-				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-				conn.Close()
-				return
-			}
-		} else {
+	//checking for the destination port of mysql
+	if destInfo.DestPort == 3306 {
+		destConnId := 0
+		if models.GetMode() != models.MODE_TEST {
+			destConnId = rand.Intn(101)
+			// if isTLS {
+			// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
+			// 	config := &tls.Config{
+			// 		InsecureSkipVerify: false,
+			// 		ServerName:         destinationUrl,
+			// 	}
+			// 	dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			// 	if err != nil {
+			// 		ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			// 		conn.Close()
+			// 		return
+			// 	}
+			// } else {
 			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
@@ -751,47 +725,102 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 				return
 				// }
 			}
+			// }
 		}
-	}
+		readRequestDelay := time.Since(connEstablishedAt)
 
-	switch {
-	case httpparser.IsOutgoingHTTP(buffer):
-		// capture the otutgoing http text messages]
-		// if models.GetMode() == models.MODE_RECORD {
-		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		mysqlparser.ProcessOutgoingMySql(clientConnId, destConnId, []byte{}, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
+
+	} else {
+		reader := bufio.NewReader(conn)
+		// initialData := make([]byte, 5)
+		// testBuffer, err := reader.Peek(len(initialData))
+		// if err != nil {
+		// 	ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+		// 	return
 		// }
-		// var deps []*models.Mock = ps.hook.GetDeps()
-		// fmt.Println("before http egress call, deps array: ", deps)
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
-		// fmt.Println("after http egress call, deps array: ", deps)
-
-		// ps.hook.SetDeps(deps)
-	case mongoparser.IsOutgoingMongo(buffer):
-		// var deps []*models.Mock = ps.hook.GetDeps()
-		// fmt.Println("before mongo egress call, deps array: ", deps)
-		ps.logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
-		// fmt.Println("after mongo egress call, deps array: ", deps)
-
-		// ps.hook.SetDeps(deps)
-
-		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-		// for _, v := range deps {
-		// 	ps.hook.AppendDeps(v)
+		// isTLS := isTLSHandshake(testBuffer)
+		conn = &Conn{r: *reader, Conn: conn}
+		// if isTLS {
+		// 	conn, err = handleTLSConnection(conn)
+		// 	if err != nil {
+		// 		ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
+		// 		return
+		// 	}
 		// }
-	default:
-		// fmt.Println("into default desp mode, before passing")
-		err = callNext(buffer, conn, dst, ps.logger)
+		buffer, err := util.ReadBytes(conn)
+		ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
+		readRequestDelay := time.Since(connEstablishedAt)
 		if err != nil {
-			ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
-			conn.Close()
+			ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 			return
 		}
-		// fmt.Println("into default desp mode, after passing")
 
+		//Dialing for tls connection
+		destConnId := 0
+		if models.GetMode() != models.MODE_TEST {
+			destConnId = rand.Intn(101)
+			// if isTLS {
+			// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
+			// 	config := &tls.Config{
+			// 		InsecureSkipVerify: false,
+			// 		ServerName:         destinationUrl,
+			// 	}
+			// 	dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			// 	if err != nil {
+			// 		ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			// 		conn.Close()
+			// 		return
+			// 	}
+			// } else {
+			dst, err = net.Dial("tcp", actualAddress)
+			if err != nil {
+				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+				// }
+			}
+			// }
+		}
+
+		switch {
+		case httpparser.IsOutgoingHTTP(buffer):
+			// capture the otutgoing http text messages]
+			// if models.GetMode() == models.MODE_RECORD {
+			// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+			// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+			// }
+			// var deps []*models.Mock = ps.hook.GetDeps()
+			// fmt.Println("before http egress call, deps array: ", deps)
+			httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
+			// fmt.Println("after http egress call, deps array: ", deps)
+
+			// ps.hook.SetDeps(deps)
+		case mongoparser.IsOutgoingMongo(buffer):
+			// var deps []*models.Mock = ps.hook.GetDeps()
+			// fmt.Println("before mongo egress call, deps array: ", deps)
+			ps.logger.Debug("into mongo parsing mode")
+			mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
+			// fmt.Println("after mongo egress call, deps array: ", deps)
+
+			// ps.hook.SetDeps(deps)
+
+			// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+			// for _, v := range deps {
+			// 	ps.hook.AppendDeps(v)
+			// }
+		default:
+			// fmt.Println("into default desp mode, before passing")
+			err = callNext(buffer, conn, dst, ps.logger)
+			if err != nil {
+				ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
+				conn.Close()
+				return
+			}
+			// fmt.Println("into default desp mode, after passing")
+
+		}
 	}
-
 	// Closing the user client connection
 	conn.Close()
 	duration := time.Since(start)

@@ -1,0 +1,236 @@
+version: api.keploy.io/v1beta2
+kind: SQL
+name: mocks
+spec:
+    metadata:
+        operation: MySQLQuery
+        responseOperation: MySQLOK
+    requests:
+        - header:
+            packet_length: 193
+            packet_number: 0
+            packet_type: MySQLQuery
+          message:
+            command: 3
+            query: |-
+                CREATE TABLE IF NOT EXISTS url_map (
+                		id char(8) NOT NULL,
+                		redirect_url varchar(150) NOT NULL UNIQUE,
+                		created_at timestamp NOT NULL,
+                		updated_at timestamp NOT NULL,
+                		PRIMARY KEY(id)
+                	);
+    responses:
+        - header:
+            packet_length: 7
+            packet_number: 0
+            packet_type: MySQLOK
+          message:
+            affected_rows: 0
+            last_insert_id: 0
+            status_flags: 512
+            warnings: 256
+            info: ""
+    created: 1692524139
+---
+version: api.keploy.io/v1beta2
+kind: SQL
+name: mocks
+spec:
+    metadata:
+        operation: COM_STMT_PREPARE
+        responseOperation: COM_STMT_PREPARE_OK
+    requests:
+        - header:
+            packet_length: 48
+            packet_number: 0
+            packet_type: COM_STMT_PREPARE
+          message:
+            query: "\nSELECT * \nFROM url_map\nWHERE id = ?\n"
+    responses:
+        - header:
+            packet_length: 12
+            packet_number: 0
+            packet_type: COM_STMT_PREPARE_OK
+          message:
+            status: 0
+            statement_id: 1
+            num_columns: 4
+            num_params: 1
+            warning_count: 0
+            column_definitions:
+                - packet_header:
+                    packet_length: 51
+                    packet_sequence_id: 4
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: id
+                  org_name: id
+                  next_length: 0
+                  character_set: 45
+                  column_length: 32
+                  column_type: 254
+                  flags: 20483
+                  decimals: 0
+                  string: ""
+                - packet_header:
+                    packet_length: 71
+                    packet_sequence_id: 5
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: redirect_url
+                  org_name: redirect_url
+                  next_length: 0
+                  character_set: 45
+                  column_length: 600
+                  column_type: 253
+                  flags: 20485
+                  decimals: 0
+                  string: ""
+                - packet_header:
+                    packet_length: 67
+                    packet_sequence_id: 6
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: created_at
+                  org_name: created_at
+                  next_length: 0
+                  character_set: 63
+                  column_length: 19
+                  column_type: 7
+                  flags: 4225
+                  decimals: 0
+                  string: ""
+                - packet_header:
+                    packet_length: 67
+                    packet_sequence_id: 7
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: updated_at
+                  org_name: updated_at
+                  next_length: 0
+                  character_set: 63
+                  column_length: 19
+                  column_type: 7
+                  flags: 4225
+                  decimals: 0
+                  string: ""
+            param_definitions:
+                - packet_header:
+                    packet_length: 23
+                    packet_sequence_id: 2
+                  catalog: def
+                  schema: ""
+                  table: ""
+                  org_table: ""
+                  name: '?'
+                  org_name: ""
+                  next_length: 0
+                  character_set: 45
+                  column_length: 65532
+                  column_type: 253
+                  flags: 0
+                  decimals: 31
+                  string: ""
+    created: 1692524139
+---
+version: api.keploy.io/v1beta2
+kind: SQL
+name: mocks
+spec:
+    metadata:
+        operation: COM_STMT_EXECUTE
+        responseOperation: RESULT_SET_PACKET
+    requests:
+        - header:
+            packet_length: 23
+            packet_number: 0
+            packet_type: COM_STMT_EXECUTE
+          message:
+            statement_id: 1
+            flags: 0
+            iteration_count: 1
+            null_bitmap: []
+            param_count: 256
+            parameters: []
+    responses:
+        - header:
+            packet_length: 1
+            packet_number: 0
+            packet_type: RESULT_SET_PACKET
+          message:
+            columns:
+                - packet_header:
+                    packet_length: 51
+                    packet_sequence_id: 2
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: id
+                  org_name: id
+                  next_length: 0
+                  character_set: 45
+                  column_length: 32
+                  column_type: 254
+                  flags: 20483
+                  decimals: 0
+                  string: ""
+                - packet_header:
+                    packet_length: 71
+                    packet_sequence_id: 3
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: redirect_url
+                  org_name: redirect_url
+                  next_length: 0
+                  character_set: 45
+                  column_length: 600
+                  column_type: 253
+                  flags: 20485
+                  decimals: 0
+                  string: ""
+                - packet_header:
+                    packet_length: 67
+                    packet_sequence_id: 4
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: created_at
+                  org_name: created_at
+                  next_length: 0
+                  character_set: 63
+                  column_length: 19
+                  column_type: 7
+                  flags: 4225
+                  decimals: 0
+                  string: ""
+                - packet_header:
+                    packet_length: 67
+                    packet_sequence_id: 5
+                  catalog: def
+                  schema: shorturl_db
+                  table: url_map
+                  org_table: url_map
+                  name: updated_at
+                  org_name: updated_at
+                  next_length: 0
+                  character_set: 63
+                  column_length: 19
+                  column_type: 7
+                  flags: 4225
+                  decimals: 0
+                  string: ""
+            rows: []
+    created: 1692524139
