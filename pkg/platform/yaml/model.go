@@ -57,7 +57,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			Response: tc.HttpResp,
 			Created:  tc.Created,
 			Assertions: map[string][]string{
-				"noise": tc.Noise,
+				"noise": noise,
 			},
 		})
 		if err != nil {
