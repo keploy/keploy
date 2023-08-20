@@ -3,7 +3,9 @@ package yaml
 import (
 	"errors"
 	"fmt"
+	"strings"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml/spec"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -27,6 +29,27 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		Name:    tc.Name,
 	}
 	// mocks := []NetworkTrafficDoc{}
+	// find noisy fields
+	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
+	if err != nil {
+		msg := "error in flattening http response"
+		logger.Error(Emoji+msg, zap.Error(err))
+	}
+	// noise := httpSpec.Assertions["noise"]
+	noise := tc.Noise
+
+	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
+		// check if k is date
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+
+		// maybe we need to concatenate the values
+		return pkg.IsTime(strings.Join(vals, ", "))
+	})...)
+
 	switch tc.Kind {
 	case models.HTTP:
 		err := doc.Spec.Encode(spec.HttpSpec{
