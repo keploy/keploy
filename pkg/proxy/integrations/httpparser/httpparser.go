@@ -77,27 +77,26 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	var headers string
 	for key, values := range header {
 		for _, value := range values {
-			if value != "gzip" {
-				headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-				headers += headerLine
-			}
+			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+			headers += headerLine
 		}
 	}
 
-	// Generate the response body
-	// bodyBytes, _ := ioutil.ReadAll(bytes.NewReader(httpSpec.Response.BodyData))
-	// body := string(bodyBytes)
 	body := httpSpec.Spec.HttpResp.Body
-	// Concatenate the status line, headers, and body
-	responseString := statusLine + headers + "\r\n" + body
-	//Remove the content-encoded header
-	// resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader([]byte(responseString))), nil)
-	// if err != nil {
-	// 	logger.Error(Emoji+"failed to parse the http response message", zap.Error(err))
-	// 	return
-	// }
-	// resp.Header.Del("Content-Encoding")
-	_, err := clienConn.Write([]byte(responseString))
+	var compressedBuffer bytes.Buffer
+	gw := gzip.NewWriter(&compressedBuffer)
+	_, err := gw.Write([]byte(body))
+	if err != nil {
+		logger.Error(Emoji+"failed to compress the response body", zap.Error(err))
+		return
+	}
+	err = gw.Close()
+	if err != nil {
+		logger.Error(Emoji+"failed to close the gzip writer", zap.Error(err))
+		return
+	}
+	responseString := statusLine + headers + "\r\n" + compressedBuffer.String()
+	_, err = clienConn.Write([]byte(responseString))
 	if err != nil {
 		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
 		return
@@ -135,7 +134,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 		}
 	}
 	//Handle chunked requests
-	if contentLengthHeader != ""{
+	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
 			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
@@ -148,7 +147,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 				if err == io.EOF {
 					logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
 					break
-				}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
 					break
 				} else {
@@ -164,15 +163,15 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 				return nil
 			}
 		}
-	}else if transferEncodingHeader != ""{
-		for{
+	} else if transferEncodingHeader != "" {
+		for {
 			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			requestBufferChunked, err := util.ReadBytes(clientConn)
 			if err != nil {
 				if err == io.EOF {
 					logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
 					break
-				}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					break
 				} else {
 					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
@@ -230,7 +229,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 				if err == io.EOF {
 					logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
 					break
-				}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
 					break
 				} else {
@@ -247,7 +246,7 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 				return nil
 			}
 		}
-	}else if(transferEncodingHeader != ""){
+	} else if transferEncodingHeader != "" {
 		//If the transfer-encoding header is chunked
 		if transferEncodingHeader == "chunked" {
 			for {
@@ -259,9 +258,9 @@ func encodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, log
 					if err == io.EOF {
 						logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
 						break
-					}else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 						//Check if the deadline is reached.
-						logger.Info(Emoji+"Stopped getting buffer from the destination server")
+						logger.Info(Emoji + "Stopped getting buffer from the destination server")
 						break
 					} else {
 						logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
