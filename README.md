@@ -96,16 +96,8 @@ Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c0001445
 
 ### Creating Alias
 
-We need to create a custom network for Keploy since we are using the Docker.  
-
-```zsh
-docker network create keploy-network
-```
-
-Once the Custom Network is created, now we have to create the alias for the Keploy.
-
 ```shell
-alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 ```
 
 ### Capture the Testcases
@@ -115,7 +107,7 @@ Now, we will use the newly created Alias `keploy` to record the testcases. Run t
 > *Note* :- add the `container_name` under your application service  inside the 'docker-compose.yaml'if you are running via `docker-compose up`.
 
 ```shell
-keploy record -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<contianerName>"
+keploy record -c "Docker_CMD_to_run_user_container" --containerName "<contianerName>"
 ```
 
 Make API Calls using [Hoppscotch](https://hoppscotch.io/), [Postman](https://www.postman.com/) or cURL command.
@@ -127,7 +119,7 @@ Keploy will capture the API calls you had made to generate the test-suites which
 Now, we will use the newly created Alias `keployV2` to test the testcases.Run the following command in root directory of the you're application.
 
 ```shell
-keploy test -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<contianerName>" --delay 20
+keploy test -c "Docker_CMD_to_run_user_container" --containerName "<contianerName>" --delay 20
 ```
 
 > **Docker_CMD_to_run_user_container** is the docker command to run the application.
