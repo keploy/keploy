@@ -94,7 +94,10 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	}
 
 	//parse request url
-	reqURL, _ := url.Parse(req.URL.String())
+	reqURL, err := url.Parse(req.URL.String())
+	if err != nil {
+		logger.Error(Emoji+"failed to parse request url", zap.Error(err))
+	}
 
 	//check if req body is a json
 	isReqBodyJSON := isJSON(reqbody)
@@ -142,7 +145,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	}
 
 	if len(eligibleMock) == 0 {
-		logger.Error(Emoji + "Didn't match any mock")
+		logger.Error(Emoji + "Didn't match any prexisting http mock")
 		return
 	}
 
