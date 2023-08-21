@@ -18,6 +18,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err
 	}
+	
 	tester := r.Resolver.Tester
 
 	if tester == nil {
@@ -30,6 +31,16 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	testCasePath := r.Resolver.Path
 	testReportPath := r.Resolver.TestReportPath
 	delay := r.Resolver.Delay
+
+	// since we are not restarting the application again and again,
+	// so we don't want for the test to wait for the delay time everytime a new test runs.
+	if r.firstRequestDone {
+		delay = 1
+	}
+
+	if !r.Resolver.firstRequestDone {
+		r.firstRequestDone = true
+	}
 
 	testReportFS := r.Resolver.TestReportFS
 	if tester == nil {
