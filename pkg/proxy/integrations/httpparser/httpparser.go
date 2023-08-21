@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
+	"net/url"
 	"time"
 
 	"go.keploy.io/server/pkg"
@@ -34,7 +35,32 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 }
 
-func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func isJSON(body []byte) bool {
+	var js interface{}
+	return json.Unmarshal(body, &js) == nil
+}
+
+func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
+	if len(map1) != len(map2) {
+		return false
+	}
+
+	for key := range map1 {
+		if _, exists := map2[key]; !exists {
+			return false
+		}
+	}
+
+	for key := range map2 {
+		if _, exists := map1[key]; !exists {
+			return false
+		}
+	}
+
+	return true
+}
+
+func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(request,  clientConn,  destConn, logger))
@@ -48,212 +74,86 @@ func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks
 
 }
 
-// Handled chunked requests when content-length is given.
-func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
-	for contentLength > 0 {
-				clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		requestChunked, err := util.ReadBytes(clientConn)
+// decodeOutgoingHttp
+func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+	//Matching algorithmm
+	//Get the mocks
+	tcsMocks := h.GetTcsMocks()
+	var bestMatch string
+	//Parse the request buffer
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
+	if err != nil {
+		logger.Error(Emoji+"failed to parse the http request message", zap.Error(err))
+		return
+	}
+
+	reqbody, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		logger.Error(Emoji+"failed to read from request body", zap.Error(err))
+
+	}
+
+	//parse request url
+	reqURL, _ := url.Parse(req.URL.String())
+
+	//check if req body is a json
+	isReqBodyJSON := isJSON(reqbody)
+
+	var eligibleMock []*models.Mock
+
+	for _, mock := range tcsMocks {
+		isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
+
+		//the body of mock and request aren't of same type
+		if isMockBodyJSON != isReqBodyJSON {
+			continue
+		}
+
+		//parse request body url
+		parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
 		if err != nil {
-			if err == io.EOF {
-				logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
-				break
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
-				break
-			} else {
-				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-				return
-			}
+			logger.Error(Emoji+"failed to parse mock url", zap.Error(err))
+			continue
 		}
-		*finalReq = append(*finalReq, requestChunked...)
-		contentLength -= len(requestChunked)
-		_, err = destConn.Write(requestChunked)
-		if err != nil {
-			logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
-			return
-		}
-	}
-}
 
-// Handled chunked requests when transfer-encoding is given.
-func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
-	if transferEncodingHeader == "chunked" {
-		for {
-						clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			requestChunked, err := util.ReadBytes(clientConn)
-			if err != nil {
-				if err == io.EOF {
-					logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
-					break
-				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					break
-				} else {
-					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-					return
-				}
-			}
-			*finalReq = append(*finalReq, requestChunked...)
-			_, err = destConn.Write(requestChunked)
-			if err != nil {
-				logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
-				return
-			}
-			if string(requestChunked) == "0\r\n\r\n" {
-				break
-			}
+		//Check if the path matches
+		if parsedURL.Path != reqURL.Path {
+			//If it is not the same, continue
+			continue
 		}
-	}
-}
 
-// Handled chunked responses when content-length is given.
-func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
-	for contentLength > 0 {
-		//Set deadline of 5 seconds
-		destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		resp, err := util.ReadBytes(destConn)
-		if err != nil {
-			//Check if the connection closed.
-			if err == io.EOF {
-				logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
-				break
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
-				break
-			} else {
-				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-				return
-			}
+		//Check if the method matches
+		if mock.Spec.HttpReq.Method != models.Method(req.Method) {
+			//If it is not the same, continue
+			continue
 		}
-		*finalResp = append(*finalResp, resp...)
-		contentLength -= len(resp)
-		// write the response message to the user client
-		_, err = clientConn.Write(resp)
-		if err != nil {
-			logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
-			return
-		}
-	}
-}
 
-// Handled chunked responses when transfer-encoding is given.
-func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
-	//If the transfer-encoding header is chunked
-	if transferEncodingHeader == "chunked" {
-		for {
-						//Set deadline of 5 seconds
-			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			resp, err := util.ReadBytes(destConn)
-			if err != nil {
-				//Check if the connection closed.
-				if err == io.EOF {
-					logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
-					break
-				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					//Check if the deadline is reached.
-					logger.Info(Emoji + "Stopped getting buffer from the destination server")
-					break
-				} else {
-					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
-					return
-				}
-			}
-			*finalResp = append(*finalResp, resp...)
-			// write the response message to the user client
-			_, err = clientConn.Write(resp)
-			if err != nil {
-				logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
-				return
-			}
-			if string(resp) == "0\r\n\r\n" {
-				break
-			}
+		// Check if the header keys match
+		if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
+			// Different headers, so not a match
+			continue
 		}
-	}
-}
 
-func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, request []byte) {
-	lines := strings.Split(string(request), "\n")
-	var contentLengthHeader string
-	var transferEncodingHeader string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "Content-Length:") {
-			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-			break
-		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
-			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
-			break
+		if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
+			// Different query params, so not a match
+			continue
 		}
+		eligibleMock = append(eligibleMock, mock)
 	}
-	//Handle chunked requests
-	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
-		if err != nil {
-			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
-			return
-		}
-		//Get the length of the body in the request.
-		bodyLength := len(request) - strings.Index(string(request), "\r\n\r\n") - 4
-		contentLength -= bodyLength
-		if contentLength > 0 {
-			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
-		}
-	} else if transferEncodingHeader != "" {
-		chunkedRequest(finalReq, clientConn, destConn, logger, transferEncodingHeader)
-	}
-}
 
-func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, resp []byte) {
-		//Getting the content-length or the transfer-encoding header
-		var contentLengthHeader, transferEncodingHeader string
-		lines := strings.Split(string(resp), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "Content-Length:") {
-				contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-				break
-			} else if strings.HasPrefix(line, "Transfer-Encoding:") {
-				transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
-				break
-			}
+	if len(eligibleMock) == 0 {
+		logger.Error(Emoji + "Didn't match any mock")
+		return
+	}
+
+	_, bestMatch = util.Fuzzymatch(eligibleMock, requestBuffer, h)
+
+	var bestMatchIndex int
+	for idx, mock := range tcsMocks {
+		if mock.Spec.HttpReq.Body == bestMatch {
+			bestMatchIndex = idx
 		}
-		//Handle chunked responses
-		if contentLengthHeader != "" {
-			contentLength, err := strconv.Atoi(contentLengthHeader)
-			if err != nil {
-				logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
-				return
-			}
-			bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
-			contentLength -= bodyLength
-			if contentLength > 0 {
-				contentLengthResponse(finalResp, clientConn, destConn, logger, contentLength)
-			}
-		} else if transferEncodingHeader != "" {
-			chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
-		}
-}
-
-//Checks if the response is gzipped
-func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
-	bufReader := bufio.NewReader(check)
-	peekedBytes, err := bufReader.Peek(2)
-	if err != nil && err != io.EOF {
-		fmt.Println("Error peeking:", err)
-		return false, nil
 	}
-	if len(peekedBytes) < 2 {
-		return false, nil
-	}
-	if peekedBytes[0] == 0x1f && peekedBytes[1] == 0x8b {
-		return true, bufReader
-	} else {
-		return false, nil
-	}
-}
-
-//Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(request []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
-	// if len(deps) == 0 {
-
 	if h.GetDepsSize() == 0 {
 		// logger.Error("failed to mock the output for unrecorded outgoing http call")
 		return
@@ -298,17 +198,17 @@ func decodeOutgoingHttp(request []byte, clienConn, destConn net.Conn, h *hooks.H
 			return
 		}
 		responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
-	}else{
+	} else {
 		responseString = statusLine + headers + "\r\n" + body
 	}
-	_, err := clienConn.Write([]byte(responseString))
+	_, err = clienConn.Write([]byte(responseString))
 	if err != nil {
 		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
 		return
 	}
 	// pop the mocked output from the dependency queue
 	// deps = deps[1:]
-	h.PopFront()
+	h.PopIndex(bestMatchIndex)
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
