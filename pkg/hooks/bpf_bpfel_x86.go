@@ -82,6 +82,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetTcpV6Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
 	SyscallProbeRetWritev            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_writev"`
+	SyscallProbeEntrySocket          *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
@@ -217,6 +218,7 @@ type bpfPrograms struct {
 	SyscallProbeRetTcpV6Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.Program `ebpf:"syscall__probe_ret_write"`
 	SyscallProbeRetWritev            *ebpf.Program `ebpf:"syscall__probe_ret_writev"`
+	SyscallProbeEntrySocket          *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
 
 func (p *bpfPrograms) Close() error {
@@ -249,6 +251,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetTcpV6Connect,
 		p.SyscallProbeRetWrite,
 		p.SyscallProbeRetWritev,
+		p.SyscallProbeEntrySocket,
 	)
 }
 

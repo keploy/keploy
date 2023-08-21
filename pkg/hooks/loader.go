@@ -52,6 +52,7 @@ type Hook struct {
 
 	// ebpf objects and events
 	stopper  chan os.Signal
+	socket   link.Link
 	connect4 link.Link
 	bind     link.Link
 	gp4      link.Link
@@ -318,6 +319,8 @@ func (h *Hook) Stop(forceStop bool) {
 	h.StopUserApplication()
 
 	// closing all events
+	//other
+	h.socket.Close()
 	//egress
 	h.bind.Close()
 	h.udpp4.Close()
@@ -400,6 +403,14 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 			time.Sleep(1 * time.Second)
 		}
 	}()
+
+	// ----- used in case of wsl -----
+	socket, err := link.Kprobe("sys_socket", objs.SyscallProbeEntrySocket, nil)
+	if err != nil {
+		log.Fatalf(Emoji, "opening sys_socket kprobe: %s", err)
+	}
+	h.socket = socket
+
 	// ------------ For Egress -------------
 
 	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
