@@ -105,7 +105,7 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 
 	logger.Debug("x count is ", zap.Int("x", x))
 	// In case of java note the byte array used for authentication
-	logger.Info(Emoji + "Encoding outgoing Postgres call !!")
+	logger.Debug(Emoji + "Encoding outgoing Postgres call !!")
 	// write the request message to the postgres server
 
 	_, err := destConn.Write(requestBuffer)
@@ -179,9 +179,9 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 
 		// for making readable first identify message type and add the Unmarshaled value for that query object
 
-		logger.Info(Emoji+"The mock is ", zap.String("payload of req ::: :: ::", base64.StdEncoding.EncodeToString(msgRequestbuffer)))
+		logger.Debug(Emoji+"The mock is ", zap.String("payload of req ::: :: ::", base64.StdEncoding.EncodeToString(msgRequestbuffer)))
 
-		println(Emoji, "Inside for loop", string(msgRequestbuffer))
+		// logger.Debug(Emoji, "Inside for loop", string(msgRequestbuffer))
 
 		// write the request message to postgres server
 		_, err = destConn.Write(msgRequestbuffer)
@@ -241,8 +241,8 @@ func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 	tcsMocks := h.GetTcsMocks()
 	println(len(tcsMocks), "len of tcs mocks")
-	logger.Debug("tcsMocks is ", zap.Any("tcsMocks", tcsMocks))
-	println(len(configMocks), "len of config mocks")
+	logger.Debug("testMocks length is ", zap.Any("testmocks", len(tcsMocks)))
+	logger.Debug("configMocks length is ", zap.Any("configMocks", len(configMocks)))
 
 	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn)
 	// frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
