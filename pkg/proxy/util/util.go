@@ -11,7 +11,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
