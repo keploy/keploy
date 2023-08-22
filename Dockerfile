@@ -17,6 +17,8 @@ RUN go build -o keploy .
 # === Runtime Stage ===
 FROM debian:bookworm-slim
 
+ENV IS_DOCKER_CMD=true 
+
 # Update the package lists and install required packages
 RUN apt-get update && \
     apt-get install -y ca-certificates curl sudo && \
