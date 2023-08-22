@@ -201,27 +201,6 @@ type ResultsetRowPacket struct {
 	RowValues    []string `yaml:"row_values"`
 }
 
-type ComStmtFetchPacket struct {
-	StatementID uint32 `yaml:"statement_id"`
-	RowCount    uint32 `yaml:"row_count"`
-	Info        string `yaml:"info"`
-}
-
-type ComStmtExecute struct {
-	StatementID    uint32           `yaml:"statement_id"`
-	Flags          byte             `yaml:"flags"`
-	IterationCount uint32           `yaml:"iteration_count"`
-	NullBitmap     []byte           `yaml:"null_bitmap"`
-	ParamCount     uint16           `yaml:"param_count"`
-	Parameters     []BoundParameter `yaml:"parameters"`
-}
-
-type BoundParameter struct {
-	Type     byte   `yaml:"type"`
-	Unsigned byte   `yaml:"unsigned"`
-	Value    []byte `yaml:"value"`
-}
-
 type ComChangeUserPacket struct {
 	User         string `yaml:"user"`
 	Auth         []byte `yaml:"auth"`
@@ -2180,62 +2159,6 @@ func decodeMYSQLEOF(data []byte) (*EOFPacket, error) {
 	return packet, nil
 }
 
-func decodeComStmtFetch(data []byte) (ComStmtFetchPacket, error) {
-	if len(data) < 9 {
-		return ComStmtFetchPacket{}, errors.New("Data too short for COM_STMT_FETCH")
-	}
-
-	statementID := binary.LittleEndian.Uint32(data[1:5])
-	rowCount := binary.LittleEndian.Uint32(data[5:9])
-
-	// Assuming the info starts at the 10th byte
-	infoData := data[9:]
-	info := string(infoData)
-
-	return ComStmtFetchPacket{
-		StatementID: statementID,
-		RowCount:    rowCount,
-		Info:        info,
-	}, nil
-}
-
-func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
-	// removed the print statement for cleanliness
-	if len(packet) < 14 { // the minimal size of the packet without parameters should be 14, not 13
-		return ComStmtExecute{}, fmt.Errorf("packet length less than 14 bytes")
-	}
-
-	stmtExecute := ComStmtExecute{}
-	stmtExecute.StatementID = binary.LittleEndian.Uint32(packet[1:5])
-	stmtExecute.Flags = packet[5]
-	stmtExecute.IterationCount = binary.LittleEndian.Uint32(packet[6:10])
-
-	// the next bytes are reserved for the Null-Bitmap, Parameter Bound Flag and Bound Parameters if they exist
-	// if the length of the packet is greater than 14, then there are parameters
-	if len(packet) > 14 {
-		nullBitmapLength := int((stmtExecute.ParamCount + 7) / 8)
-
-		stmtExecute.NullBitmap = packet[10 : 10+nullBitmapLength]
-		stmtExecute.ParamCount = binary.LittleEndian.Uint16(packet[10+nullBitmapLength:])
-
-		// in case new parameters are bound, the new types and values are sent
-		if packet[10+nullBitmapLength] == 1 {
-			// read the types and values of the new parameters
-			stmtExecute.Parameters = make([]BoundParameter, stmtExecute.ParamCount)
-			for i := 0; i < int(stmtExecute.ParamCount); i++ {
-				index := 10 + nullBitmapLength + 1 + 2*i
-				if index+1 >= len(packet) {
-					return ComStmtExecute{}, fmt.Errorf("packet length less than expected while reading parameters")
-				}
-				stmtExecute.Parameters[i].Type = packet[index]
-				stmtExecute.Parameters[i].Unsigned = packet[index+1]
-			}
-		}
-	}
-
-	return stmtExecute, nil
-}
-
 func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {
 	if len(data) < 2 {
 		return ComChangeUserPacket{}, errors.New("Data too short for COM_CHANGE_USER")
@@ -2260,17 +2183,6 @@ func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {
 		CharacterSet: characterSet,
 		AuthPlugin:   authPlugin,
 	}, nil
-}
-
-type ComPingPacket struct {
-}
-
-func decodeComPing(data []byte) (ComPingPacket, error) {
-	if len(data) < 1 || data[0] != 0x0e {
-		return ComPingPacket{}, errors.New("Data malformed for COM_PING")
-	}
-
-	return ComPingPacket{}, nil
 }
 
 // No response is sent back to client in this packet
