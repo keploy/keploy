@@ -10,7 +10,8 @@ type Mock struct {
 type MockSpec struct {
 	Metadata map[string]string `json:"Metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	// for GenericSpec
-	OutputBinary []*OutputBinary `json:"Bin,omitempty"`
+	GenericRequests  []GenericPayload `json:"RequestBin,omitempty"`
+	GenericResponses []GenericPayload `json:"ResponseBin,omitempty"`
 	// for HttpSpec
 	HttpReq  *HttpReq  `json:"Req,omitempty"`
 	HttpResp *HttpResp `json:"Res,omitempty"`
@@ -22,10 +23,25 @@ type MockSpec struct {
 	// MongoResponse       interface{}     `json:"MongoResponse,omitempty"`
 	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
 	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
+		//for postgres
+		PostgresReq  *Backend  `json:"postgresRequest,omitempty"`
+		PostgresResp *Frontend `json:"postgresResponse,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
 type OutputBinary struct {
 	Type string `json:"type" yaml:"type"`
 	Data string `json:"data" yaml:"data"`
+}
+
+type OriginType string
+
+const (
+	FromServer OriginType = "server"
+	FromClient OriginType = "client"
+)
+
+type GenericPayload struct {
+	Origin  OriginType     `json:"Origin,omitempty" yaml:"origin"`
+	Message []OutputBinary `json:"Message,omitempty" yaml:"message"`
 }
