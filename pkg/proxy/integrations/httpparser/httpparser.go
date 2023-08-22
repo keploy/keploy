@@ -49,12 +49,7 @@ func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks
 }
 
 // Handled chunked requests when content-length is given.
-func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLengthHeader string) {
-	contentLength, err := strconv.Atoi(contentLengthHeader)
-	if err != nil {
-		logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
-		return
-	}
+func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
 	for contentLength > 0 {
 				clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		requestChunked, err := util.ReadBytes(clientConn)
@@ -111,12 +106,7 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 }
 
 // Handled chunked responses when content-length is given.
-func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLengthHeader string) {
-	contentLength, err := strconv.Atoi(contentLengthHeader)
-	if err != nil {
-		logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
-		return
-	}
+func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
 	for contentLength > 0 {
 		//Set deadline of 5 seconds
 		destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -196,7 +186,17 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 	}
 	//Handle chunked requests
 	if contentLengthHeader != "" {
-		contentLengthRequest(finalReq, clientConn, destConn, logger, contentLengthHeader)
+		contentLength, err := strconv.Atoi(contentLengthHeader)
+		if err != nil {
+			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+			return
+		}
+		//Get the length of the body in the request.
+		bodyLength := len(request) - strings.Index(string(request), "\r\n\r\n") - 4
+		contentLength -= bodyLength
+		if contentLength > 0 {
+			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
+		}
 	} else if transferEncodingHeader != "" {
 		chunkedRequest(finalReq, clientConn, destConn, logger, transferEncodingHeader)
 	}
@@ -217,7 +217,16 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 		}
 		//Handle chunked responses
 		if contentLengthHeader != "" {
-			contentLengthResponse(finalResp, clientConn, destConn, logger, contentLengthHeader)
+			contentLength, err := strconv.Atoi(contentLengthHeader)
+			if err != nil {
+				logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+				return
+			}
+			bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
+			contentLength -= bodyLength
+			if contentLength > 0 {
+				contentLengthResponse(finalResp, clientConn, destConn, logger, contentLength)
+			}
 		} else if transferEncodingHeader != "" {
 			chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
 		}
@@ -316,6 +325,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		return nil
 	}
 	finalReq = append(finalReq, request...)
+
+	//Handle chunked requests
 	handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
 
 	// read the response from the actual server
