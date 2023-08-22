@@ -35,7 +35,7 @@ func decodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	srv := NewFakeServer(framer, logger, h)
 	err := srv.ListenAndServe()
 	if err != nil {
-		logger.Error("could not server grpc request")
+		logger.Error("could not serve grpc request")
 	}
 }
 

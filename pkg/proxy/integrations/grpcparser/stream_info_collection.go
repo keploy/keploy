@@ -105,9 +105,9 @@ func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32) {
 
 	grpcReq := sic.StreamInfo[streamID].GrpcReq
 	grpcResp := sic.StreamInfo[streamID].GrpcResp
-	sic.hook.AppendDeps(&models.Mock{
+	sic.hook.AppendMocks(&models.Mock{
 		Version: models.V1Beta2,
-		Name:    "grpc-mock",
+		Name:    "mocks",
 		Kind:    models.GRPC_EXPORT,
 		Spec: models.MockSpec{
 			GRPCReq:  &grpcReq,

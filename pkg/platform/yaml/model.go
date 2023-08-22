@@ -214,8 +214,8 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		}
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
-		mocks, err := decodeMocks(yamlMocks, logger)
-		tc.Mocks = mocks
+		//mocks, err := decodeMocks(yamlMocks, logger)
+		//tc.Mocks = mocks
 	default:
 		logger.Error(Emoji+"failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
 		return nil, errors.New("yaml doc of unknown type")

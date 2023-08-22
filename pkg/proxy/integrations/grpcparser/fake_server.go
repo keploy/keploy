@@ -84,7 +84,7 @@ func (srv *fakeServer) ProcessDataFrame(dataFrame *http2.DataFrame) error {
 	grpcReq := srv.sic.FetchRequestForStream(id)
 
 	// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
-	mocks := srv.hook.GetDeps()
+	mocks := srv.hook.GetTcsMocks()
 	mock := FilterMocksBasedOnGrpcRequest(grpcReq, mocks)
 	if mock == nil {
 		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
