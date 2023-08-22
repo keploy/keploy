@@ -118,7 +118,7 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 		return
 	}
 	for contentLength > 0 {
-				//Set deadline of 5 seconds
+		//Set deadline of 5 seconds
 		destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		resp, err := util.ReadBytes(destConn)
 		if err != nil {
@@ -221,6 +221,24 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 		} else if transferEncodingHeader != "" {
 			chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
 		}
+}
+
+//Checks if the response is gzipped
+func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
+	bufReader := bufio.NewReader(check)
+	peekedBytes, err := bufReader.Peek(2)
+	if err != nil && err != io.EOF {
+		fmt.Println("Error peeking:", err)
+		return false, nil
+	}
+	if len(peekedBytes) < 2 {
+		return false, nil
+	}
+	if peekedBytes[0] == 0x1f && peekedBytes[1] == 0x8b {
+		return true, bufReader
+	} else {
+		return false, nil
+	}
 }
 
 //Decodes the mocks in test mode so that they can be sent to the user application.
@@ -340,10 +358,16 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	var respBody []byte
 	if respParsed.Body != nil { // Read
 		if respParsed.Header.Get("Content-Encoding") == "gzip" {
-			respParsed.Body, err = gzip.NewReader(respParsed.Body)
-			if err != nil {
-				logger.Error(Emoji+"failed to read the the http response body", zap.Error(err))
-				return nil
+			check := respParsed.Body
+			ok, reader := checkIfGzipped(check)
+			fmt.Println("ok: ", ok)
+			if ok {
+				gzipReader, err := gzip.NewReader(reader)
+				if err != nil {
+					logger.Error(Emoji+"failed to create a gzip reader", zap.Error(err))
+					return nil
+				}
+				respParsed.Body = gzipReader
 			}
 		}
 		respBody, err = io.ReadAll(respParsed.Body)
