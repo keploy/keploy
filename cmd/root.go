@@ -80,6 +80,15 @@ Test:
 keployV2 test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
 `
 
+func checkForDebugFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--debug" {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Root) execute() {
 
 	// Root command
@@ -95,10 +104,8 @@ func (r *Root) execute() {
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
 	// Manually parse flags to determine debug mode early
-	args := os.Args[1:]
-	rootCmd.ParseFlags(args)
-
-	// Now that flags are parsed, set up the logger
+	debugMode = checkForDebugFlag(os.Args[1:])
+	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
 
 	r.subCommands = append(r.subCommands, NewCmdExample(r.logger), NewCmdTest(r.logger), NewCmdRecord(r.logger))
