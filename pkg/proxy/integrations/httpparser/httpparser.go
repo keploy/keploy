@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/pkg"
@@ -64,14 +66,216 @@ func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(request,  clientConn,  destConn, logger))
-		h.AppendMocks(encodeOutgoingHttp(request, clientConn, destConn, logger))
+		h.AppendMocks(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
 		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(request, clientConn, destConn, logger))
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
+		decodeOutgoingHttp(requestBuffer, clientConn, destConn, h, logger)
 	default:
 		logger.Info(Emoji+"Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
+}
+
+// Handled chunked requests when content-length is given.
+func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
+	for contentLength > 0 {
+		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		requestChunked, err := util.ReadBytes(clientConn)
+		if err != nil {
+			if err == io.EOF {
+				logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
+				break
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
+				break
+			} else {
+				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+				return
+			}
+		}
+		*finalReq = append(*finalReq, requestChunked...)
+		contentLength -= len(requestChunked)
+		_, err = destConn.Write(requestChunked)
+		if err != nil {
+			logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+			return
+		}
+	}
+}
+
+// Handled chunked requests when transfer-encoding is given.
+func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
+	if transferEncodingHeader == "chunked" {
+		for {
+			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			requestChunked, err := util.ReadBytes(clientConn)
+			if err != nil {
+				if err == io.EOF {
+					logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
+					break
+				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					break
+				} else {
+					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					return
+				}
+			}
+			*finalReq = append(*finalReq, requestChunked...)
+			_, err = destConn.Write(requestChunked)
+			if err != nil {
+				logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+				return
+			}
+			if string(requestChunked) == "0\r\n\r\n" {
+				break
+			}
+		}
+	}
+}
+
+// Handled chunked responses when content-length is given.
+func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
+	for contentLength > 0 {
+		//Set deadline of 5 seconds
+		destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := util.ReadBytes(destConn)
+		if err != nil {
+			//Check if the connection closed.
+			if err == io.EOF {
+				logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
+				break
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
+				break
+			} else {
+				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+				return
+			}
+		}
+		*finalResp = append(*finalResp, resp...)
+		contentLength -= len(resp)
+		// write the response message to the user client
+		_, err = clientConn.Write(resp)
+		if err != nil {
+			logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+			return
+		}
+	}
+}
+
+// Handled chunked responses when transfer-encoding is given.
+func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
+	//If the transfer-encoding header is chunked
+	if transferEncodingHeader == "chunked" {
+		for {
+			//Set deadline of 5 seconds
+			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			resp, err := util.ReadBytes(destConn)
+			if err != nil {
+				//Check if the connection closed.
+				if err == io.EOF {
+					logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
+					break
+				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					//Check if the deadline is reached.
+					logger.Info(Emoji + "Stopped getting buffer from the destination server")
+					break
+				} else {
+					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					return
+				}
+			}
+			*finalResp = append(*finalResp, resp...)
+			// write the response message to the user client
+			_, err = clientConn.Write(resp)
+			if err != nil {
+				logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+				return
+			}
+			if string(resp) == "0\r\n\r\n" {
+				break
+			}
+		}
+	}
+}
+
+func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, request []byte) {
+	lines := strings.Split(string(request), "\n")
+	var contentLengthHeader string
+	var transferEncodingHeader string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Content-Length:") {
+			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			break
+		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
+			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
+			break
+		}
+	}
+	//Handle chunked requests
+	if contentLengthHeader != "" {
+		contentLength, err := strconv.Atoi(contentLengthHeader)
+		if err != nil {
+			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+			return
+		}
+		//Get the length of the body in the request.
+		bodyLength := len(request) - strings.Index(string(request), "\r\n\r\n") - 4
+		contentLength -= bodyLength
+		if contentLength > 0 {
+			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
+		}
+	} else if transferEncodingHeader != "" {
+		chunkedRequest(finalReq, clientConn, destConn, logger, transferEncodingHeader)
+	}
+}
+
+func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, resp []byte) {
+	//Getting the content-length or the transfer-encoding header
+	var contentLengthHeader, transferEncodingHeader string
+	lines := strings.Split(string(resp), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Content-Length:") {
+			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			break
+		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
+			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
+			break
+		}
+	}
+	//Handle chunked responses
+	if contentLengthHeader != "" {
+		contentLength, err := strconv.Atoi(contentLengthHeader)
+		if err != nil {
+			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+			return
+		}
+		bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
+		contentLength -= bodyLength
+		if contentLength > 0 {
+			contentLengthResponse(finalResp, clientConn, destConn, logger, contentLength)
+		}
+	} else if transferEncodingHeader != "" {
+		chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
+	}
+}
+
+//Checks if the response is gzipped
+func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
+	bufReader := bufio.NewReader(check)
+	peekedBytes, err := bufReader.Peek(2)
+	if err != nil && err != io.EOF {
+		fmt.Println("Error peeking:", err)
+		return false, nil
+	}
+	if len(peekedBytes) < 2 {
+		return false, nil
+	}
+	if peekedBytes[0] == 0x1f && peekedBytes[1] == 0x8b {
+		return true, bufReader
+	} else {
+		return false, nil
+	}
 }
 
 // decodeOutgoingHttp
