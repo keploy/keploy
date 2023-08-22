@@ -75,7 +75,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// update for the next dependency call
 		genericRequests = [][]byte{}
 	}
-	return nil
+
 }
 
 func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
@@ -121,7 +121,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 		// if !checkInitialRequest {
 		// go routine to read from client
-		// go func() {
+		// gdo func() {
 		// requestBuffers := [][]byte{}
 		for {
 			buffer, err := util.ReadBytes(clientConn)
@@ -460,7 +460,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 						Data: bufStr,
 		// 					},
 		// 				},
-		// 			})
+		// 			})d
 		// 		}
 		// 	}
 		// 	// fmt.Println(Emoji, "Successfully wrote response to the user client ", destConn.RemoteAddr().String())

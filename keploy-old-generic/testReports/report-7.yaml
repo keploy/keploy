@@ -1,6 +1,0 @@
-version: api.keploy.io/v1beta1
-name: report-7
-status: RUNNING
-success: 0
-failure: 0
-total: 1

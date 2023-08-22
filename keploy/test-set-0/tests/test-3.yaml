@@ -4,29 +4,22 @@ name: test-3
 spec:
     metadata: {}
     req:
-        method: POST
+        method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:3000/notes
+        url: http://localhost:8080/api/employees/2
         header:
             Accept: '*/*'
-            Content-Length: "61"
-            Content-Type: application/json
-            Host: localhost:3000
+            Host: localhost:8080
             User-Agent: curl/7.81.0
-        body: '{"title": "Sample Note", "content": "This is a sample note."}'
+        body: ""
         body_type: ""
     resp:
         status_code: 200
         header:
-            Connection: keep-alive
-            Content-Length: "65"
-            Content-Type: application/json; charset=utf-8
-            Date: Fri, 18 Aug 2023 11:21:31 GMT
-            Etag: W/"41-JnZkQ8XQ0eap8awDYXYZpKx8L+Q"
-            Keep-Alive: timeout=5
-            X-Powered-By: Express
-        body: '{"id":3,"title":"Sample Note","content":"This is a sample note."}'
+            Content-Type: application/json
+            Date: Tue, 22 Aug 2023 12:19:19 GMT
+        body: '{"id":2,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1692544001}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -35,4 +28,4 @@ spec:
     assertions:
         noise:
             - header.Date
-    created: 1692357691
+    created: 1692706761
