@@ -219,6 +219,9 @@ func decodeOutgoingMySQL(clientConnId, destConnId int, requestBuffer []byte, cli
 			}
 			oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
 			if oprRequest == "COM_STMT_CLOSE" {
+				if len(tcsMocks) == mockResponseRead {
+					mockResponseRead = 0
+				}
 				return
 			}
 			fmt.Println(oprRequest, requestHeader, mysqlRequest, err)
@@ -361,7 +364,6 @@ func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysq
 
 func bytesToMySQLPacket(buffer []byte) MySQLPacket {
 	if buffer == nil || len(buffer) < 4 {
-		// Log an error, return an empty packet
 		fmt.Println("Error: buffer is nil or too short to be a valid MySQL packet")
 		return MySQLPacket{}
 	}

@@ -943,12 +943,17 @@ func encodeToBinary(packet interface{}, operation string, sequence int) ([]byte,
 }
 
 func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn) (string, MySQLPacketHeader, interface{}, error) {
+
 	data := packet.Payload
 	header := packet.Header
 
 	var packetData interface{}
 	var packetType string
 	var err error
+
+	if len(data) < 1 {
+		return "", MySQLPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
+	}
 
 	switch {
 	case data[0] == 0x0e: // COM_PING
@@ -2106,8 +2111,8 @@ func decodeMySQLOK(data []byte) (*OKPacket, error) {
 
 	packet := &OKPacket{}
 	var err error
-	var offset int
-
+	//identifier of ok packet
+	var offset int = 1
 	// Decode affected rows
 	packet.AffectedRows, err = readLengthEncodedIntegerOff(data, &offset)
 	if err != nil {
@@ -2130,7 +2135,7 @@ func decodeMySQLOK(data []byte) (*OKPacket, error) {
 	offset += 2
 
 	if offset < len(data) {
-		packet.Info = string(data[offset+1:])
+		packet.Info = string(data[offset:])
 	}
 
 	return packet, nil
