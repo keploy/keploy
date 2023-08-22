@@ -143,7 +143,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			Request:  *mock.Spec.HttpReq,
 			Response: *mock.Spec.HttpResp,
 			Created:  mock.Spec.Created,
-			Objects:  mock.Spec.OutputBinary,
+			// Objects:  mock.Spec.OutputBinary,
 		}
 		err := yamlDoc.Spec.Encode(httpSpec)
 		if err != nil {
@@ -153,11 +153,27 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 	case models.GENERIC:
 		genericSpec := spec.GenericSpec{
 			Metadata: mock.Spec.Metadata,
-			Objects:  mock.Spec.OutputBinary,
+			// Objects:  mock.Spec.OutputBinary,
+			GenericRequests:  mock.Spec.GenericRequests,
+			GenericResponses: mock.Spec.GenericResponses,
 		}
 		err := yamlDoc.Spec.Encode(genericSpec)
 		if err != nil {
 			logger.Error(Emoji+"failed to marshal binary input-output of external call into yaml", zap.Error(err))
+			return nil, err
+		}
+	case models.Postgres:
+		var postgresSpec spec.PostgresSpec
+		if mock.Spec.PostgresReq != nil {
+			postgresSpec = spec.PostgresSpec{
+				PostgresReq:  *mock.Spec.PostgresReq,
+				PostgresResp: *mock.Spec.PostgresResp,
+			}
+		}
+		
+		err := yamlDoc.Spec.Encode(postgresSpec)
+		if err != nil {
+			logger.Error(Emoji+"failed to marshal postgres of external call into yaml", zap.Error(err))
 			return nil, err
 		}
 	default:
@@ -219,11 +235,11 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:     httpSpec.Metadata,
-				HttpReq:      &httpSpec.Request,
-				HttpResp:     &httpSpec.Response,
-				OutputBinary: httpSpec.Objects,
-				Created:      httpSpec.Created,
+				Metadata: httpSpec.Metadata,
+				HttpReq:  &httpSpec.Request,
+				HttpResp: &httpSpec.Response,
+				// OutputBinary: httpSpec.Objects,
+				Created: httpSpec.Created,
 			}
 		case models.Mongo:
 			mongoSpec := spec.MongoSpec{}
@@ -252,8 +268,22 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:     genericSpec.Metadata,
-				OutputBinary: genericSpec.Objects,
+				Metadata: genericSpec.Metadata,
+				// OutputBinary: genericSpec.Objects,
+				GenericRequests:  genericSpec.GenericRequests,
+				GenericResponses: genericSpec.GenericResponses,
+			}
+	
+		case models.Postgres:
+			postgresSpec := spec.PostgresSpec{}
+			err := m.Spec.Decode(&postgresSpec)
+			if err != nil {
+				logger.Error(Emoji+"failed to unmarshal a yaml doc into postgres mock", zap.Error(err), zap.Any("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				PostgresReq:  &postgresSpec.PostgresReq,
+				PostgresResp: &postgresSpec.PostgresResp,
 			}
 		default:
 			logger.Error(Emoji+"failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))

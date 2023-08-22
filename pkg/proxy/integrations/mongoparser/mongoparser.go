@@ -49,7 +49,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		tcsMocks := h.GetTcsMocks()
 		var (
 			mongoRequests = []models.MongoRequest{}
-			err error
+			err           error
 		)
 		if string(requestBuffer) == "read form client connection" {
 			started := time.Now()
@@ -146,7 +146,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 								maxMatchScore = score
 								bestMatchIndex = configIndex
 							}
-							
+
 						case wiremessage.OpMsg:
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 								continue
