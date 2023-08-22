@@ -62,14 +62,14 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	return true
 }
 
-func ProcessOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(request,  clientConn,  destConn, logger))
-		h.AppendMocks(encodeOutgoingHttp(requestBuffer, clientConn, destConn, logger))
+		h.AppendMocks(encodeOutgoingHttp(request, clientConn, destConn, logger))
 		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(request, clientConn, destConn, logger))
 	case models.MODE_TEST:
-		decodeOutgoingHttp(requestBuffer, clientConn, destConn, h, logger)
+		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
 	default:
 		logger.Info(Emoji+"Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -278,7 +278,7 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 	}
 }
 
-// decodeOutgoingHttp
+//Decodes the mocks in test mode so that they can be sent to the user application.
 func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	//Matching algorithmm
 	//Get the mocks
