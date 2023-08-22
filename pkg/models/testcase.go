@@ -13,6 +13,7 @@ const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
 	SQL            Kind     = "SQL"
+	Postgres	   Kind     = "Postgres"
 	GRPC_EXPORT    Kind     = "gRPC"
 	Mongo          Kind     = "Mongo"
 	BodyTypeUtf8   BodyType = "utf-8"

@@ -28,8 +28,10 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -277,6 +279,53 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 		// TODO: Release eBPF resources if failed abruptly
 		log.Fatalf(Emoji+"Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
 	}
+
+	// randomID := generateRandomID()
+	// go func() {
+
+	// 	pcapFileName := fmt.Sprintf("capture_%s.pcap", randomID)
+
+	// 	// Create a new PCAP file
+	// 	pcapFile, err := os.Create(pcapFileName)
+	// 	if err != nil {
+	// 		log.Fatal("Error creating PCAP file:", err)
+	// 	}
+	// 	defer pcapFile.Close()
+
+	// 	// Create a new PCAP writer
+	// 	pcapWriter := pcapgo.NewWriter(pcapFile)
+	// 	pcapWriter.WriteFileHeader(65536, layers.LinkTypeEthernet) // Adjust parameters as needed
+
+	// 	// Create a packet source to capture packets from an interface
+	// 	iface := "any" // Replace with your network interface name
+	// 	handle, err := pcap.OpenLive(iface, 1600, true, pcap.BlockForever)
+	// 	if err != nil {
+	// 		log.Fatal("Error opening interface:", err)
+	// 	}
+	// 	defer handle.Close()
+
+	// 	// Set up a packet filter for port 16789
+	// 	filter := "port 16789"
+	// 	err = handle.SetBPFFilter(filter)
+	// 	if err != nil {
+	// 		log.Fatal("Error setting BPF filter:", err)
+	// 	}
+
+	// 	// Start capturing packets
+	// 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	// 	for packet := range packetSource.Packets() {
+	// 		// Convert packet data to bytes
+	// 		packetData := packet.Data()
+
+	// 		// Write packet data to the PCAP file
+	// 		err = pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packetData)
+	// 		if err != nil {
+	// 			log.Println("Error writing packet data:", err)
+	// 		}
+	// 	}
+
+	// 	log.Println("Packet capture complete")
+	// }()
 
 	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPv4:Port %v:%v", proxySet.IP4, proxySet.Port))
 	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPV6:Port Addr %v:%v", proxySet.IP6, proxySet.Port))
@@ -780,14 +829,20 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// for _, v := range deps {
 		// 	ps.hook.AppendDeps(v)
 		// }
+	case postgresparser.IsOutgoingPSQL(buffer):
+		fmt.Println("into psql desp mode, before passing")
+		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
+
 	default:
+		ps.logger.Debug(Emoji + "the external dependecy call is not supported")
+		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
 		// fmt.Println("into default desp mode, before passing")
-		err = callNext(buffer, conn, dst, ps.logger)
-		if err != nil {
-			ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
-			conn.Close()
-			return
-		}
+		// err = callNext(buffer, conn, dst, ps.logger)
+		// if err != nil {
+		// 	ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
+		// 	conn.Close()
+		// 	return
+		// }
 		// fmt.Println("into default desp mode, after passing")
 
 	}
@@ -872,4 +927,10 @@ func (ps *ProxySet) StopProxyServer() {
 		ps.logger.Info(Emoji + "Dns server stopped")
 	}
 	ps.logger.Info(Emoji + "proxy stopped...")
+}
+
+func generateRandomID() string {
+	rand.Seed(time.Now().UnixNano())
+	id := rand.Intn(100000) // Adjust the range as needed
+	return fmt.Sprintf("%d", id)
 }
