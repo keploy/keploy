@@ -1,0 +1,127 @@
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: 5gAAAAIAAAAAAAAA1AcAAAQAAABhZG1pbi4kY21kAAAAAAD/////vwAAABBpc01hc3RlcgABAAAACGhlbGxvT2sAAQRjb21wcmVzc2lvbgAFAAAAAANjbGllbnQAiAAAAANkcml2ZXIAMwAAAAJuYW1lABAAAABtb25nby1nby1kcml2ZXIAAnZlcnNpb24ABwAAAHYxLjguMQAAA29zAC0AAAACdHlwZQAGAAAAbGludXgAAmFyY2hpdGVjdHVyZQAGAAAAYXJtNjQAAAJwbGF0Zm9ybQAJAAAAZ28xLjIxLjAAAAA=
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: SQEAACuoAgACAAAAAQAAAAgAAAAAAAAAAAAAAAAAAAABAAAAJQEAAAhoZWxsb09rAAEIaXNtYXN0ZXIAAQN0b3BvbG9neVZlcnNpb24ALQAAAAdwcm9jZXNzSWQAZOW8BJuXCRcFaIbGEmNvdW50ZXIAAAAAAAAAAAAAEG1heEJzb25PYmplY3RTaXplAAAAAAEQbWF4TWVzc2FnZVNpemVCeXRlcwAAbNwCEG1heFdyaXRlQmF0Y2hTaXplAKCGAQAJbG9jYWxUaW1lAOm51iGKAQAAEGxvZ2ljYWxTZXNzaW9uVGltZW91dE1pbnV0ZXMAHgAAABBjb25uZWN0aW9uSWQAkhEAABBtaW5XaXJlVmVyc2lvbgAAAAAAEG1heFdpcmVWZXJzaW9uABUAAAAIcmVhZE9ubHkAAAFvawAAAAAAAADwPwA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: 5gAAAAEAAAAAAAAA1AcAAAQAAABhZG1pbi4kY21kAAAAAAD/////vwAAABBpc01hc3RlcgABAAAACGhlbGxvT2sAAQRjb21wcmVzc2lvbgAFAAAAAANjbGllbnQAiAAAAANkcml2ZXIAMwAAAAJuYW1lABAAAABtb25nby1nby1kcml2ZXIAAnZlcnNpb24ABwAAAHYxLjguMQAAA29zAC0AAAACdHlwZQAGAAAAbGludXgAAmFyY2hpdGVjdHVyZQAGAAAAYXJtNjQAAAJwbGF0Zm9ybQAJAAAAZ28xLjIxLjAAAAA=
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: SQEAACyoAgABAAAAAQAAAAgAAAAAAAAAAAAAAAAAAAABAAAAJQEAAAhoZWxsb09rAAEIaXNtYXN0ZXIAAQN0b3BvbG9neVZlcnNpb24ALQAAAAdwcm9jZXNzSWQAZOW8BJuXCRcFaIbGEmNvdW50ZXIAAAAAAAAAAAAAEG1heEJzb25PYmplY3RTaXplAAAAAAEQbWF4TWVzc2FnZVNpemVCeXRlcwAAbNwCEG1heFdyaXRlQmF0Y2hTaXplAKCGAQAJbG9jYWxUaW1lAOq51iGKAQAAEGxvZ2ljYWxTZXNzaW9uVGltZW91dE1pbnV0ZXMAHgAAABBjb25uZWN0aW9uSWQAkxEAABBtaW5XaXJlVmVyc2lvbgAAAAAAEG1heFdpcmVWZXJzaW9uABUAAAAIcmVhZE9ubHkAAAFvawAAAAAAAADwPwA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: PgAAAAQAAAAAAAAA3QcAAAAAAAAAKQAAABBoZWxsbwABAAAACGhlbGxvT2sAAQIkZGIABgAAAGFkbWluAAA=
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: QwEAAC2oAgAEAAAA3QcAAAAAAAAALgEAAAhoZWxsb09rAAEIaXNXcml0YWJsZVByaW1hcnkAAQN0b3BvbG9neVZlcnNpb24ALQAAAAdwcm9jZXNzSWQAZOW8BJuXCRcFaIbGEmNvdW50ZXIAAAAAAAAAAAAAEG1heEJzb25PYmplY3RTaXplAAAAAAEQbWF4TWVzc2FnZVNpemVCeXRlcwAAbNwCEG1heFdyaXRlQmF0Y2hTaXplAKCGAQAJbG9jYWxUaW1lAPzg1iGKAQAAEGxvZ2ljYWxTZXNzaW9uVGltZW91dE1pbnV0ZXMAHgAAABBjb25uZWN0aW9uSWQAkxEAABBtaW5XaXJlVmVyc2lvbgAAAAAAEG1heFdpcmVWZXJzaW9uABUAAAAIcmVhZE9ubHkAAAFvawAAAAAAAADwPwA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: 5gAAAAUAAAAAAAAA1AcAAAQAAABhZG1pbi4kY21kAAAAAAD/////vwAAABBpc01hc3RlcgABAAAACGhlbGxvT2sAAQRjb21wcmVzc2lvbgAFAAAAAANjbGllbnQAiAAAAANkcml2ZXIAMwAAAAJuYW1lABAAAABtb25nby1nby1kcml2ZXIAAnZlcnNpb24ABwAAAHYxLjguMQAAA29zAC0AAAACdHlwZQAGAAAAbGludXgAAmFyY2hpdGVjdHVyZQAGAAAAYXJtNjQAAAJwbGF0Zm9ybQAJAAAAZ28xLjIxLjAAAAA=
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: SQEAAC+oAgAFAAAAAQAAAAgAAAAAAAAAAAAAAAAAAAABAAAAJQEAAAhoZWxsb09rAAEIaXNtYXN0ZXIAAQN0b3BvbG9neVZlcnNpb24ALQAAAAdwcm9jZXNzSWQAZOW8BJuXCRcFaIbGEmNvdW50ZXIAAAAAAAAAAAAAEG1heEJzb25PYmplY3RTaXplAAAAAAEQbWF4TWVzc2FnZVNpemVCeXRlcwAAbNwCEG1heFdyaXRlQmF0Y2hTaXplAKCGAQAJbG9jYWxUaW1lAIf01iGKAQAAEGxvZ2ljYWxTZXNzaW9uVGltZW91dE1pbnV0ZXMAHgAAABBjb25uZWN0aW9uSWQAlBEAABBtaW5XaXJlVmVyc2lvbgAAAAAAEG1heFdpcmVWZXJzaW9uABUAAAAIcmVhZE9ubHkAAAFvawAAAAAAAADwPwA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: LQEAAAYAAAAAAAAA3QcAAAAAAAAAgAAAAAJ1cGRhdGUADgAAAHVybC1zaG9ydGVuZXIACG9yZGVyZWQAAQN3cml0ZUNvbmNlcm4AFQAAAAJ3AAkAAABtYWpvcml0eQAAA2xzaWQAHgAAAAVpZAAQAAAABEhnEuRUP04xtVFPjTMZRC0AAiRkYgAHAAAAa2VwbG95AAABlwAAAHVwZGF0ZXMAiwAAAANxABcAAAACX2lkAAkAAABMaHI0QldBaQAAA3UAYAAAAAMkc2V0AFUAAAACX2lkAAkAAABMaHI0QldBaQAJY3JlYXRlZACD9NYhigEAAAl1cGRhdGVkAIP01iGKAQAAAnVybAATAAAAaHR0cHM6Ly9nb29nbGUuY29tAAAACHVwc2VydAABAA==
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: PAAAADCoAgAGAAAA3QcAAAAAAAAAJwAAABBuAAEAAAAQbk1vZGlmaWVkAAEAAAABb2sAAAAAAAAA8D8A
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: ogAAAAcAAAAAAAAA3QcAAAAAAAAAjQAAAAJmaW5kAA4AAAB1cmwtc2hvcnRlbmVyAANmaWx0ZXIAFwAAAAJfaWQACQAAAExocjRCV0FpAAASbGltaXQAAQAAAAAAAAAIc2luZ2xlQmF0Y2gAAQNsc2lkAB4AAAAFaWQAEAAAAARIZxLkVD9OMbVRT40zGUQtAAIkZGIABwAAAGtlcGxveQAA
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: xQAAADGoAgAHAAAA3QcAAAAAAAAAsAAAAANjdXJzb3IAlwAAAARmaXJzdEJhdGNoAF0AAAADMABVAAAAAl9pZAAJAAAATGhyNEJXQWkACWNyZWF0ZWQAg/TWIYoBAAAJdXBkYXRlZACD9NYhigEAAAJ1cmwAEwAAAGh0dHBzOi8vZ29vZ2xlLmNvbQAAABJpZAAAAAAAAAAAAAJucwAVAAAAa2VwbG95LnVybC1zaG9ydGVuZXIAAAFvawAAAAAAAADwPwA=
+# ---
+# version: api.keploy.io/v1beta2
+# kind: Generic
+# name: mocks
+# spec:
+#     metadata: {}
+#     genericrequests:
+#         - origin: client
+#           message:
+#             - type: binary
+#               data: PgAAAAgAAAAAAAAA3QcAAAAAAAAAKQAAABBoZWxsbwABAAAACGhlbGxvT2sAAQIkZGIABgAAAGFkbWluAAA=
+#     genericresponses:
+#         - origin: server
+#           message:
+#             - type: binary
+#               data: QwEAADKoAgAIAAAA3QcAAAAAAAAALgEAAAhoZWxsb09rAAEIaXNXcml0YWJsZVByaW1hcnkAAQN0b3BvbG9neVZlcnNpb24ALQAAAAdwcm9jZXNzSWQAZOW8BJuXCRcFaIbGEmNvdW50ZXIAAAAAAAAAAAAAEG1heEJzb25PYmplY3RTaXplAAAAAAEQbWF4TWVzc2FnZVNpemVCeXRlcwAAbNwCEG1heFdyaXRlQmF0Y2hTaXplAKCGAQAJbG9jYWxUaW1lAA0I1yGKAQAAEGxvZ2ljYWxTZXNzaW9uVGltZW91dE1pbnV0ZXMAHgAAABBjb25uZWN0aW9uSWQAkxEAABBtaW5XaXJlVmVyc2lvbgAAAAAAEG1heFdpcmVWZXJzaW9uABUAAAAIcmVhZE9ubHkAAAFvawAAAAAAAADwPwA=
+---
+version: api.keploy.io/v1beta2
+kind: Generic
+name: mocks
+spec:
+    metadata: {}
+    genericrequests:
+        - origin: client
+          message:
+            - type: binary
+              data: 5gAAAAkAAAAAAAAA1AcAAAQAAABhZG1pbi4kY21kAAAAAAD/////vwAAABBpc01hc3RlcgABAAAACGhlbGxvT2sAAQRjb21wcmVzc2lvbgAFAAAAAANjbGllbnQAiAAAAANkcml2ZXIAMwAAAAJuYW1lABAAAABtb25nby1nby1kcml2ZXIAAnZlcnNpb24ABwAAAHYxLjguMQAAA29zAC0AAAACdHlwZQAGAAAAbGludXgAAmFyY2hpdGVjdHVyZQAGAAAAYXJtNjQAAAJwbGF0Zm9ybQAJAAAAZ28xLjIxLjAAAAA=
+    genericresponses:
+        - origin: server
+          message:
+            - type: binary
+              data: SQEAADOoAgAJAAAAAQAAAAgAAAAAAAAAAAAAAAAAAAABAAAAJQEAAAhoZWxsb09rAAEIaXNtYXN0ZXIAAQN0b3BvbG9neVZlcnNpb24ALQAAAAdwcm9jZXNzSWQAZOW8BJuXCRcFaIbGEmNvdW50ZXIAAAAAAAAAAAAAEG1heEJzb25PYmplY3RTaXplAAAAAAEQbWF4TWVzc2FnZVNpemVCeXRlcwAAbNwCEG1heFdyaXRlQmF0Y2hTaXplAKCGAQAJbG9jYWxUaW1lAAMK1yGKAQAAEGxvZ2ljYWxTZXNzaW9uVGltZW91dE1pbnV0ZXMAHgAAABBjb25uZWN0aW9uSWQAlREAABBtaW5XaXJlVmVyc2lvbgAAAAAAEG1heFdpcmVWZXJzaW9uABUAAAAIcmVhZE9ubHkAAAFvawAAAAAAAADwPwA=
