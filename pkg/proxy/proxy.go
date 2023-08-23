@@ -30,7 +30,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
-	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	// "go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
@@ -59,6 +59,9 @@ type CustomConn struct {
 }
 
 func (c *CustomConn) Read(p []byte) (int, error) {
+	if len(p) == 0{
+		fmt.Println("the length is 0 for the reading")
+	}
 	return c.r.Read(p)
 }
 
@@ -756,12 +759,12 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			return
 		}
 	}
-	connEstablishedAt := time.Now()
+	// connEstablishedAt := time.Now()
 	rand.Seed(time.Now().UnixNano())
 	clientConnId := rand.Intn(101)
 	buffer, err := util.ReadBytes(conn)
 	ps.logger.Debug(Emoji + fmt.Sprintf("the clientConnId: %v", clientConnId))
-	readRequestDelay := time.Since(connEstablishedAt)
+	// readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 		return
@@ -777,9 +780,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	//Dialing for tls connection
-	destConnId := 0
-	if models.GetMode() != models.MODE_TEST {
-		destConnId = rand.Intn(101)
+	// destConnId := 0
+	// if models.GetMode() != models.MODE_TEST {
+		// destConnId = rand.Intn(101)
 		if isTLS {
 			ps.logger.Debug(Emoji, zap.Any("isTLS", isTLS))
 			config := &tls.Config{
@@ -787,21 +790,21 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 				ServerName:         destinationUrl,
 			}
 			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-			if err != nil {
+			if err != nil && models.GetMode() != models.MODE_TEST {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 			}
 		} else {
 			dst, err = net.Dial("tcp", actualAddress)
-			if err != nil {
+			if err != nil && models.GetMode() != models.MODE_TEST {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 				// }
 			}
 		}
-	}
+	// }
 
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
@@ -816,19 +819,19 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// fmt.Println("after http egress call, deps array: ", deps)
 
 		// ps.hook.SetDeps(deps)
-	case mongoparser.IsOutgoingMongo(buffer):
-		// var deps []*models.Mock = ps.hook.GetDeps()
-		// fmt.Println("before mongo egress call, deps array: ", deps)
-		ps.logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
-		// fmt.Println("after mongo egress call, deps array: ", deps)
+	// case mongoparser.IsOutgoingMongo(buffer):
+		// // var deps []*models.Mock = ps.hook.GetDeps()
+		// // fmt.Println("before mongo egress call, deps array: ", deps)
+		// ps.logger.Debug("into mongo parsing mode")
+		// mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
+		// // fmt.Println("after mongo egress call, deps array: ", deps)
 
-		// ps.hook.SetDeps(deps)
+		// // ps.hook.SetDeps(deps)
 
-		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-		// for _, v := range deps {
-		// 	ps.hook.AppendDeps(v)
-		// }
+		// // deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+		// // for _, v := range deps {
+		// // 	ps.hook.AppendDeps(v)
+		// // }
 	case postgresparser.IsOutgoingPSQL(buffer):
 		ps.logger.Debug("into psql desp mode, before passing")
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)

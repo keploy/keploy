@@ -1,0 +1,64 @@
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"update":"url-shortener","ordered":true,"writeConcern":{"w":"majority"},"lsid":{"id":{"$binary":{"base64":"idhMqEGZTRaMZDdgu5XMxQ==","subType":"04"}}},"$db":"keploy"} }, { SectionSingle identifier: updates , msgs: [ {"q":{"_id":"Lhr4BWAi"},"u":{"$set":{"_id":"Lhr4BWAi","created":{"$date":{"$numberLong":"1692783368234"}},"updated":{"$date":{"$numberLong":"1692783368234"}},"url":"https://google.com"}},"upsert":true} ] }], checksum: 0 }'
+    requests:
+        - header:
+            length: 301
+            requestId: 5
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"update":"url-shortener","ordered":true,"writeConcern":{"w":"majority"},"lsid":{"id":{"$binary":{"base64":"idhMqEGZTRaMZDdgu5XMxQ==","subType":"04"}}},"$db":"keploy"} }'
+                - '{ SectionSingle identifier: updates , msgs: [ {"q":{"_id":"Lhr4BWAi"},"u":{"$set":{"_id":"Lhr4BWAi","created":{"$date":{"$numberLong":"1692783368234"}},"updated":{"$date":{"$numberLong":"1692783368234"}},"url":"https://google.com"}},"upsert":true} ] }'
+            checksum: 0
+          read_delay: 1056066
+    responses:
+        - header:
+            length: 60
+            requestId: 174067
+            responseTo: 5
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"n":{"$numberInt":"1"},"nModified":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 6038151
+    created: 1692783368
+---
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: mocks
+spec:
+    metadata:
+        operation: '{ OpMsg flags: 0, sections: [{ SectionSingle msg: {"find":"url-shortener","filter":{"_id":"Lhr4BWAi"},"limit":{"$numberLong":"1"},"singleBatch":true,"lsid":{"id":{"$binary":{"base64":"idhMqEGZTRaMZDdgu5XMxQ==","subType":"04"}}},"$db":"keploy"} }], checksum: 0 }'
+    requests:
+        - header:
+            length: 162
+            requestId: 6
+            responseTo: 0
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"find":"url-shortener","filter":{"_id":"Lhr4BWAi"},"limit":{"$numberLong":"1"},"singleBatch":true,"lsid":{"id":{"$binary":{"base64":"idhMqEGZTRaMZDdgu5XMxQ==","subType":"04"}}},"$db":"keploy"} }'
+            checksum: 0
+          read_delay: 3060456733
+    responses:
+        - header:
+            length: 197
+            requestId: 174068
+            responseTo: 6
+            Opcode: 2013
+          message:
+            flagBits: 0
+            sections:
+                - '{ SectionSingle msg: {"cursor":{"firstBatch":[{"_id":"Lhr4BWAi","created":{"$date":{"$numberLong":"1692783368234"}},"updated":{"$date":{"$numberLong":"1692783368234"}},"url":"https://google.com"}],"id":{"$numberLong":"0"},"ns":"keploy.url-shortener"},"ok":{"$numberDouble":"1.0"}} }'
+            checksum: 0
+          read_delay: 1355728
+    created: 1692783371

@@ -2,7 +2,6 @@ package genericparser
 
 import (
 	"encoding/base64"
-	"errors"
 	"net"
 	"os"
 	"os/signal"
@@ -61,8 +60,14 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 		if !matched {
 			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
-			return errors.New("failed to match the dependency call from user application")
-			// continue
+			genericReq, err := util.Passthrough(clientConn, destConn, genericRequests, logger)
+			if err != nil {
+				logger.Error("failed to pass through the request in test mode for generic", zap.Any("number of generic request", len(genericRequests)))
+				return err
+			}
+			genericRequests = [][]byte{genericReq}
+			// return errors.New("failed to match the dependency call from user application")
+			continue
 		}
 		for _, genericResponse := range genericResponses {
 			encoded, _ := PostgresDecoder(genericResponse.Message[0].Data)
