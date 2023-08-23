@@ -164,8 +164,6 @@ var (
 )
 
 func decodeOutgoingMySQL(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
-	// startedDecoding := time.Now()
-	startedDecoding := time.Now()
 	firstLoop := true
 	doHandshakeAgain := false
 
@@ -228,7 +226,6 @@ func decodeOutgoingMySQL(clientConnId, destConnId int, requestBuffer []byte, cli
 
 		firstLoop = false
 	}
-	fmt.Println(startedDecoding, firstLoop)
 }
 
 func ReadFirstBuffer(clientConn, destConn net.Conn) ([]byte, string, error) {
