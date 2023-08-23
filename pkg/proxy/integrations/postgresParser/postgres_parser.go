@@ -18,7 +18,6 @@ import (
 	// "bytes"
 
 	"errors"
-	
 
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -49,12 +48,12 @@ func IsOutgoingPSQL(buffer []byte) bool {
 func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		// encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodeStreamOutgoing(requestBuffer, clientConn, destConn, h, logger)
 		// startProxy(requestBuffer, clientConn, destConn, logger, h)
-		SaveOutgoingPSQL(requestBuffer, clientConn, destConn, logger, h)
+		// SaveOutgoingPSQL(requestBuffer, clientConn, destConn, logger, h)
 	case models.MODE_TEST:
-		decodeOutgoingPSQL(requestBuffer, clientConn, destConn, h, logger)
-		// decodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		// decodeOutgoingPSQL(requestBuffer, clientConn, destConn, h, logger)
+		decodeStreamOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	default:
 		logger.Info(Emoji+"Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -161,7 +160,7 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 	for {
 		// read request message from the postgres client and see if it's authentication buffer
 		// if its auth buffer then just save it in global config
-		
+
 		for {
 			msgRequestbuffer, _, err = util.ReadBytes1(clientConn)
 			if err != nil {
@@ -235,6 +234,7 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 
 }
 
+// This is the encoding function for the non streaming postgres messages
 func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	// decode the request buffer
 	configMocks := h.GetConfigMocks()
@@ -310,15 +310,16 @@ func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	// return
 }
 
-func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+// This is the encoding function for the streaming postgres wiremessage
+func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 
-	genericRequests := []models.GenericPayload{}
+	pgRequests := []models.GenericPayload{}
 	logger.Info("Encoding outgoing generic call from postgres parser !!")
 	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
 	// }
 	if bufStr != "" {
 
-		genericRequests = append(genericRequests, models.GenericPayload{
+		pgRequests = append(pgRequests, models.GenericPayload{
 			Origin: models.FromClient,
 			Message: []models.OutputBinary{
 				{
@@ -333,7 +334,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
-	genericResponses := []models.GenericPayload{}
+	pgResponses := []models.GenericPayload{}
 
 	clientBufferChannel := make(chan []byte)
 	destBufferChannel := make(chan []byte)
@@ -359,24 +360,24 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			}
 
 			// logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
-			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
+			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
 					Version: models.V1Beta2,
 					Name:    "mocks",
-					Kind:    models.GENERIC,
+					Kind:    models.Postgres,
 					Spec: models.MockSpec{
-						GenericRequests:  genericRequests,
-						GenericResponses: genericResponses,
+						PostgresRequests:  pgRequests,
+						PostgresResponses: pgResponses,
 					},
 				})
-				genericRequests = []models.GenericPayload{}
-				genericResponses = []models.GenericPayload{}
+				pgRequests = []models.GenericPayload{}
+				pgResponses = []models.GenericPayload{}
 			}
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
 			// }
 			if bufStr != "" {
 
-				genericRequests = append(genericRequests, models.GenericPayload{
+				pgRequests = append(pgRequests, models.GenericPayload{
 					Origin: models.FromClient,
 					Message: []models.OutputBinary{
 						{
@@ -392,14 +393,14 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
-				logger.Error(hooks.Emoji+"failed to write response to the client", zap.Error(err))
+				logger.Error(hooks.Emoji+"failed to write response to the pg client", zap.Error(err))
 				return err
 			}
 
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
 			// }
 			if bufStr != "" {
-				genericResponses = append(genericResponses, models.GenericPayload{
+				pgResponses = append(pgResponses, models.GenericPayload{
 					Origin: models.FromServer,
 					Message: []models.OutputBinary{
 						{
@@ -418,13 +419,14 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	}
 }
 
-func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
-	genericRequests := [][]byte{requestBuffer}
+// This is the decoding function for the postgres wiremessage
+func decodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+	pgRequests := [][]byte{requestBuffer}
 	for {
 		tcsMocks := h.GetTcsMocks()
 		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
-			logger.Error(hooks.Emoji+"failed to set the read deadline for the client connection", zap.Error(err))
+			logger.Error(hooks.Emoji+"failed to set the read deadline for the pg client connection", zap.Error(err))
 			return err
 		}
 
@@ -439,24 +441,24 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				logger.Debug(hooks.Emoji + "the timeout for the client read in generic")
 				break
 			}
-			genericRequests = append(genericRequests, buffer)
+			pgRequests = append(pgRequests, buffer)
 		}
 
-		if len(genericRequests) == 0 {
-			logger.Debug(hooks.Emoji + "the generic request buffer is empty")
+		if len(pgRequests) == 0 {
+			logger.Debug(hooks.Emoji + "the postgres request buffer is empty")
 			continue
 		}
 		// bestMatchedIndx := 0
 		// fuzzy match gives the index for the best matched generic mock
-		matched, genericResponses := fuzzymatch(tcsMocks, genericRequests, h)
+		matched, pgResponses := matchingPg(tcsMocks, pgRequests, h)
 
 		if !matched {
-			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
+			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
 			return errors.New("failed to match the dependency call from user application")
 			// continue
 		}
-		for _, genericResponse := range genericResponses {
-			encoded, _ := PostgresDecoder(genericResponse.Message[0].Data)
+		for _, pgResponse := range pgResponses {
+			encoded, _ := PostgresDecoder(pgResponse.Message[0].Data)
 			_, err := clientConn.Write([]byte(encoded))
 			if err != nil {
 				logger.Error(hooks.Emoji+"failed to write request message to the client application", zap.Error(err))
@@ -467,7 +469,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// }
 
 		// update for the next dependency call
-		genericRequests = [][]byte{}
+		pgRequests = [][]byte{}
 	}
 
 }
