@@ -6,7 +6,7 @@ import (
 )
 
 type COM_STMT_RESET_PACKET struct {
-	StatementID uint32
+	StatementID uint32 `yaml:"statement_id"`
 }
 
 func decodeComStmtReset(packet []byte) (*COM_STMT_RESET_PACKET, error) {
