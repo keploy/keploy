@@ -2,17 +2,21 @@ package mysqlparser
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"time"
 
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
+
+//common
+type PacketHeader struct {
+	PacketLength     uint8 `yaml:"packet_length"`
+	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
+}
 
 type MySQLPacketHeader struct {
 	PayloadLength uint32 `yaml:"payload_length"` // MySQL packet payload length
@@ -22,26 +26,6 @@ type MySQLPacketHeader struct {
 type MySQLPacket struct {
 	Header  MySQLPacketHeader `yaml:"header"`
 	Payload []byte            `yaml:"payload"`
-}
-
-type HandshakeResponse41 struct {
-	CapabilityFlags   CapabilityFlags   `yaml:"capability_flags"`
-	MaxPacketSize     uint32            `yaml:"max_packet_size"`
-	CharacterSet      uint8             `yaml:"character_set"`
-	Reserved          [23]byte          `yaml:"reserved"`
-	Username          string            `yaml:"username"`
-	LengthEncodedInt  uint8             `yaml:"length_encoded_int"`
-	AuthResponse      []byte            `yaml:"auth_response"`
-	Database          string            `yaml:"database"`
-	AuthPluginName    string            `yaml:"auth_plugin_name"`
-	ConnectAttributes map[string]string `yaml:"connect_attributes"`
-}
-
-type SSLRequestPacket struct {
-	Capabilities  uint32   `yaml:"capabilities"`
-	MaxPacketSize uint32   `yaml:"max_packet_size"`
-	CharacterSet  uint8    `yaml:"character_set"`
-	Reserved      [23]byte `yaml:"reserved"`
 }
 
 type ColumnDefinition struct {
@@ -65,78 +49,6 @@ type RowDataPacket struct {
 	Data []byte `yaml:"data"`
 }
 
-type ColumnValue struct {
-	Null  bool   `yaml:"null"`
-	Value string `yaml:"value"`
-}
-
-type ColumnDefinitionPacket struct {
-	Catalog      string `yaml:"catalog"`
-	Schema       string `yaml:"schema"`
-	Table        string `yaml:"table"`
-	OrgTable     string `yaml:"org_table"`
-	Name         string `yaml:"name"`
-	OrgName      string `yaml:"org_name"`
-	CharacterSet uint16 `yaml:"character_set"`
-	ColumnLength uint32 `yaml:"column_length"`
-	ColumnType   string `yaml:"column_type"`
-	Flags        uint16 `yaml:"flags"`
-	Decimals     uint8  `yaml:"decimals"`
-	Filler       uint16 `yaml:"filler"`
-	DefaultValue string `yaml:"default_value"`
-}
-
-type packetDecoder struct {
-	conn net.Conn `yaml:"conn"`
-}
-
-type binaryRows struct {
-	pd      *packetDecoder `yaml:"pd"`
-	rs      resultSet      `yaml:"rs"`
-	mc      mysqlConn      `yaml:"mc"`
-	data    []byte         `yaml:"data"`
-	columns []mysqlField   `yaml:"columns"`
-}
-
-type resultSet struct {
-	columns []column `yaml:"columns"`
-	done    bool     `yaml:"done"`
-}
-
-type column struct {
-	fieldType int `yaml:"field_type"`
-	flags     int `yaml:"flags"`
-	decimals  int `yaml:"decimals"`
-}
-
-type mysqlConn struct {
-	status uint16 `yaml:"status"`
-	cfg    config `yaml:"cfg"`
-}
-
-type config struct {
-	Loc int `yaml:"loc"`
-}
-
-type mysqlField struct {
-	tableName string    `yaml:"table_name"`
-	name      string    `yaml:"name"`
-	length    uint32    `yaml:"length"`
-	flags     fieldFlag `yaml:"flags"`
-	fieldType fieldType `yaml:"field_type"`
-	decimals  byte      `yaml:"decimals"`
-	charSet   uint8     `yaml:"char_set"`
-}
-
-type ResultsetRowPacket struct {
-	ColumnValues []string `yaml:"column_values"`
-	RowValues    []string `yaml:"row_values"`
-}
-
-type COM_STMT_RESET struct {
-	StatementID uint32 `yaml:"statement_id"`
-}
-
 type PluginDetails struct {
 	Type    string `yaml:"type"`
 	Message string `yaml:"message"`
@@ -144,309 +56,7 @@ type PluginDetails struct {
 
 type CapabilityFlags uint32
 
-var mySQLfieldTypeNames = map[byte]string{
-	0x00: "MYSQL_TYPE_DECIMAL",
-	0x01: "MYSQL_TYPE_TINY",
-	0x02: "MYSQL_TYPE_SHORT",
-	0x03: "MYSQL_TYPE_LONG",
-	0x04: "MYSQL_TYPE_FLOAT",
-	0x05: "MYSQL_TYPE_DOUBLE",
-	0x06: "MYSQL_TYPE_NULL",
-	0x07: "MYSQL_TYPE_TIMESTAMP",
-	0x08: "MYSQL_TYPE_LONGLONG",
-	0x09: "MYSQL_TYPE_INT24",
-	0x0a: "MYSQL_TYPE_DATE",
-	0x0b: "MYSQL_TYPE_TIME",
-	0x0c: "MYSQL_TYPE_DATETIME",
-	0x0d: "MYSQL_TYPE_YEAR",
-	0x0e: "MYSQL_TYPE_NEWDATE",
-	0x0f: "MYSQL_TYPE_VARCHAR",
-	0x10: "MYSQL_TYPE_BIT",
-	0xf6: "MYSQL_TYPE_NEWDECIMAL",
-	0xf7: "MYSQL_TYPE_ENUM",
-	0xf8: "MYSQL_TYPE_SET",
-	0xf9: "MYSQL_TYPE_TINY_BLOB",
-	0xfa: "MYSQL_TYPE_MEDIUM_BLOB",
-	0xfb: "MYSQL_TYPE_LONG_BLOB",
-	0xfc: "MYSQL_TYPE_BLOB",
-	0xfd: "MYSQL_TYPE_VAR_STRING",
-	0xfe: "MYSQL_TYPE_STRING",
-	0xff: "MYSQL_TYPE_GEOMETRY",
-}
-var columnTypeValues = map[string]byte{
-	"MYSQL_TYPE_DECIMAL":     0x00,
-	"MYSQL_TYPE_TINY":        0x01,
-	"MYSQL_TYPE_SHORT":       0x02,
-	"MYSQL_TYPE_LONG":        0x03,
-	"MYSQL_TYPE_FLOAT":       0x04,
-	"MYSQL_TYPE_DOUBLE":      0x05,
-	"MYSQL_TYPE_NULL":        0x06,
-	"MYSQL_TYPE_TIMESTAMP":   0x07,
-	"MYSQL_TYPE_LONGLONG":    0x08,
-	"MYSQL_TYPE_INT24":       0x09,
-	"MYSQL_TYPE_DATE":        0x0a,
-	"MYSQL_TYPE_TIME":        0x0b,
-	"MYSQL_TYPE_DATETIME":    0x0c,
-	"MYSQL_TYPE_YEAR":        0x0d,
-	"MYSQL_TYPE_NEWDATE":     0x0e,
-	"MYSQL_TYPE_VARCHAR":     0x0f,
-	"MYSQL_TYPE_BIT":         0x10,
-	"MYSQL_TYPE_NEWDECIMAL":  0xf6,
-	"MYSQL_TYPE_ENUM":        0xf7,
-	"MYSQL_TYPE_SET":         0xf8,
-	"MYSQL_TYPE_TINY_BLOB":   0xf9,
-	"MYSQL_TYPE_MEDIUM_BLOB": 0xfa,
-	"MYSQL_TYPE_LONG_BLOB":   0xfb,
-	"MYSQL_TYPE_BLOB":        0xfc,
-	"MYSQL_TYPE_VAR_STRING":  0xfd,
-	"MYSQL_TYPE_STRING":      0xfe,
-	"MYSQL_TYPE_GEOMETRY":    0xff,
-}
-
 var handshakePluginName string
-
-func NewHandshakeResponsePacket(handshake *HandshakeV10Packet, authMethod string, password string) *HandshakeResponse41 {
-	authResponse := GenerateAuthResponse(password, handshake.AuthPluginData)
-	return &HandshakeResponse41{
-		CapabilityFlags: CapabilityFlags(handshake.CapabilityFlags),
-		MaxPacketSize:   MaxPacketSize,
-		CharacterSet:    0x21, // utf8_general_ci
-		Username:        "user",
-		AuthResponse:    authResponse,
-		Database:        "shorturl_db",
-		AuthPluginName:  authMethod,
-	}
-}
-func GenerateAuthResponse(password string, salt []byte) []byte {
-	// 1. Hash the password
-	passwordHash := sha1.Sum([]byte(password))
-
-	// 2. Hash the salt and the password hash
-	finalHash := sha1.Sum(append(salt, passwordHash[:]...))
-
-	return finalHash[:]
-}
-
-func (p *HandshakeResponse41) EncodeHandshake() ([]byte, error) {
-	length := 4 + 4 + 1 + 23 + len(p.Username) + 1 + 1 + len(p.AuthResponse) + len(p.Database) + 1 + len(p.AuthPluginName) + 1
-	buffer := make([]byte, length)
-	offset := 0
-
-	binary.LittleEndian.PutUint32(buffer[offset:], uint32(p.CapabilityFlags))
-	offset += 4
-	binary.LittleEndian.PutUint32(buffer[offset:], p.MaxPacketSize)
-	offset += 4
-	buffer[offset] = p.CharacterSet
-	offset += 1 + 23
-	offset += copy(buffer[offset:], p.Username)
-	buffer[offset] = 0x00
-	offset++
-	buffer[offset] = uint8(len(p.AuthResponse))
-	offset++
-	offset += copy(buffer[offset:], p.AuthResponse)
-	offset += copy(buffer[offset:], p.Database)
-	buffer[offset] = 0x00
-	offset++
-	offset += copy(buffer[offset:], p.AuthPluginName)
-	buffer[offset] = 0x00
-
-	return buffer, nil
-}
-
-func NewSSLRequestPacket(capabilities uint32, maxPacketSize uint32, characterSet uint8) *SSLRequestPacket {
-	// Ensure the SSL capability flag is set
-	capabilities |= CLIENT_SSL
-
-	if characterSet == 0 {
-		characterSet = 33 // Set default to utf8mb4 if not specified.
-	}
-
-	return &SSLRequestPacket{
-		Capabilities:  capabilities,
-		MaxPacketSize: maxPacketSize,
-		CharacterSet:  characterSet,
-		Reserved:      [23]byte{},
-	}
-}
-
-func (p *MySQLPacket) Encode() ([]byte, error) {
-	packet := make([]byte, 4)
-
-	binary.LittleEndian.PutUint32(packet[:3], p.Header.PayloadLength)
-	packet[3] = p.Header.SequenceID
-
-	// Simplistic interpretation of MySQL's COM_QUERY
-	if p.Payload[0] == 0x03 {
-		query := string(p.Payload[1:])
-		queryObj := map[string]interface{}{
-			"command": "COM_QUERY",
-			"query":   query,
-		}
-		queryJson, _ := json.Marshal(queryObj)
-		packet = append(packet, queryJson...)
-	}
-
-	return packet, nil
-}
-
-var lastCommand byte // This is global and will remember the last command
-
-func encodeLengthEncodedInteger(n uint64) []byte {
-	var buf []byte
-
-	if n <= 250 {
-		buf = append(buf, byte(n))
-	} else if n <= 0xffff {
-		buf = append(buf, 0xfc, byte(n), byte(n>>8))
-	} else if n <= 0xffffff {
-		buf = append(buf, 0xfd, byte(n), byte(n>>8), byte(n>>16))
-	} else {
-		buf = append(buf, 0xfe, byte(n), byte(n>>8), byte(n>>16), byte(n>>24), byte(n>>32), byte(n>>40), byte(n>>48), byte(n>>56))
-	}
-
-	return buf
-}
-
-func writeLengthEncodedString(buf *bytes.Buffer, s string) {
-	length := len(s)
-	switch {
-	case length <= 250:
-		buf.WriteByte(byte(length))
-	case length <= 0xFFFF:
-		buf.WriteByte(0xFC)
-		binary.Write(buf, binary.LittleEndian, uint16(length))
-	case length <= 0xFFFFFF:
-		buf.WriteByte(0xFD)
-		binary.Write(buf, binary.LittleEndian, uint32(length)&0xFFFFFF)
-	default:
-		buf.WriteByte(0xFE)
-		binary.Write(buf, binary.LittleEndian, uint64(length))
-	}
-	buf.WriteString(s)
-}
-
-func encodeColumnDefinition(buf *bytes.Buffer, column *models.ColumnDefinition, seqNum *byte) error {
-	tmpBuf := &bytes.Buffer{}
-	writeLengthEncodedString(tmpBuf, column.Catalog)
-	writeLengthEncodedString(tmpBuf, column.Schema)
-	writeLengthEncodedString(tmpBuf, column.Table)
-	writeLengthEncodedString(tmpBuf, column.OrgTable)
-	writeLengthEncodedString(tmpBuf, column.Name)
-	writeLengthEncodedString(tmpBuf, column.OrgName)
-	tmpBuf.WriteByte(0x0C)
-	if err := binary.Write(tmpBuf, binary.LittleEndian, column.CharacterSet); err != nil {
-		return err
-	}
-	if err := binary.Write(tmpBuf, binary.LittleEndian, column.ColumnLength); err != nil {
-		return err
-	}
-	tmpBuf.WriteByte(column.ColumnType)
-	if err := binary.Write(tmpBuf, binary.LittleEndian, column.Flags); err != nil {
-		return err
-	}
-	tmpBuf.WriteByte(column.Decimals)
-	tmpBuf.Write([]byte{0x00, 0x00})
-
-	colData := tmpBuf.Bytes()
-	length := len(colData)
-
-	// Write packet header with length and sequence number
-	buf.WriteByte(byte(length))
-	buf.WriteByte(byte(length >> 8))
-	buf.WriteByte(byte(length >> 16))
-	buf.WriteByte(*seqNum)
-	*seqNum++
-
-	// Write column definition data
-	buf.Write(colData)
-
-	return nil
-}
-
-func writeLengthEncodedInteger(buf *bytes.Buffer, val uint64) {
-	switch {
-	case val <= 250:
-		buf.WriteByte(byte(val))
-	case val <= 0xFFFF:
-		buf.WriteByte(0xFC)
-		binary.Write(buf, binary.LittleEndian, uint16(val))
-	case val <= 0xFFFFFF:
-		buf.WriteByte(0xFD)
-		binary.Write(buf, binary.LittleEndian, uint32(val)&0xFFFFFF)
-	default:
-		buf.WriteByte(0xFE)
-		binary.Write(buf, binary.LittleEndian, val)
-	}
-}
-
-func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]byte, error) {
-	var buf bytes.Buffer
-
-	// Write the header
-	//binary.Write(&buf, binary.LittleEndian, uint32(row.Header.PacketLength))
-	//buf.WriteByte(row.Header.PacketSequenceId)
-
-	for _, column := range columnValues {
-		value := column.Value
-		switch fieldType(column.Type) {
-		case fieldTypeTimestamp:
-			timestamp, ok := value.(string)
-			if !ok {
-				return nil, errors.New("could not convert value to string")
-			}
-			t, err := time.Parse("2006-01-02 15:04:05", timestamp)
-			if err != nil {
-				return nil, errors.New("could not parse timestamp value")
-			}
-
-			buf.WriteByte(7) // Length of the following encoded data
-			yearBytes := make([]byte, 2)
-			binary.LittleEndian.PutUint16(yearBytes, uint16(t.Year()))
-			buf.Write(yearBytes)            // Year
-			buf.WriteByte(byte(t.Month()))  // Month
-			buf.WriteByte(byte(t.Day()))    // Day
-			buf.WriteByte(byte(t.Hour()))   // Hour
-			buf.WriteByte(byte(t.Minute())) // Minute
-			buf.WriteByte(byte(t.Second())) // Second
-		default:
-			strValue, ok := value.(string)
-			if !ok {
-				return nil, errors.New("could not convert value to string")
-			}
-			// Write a length-encoded integer for the string length
-			writeLengthEncodedInteger(&buf, uint64(len(strValue)))
-			// Write the string
-			buf.WriteString(strValue)
-		}
-	}
-
-	return buf.Bytes(), nil
-}
-
-func writeLengthEncodedIntegers(buf *bytes.Buffer, value uint64) {
-	if value <= 250 {
-		buf.WriteByte(byte(value))
-	} else if value <= 0xffff {
-		buf.WriteByte(0xfc)
-		buf.WriteByte(byte(value))
-		buf.WriteByte(byte(value >> 8))
-	} else if value <= 0xffffff {
-		buf.WriteByte(0xfd)
-		buf.WriteByte(byte(value))
-		buf.WriteByte(byte(value >> 8))
-		buf.WriteByte(byte(value >> 16))
-	} else {
-		buf.WriteByte(0xfe)
-		binary.Write(buf, binary.LittleEndian, value)
-	}
-}
-
-func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
-	data := []byte(value)
-	length := uint64(len(data))
-	writeLengthEncodedIntegers(buf, length)
-	buf.Write(data)
-}
 
 func encodeToBinary(packet interface{}, operation string, sequence int) ([]byte, error) {
 	var data []byte
@@ -614,6 +224,103 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	return packetType, header, packetData, nil
 }
 
+func (p *MySQLPacket) Encode() ([]byte, error) {
+	packet := make([]byte, 4)
+
+	binary.LittleEndian.PutUint32(packet[:3], p.Header.PayloadLength)
+	packet[3] = p.Header.SequenceID
+
+	// Simplistic interpretation of MySQL's COM_QUERY
+	if p.Payload[0] == 0x03 {
+		query := string(p.Payload[1:])
+		queryObj := map[string]interface{}{
+			"command": "COM_QUERY",
+			"query":   query,
+		}
+		queryJson, _ := json.Marshal(queryObj)
+		packet = append(packet, queryJson...)
+	}
+
+	return packet, nil
+}
+
+var lastCommand byte // This is global and will remember the last command
+
+func encodeLengthEncodedInteger(n uint64) []byte {
+	var buf []byte
+
+	if n <= 250 {
+		buf = append(buf, byte(n))
+	} else if n <= 0xffff {
+		buf = append(buf, 0xfc, byte(n), byte(n>>8))
+	} else if n <= 0xffffff {
+		buf = append(buf, 0xfd, byte(n), byte(n>>8), byte(n>>16))
+	} else {
+		buf = append(buf, 0xfe, byte(n), byte(n>>8), byte(n>>16), byte(n>>24), byte(n>>32), byte(n>>40), byte(n>>48), byte(n>>56))
+	}
+
+	return buf
+}
+
+func writeLengthEncodedString(buf *bytes.Buffer, s string) {
+	length := len(s)
+	switch {
+	case length <= 250:
+		buf.WriteByte(byte(length))
+	case length <= 0xFFFF:
+		buf.WriteByte(0xFC)
+		binary.Write(buf, binary.LittleEndian, uint16(length))
+	case length <= 0xFFFFFF:
+		buf.WriteByte(0xFD)
+		binary.Write(buf, binary.LittleEndian, uint32(length)&0xFFFFFF)
+	default:
+		buf.WriteByte(0xFE)
+		binary.Write(buf, binary.LittleEndian, uint64(length))
+	}
+	buf.WriteString(s)
+}
+
+func writeLengthEncodedInteger(buf *bytes.Buffer, val uint64) {
+	switch {
+	case val <= 250:
+		buf.WriteByte(byte(val))
+	case val <= 0xFFFF:
+		buf.WriteByte(0xFC)
+		binary.Write(buf, binary.LittleEndian, uint16(val))
+	case val <= 0xFFFFFF:
+		buf.WriteByte(0xFD)
+		binary.Write(buf, binary.LittleEndian, uint32(val)&0xFFFFFF)
+	default:
+		buf.WriteByte(0xFE)
+		binary.Write(buf, binary.LittleEndian, val)
+	}
+}
+
+func writeLengthEncodedIntegers(buf *bytes.Buffer, value uint64) {
+	if value <= 250 {
+		buf.WriteByte(byte(value))
+	} else if value <= 0xffff {
+		buf.WriteByte(0xfc)
+		buf.WriteByte(byte(value))
+		buf.WriteByte(byte(value >> 8))
+	} else if value <= 0xffffff {
+		buf.WriteByte(0xfd)
+		buf.WriteByte(byte(value))
+		buf.WriteByte(byte(value >> 8))
+		buf.WriteByte(byte(value >> 16))
+	} else {
+		buf.WriteByte(0xfe)
+		binary.Write(buf, binary.LittleEndian, value)
+	}
+}
+
+func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
+	data := []byte(value)
+	length := uint64(len(data))
+	writeLengthEncodedIntegers(buf, length)
+	buf.Write(data)
+}
+
 func readLengthEncodedString(data []byte, offset *int) (string, error) {
 	if *offset >= len(data) {
 		return "", errors.New("data length is not enough")
@@ -649,15 +356,6 @@ func readLengthEncodedString(data []byte, offset *int) (string, error) {
 	result := string(data[*offset : *offset+length])
 	*offset += length
 	return result, nil
-}
-
-type PacketHeader struct {
-	PacketLength     uint8 `yaml:"packet_length"`
-	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
-}
-type RowHeader struct {
-	PacketLength int   `yaml:"packet_length"`
-	SequenceID   uint8 `yaml:"sequence_id"`
 }
 
 func ReadLengthEncodedIntegers(data []byte, offset int) (uint64, int) {
@@ -726,33 +424,6 @@ func readLengthEncodedStringUpdated(data []byte) (string, []byte, error) {
 	return str, remainingData, nil
 }
 
-func decodeRowData(data []byte, columns []ColumnDefinition) ([]RowDataPacket, []byte, error) {
-	var rowPackets []RowDataPacket
-	for _, _ = range columns {
-		var rowData RowDataPacket
-		var err error
-
-		// Check for NULL column
-		if data[0] == 0xfb {
-			data = data[1:]
-			rowData.Data = nil
-			rowPackets = append(rowPackets, rowData)
-			continue
-		}
-
-		var fieldStr string
-		fieldStr, data, err = readLengthEncodedStringUpdated(data)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		rowData.Data = []byte(fieldStr)
-		rowPackets = append(rowPackets, rowData)
-	}
-
-	return rowPackets, data, nil
-}
-
 func readUint24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
 }
@@ -782,8 +453,6 @@ func readLengthEncodedStrings(b []byte) (string, int) {
 	length, n := readLengthEncodedIntegers(b)
 	return string(b[n : n+int(length)]), n + int(length)
 }
-
-type fieldFlag uint16
 
 func (packet *HandshakeV10Packet) ShouldUseSSL() bool {
 	return (packet.CapabilityFlags & CLIENT_SSL) != 0

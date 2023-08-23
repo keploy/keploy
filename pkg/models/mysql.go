@@ -87,21 +87,6 @@ type MySQLResultSet struct {
 	Columns []*ColumnDefinition `yaml:"columns"`
 	Rows    []*Row              `yaml:"rows"`
 }
-type ColumnDefinitionPacket struct {
-	Catalog      string `yaml:"catalog"`
-	Schema       string `yaml:"schema"`
-	Table        string `yaml:"table"`
-	OrgTable     string `yaml:"org_table"`
-	Name         string `yaml:"name"`
-	OrgName      string `yaml:"org_name"`
-	CharacterSet uint16 `yaml:"character_set"`
-	ColumnLength uint32 `yaml:"column_length"`
-	ColumnType   string `yaml:"column_type"`
-	Flags        uint16 `yaml:"flags"`
-	Decimals     uint8  `yaml:"decimals"`
-	Filler       uint16 `yaml:"filler"`
-	DefaultValue string `yaml:"default_value"`
-}
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
 	PacketSequenceId uint8 `yaml:"packet_sequence_id"`

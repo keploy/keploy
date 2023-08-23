@@ -188,3 +188,41 @@ func encodeStmtPrepareOk(packet *models.MySQLStmtPrepareOk) ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
+
+func encodeColumnDefinition(buf *bytes.Buffer, column *models.ColumnDefinition, seqNum *byte) error {
+	tmpBuf := &bytes.Buffer{}
+	writeLengthEncodedString(tmpBuf, column.Catalog)
+	writeLengthEncodedString(tmpBuf, column.Schema)
+	writeLengthEncodedString(tmpBuf, column.Table)
+	writeLengthEncodedString(tmpBuf, column.OrgTable)
+	writeLengthEncodedString(tmpBuf, column.Name)
+	writeLengthEncodedString(tmpBuf, column.OrgName)
+	tmpBuf.WriteByte(0x0C)
+	if err := binary.Write(tmpBuf, binary.LittleEndian, column.CharacterSet); err != nil {
+		return err
+	}
+	if err := binary.Write(tmpBuf, binary.LittleEndian, column.ColumnLength); err != nil {
+		return err
+	}
+	tmpBuf.WriteByte(column.ColumnType)
+	if err := binary.Write(tmpBuf, binary.LittleEndian, column.Flags); err != nil {
+		return err
+	}
+	tmpBuf.WriteByte(column.Decimals)
+	tmpBuf.Write([]byte{0x00, 0x00})
+
+	colData := tmpBuf.Bytes()
+	length := len(colData)
+
+	// Write packet header with length and sequence number
+	buf.WriteByte(byte(length))
+	buf.WriteByte(byte(length >> 8))
+	buf.WriteByte(byte(length >> 16))
+	buf.WriteByte(*seqNum)
+	*seqNum++
+
+	// Write column definition data
+	buf.Write(colData)
+
+	return nil
+}

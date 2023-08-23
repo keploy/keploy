@@ -21,19 +21,11 @@ func IsOutgoingMySQL(buffer []byte) bool {
 }
 
 func ProcessOutgoingMySql(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
-	// fmt.Println("into processing mongo. clientConnId: ", clientConnId)
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		// capturedDeps := encodeOutgoingMongo(requestBuffer, clientConn, destConn, logger)
 		encodeOutgoingMySql(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
 
-		// *deps = append(*deps, capturedDeps...)
-		// for _, v := range capturedDeps {
-		// 	h.AppendDeps(v)
-		// 	// h.WriteMock(v)
-		// }
 	case models.MODE_TEST:
-		fmt.Println("into test mode. clientConnId: ", clientConnId)
 		decodeOutgoingMySQL(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
 	default:
 	}

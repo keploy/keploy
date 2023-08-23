@@ -3,9 +3,11 @@ package mysqlparser
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
+	"time"
 
 	"go.keploy.io/server/pkg/models"
 )
@@ -23,6 +25,10 @@ type RowColumnDefinition struct {
 	Type  fieldType   `yaml:"type"`
 	Name  string      `yaml:"name"`
 	Value interface{} `yaml:"value"`
+}
+type RowHeader struct {
+	PacketLength int   `yaml:"packet_length"`
+	SequenceID   uint8 `yaml:"sequence_id"`
 }
 
 func parseResultSet(b []byte) (*ResultSet, error) {
@@ -239,6 +245,50 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	sequenceID++
 	// Write EOF packet header again
 	buf.Write([]byte{5, 0, 0, sequenceID, 0xFE, 0x00, 0x00, 0x02, 0x00})
+
+	return buf.Bytes(), nil
+}
+
+func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// Write the header
+	//binary.Write(&buf, binary.LittleEndian, uint32(row.Header.PacketLength))
+	//buf.WriteByte(row.Header.PacketSequenceId)
+
+	for _, column := range columnValues {
+		value := column.Value
+		switch fieldType(column.Type) {
+		case fieldTypeTimestamp:
+			timestamp, ok := value.(string)
+			if !ok {
+				return nil, errors.New("could not convert value to string")
+			}
+			t, err := time.Parse("2006-01-02 15:04:05", timestamp)
+			if err != nil {
+				return nil, errors.New("could not parse timestamp value")
+			}
+
+			buf.WriteByte(7) // Length of the following encoded data
+			yearBytes := make([]byte, 2)
+			binary.LittleEndian.PutUint16(yearBytes, uint16(t.Year()))
+			buf.Write(yearBytes)            // Year
+			buf.WriteByte(byte(t.Month()))  // Month
+			buf.WriteByte(byte(t.Day()))    // Day
+			buf.WriteByte(byte(t.Hour()))   // Hour
+			buf.WriteByte(byte(t.Minute())) // Minute
+			buf.WriteByte(byte(t.Second())) // Second
+		default:
+			strValue, ok := value.(string)
+			if !ok {
+				return nil, errors.New("could not convert value to string")
+			}
+			// Write a length-encoded integer for the string length
+			writeLengthEncodedInteger(&buf, uint64(len(strValue)))
+			// Write the string
+			buf.WriteString(strValue)
+		}
+	}
 
 	return buf.Bytes(), nil
 }
