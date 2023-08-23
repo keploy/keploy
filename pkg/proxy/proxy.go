@@ -805,6 +805,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			return
 		}
 
+
 		//Dialing for tls connection
 		destConnId := 0
 		if models.GetMode() != models.MODE_TEST {

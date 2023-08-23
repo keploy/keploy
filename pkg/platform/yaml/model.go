@@ -303,7 +303,6 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				GenericRequests:  genericSpec.GenericRequests,
 				GenericResponses: genericSpec.GenericResponses,
 			}
-
 		case models.Postgres:
 			postgresSpec := spec.PostgresSpec{}
 			err := m.Spec.Decode(&postgresSpec)

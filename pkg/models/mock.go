@@ -29,6 +29,7 @@ type MockSpec struct {
 	//for postgres
 	PostgresReq  *Backend  `json:"postgresRequest,omitempty"`
 	PostgresResp *Frontend `json:"postgresResponse,omitempty"`
+
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
