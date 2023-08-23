@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -283,7 +284,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	//Matching algorithmm
 	//Get the mocks
 	tcsMocks := h.GetTcsMocks()
-	var bestMatch string
+	var bestMatch *models.Mock
 	//Parse the request buffer
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
 	if err != nil {
@@ -357,8 +358,9 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 
 	var bestMatchIndex int
 	for idx, mock := range tcsMocks {
-		if mock.Spec.HttpReq.Body == bestMatch {
+		if reflect.DeepEqual(mock, bestMatch) {
 			bestMatchIndex = idx
+			break
 		}
 	}
 	if h.GetDepsSize() == 0 {
@@ -416,6 +418,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	// pop the mocked output from the dependency queue
 	// deps = deps[1:]
 	h.PopIndex(bestMatchIndex)
+	return
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.

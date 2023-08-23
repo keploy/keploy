@@ -341,13 +341,13 @@ func HttpEncoder(buffer []byte) string {
 	encoded := string(buffer)
 	return encoded
 }
-func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, string) {
+func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *models.Mock) {
 	com := HttpEncoder(reqBuff)
 	for _, mock := range tcsMocks {
 		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
 		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
 			fmt.Println("matched in first loop")
-			return true, mock.Spec.HttpReq.Body
+			return true, mock
 		}
 	}
 	// convert all the configmocks to string array
@@ -359,15 +359,13 @@ func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, s
 	if IsAsciiPrintable(string(reqBuff)) {
 		idx := findStringMatch(string(reqBuff), mockString)
 		if idx != -1 {
-			nMatch := tcsMocks[idx].Spec.HttpReq.Body
 			fmt.Println("Returning mock from String Match !!")
-			return true, nMatch
+			return true, tcsMocks[idx]
 		}
 	}
 	idx := findBinaryMatch(tcsMocks, reqBuff, h)
 	if idx != -1 {
-		nMatch := tcsMocks[idx].Spec.HttpReq.Body
-		return true, nMatch
+		return true, tcsMocks[idx]
 	}
-	return false, ""
+	return false, &models.Mock{}
 }
