@@ -160,7 +160,6 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 	for {
 		// read request message from the postgres client and see if it's authentication buffer
 		// if its auth buffer then just save it in global config
-
 		for {
 			msgRequestbuffer, _, err = util.ReadBytes1(clientConn)
 			if err != nil {

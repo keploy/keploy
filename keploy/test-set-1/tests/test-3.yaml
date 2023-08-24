@@ -1,38 +1,40 @@
 version: api.keploy.io/v1beta2
 kind: Http
-name: test-1
+name: test-3
 spec:
     metadata: {}
     req:
         method: POST
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8080/api/tutorials
+        url: http://localhost:8080/api/employees
         header:
             Accept: '*/*'
-            Content-Length: "94"
+            Content-Length: "102"
             Content-Type: application/json
             Host: localhost:8080
             User-Agent: curl/7.81.0
         body: |-
             {
-              "title": "New Tutorial",
-              "description": "This is a new tutorial",
-              "published": false
+                "firstName": "GOurav",
+                "lastName": "Tyson",
+                "email": "gt@gmail.com",
+                "timestamp":1
             }
         body_type: ""
     resp:
-        status_code: 201
+        status_code: 200
         header:
             Content-Type: application/json
-            Date: Thu, 10 Aug 2023 16:27:29 GMT
-            Vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers
-        body: '{"id":"64d50ff0c5ca8618660bf844","title":"New Tutorial","description":"This is a new tutorial","published":false}'
+            Date: Tue, 22 Aug 2023 12:21:03 GMT
+        body: '{"id":21,"firstName":"GOurav","lastName":"Tyson","email":"gt@gmail.com","timestamp":1692706863}'
         body_type: ""
         status_message: ""
         proto_major: 0
         proto_minor: 0
     objects: []
     assertions:
-        noise: []
-    created: 1691684850
+        noise:
+            - header.Date
+            - body.timestamp
+    created: 1692706864

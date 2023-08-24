@@ -1,6 +1,217 @@
 version: api.keploy.io/v1beta1
 name: report-6
-status: RUNNING
-success: 0
+status: PASSED
+success: 3
 failure: 0
 total: 3
+tests:
+    - kind: Http
+      name: report-6
+      status: PASSED
+      started: 1692707548
+      completed: 1692707548
+      test_case_path: /home/keploy/Desktop/gk_workspace/sarthak/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "100"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                "firstName": "Myke",
+                "lastName": "Tyson",
+                "email": "mt@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Tue, 22 Aug 2023 12:20:47 GMT
+        body: '{"id":19,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1692706847}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+        - body.timestamp
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 22 Aug 2023 12:20:47 GMT
+              actual:
+                key: Date
+                value:
+                    - Tue, 22 Aug 2023 12:32:28 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":19,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1692706847}'
+              actual: '{"id":19,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1692707548}'
+        dep_result: []
+    - kind: Http
+      name: report-6
+      status: PASSED
+      started: 1692707548
+      completed: 1692707548
+      test_case_path: /home/keploy/Desktop/gk_workspace/sarthak/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "100"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                "firstName": "Myke",
+                "lastName": "Tyson",
+                "email": "mt@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Tue, 22 Aug 2023 12:20:47 GMT
+        body: '{"id":20,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1692706848}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+        - body.timestamp
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 22 Aug 2023 12:20:47 GMT
+              actual:
+                key: Date
+                value:
+                    - Tue, 22 Aug 2023 12:32:28 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":20,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1692706848}'
+              actual: '{"id":20,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1692707548}'
+        dep_result: []
+    - kind: Http
+      name: report-6
+      status: PASSED
+      started: 1692707548
+      completed: 1692707548
+      test_case_path: /home/keploy/Desktop/gk_workspace/sarthak/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "102"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                "firstName": "GOurav",
+                "lastName": "Tyson",
+                "email": "gt@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Tue, 22 Aug 2023 12:21:03 GMT
+        body: '{"id":21,"firstName":"GOurav","lastName":"Tyson","email":"gt@gmail.com","timestamp":1692706863}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+        - body.timestamp
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 22 Aug 2023 12:21:03 GMT
+              actual:
+                key: Date
+                value:
+                    - Tue, 22 Aug 2023 12:32:28 GMT
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":21,"firstName":"GOurav","lastName":"Tyson","email":"gt@gmail.com","timestamp":1692706863}'
+              actual: '{"id":21,"firstName":"GOurav","lastName":"Tyson","email":"gt@gmail.com","timestamp":1692707548}'
+        dep_result: []
