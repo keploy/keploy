@@ -380,17 +380,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
 
+	body := stub.Spec.HttpResp.Body
+	var respBody string
+	var responseString string
+	
 	// Fetching the response headers
 	header := pkg.ToHttpHeader(stub.Spec.HttpResp.Header)
-	var headers string
-	for key, values := range header {
-		for _, value := range values {
-			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-			headers += headerLine
-		}
-	}
-	body := stub.Spec.HttpResp.Body
-	var responseString string
 
 	//Check if the gzip encoding is present in the header
 	if header["Content-Encoding"] != nil && header["Content-Encoding"][0] == "gzip" {
@@ -406,10 +401,25 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			logger.Error(Emoji+"failed to close the gzip writer", zap.Error(err))
 			return
 		}
-		responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
+		logger.Debug("the length of the response body: " +strconv.Itoa(len(compressedBuffer.String())))
+		respBody = compressedBuffer.String()
+		// responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
 	} else {
-		responseString = statusLine + headers + "\r\n" + body
+		respBody = body
+		// responseString = statusLine + headers + "\r\n" + body
 	}
+	var headers string
+	for key, values := range header {
+		if key == "Content-Length" {
+			values = []string{strconv.Itoa(len(respBody))}
+		}
+		for _, value := range values {
+			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+			headers += headerLine
+		}
+	}
+	responseString = statusLine + headers + "\r\n" + respBody
+	logger.Debug("the content-length header" + headers)
 	_, err = clienConn.Write([]byte(responseString))
 	if err != nil {
 		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
