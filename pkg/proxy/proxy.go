@@ -833,7 +833,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 	ps.hook.AppendDeps(v)
 		// }
 	case postgresparser.IsOutgoingPSQL(buffer):
-		fmt.Println("into psql desp mode, before passing")
+
+		ps.logger.Debug("into psql desp mode, before passing")
+
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
 
 	default:
