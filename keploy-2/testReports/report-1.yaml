@@ -1,0 +1,399 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: PASSED
+success: 6
+failure: 0
+total: 6
+tests:
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1692355155
+      completed: 1692355157
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/createTable
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 500
+        header:
+            Content-Length: "75"
+            Content-Type: text/plain; charset=utf-8
+            Date: Fri, 18 Aug 2023 10:33:14 GMT
+            X-Content-Type-Options: nosniff
+        body: |+
+            Can't create table: ORA-00955: name is already used by an existing object
+
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 500
+            actual: 500
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "75"
+              actual:
+                key: Content-Length
+                value:
+                    - "75"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - text/plain; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - text/plain; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:33:14 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:39:17 GMT
+            - normal: true
+              expected:
+                key: X-Content-Type-Options
+                value:
+                    - nosniff
+              actual:
+                key: X-Content-Type-Options
+                value:
+                    - nosniff
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: |+
+                Can't create table: ORA-00955: name is already used by an existing object
+
+              actual: |+
+                Can't create table: ORA-00955: name is already used by an existing object
+
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1692355157
+      completed: 1692355159
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/dropTable
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Fri, 18 Aug 2023 10:33:52 GMT
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:33:52 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:39:19 GMT
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1692355159
+      completed: 1692355161
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/createTable
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Fri, 18 Aug 2023 10:33:58 GMT
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:33:58 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:39:21 GMT
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1692355161
+      completed: 1692355164
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-4
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/queryData
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Fri, 18 Aug 2023 10:36:18 GMT
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:36:18 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:39:24 GMT
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1692355164
+      completed: 1692355166
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-5
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/deleteData
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Fri, 18 Aug 2023 10:38:32 GMT
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:38:32 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:39:26 GMT
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1692355166
+      completed: 1692355168
+      test_case_path: /Users/sarthak_1/Documents/Keploy/v2/keploy/keploy
+      mock_path: ""
+      test_case_id: test-6
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/dropTable
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Fri, 18 Aug 2023 10:38:40 GMT
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:38:40 GMT
+              actual:
+                key: Date
+                value:
+                    - Fri, 18 Aug 2023 10:39:28 GMT
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
