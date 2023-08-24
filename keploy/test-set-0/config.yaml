@@ -1,0 +1,35 @@
+version: api.keploy.io/v1beta2
+kind: Mongo
+name: config
+spec:
+    metadata:
+        operation: '{ OpQuery flags: [], fullCollectionName: admin.$cmd, numberToSkip: 0, numberToReturn: -1, query: {"isMaster": {"$numberInt":"1"},"helloOk": true,"client": {"driver": {"name": "mongo-java-driver|sync|spring-boot","version": "4.9.1"},"os": {"type": "Linux","name": "Linux","architecture": "amd64","version": "5.19.0-1028-aws"},"platform": "Java/Private Build/17.0.8+7-Ubuntu-122.04"}}, returnFieldsSelector:  }'
+    requests:
+        - header:
+            length: 308
+            requestId: 9
+            responseTo: 0
+            Opcode: 2004
+          message:
+            flags: 0
+            collection_name: admin.$cmd
+            number_to_skip: 0
+            number_to_return: -1
+            query: '{"isMaster":{"$numberInt":"1"},"helloOk":true,"client":{"driver":{"name":"mongo-java-driver|sync|spring-boot","version":"4.9.1"},"os":{"type":"Linux","name":"Linux","architecture":"amd64","version":"5.19.0-1028-aws"},"platform":"Java/Private Build/17.0.8+7-Ubuntu-122.04"}}'
+            return_fields_selector: ""
+          read_delay: 34870
+    responses:
+        - header:
+            length: 329
+            requestId: 3
+            responseTo: 9
+            Opcode: 1
+          message:
+            response_flags: 8
+            cursor_id: 0
+            starting_from: 0
+            number_returned: 1
+            documents:
+                - '{"helloOk":true,"ismaster":true,"topologyVersion":{"processId":{"$oid":"64d50fbe393a1f7a1c50cfaa"},"counter":{"$numberLong":"0"}},"maxBsonObjectSize":{"$numberInt":"16777216"},"maxMessageSizeBytes":{"$numberInt":"48000000"},"maxWriteBatchSize":{"$numberInt":"100000"},"localTime":{"$date":{"$numberLong":"1691684800162"}},"logicalSessionTimeoutMinutes":{"$numberInt":"30"},"connectionId":{"$numberInt":"1"},"minWireVersion":{"$numberInt":"0"},"maxWireVersion":{"$numberInt":"17"},"readOnly":false,"ok":{"$numberDouble":"1.0"}}'
+          read_delay: 939866
+    created: 1691684800
