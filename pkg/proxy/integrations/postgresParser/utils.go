@@ -4,15 +4,6 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	// "time"
-	// "sync"
-	// "strings"
-
-	// "encoding/json"
-
-	// "fmt"
-
-	// "bytes"
 	"encoding/binary"
 	"errors"
 	"unicode"
@@ -231,7 +222,7 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 }
 
 
-func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
+func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
 
 	for idx, mock := range tcsMocks {
 		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
@@ -272,7 +263,7 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 	// 		return true, nMatch
 	// 	}
 	// }
-	idx := findBinaryMatch(tcsMocks, nil, h)
+	idx := findBinaryStreamMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
 		// fmt.Println("matched in first loop")
 		bestMatch := tcsMocks[idx].Spec.GenericResponses
@@ -302,36 +293,37 @@ func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) 
 	}
 	return mxIdx
 }
-// func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
-// 	mxSim := -1.0
-// 	mxIdx := -1
+func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
-// 	for idx, mock := range tcsMocks {
-// 		println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
-// 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
-// 			for requestIndex, reqBuff := range requestBuffers {
+	mxSim := -1.0
+	mxIdx := -1
 
-// 				// bufStr := string(reqBuff)
-// 				// if !IsAsciiPrintable(bufStr) {
-// 				_ = base64.StdEncoding.EncodeToString(reqBuff)
-// 				// }
-// 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-// 				fmt.Println("INSIDE FOR LOOP")
-// 				k := AdaptiveK(len(reqBuff), 3, 8, 5)
-// 				shingles1 := CreateShingles(encoded, k)
-// 				shingles2 := CreateShingles(reqBuff, k)
-// 				similarity := JaccardSimilarity(shingles1, shingles2)
-// 				fmt.Printf("Jaccard Similarity: %f\n", similarity)
-// 				if mxSim < similarity {
-// 					mxSim = similarity
-// 					mxIdx = idx
-// 				}
-// 			}
-// 		}
-// 	}
-// 	return mxIdx
-// }
+	for idx, mock := range tcsMocks {
+		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
+		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+			for requestIndex, reqBuff := range requestBuffers {
+
+				// bufStr := string(reqBuff)
+				// if !IsAsciiPrintable(bufStr) {
+				_ = base64.StdEncoding.EncodeToString(reqBuff)
+				// }
+				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				// fmt.Println("INSIDE FOR LOOP")
+				k := AdaptiveK(len(reqBuff), 3, 8, 5)
+				shingles1 := CreateShingles(encoded, k)
+				shingles2 := CreateShingles(reqBuff, k)
+				similarity := JaccardSimilarity(shingles1, shingles2)
+				// fmt.Printf("Jaccard Similarity: %f\n", similarity)
+				if mxSim < similarity {
+					mxSim = similarity
+					mxIdx = idx
+				}
+			}
+		}
+	}
+	return mxIdx
+}
 
 // CreateShingles produces a set of k-shingles from a byte buffer.
 func CreateShingles(data []byte, k int) map[string]struct{} {
