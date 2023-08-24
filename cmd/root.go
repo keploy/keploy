@@ -11,16 +11,16 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type Root struct {
-	logger *zap.Logger
-	// subCommands holds a list of registered plugins.
-	subCommands []Plugins
+	Logger *zap.Logger
+	// SubCommands holds a list of registered plugins.
+	SubCommands []Plugins
 }
 
-var debugMode bool
+var DebugMode bool
 
-func setupLogger() *zap.Logger {
+func SetupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
-	if debugMode {
+	if DebugMode {
 		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 		logCfg.DisableStacktrace = false
 	} else {
@@ -36,19 +36,19 @@ func setupLogger() *zap.Logger {
 	return logger
 }
 
-func newRoot() *Root {
+func NewRoot() *Root {
 	return &Root{
-		subCommands: []Plugins{},
+		SubCommands: []Plugins{},
 	}
 }
 
 // Execute adds all child commands to the root command.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	newRoot().execute()
+	NewRoot().execute()
 }
 
-var rootCustomHelpTemplate = `{{.Short}}
+var RootCustomHelpTemplate = `{{.Short}}
 
 Usage:{{if .Runnable}}
   {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
@@ -72,7 +72,7 @@ Examples:
 Use "{{.CommandPath}} [command] --help" for more information about a command.{{end}}
 `
 
-var rootExamples = `
+var RootExamples = `
 Record:
 keployV2 record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network --rm <applicationImage>" --containerName "<containerName>" --delay 1
 
@@ -80,7 +80,7 @@ Test:
 keployV2 test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
 `
 
-func checkForDebugFlag(args []string) bool {
+func CheckForDebugFlag(args []string) bool {
 	for _, arg := range args {
 		if arg == "--debug" {
 			return true
@@ -95,28 +95,28 @@ func (r *Root) execute() {
 	var rootCmd = &cobra.Command{
 		Use:     "keploy",
 		Short:   "Keploy CLI",
-		Example: rootExamples,
+		Example: RootExamples,
 	}
-	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
+	rootCmd.SetHelpTemplate(RootCustomHelpTemplate)
 
 	// rootCmd.Flags().IntP("pid", "", 0, "Please enter the process id on which your application is running.")
 
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
+	rootCmd.PersistentFlags().BoolVar(&DebugMode, "debug", false, "Run in debug mode")
 
 	// Manually parse flags to determine debug mode early
-	debugMode = checkForDebugFlag(os.Args[1:])
+	DebugMode = CheckForDebugFlag(os.Args[1:])
 	// Now that flags are parsed, set up the l722ogger
-	r.logger = setupLogger()
+	r.Logger = SetupLogger()
 
-	r.subCommands = append(r.subCommands, NewCmdExample(r.logger), NewCmdTest(r.logger), NewCmdRecord(r.logger))
+	r.SubCommands = append(r.SubCommands, NewCmdExample(r.Logger), NewCmdTest(r.Logger), NewCmdRecord(r.Logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
-	for _, sc := range r.subCommands {
+	for _, sc := range r.SubCommands {
 		rootCmd.AddCommand(sc.GetCmd())
 	}
 
 	if err := rootCmd.Execute(); err != nil {
-		r.logger.Error(Emoji+"failed to start the CLI.", zap.Any("error", err.Error()))
+		r.Logger.Error(Emoji+"failed to start the CLI.", zap.Any("error", err.Error()))
 		os.Exit(1)
 	}
 }
@@ -128,5 +128,5 @@ type Plugins interface {
 
 // RegisterPlugin registers a plugin by appending it to the list of subCommands.
 func (r *Root) RegisterPlugin(p Plugins) {
-	r.subCommands = append(r.subCommands, p)
+	r.SubCommands = append(r.SubCommands, p)
 }
