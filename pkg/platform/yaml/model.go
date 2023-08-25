@@ -180,12 +180,18 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			return nil, err
 		}
 	case models.Postgres:
-		var postgresSpec spec.PostgresSpec
-		if mock.Spec.PostgresReq != nil {
-			postgresSpec = spec.PostgresSpec{
-				PostgresReq:  *mock.Spec.PostgresReq,
-				PostgresResp: *mock.Spec.PostgresResp,
-			}
+		// var postgresSpec spec.PostgresSpec
+		// if mock.Spec.PostgresReq != nil {
+		// 	postgresSpec = spec.PostgresSpec{
+		// 		PostgresReq:  *mock.Spec.PostgresReq,
+		// 		PostgresResp: *mock.Spec.PostgresResp,
+		// 	}
+		// }
+		postgresSpec := spec.PostgresSpec{
+			Metadata: mock.Spec.Metadata,
+			// Objects:  mock.Spec.OutputBinary,
+			PostgresRequests:  mock.Spec.PostgresRequests,
+			PostgresResponses: mock.Spec.PostgresResponses,
 		}
 
 		err := yamlDoc.Spec.Encode(postgresSpec)
@@ -303,16 +309,29 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				GenericRequests:  genericSpec.GenericRequests,
 				GenericResponses: genericSpec.GenericResponses,
 			}
+
 		case models.Postgres:
-			postgresSpec := spec.PostgresSpec{}
-			err := m.Spec.Decode(&postgresSpec)
+			// postgresSpec := spec.PostgresSpec{}
+			// err := m.Spec.Decode(&postgresSpec)
+			// if err != nil {
+			// 	logger.Error(Emoji+"failed to unmarshal a yaml doc into postgres mock", zap.Error(err), zap.Any("mock name", m.Name))
+			// 	return nil, err
+			// }
+			// mock.Spec = models.MockSpec{
+			// 	PostgresReq:  &postgresSpec.PostgresReq,
+			// 	PostgresResp: &postgresSpec.PostgresResp,
+			// }
+			genericSpec := spec.PostgresSpec{}
+			err := m.Spec.Decode(&genericSpec)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal a yaml doc into postgres mock", zap.Error(err), zap.Any("mock name", m.Name))
+				logger.Error(Emoji+"failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				PostgresReq:  &postgresSpec.PostgresReq,
-				PostgresResp: &postgresSpec.PostgresResp,
+				Metadata: genericSpec.Metadata,
+				// OutputBinary: genericSpec.Objects,
+				GenericRequests:  genericSpec.PostgresRequests,
+				GenericResponses: genericSpec.PostgresResponses,
 			}
 		default:
 			logger.Error(Emoji+"failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
