@@ -454,7 +454,7 @@ func readLengthEncodedStrings(b []byte) (string, int) {
 }
 
 func (packet *HandshakeV10Packet) ShouldUseSSL() bool {
-	return (packet.CapabilityFlags & CLIENT_SSL) != 0
+	return (packet.CapabilityFlags & models.CLIENT_SSL) != 0
 }
 
 func (packet *HandshakeV10Packet) GetAuthMethod() string {

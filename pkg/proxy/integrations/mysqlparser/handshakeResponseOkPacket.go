@@ -22,17 +22,17 @@ func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {
 	)
 
 	switch data[0] {
-	case iOK:
+	case models.OK:
 		packetIndicator = "OK"
-	case iAuthMoreData:
+	case models.AuthMoreData:
 		packetIndicator = "AuthMoreData"
-	case iEOF:
+	case models.EOF:
 		packetIndicator = "EOF"
 	default:
 		packetIndicator = "Unknown"
 	}
 
-	if data[0] == iAuthMoreData {
+	if data[0] == models.AuthMoreData {
 		count := int(data[0])
 		var authData = data[1 : count+1]
 		switch handshakePluginName {
@@ -40,11 +40,11 @@ func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {
 			switch len(authData) {
 			case 1:
 				switch authData[0] {
-				case cachingSha2PasswordFastAuthSuccess:
+				case models.CachingSha2PasswordFastAuthSuccess:
 					authType = "cachingSha2PasswordFastAuthSuccess"
 					message = "Ok"
 					remainingBytes = data[count+1:]
-				case cachingSha2PasswordPerformFullAuthentication:
+				case models.CachingSha2PasswordPerformFullAuthentication:
 					authType = "cachingSha2PasswordPerformFullAuthentication"
 					message = ""
 					remainingBytes = data[count+1:]
@@ -69,11 +69,11 @@ func encodeHandshakeResponseOk(packet *models.MySQLHandshakeResponseOk) ([]byte,
 	var packetIndicator byte
 	switch packet.PacketIndicator {
 	case "OK":
-		packetIndicator = iOK
+		packetIndicator = models.OK
 	case "AuthMoreData":
-		packetIndicator = iAuthMoreData
+		packetIndicator = models.AuthMoreData
 	case "EOF":
-		packetIndicator = iEOF
+		packetIndicator = models.EOF
 	default:
 		return nil, fmt.Errorf("unknown packet indicator")
 	}
@@ -84,9 +84,9 @@ func encodeHandshakeResponseOk(packet *models.MySQLHandshakeResponseOk) ([]byte,
 		var authData byte
 		switch packet.PluginDetails.Type {
 		case "cachingSha2PasswordFastAuthSuccess":
-			authData = cachingSha2PasswordFastAuthSuccess
+			authData = models.CachingSha2PasswordFastAuthSuccess
 		case "cachingSha2PasswordPerformFullAuthentication":
-			authData = cachingSha2PasswordPerformFullAuthentication
+			authData = models.CachingSha2PasswordPerformFullAuthentication
 		default:
 			return nil, fmt.Errorf("unknown auth type")
 		}

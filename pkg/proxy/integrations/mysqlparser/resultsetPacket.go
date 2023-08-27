@@ -22,9 +22,9 @@ type Row struct {
 	Columns []RowColumnDefinition `yaml:"row_column_definition"`
 }
 type RowColumnDefinition struct {
-	Type  fieldType   `yaml:"type"`
-	Name  string      `yaml:"name"`
-	Value interface{} `yaml:"value"`
+	Type  models.FieldType `yaml:"type"`
+	Name  string           `yaml:"name"`
+	Value interface{}      `yaml:"value"`
 }
 type RowHeader struct {
 	PacketLength int   `yaml:"packet_length"`
@@ -134,8 +134,8 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 		var length int
 
 		// Check the column type
-		switch fieldType(columnDef.ColumnType) {
-		case fieldTypeTimestamp:
+		switch models.FieldType(columnDef.ColumnType) {
+		case models.FieldTypeTimestamp:
 			dataLength := int(b[0])
 			b = b[1:] // Advance the buffer to the start of the encoded timestamp data
 
@@ -151,24 +151,24 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 			minute := uint8(b[5])
 			second := uint8(b[6])
 
-			colValue.Type = fieldTypeTimestamp
+			colValue.Type = models.FieldTypeTimestamp
 			colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)
 			length = dataLength // Including the initial byte for dataLength
 
-		case fieldTypeInt24, fieldTypeLong:
-			colValue.Type = fieldType(columnDef.ColumnType)
+		case models.FieldTypeInt24, models.FieldTypeLong:
+			colValue.Type = models.FieldType(columnDef.ColumnType)
 			colValue.Value = int32(binary.LittleEndian.Uint32(b[:4]))
 			length = 4
-		case fieldTypeLongLong:
-			colValue.Type = fieldTypeLongLong
+		case models.FieldTypeLongLong:
+			colValue.Type = models.FieldTypeLongLong
 			colValue.Value = int64(binary.LittleEndian.Uint64(b[:8]))
 			length = 8
-		case fieldTypeFloat:
-			colValue.Type = fieldTypeFloat
+		case models.FieldTypeFloat:
+			colValue.Type = models.FieldTypeFloat
 			colValue.Value = math.Float32frombits(binary.LittleEndian.Uint32(b[:4]))
 			length = 4
-		case fieldTypeDouble:
-			colValue.Type = fieldTypeDouble
+		case models.FieldTypeDouble:
+			colValue.Type = models.FieldTypeDouble
 			colValue.Value = math.Float64frombits(binary.LittleEndian.Uint64(b[:8]))
 			length = 8
 		default:
@@ -183,7 +183,7 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 			re := regexp.MustCompile(`[^[:print:]\t\r\n]`)
 			cleanedStr := re.ReplaceAllString(str, "")
 
-			colValue.Type = fieldType(columnDef.ColumnType)
+			colValue.Type = models.FieldType(columnDef.ColumnType)
 			colValue.Value = cleanedStr
 		}
 
@@ -258,8 +258,8 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 
 	for _, column := range columnValues {
 		value := column.Value
-		switch fieldType(column.Type) {
-		case fieldTypeTimestamp:
+		switch models.FieldType(column.Type) {
+		case models.FieldTypeTimestamp:
 			timestamp, ok := value.(string)
 			if !ok {
 				return nil, errors.New("could not convert value to string")

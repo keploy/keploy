@@ -1,7 +1,5 @@
 package models
 
-type fieldType byte
-
 type MySQLPacketHeader struct {
 	PacketLength uint32 `json:"packet_length" yaml:"packet_length"`
 	PacketNumber uint8  `json:"packet_number" yaml:"packet_number"`
@@ -13,7 +11,7 @@ type MySQLRequest struct {
 	ReadDelay int64              `json:"read_delay,omitempty"`
 }
 type RowColumnDefinition struct {
-	Type  fieldType   `yaml:"type"`
+	Type  FieldType   `yaml:"type"`
 	Name  string      `yaml:"name"`
 	Value interface{} `yaml:"value"`
 }
