@@ -138,6 +138,13 @@ func (h *Hook) PopFront() {
 	h.tcsMocks = h.tcsMocks[1:]
 	h.mu.Unlock()
 }
+
+func (h *Hook) PopIndex(index int) {
+	h.mu.Lock()
+	h.tcsMocks = append(h.tcsMocks[:index], h.tcsMocks[index+1:]...)
+	h.mu.Unlock()
+}
+
 func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
 	dep := h.tcsMocks[indx]
