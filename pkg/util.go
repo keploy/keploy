@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/araddon/dateparse"
-	"github.com/gorilla/mux"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
@@ -18,24 +17,13 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 // UrlParams returns the Url and Query parameters from the request url.
 func UrlParams(r *http.Request) map[string]string {
-	params := mux.Vars(r)
-
-	result := params
 	qp := r.URL.Query()
-	for i, j := range qp {
-		var s string
-		if _, ok := result[i]; ok {
-			s = result[i]
-		}
-		for _, e := range j {
-			if s != "" {
-				s += ", " + e
-			} else {
-				s = e
-			}
-		}
-		result[i] = s
+	result := make(map[string]string)
+
+	for key, values := range qp {
+		result[key] = strings.Join(values, ", ")
 	}
+
 	return result
 }
 
@@ -113,7 +101,6 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 
 	return resp, nil
 }
-
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
