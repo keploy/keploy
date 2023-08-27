@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"embed"
 	"fmt"
+	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	"io"
 	"io/ioutil"
 	"log"
@@ -839,7 +840,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		ps.logger.Debug("into psql desp mode, before passing")
 
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
-
+	case grpcparser.IsOutgoingGRPC(buffer):
+		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, ps.logger)
 	default:
 		ps.logger.Debug("the external dependecy call is not supported")
 		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
