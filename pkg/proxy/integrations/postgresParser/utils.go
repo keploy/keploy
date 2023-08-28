@@ -175,19 +175,23 @@ func IsAsciiPrintable(s string) bool {
 func Fuzzymatch(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, string) {
 	com := PostgresEncoder(reqBuff)
 	for idx, mock := range tcsMocks {
-		encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
-
-		if string(encoded) == string(reqBuff) || mock.Spec.PostgresReq.Payload == com {
-			// fmt.Println("matched in first loop")
-			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-			h.SetTcsMocks(tcsMocks)
-			return true, mock.Spec.PostgresResp.Payload
+		if mock.Kind == models.Postgres {
+			encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
+	
+			if string(encoded) == string(reqBuff) || mock.Spec.PostgresReq.Payload == com {
+				// fmt.Println("matched in first loop")
+				tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+				h.SetTcsMocks(tcsMocks)
+				return true, mock.Spec.PostgresResp.Payload
+			}
 		}
 	}
 	// convert all the configmocks to string array
 	mockString := make([]string, len(tcsMocks))
 	for i := 0; i < len(tcsMocks); i++ {
-		mockString[i] = string(tcsMocks[i].Spec.PostgresReq.Payload)
+		if tcsMocks[i].Kind == models.Postgres {
+			mockString[i] = string(tcsMocks[i].Spec.PostgresReq.Payload)
+		}
 	}
 	// find the closest match
 	if IsAsciiPrintable(string(reqBuff)) {
@@ -280,15 +284,17 @@ func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) 
 	mxIdx := -1
 	// find the fuzzy hash of the mocks
 	for idx, mock := range configMocks {
-		encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
-		k := AdaptiveK(len(reqBuff), 3, 8, 5)
-		shingles1 := CreateShingles(encoded, k)
-		shingles2 := CreateShingles(reqBuff, k)
-		similarity := JaccardSimilarity(shingles1, shingles2)
-		// fmt.Printf("Jaccard Similarity: %f\n", similarity)
-		if mxSim < similarity {
-			mxSim = similarity
-			mxIdx = idx
+		if mock.Kind == models.Postgres {
+			encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
+			k := AdaptiveK(len(reqBuff), 3, 8, 5)
+			shingles1 := CreateShingles(encoded, k)
+			shingles2 := CreateShingles(reqBuff, k)
+			similarity := JaccardSimilarity(shingles1, shingles2)
+			// fmt.Printf("Jaccard Similarity: %f\n", similarity)
+			if mxSim < similarity {
+				mxSim = similarity
+				mxIdx = idx
+			}
 		}
 	}
 	return mxIdx

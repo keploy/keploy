@@ -115,7 +115,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
 			for configIndex, configMock := range configMocks {
-				if len(configMock.Spec.MongoRequests) == len(mongoRequests) {
+				if configMock.Kind == models.Mongo && len(configMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range configMock.Spec.MongoRequests {
 						if len(configMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
 							continue
@@ -240,7 +240,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
 			for tcsIndx, tcsMock := range tcsMocks {
-				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
+				if tcsMock.Kind == models.Mongo && len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range tcsMock.Spec.MongoRequests {
 						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
 							continue
