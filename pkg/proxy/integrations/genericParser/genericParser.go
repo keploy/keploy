@@ -2,12 +2,14 @@ package genericparser
 
 import (
 	"encoding/base64"
+
 	"errors"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
+
 	"time"
 
 	"go.keploy.io/server/pkg/hooks"
@@ -61,6 +63,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 		if !matched {
 			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
+
 			return errors.New("failed to match the dependency call from user application")
 			// continue
 		}
@@ -177,6 +180,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}
+
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
 			// }
 			if bufStr != "" {
@@ -192,6 +196,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				})
 			}
 
+
 			isPreviousChunkRequest = true
 		case buffer := <-destBufferChannel:
 			// Write the response message to the client
@@ -204,6 +209,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
 			// }
 			if bufStr != "" {
+
 				genericResponses = append(genericResponses, models.GenericPayload{
 					Origin: models.FromServer,
 					Message: []models.OutputBinary{
@@ -214,6 +220,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					},
 				})
 			}
+
 			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			isPreviousChunkRequest = false
 		case err := <-errChannel:
@@ -272,6 +279,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 	// if !IsAsciiPrintable(bufStr) {
 		// 	bufStr := base64.StdEncoding.EncodeToString(buffer)
 		// 	// }
+
 		// 	if bufStr != "" {
 
 		// 		genericRequests = append(genericRequests, models.GenericPayload{
@@ -284,6 +292,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 			},
 		// 		})
 		// 	}
+
 		// 	// fmt.Println("buffer from client connection")
 		// 	// fmt.Println(buffer)
 		// 	// fmt.Println(string(buffer))
@@ -325,6 +334,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 	// if !IsAsciiPrintable(bufStr) {
 		// 	bufStr = base64.StdEncoding.EncodeToString(buffer)
 		// 	// }
+
 		// 	if bufStr != "" {
 
 		// 		genericResponses = append(genericResponses, models.GenericPayload{
@@ -337,6 +347,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 			},
 		// 		})
 		// 	}
+
 		// 	// fmt.Println("buffer from destination connection")
 		// 	// fmt.Println(buffer)
 		// 	// fmt.Println(string(buffer))
@@ -356,6 +367,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 		return err
 		// // 	}
 
+
 		// if len(genericRequests) > 0 && len(genericResponses) > 0 {
 		// 	h.AppendMocks(&models.Mock{
 		// 		Version: models.V1Beta2,
@@ -366,6 +378,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 			GenericResponses: genericResponses,
 		// 		},
 		// 	})
+
 		// 	genericRequests = []models.GenericPayload{}
 		// 	genericResponses = []models.GenericPayload{}
 		// }
@@ -604,5 +617,6 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 		},
 		// // 	})
 		// // }
+
 	}
 }

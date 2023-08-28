@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +38,31 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 }
 
+func isJSON(body []byte) bool {
+	var js interface{}
+	return json.Unmarshal(body, &js) == nil
+}
+
+func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
+	if len(map1) != len(map2) {
+		return false
+	}
+
+	for key := range map1 {
+		if _, exists := map2[key]; !exists {
+			return false
+		}
+	}
+
+	for key := range map2 {
+		if _, exists := map1[key]; !exists {
+			return false
+		}
+	}
+
+	return true
+}
+
 func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
@@ -51,7 +80,7 @@ func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks
 // Handled chunked requests when content-length is given.
 func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
 	for contentLength > 0 {
-				clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		requestChunked, err := util.ReadBytes(clientConn)
 		if err != nil {
 			if err == io.EOF {
@@ -79,7 +108,7 @@ func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logge
 func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
 	if transferEncodingHeader == "chunked" {
 		for {
-						clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			requestChunked, err := util.ReadBytes(clientConn)
 			if err != nil {
 				if err == io.EOF {
@@ -140,7 +169,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 	//If the transfer-encoding header is chunked
 	if transferEncodingHeader == "chunked" {
 		for {
-						//Set deadline of 5 seconds
+			//Set deadline of 5 seconds
 			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			resp, err := util.ReadBytes(destConn)
 			if err != nil {
@@ -203,33 +232,33 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 }
 
 func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, resp []byte) {
-		//Getting the content-length or the transfer-encoding header
-		var contentLengthHeader, transferEncodingHeader string
-		lines := strings.Split(string(resp), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "Content-Length:") {
-				contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-				break
-			} else if strings.HasPrefix(line, "Transfer-Encoding:") {
-				transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
-				break
-			}
+	//Getting the content-length or the transfer-encoding header
+	var contentLengthHeader, transferEncodingHeader string
+	lines := strings.Split(string(resp), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Content-Length:") {
+			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			break
+		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
+			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
+			break
 		}
-		//Handle chunked responses
-		if contentLengthHeader != "" {
-			contentLength, err := strconv.Atoi(contentLengthHeader)
-			if err != nil {
-				logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
-				return
-			}
-			bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
-			contentLength -= bodyLength
-			if contentLength > 0 {
-				contentLengthResponse(finalResp, clientConn, destConn, logger, contentLength)
-			}
-		} else if transferEncodingHeader != "" {
-			chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
+	}
+	//Handle chunked responses
+	if contentLengthHeader != "" {
+		contentLength, err := strconv.Atoi(contentLengthHeader)
+		if err != nil {
+			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+			return
 		}
+		bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
+		contentLength -= bodyLength
+		if contentLength > 0 {
+			contentLengthResponse(finalResp, clientConn, destConn, logger, contentLength)
+		}
+	} else if transferEncodingHeader != "" {
+		chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
+	}
 }
 
 //Checks if the response is gzipped
@@ -251,9 +280,90 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 }
 
 //Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(request []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
-	// if len(deps) == 0 {
+func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+	//Matching algorithmm
+	//Get the mocks
+	tcsMocks := h.GetTcsMocks()
+	var bestMatch *models.Mock
+	//Parse the request buffer
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
+	if err != nil {
+		logger.Error(Emoji+"failed to parse the http request message", zap.Error(err))
+		return
+	}
 
+	reqbody, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		logger.Error(Emoji+"failed to read from request body", zap.Error(err))
+
+	}
+
+	//parse request url
+	reqURL, err := url.Parse(req.URL.String())
+	if err != nil {
+		logger.Error(Emoji+"failed to parse request url", zap.Error(err))
+	}
+
+	//check if req body is a json
+	isReqBodyJSON := isJSON(reqbody)
+
+	var eligibleMock []*models.Mock
+
+	for _, mock := range tcsMocks {
+		isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
+
+		//the body of mock and request aren't of same type
+		if isMockBodyJSON != isReqBodyJSON {
+			continue
+		}
+
+		//parse request body url
+		parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
+		if err != nil {
+			logger.Error(Emoji+"failed to parse mock url", zap.Error(err))
+			continue
+		}
+
+		//Check if the path matches
+		if parsedURL.Path != reqURL.Path {
+			//If it is not the same, continue
+			continue
+		}
+
+		//Check if the method matches
+		if mock.Spec.HttpReq.Method != models.Method(req.Method) {
+			//If it is not the same, continue
+			continue
+		}
+
+		// Check if the header keys match
+		if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
+			// Different headers, so not a match
+			continue
+		}
+
+		if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
+			// Different query params, so not a match
+			continue
+		}
+		eligibleMock = append(eligibleMock, mock)
+	}
+
+	if len(eligibleMock) == 0 {
+		logger.Error(Emoji + "Didn't match any prexisting http mock")
+		util.Passthrough(clienConn, destConn, [][]byte{requestBuffer}, logger)
+		return
+	}
+
+	_, bestMatch = util.Fuzzymatch(eligibleMock, requestBuffer, h)
+
+	var bestMatchIndex int
+	for idx, mock := range tcsMocks {
+		if reflect.DeepEqual(mock, bestMatch) {
+			bestMatchIndex = idx
+			break
+		}
+	}
 	if h.GetDepsSize() == 0 {
 		// logger.Error("failed to mock the output for unrecorded outgoing http call")
 		return
@@ -271,17 +381,12 @@ func decodeOutgoingHttp(request []byte, clienConn, destConn net.Conn, h *hooks.H
 
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
 
+	body := stub.Spec.HttpResp.Body
+	var respBody string
+	var responseString string
+	
 	// Fetching the response headers
 	header := pkg.ToHttpHeader(stub.Spec.HttpResp.Header)
-	var headers string
-	for key, values := range header {
-		for _, value := range values {
-			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-			headers += headerLine
-		}
-	}
-	body := stub.Spec.HttpResp.Body
-	var responseString string
 
 	//Check if the gzip encoding is present in the header
 	if header["Content-Encoding"] != nil && header["Content-Encoding"][0] == "gzip" {
@@ -297,18 +402,34 @@ func decodeOutgoingHttp(request []byte, clienConn, destConn net.Conn, h *hooks.H
 			logger.Error(Emoji+"failed to close the gzip writer", zap.Error(err))
 			return
 		}
-		responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
-	}else{
-		responseString = statusLine + headers + "\r\n" + body
+		logger.Debug("the length of the response body: " +strconv.Itoa(len(compressedBuffer.String())))
+		respBody = compressedBuffer.String()
+		// responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
+	} else {
+		respBody = body
+		// responseString = statusLine + headers + "\r\n" + body
 	}
-	_, err := clienConn.Write([]byte(responseString))
+	var headers string
+	for key, values := range header {
+		if key == "Content-Length" {
+			values = []string{strconv.Itoa(len(respBody))}
+		}
+		for _, value := range values {
+			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+			headers += headerLine
+		}
+	}
+	responseString = statusLine + headers + "\r\n" + respBody
+	logger.Debug("the content-length header" + headers)
+	_, err = clienConn.Write([]byte(responseString))
 	if err != nil {
 		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
 		return
 	}
 	// pop the mocked output from the dependency queue
 	// deps = deps[1:]
-	h.PopFront()
+	h.PopIndex(bestMatchIndex)
+	return
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.

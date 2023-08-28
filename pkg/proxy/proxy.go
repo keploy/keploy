@@ -60,6 +60,9 @@ type CustomConn struct {
 }
 
 func (c *CustomConn) Read(p []byte) (int, error) {
+	if len(p) == 0{
+		fmt.Println("the length is 0 for the reading")
+	}
 	return c.r.Read(p)
 }
 
@@ -737,10 +740,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
 
-	connEstablishedAt := time.Now()
-	rand.Seed(time.Now().UnixNano())
-	clientConnId := rand.Intn(101)
-
 	// dst stores the connection with actual destination for the outgoing network call
 	var dst net.Conn
 	var actualAddress = ""
@@ -776,27 +775,32 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			}
 			// }
 		}
-		readRequestDelay := time.Since(connEstablishedAt)
-
+    clientConnId := rand.Intn(101)
+		connEstablishedAt := time.Now()
+    readRequestDelay := time.Since(connEstablishedAt)
 		mysqlparser.ProcessOutgoingMySql(clientConnId, destConnId, []byte{}, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
 
 	} else {
 		reader := bufio.NewReader(conn)
-		// initialData := make([]byte, 5)
-		// testBuffer, err := reader.Peek(len(initialData))
-		// if err != nil {
-		// 	ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		// 	return
-		// }
-		// isTLS := isTLSHandshake(testBuffer)
-		conn = &Conn{r: *reader, Conn: conn}
-		// if isTLS {
-		// 	conn, err = handleTLSConnection(conn)
-		// 	if err != nil {
-		// 		ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
-		// 		return
-		// 	}
-		// }
+		initialData := make([]byte, 5)
+	  testBuffer, err := reader.Peek(len(initialData))
+		if err != nil {
+		        ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+		return
+		}
+		isTLS := isTLSHandshake(testBuffer)
+    multiReader := io.MultiReader(reader, conn)
+		conn = &CustomConn{r: multiReader, Conn: conn}
+		if isTLS {
+			conn, err = handleTLSConnection(conn)
+			if err != nil {
+				ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
+				return
+			}
+		}
+    connEstablishedAt := time.Now()
+	  rand.Seed(time.Now().UnixNano())
+	  clientConnId := rand.Intn(101)
 		buffer, err := util.ReadBytes(conn)
 		ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
 		readRequestDelay := time.Since(connEstablishedAt)
@@ -808,21 +812,21 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 		//Dialing for tls connection
 		destConnId := 0
-		if models.GetMode() != models.MODE_TEST {
+		//if models.GetMode() != models.MODE_TEST {
 			destConnId = rand.Intn(101)
-			// if isTLS {
-			// 	ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
-			// 	config := &tls.Config{
-			// 		InsecureSkipVerify: false,
-			// 		ServerName:         destinationUrl,
-			// 	}
-			// 	dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-			// 	if err != nil {
-			// 		ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			// 		conn.Close()
-			// 		return
-			// 	}
-			// } else {
+			if isTLS {
+				ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
+				config := &tls.Config{
+					InsecureSkipVerify: false,
+					ServerName:         destinationUrl,
+				}
+				dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+				if err != nil {
+					ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+					conn.Close()
+					return
+				}
+			} else {
 			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
@@ -830,8 +834,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 				return
 				// }
 			}
-			// }
-		}
+			 }
+	// }
 
 		switch {
 		case httpparser.IsOutgoingHTTP(buffer):

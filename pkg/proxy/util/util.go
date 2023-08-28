@@ -6,12 +6,99 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"go.uber.org/zap"
+
 
 	// "math/rand"
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
+
+	"github.com/agnivade/levenshtein"
+	"go.keploy.io/server/pkg/hooks"
+	"go.keploy.io/server/pkg/models"
 )
+
+var Emoji = "\U0001F430" + " Keploy:"
+
+func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger) error {
+	for {
+		if conn == nil {
+			logger.Debug("the connection is nil")
+		}
+		buffer, err := ReadBytes(conn)
+		if err != nil {
+			logger.Error(Emoji+"failed to read the packet message in proxy for generic dependency", zap.Error(err))
+			errChannel <- err
+			return err
+		}
+		bufferChannel <- buffer
+	}
+	return nil
+}
+
+
+func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *zap.Logger) ([]byte, error) {
+
+	if destConn == nil {
+		return nil, errors.New("failed to pass network traffic to the destination connection")
+	}
+	logger.Debug(Emoji+"trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+	for _, v := range requestBuffer {
+		_, err := destConn.Write(v)
+		if err != nil {
+			logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+			return nil, err
+		}
+	}
+	// defer destConn.Close()
+
+	// channels for writing messages from proxy to destination or client
+	clientBufferChannel := make(chan []byte)
+	destBufferChannel := make(chan []byte)
+	errChannel := make(chan error)
+	// read requests from client
+	go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
+	// read response from destination
+	// destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	
+	go ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+
+
+	// for {
+
+			select {
+			case buffer := <-clientBufferChannel:
+				// Write the request message to the destination
+				_, err := destConn.Write(buffer)
+				if err != nil {
+					logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+					return nil, err
+				}
+				logger.Debug("the iteration for the generic request ends with requests:" + strconv.Itoa(len(buffer)))
+				return buffer, nil
+			case buffer := <-destBufferChannel:
+				// Write the response message to the client
+				_, err := clientConn.Write(buffer)
+				if err != nil {
+					logger.Error(Emoji+"failed to write response to the client", zap.Error(err))
+					return nil, err
+				}
+	
+				
+				logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)))
+			case err := <-errChannel:
+				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+					return nil, err
+				}
+				return nil, nil 
+			}
+		
+	// }
+
+	return nil, nil
+}
 
 // ToIP4AddressStr converts the integer IP4 Address to the octet format
 func ToIP4AddressStr(ip uint32) string {
@@ -236,4 +323,131 @@ func IsDockerRelatedCommand(cmd string) (bool, string) {
 	}
 
 	return false, ""
+}
+
+func findStringMatch(req string, mockString []string) int {
+	minDist := int(^uint(0) >> 1) // Initialize with max int value
+	bestMatch := -1
+	for idx, req := range mockString {
+		if !IsAsciiPrintable(mockString[idx]) {
+			continue
+		}
+
+		dist := levenshtein.ComputeDistance(req, mockString[idx])
+		if dist == 0 {
+			return 0
+		}
+
+		if dist < minDist {
+			minDist = dist
+			bestMatch = idx
+		}
+	}
+	return bestMatch
+}
+
+func HttpDecoder(encoded string) ([]byte, error) {
+	// decode the string to a buffer.
+
+	data := []byte(encoded)
+	return data, nil
+}
+
+func AdaptiveK(length, kMin, kMax, N int) int {
+	k := length / N
+	if k < kMin {
+		return kMin
+	} else if k > kMax {
+		return kMax
+	}
+	return k
+}
+
+func CreateShingles(data []byte, k int) map[string]struct{} {
+	shingles := make(map[string]struct{})
+	for i := 0; i < len(data)-k+1; i++ {
+		shingle := string(data[i : i+k])
+		shingles[shingle] = struct{}{}
+	}
+	return shingles
+}
+
+// JaccardSimilarity computes the Jaccard similarity between two sets of shingles.
+func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
+	intersectionSize := 0
+	for k := range setA {
+		if _, exists := setB[k]; exists {
+			intersectionSize++
+		}
+	}
+
+	unionSize := len(setA) + len(setB) - intersectionSize
+
+	if unionSize == 0 {
+		return 0.0
+	}
+	return float64(intersectionSize) / float64(unionSize)
+}
+
+func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) int {
+
+	mxSim := -1.0
+	mxIdx := -1
+	// find the fuzzy hash of the mocks
+	for idx, mock := range configMocks {
+		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
+		k := AdaptiveK(len(reqBuff), 3, 8, 5)
+		shingles1 := CreateShingles(encoded, k)
+		shingles2 := CreateShingles(reqBuff, k)
+		similarity := JaccardSimilarity(shingles1, shingles2)
+		fmt.Printf("Jaccard Similarity: %f\n", similarity)
+		if mxSim < similarity {
+			mxSim = similarity
+			mxIdx = idx
+		}
+	}
+	return mxIdx
+}
+
+func IsAsciiPrintable(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func HttpEncoder(buffer []byte) string {
+	//Encode the buffer to string
+	encoded := string(buffer)
+	return encoded
+}
+func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *models.Mock) {
+	com := HttpEncoder(reqBuff)
+	for _, mock := range tcsMocks {
+		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
+		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
+			fmt.Println("matched in first loop")
+			return true, mock
+		}
+	}
+	// convert all the configmocks to string array
+	mockString := make([]string, len(tcsMocks))
+	for i := 0; i < len(tcsMocks); i++ {
+		mockString[i] = string(tcsMocks[i].Spec.HttpReq.Body)
+	}
+	// find the closest match
+	if IsAsciiPrintable(string(reqBuff)) {
+		idx := findStringMatch(string(reqBuff), mockString)
+		if idx != -1 {
+			fmt.Println("Returning mock from String Match !!")
+			return true, tcsMocks[idx]
+		}
+	}
+	idx := findBinaryMatch(tcsMocks, reqBuff, h)
+	if idx != -1 {
+		return true, tcsMocks[idx]
+	}
+	return false, &models.Mock{}
 }

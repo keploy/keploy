@@ -180,6 +180,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			return nil, err
 		}
 	case models.Postgres:
+
 		// var postgresSpec spec.PostgresSpec
 		// if mock.Spec.PostgresReq != nil {
 		// 	postgresSpec = spec.PostgresSpec{
@@ -193,6 +194,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			PostgresRequests:  mock.Spec.PostgresRequests,
 			PostgresResponses: mock.Spec.PostgresResponses,
 		}
+
 
 		err := yamlDoc.Spec.Encode(postgresSpec)
 		if err != nil {
