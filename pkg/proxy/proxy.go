@@ -821,20 +821,20 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 					ServerName:         destinationUrl,
 				}
 				dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-				if err != nil {
+				if err != nil && models.GetMode() != models.MODE_TEST {
 					ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 					conn.Close()
 					return
 				}
 			} else {
 			dst, err = net.Dial("tcp", actualAddress)
-			if err != nil {
+			if err != nil && models.GetMode() != models.MODE_TEST {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 				// }
 			}
-			 }
+		}
 	// }
 
 		switch {
