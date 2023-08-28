@@ -310,43 +310,45 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	var eligibleMock []*models.Mock
 
 	for _, mock := range tcsMocks {
-		isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
-
-		//the body of mock and request aren't of same type
-		if isMockBodyJSON != isReqBodyJSON {
-			continue
+		if mock.Kind == models.HTTP {
+			isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
+	
+			//the body of mock and request aren't of same type
+			if isMockBodyJSON != isReqBodyJSON {
+				continue
+			}
+	
+			//parse request body url
+			parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
+			if err != nil {
+				logger.Error(Emoji+"failed to parse mock url", zap.Error(err))
+				continue
+			}
+	
+			//Check if the path matches
+			if parsedURL.Path != reqURL.Path {
+				//If it is not the same, continue
+				continue
+			}
+	
+			//Check if the method matches
+			if mock.Spec.HttpReq.Method != models.Method(req.Method) {
+				//If it is not the same, continue
+				continue
+			}
+	
+			// Check if the header keys match
+			if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
+				// Different headers, so not a match
+				continue
+			}
+	
+			if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
+				// Different query params, so not a match
+				continue
+			}
+			eligibleMock = append(eligibleMock, mock)
 		}
-
-		//parse request body url
-		parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
-		if err != nil {
-			logger.Error(Emoji+"failed to parse mock url", zap.Error(err))
-			continue
-		}
-
-		//Check if the path matches
-		if parsedURL.Path != reqURL.Path {
-			//If it is not the same, continue
-			continue
-		}
-
-		//Check if the method matches
-		if mock.Spec.HttpReq.Method != models.Method(req.Method) {
-			//If it is not the same, continue
-			continue
-		}
-
-		// Check if the header keys match
-		if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
-			// Different headers, so not a match
-			continue
-		}
-
-		if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
-			// Different query params, so not a match
-			continue
-		}
-		eligibleMock = append(eligibleMock, mock)
 	}
 
 	if len(eligibleMock) == 0 {
@@ -376,7 +378,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	// 	return
 	// }
 	// httpSpec := deps[0]
-	stub := h.FetchDep(0)
+	stub := h.FetchDep(bestMatchIndex)
 	// fmt.Println("http mock in test: ", stub)
 
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
