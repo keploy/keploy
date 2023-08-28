@@ -41,10 +41,10 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 
 func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *zap.Logger) ([]byte, error) {
 
-	logger.Debug(Emoji+"trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination connection")
 	}
+	logger.Debug(Emoji+"trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	for _, v := range requestBuffer {
 		_, err := destConn.Write(v)
 		if err != nil {
