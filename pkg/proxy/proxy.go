@@ -59,6 +59,9 @@ type CustomConn struct {
 }
 
 func (c *CustomConn) Read(p []byte) (int, error) {
+	if len(p) == 0{
+		fmt.Println("the length is 0 for the reading")
+	}
 	return c.r.Read(p)
 }
 
@@ -778,7 +781,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	//Dialing for tls connection
 	destConnId := 0
-	if models.GetMode() != models.MODE_TEST {
+	// if models.GetMode() != models.MODE_TEST {
 		destConnId = rand.Intn(101)
 		if isTLS {
 			ps.logger.Debug(Emoji, zap.Any("isTLS", isTLS))
@@ -787,21 +790,21 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 				ServerName:         destinationUrl,
 			}
 			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-			if err != nil {
+			if err != nil && models.GetMode() != models.MODE_TEST {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 			}
 		} else {
 			dst, err = net.Dial("tcp", actualAddress)
-			if err != nil {
+			if err != nil && models.GetMode() != models.MODE_TEST {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 				// }
 			}
 		}
-	}
+	// }
 
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
@@ -830,7 +833,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// 	ps.hook.AppendDeps(v)
 		// }
 	case postgresparser.IsOutgoingPSQL(buffer):
+
 		ps.logger.Debug("into psql desp mode, before passing")
+
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
 
 	default:
