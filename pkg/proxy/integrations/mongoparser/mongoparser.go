@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strconv"
 	"reflect"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cl
 
 func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	startedDecoding := time.Now()
+	requestBuffers := [][]byte{requestBuffer}
 	for {
 		configMocks := h.GetConfigMocks()
 		tcsMocks := h.GetTcsMocks()
@@ -58,6 +60,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				logger.Error(Emoji+"failed to read request from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
 				return
 			}
+			requestBuffers = append(requestBuffers, requestBuffer)
 			logger.Debug("the request from the mongo client", zap.Any("buffer", requestBuffer))
 			readRequestDelay = time.Since(started)
 		}
@@ -84,6 +87,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 					logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 					return
 				}
+				requestBuffers = append(requestBuffers, requestBuffer)
 				readRequestDelay = time.Since(started)
 
 				if len(requestBuffer1) == 0 {
@@ -170,6 +174,12 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			responseTo := mongoRequests[0].Header.RequestID
 			if bestMatchIndex == -1 || maxMatchScore == 0.0 {
 				logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
+				// if bestMatchIndex == -1 {
+				// 	err = util.Passthrough(clientConn, destConn, requestBuffers, logger)
+				// 	if err!=nil {
+				// 		return
+				// 	}
+				// }
 				continue
 			}
 			for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
@@ -253,6 +263,14 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 					}
 				}
 			}
+			if bestMatchIndex == -1 {
+				requestBuffer, err = util.Passthrough(clientConn, destConn, requestBuffers, logger)
+				if err != nil {
+					return 
+				}
+				continue
+			}
+
 			responseTo := mongoRequests[0].Header.RequestID
 			logger.Debug("the index mostly matched with the current request", zap.Any("indx", bestMatchIndex), zap.Any("responseTo", responseTo))
 			for _, resp := range tcsMocks[bestMatchIndex].Spec.MongoResponses {
@@ -278,7 +296,11 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			}
 			logger.Debug(fmt.Sprintf("the length of tcsMocks after filtering matched: %v\n", len(tcsMocks)))
 		}
-		requestBuffer = []byte("read form client connection")
+		logger.Debug("the length of the requestBuffer after matching: " + strconv.Itoa(len(requestBuffer)) + strconv.Itoa(len(requestBuffers[0])))
+		if len(requestBuffers)>0 && len(requestBuffer) == len(requestBuffers[0]) {
+			requestBuffer = []byte("read form client connection")
+		}
+		requestBuffers = [][]byte{}
 	}
 }
 

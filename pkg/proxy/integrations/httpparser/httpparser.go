@@ -351,6 +351,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 
 	if len(eligibleMock) == 0 {
 		logger.Error(Emoji + "Didn't match any prexisting http mock")
+		util.Passthrough(clienConn, destConn, [][]byte{requestBuffer}, logger)
 		return
 	}
 
