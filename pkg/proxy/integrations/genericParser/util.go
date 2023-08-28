@@ -25,7 +25,7 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
 
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+		if mock.Kind == models.GENERIC && len(mock.Spec.GenericRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 
 				// bufStr := string(reqBuff)
@@ -77,7 +77,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 	mxSim := -1.0
 	mxIdx := -1
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+		if mock.Kind == models.GENERIC && len(mock.Spec.GenericRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 
 				// bufStr := string(reqBuff)
