@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-2
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/notes
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Thu, 31 Aug 2023 10:06:09 GMT
+        body: '[{"id":1,"title":"Sample Title","content":"Sample Content"},{"id":2,"title":"Sample Title","content":"Sample Content"},{"id":3,"title":"Sample Title","content":"Sample Content"},{"id":4,"title":"Sample Title","content":"Sample Content"},{"id":5,"title":"Sample Title","content":"Sample Content"},{"id":6,"title":"Sample Title","content":"Sample Content"},{"id":7,"title":"Sample Title","content":"Sample Content"},{"id":8,"title":"Sample Title","content":"Sample Content"},{"id":9,"title":"Sample Title","content":"Sample Content"},{"id":10,"title":"Sample Title","content":"Sample Content"},{"id":11,"title":"Sample Title","content":"Sample Content"},{"id":12,"title":"Sample Title","content":"Sample Content"}]'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise:
+            - header.Date
+            - body.id
+    created: 1693476371
