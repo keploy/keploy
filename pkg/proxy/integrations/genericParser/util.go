@@ -2,7 +2,7 @@ package genericparser
 
 import (
 	"encoding/base64"
-	"fmt"
+	// "fmt"
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
@@ -16,7 +16,7 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		fmt.Printf(hooks.Emoji+"failed to decode the data:%v\n", err)
+		// fmt.Println(hooks.Emoji+"failed to decode the data", err)
 		return nil, err
 	}
 	// println("Decoded data is :", string(data))
@@ -38,7 +38,7 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
 					log.Debug("matched in first loop")
 					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-					h.SetConfigMocks(tcsMocks)
+					h.SetTcsMocks(tcsMocks)
 					return true, mock.Spec.GenericResponses
 				}
 			}
@@ -67,7 +67,7 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 		log.Debug("matched in first loop")
 		bestMatch := tcsMocks[idx].Spec.GenericResponses
 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-		h.SetConfigMocks(tcsMocks)
+		h.SetTcsMocks(tcsMocks)
 		return true, bestMatch
 	}
 	return false, nil
