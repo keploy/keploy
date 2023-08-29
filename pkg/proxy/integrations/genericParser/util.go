@@ -2,7 +2,7 @@ package genericparser
 
 import (
 	"encoding/base64"
-	"fmt"
+	// "fmt"
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
@@ -15,7 +15,7 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		fmt.Println(hooks.Emoji+"failed to decode the data", err)
+		// fmt.Println(hooks.Emoji+"failed to decode the data", err)
 		return nil, err
 	}
 	// println("Decoded data is :", string(data))
@@ -35,9 +35,9 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
-					fmt.Println("matched in first loop")
+					// fmt.Println("matched in first loop")
 					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-					h.SetConfigMocks(tcsMocks)
+					h.SetTcsMocks(tcsMocks)
 					return true, mock.Spec.GenericResponses
 				}
 			}
@@ -63,10 +63,10 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 	// }
 	idx := findBinaryMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
-		fmt.Println("matched in first loop")
+		// fmt.Println("matched in first loop")
 		bestMatch := tcsMocks[idx].Spec.GenericResponses
 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-		h.SetConfigMocks(tcsMocks)
+		h.SetTcsMocks(tcsMocks)
 		return true, bestMatch
 	}
 	return false, nil
@@ -90,7 +90,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				shingles1 := CreateShingles(encoded, k)
 				shingles2 := CreateShingles(reqBuff, k)
 				similarity := JaccardSimilarity(shingles1, shingles2)
-				fmt.Printf("Jaccard Similarity: %f\n", similarity)
+				// fmt.Printf("Jaccard Similarity: %f\n", similarity)
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx

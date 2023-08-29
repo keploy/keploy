@@ -3,13 +3,11 @@ package genericparser
 import (
 	"encoding/base64"
 
-	"errors"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
-
 	"time"
 
 	"go.keploy.io/server/pkg/hooks"
@@ -31,6 +29,7 @@ func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hook
 
 func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 	genericRequests := [][]byte{requestBuffer}
+	logger.Debug("into the generic parser in test mode")
 	for {
 		tcsMocks := h.GetTcsMocks()
 		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
@@ -62,9 +61,24 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		matched, genericResponses := fuzzymatch(tcsMocks, genericRequests, h)
 
 		if !matched {
-			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
-
-			return errors.New("failed to match the dependency call from user application")
+			// logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
+			clientConn.SetReadDeadline(time.Time{})
+			logger.Debug("the genericRequests are before pass through", zap.Any("length", len(genericRequests)))
+			for _, vgen := range genericRequests {
+				logger.Debug("the genericRequests are:", zap.Any("h", string(vgen)))
+			}
+			requestBuffer, err = util.Passthrough(clientConn, destConn, genericRequests, logger)
+			// if err != nil {
+			// 	return err
+			// }
+			genericRequests = [][]byte{}
+			logger.Debug("the request buffer after pass through in generic", zap.Any("buffer", string(requestBuffer)))
+			if len(requestBuffer) > 0 {
+				genericRequests = [][]byte{requestBuffer}
+			}
+			logger.Debug("the length of genericRequests after passthrough ", zap.Any("length", len(genericRequests)))
+			continue
+			// return errors.New("failed to match the dependency call from user application")
 			// continue
 		}
 		for _, genericResponse := range genericResponses {
@@ -80,6 +94,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 		// update for the next dependency call
 		genericRequests = [][]byte{}
+		logger.Debug("the genericRequests after the iteration", zap.Any("length", len(genericRequests)))
 	}
 }
 

@@ -2,7 +2,7 @@ package postgresparser
 
 import (
 	"encoding/base64"
-	"fmt"
+	// "fmt"
 
 	"encoding/binary"
 	"errors"
@@ -42,7 +42,7 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		fmt.Println(Emoji+"failed to decode the data", err)
+		// fmt.Println(Emoji+"failed to decode the data", err)
 		return nil, err
 	}
 	// println("Decoded data is :", string(data))
@@ -95,7 +95,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 		// 	continue
 		// }
 		if string(encoded) == string(reqBuff) || mock.Spec.PostgresReq.Payload == com {
-			fmt.Println("matched in first loop")
+			// fmt.Println("matched in first loop")
 
 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
 			h.SetConfigMocks(configMocks)
@@ -109,7 +109,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 			}
 		}
 		if i >= 8 {
-			fmt.Println("matched in second loop")
+			// fmt.Println("matched in second loop")
 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
 			h.SetConfigMocks(configMocks)
 			return true, mock.Spec.PostgresResp.Payload
@@ -126,7 +126,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 		i := 0
 		for i = 0; i < len(com); i++ {
 			if com[i] == mock.Spec.PostgresReq.Payload[i] {
-				fmt.Println("matched in second loop")
+				// fmt.Println("matched in second loop")
 			}
 		}
 		if i >= len(com)/2 {

@@ -87,7 +87,7 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *
 				}
 	
 				
-				logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)))
+				logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)) +" "+ string(buffer))
 			case err := <-errChannel:
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 					return nil, err
