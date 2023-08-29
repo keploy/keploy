@@ -117,7 +117,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			// pid, err := cmd.Flags().GetUint32("pid")
 
 			// if err != nil {
-			// 	t.logger.Error(Emoji+"Failed to get the pid of the application", zap.Error((err)))
+			// 	t.logger.Error("Failed to get the pid of the application", zap.Error((err)))
 			// }
 
 			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay)

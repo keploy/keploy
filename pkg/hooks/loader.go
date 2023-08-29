@@ -186,11 +186,11 @@ func (h *Hook) ResetDeps() int {
 
 // This function sends the keploy graphql server port to be filtered in the eBPF program.
 func (h *Hook) SendKeployServerPort(port uint32) error {
-	h.logger.Debug(Emoji+"sending keploy server port", zap.Any("port", port))
+	h.logger.Debug("sending keploy server port", zap.Any("port", port))
 	key := 0
 	err := h.keployServerPort.Update(uint32(key), &port, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error(Emoji+"failed to send keploy server port to the epbf program", zap.Any("Keploy server port", port), zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error("failed to send keploy server port to the epbf program", zap.Any("Keploy server port", port), zap.Any("error thrown by ebpf map", err.Error()))
 		return err
 	}
 	return nil
@@ -235,9 +235,9 @@ func (h *Hook) PrintRedirectProxyMap() {
 	dest := structs.DestInfo{}
 
 	for itr.Next(&key, &dest) {
-		h.logger.Debug( fmt.Sprintf("Redirect Proxy:  [key:%v] || [value:%v]\n", key, dest))
+		h.logger.Debug(fmt.Sprintf("Redirect Proxy:  [key:%v] || [value:%v]\n", key, dest))
 	}
-	h.logger.Debug( "--------Redirect Proxy Map-------")
+	h.logger.Debug("--------Redirect Proxy Map-------")
 }
 
 func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
@@ -253,10 +253,10 @@ func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 
 // this function is used in case of running keploy tests along with unit tests of application
 func (h *Hook) SendAppPid(pid uint32) error {
-	h.logger.Debug(Emoji+"Sending app pid to kernel", zap.Any("app Pid", pid))
+	h.logger.Debug("Sending app pid to kernel", zap.Any("app Pid", pid))
 	err := h.appPidMap.Update(uint32(0), &pid, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error(Emoji+"failed to send the app pid to the ebpf program", zap.Any("app Pid", pid), zap.Any("error thrown by ebpf map", err.Error()))
+		h.logger.Error("failed to send the app pid to the ebpf program", zap.Any("app Pid", pid), zap.Any("error thrown by ebpf map", err.Error()))
 		return err
 	}
 	return nil
@@ -287,7 +287,7 @@ func (h *Hook) StopUserApplication() {
 		if err != nil {
 			h.logger.Error("failed to stop user application", zap.Error(err))
 		} else {
-			h.logger.Info( "User application stopped successfully...")
+			h.logger.Info("User application stopped successfully...")
 		}
 	}
 }
@@ -295,10 +295,10 @@ func (h *Hook) StopUserApplication() {
 func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
-		h.logger.Info( "Received signal, exiting program..")
+		h.logger.Info("Received signal, exiting program..")
 
 	} else {
-		h.logger.Info(Emoji + "Exiting keploy program gracefully.")
+		h.logger.Info("Exiting keploy program gracefully.")
 	}
 
 	// closing all readers.
@@ -695,7 +695,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	h.logger.Debug("", zap.Any("Keploy Inode number", k_inode))
 	h.SendNameSpaceId(1, k_inode)
 	h.SendKeployPid(uint32(os.Getpid()))
-	h.logger.Debug( "Keploy Pid sent successfully...")
+	h.logger.Debug("Keploy Pid sent successfully...")
 
 	//send app pid to kernel to get filtered in case of integration with unit test file
 	// app pid here is the pid of the unit test file process or application pid

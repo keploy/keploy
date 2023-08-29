@@ -49,7 +49,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 	for {
 		configMocks := h.GetConfigMocks()
 		tcsMocks := h.GetTcsMocks()
-		logger.Debug(Emoji + fmt.Sprintf("the config mocks are: %v\nthe testcase mocks are: %v", configMocks, tcsMocks))
+		logger.Debug(fmt.Sprintf("the config mocks are: %v\nthe testcase mocks are: %v", configMocks, tcsMocks))
 
 		var (
 			mongoRequests = []models.MongoRequest{}
