@@ -40,8 +40,6 @@ func NewTester(logger *zap.Logger) Tester {
 func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
 	models.SetMode(models.MODE_TEST)
 
-	// println("called Test()")
-
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
 	// ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
@@ -97,14 +95,13 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		}
 
 		t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", sessionIndex, configMocks, tcsMocks))
-		// fmt.Println("the mocks are: ", configMocks, tcsMocks)
 		loadedHooks.SetConfigMocks(configMocks)
 		loadedHooks.SetTcsMocks(tcsMocks)
 
 		// start user application
 		if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
 			result = false
-			t.logger.Debug(Emoji + "failed to process the user application")
+			t.logger.Debug("failed to process the user application")
 			continue
 			// return false
 		}
@@ -124,7 +121,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		// starts the testrun
 		err = testReportFS.Write(context.Background(), testReportPath, testReport)
 		if err != nil {
-			t.logger.Error(Emoji + err.Error())
+			t.logger.Error("failed to start the testrun", zap.Error(err))
 			result = false
 			continue
 			// return false
@@ -160,10 +157,10 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		if ok || dIDE {
 			userIp = loadedHooks.GetUserIP()
 			t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
-			t.logger.Debug(Emoji, zap.Any("User Ip", userIp))
+			t.logger.Debug("", zap.Any("User Ip", userIp))
 		}
 
-		t.logger.Info(Emoji, zap.Any("no of test cases", len(tcs)))
+		t.logger.Info("", zap.Any("no of test cases", len(tcs)))
 		t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(Delay)*time.Second)))
 
 		// added delay to hold running keploy tests until application starts
@@ -182,33 +179,28 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 				// 	loadedHooks.AppendDeps(&mocks[tc.Name][i])
 				// }
 
-				t.logger.Debug(Emoji + "Before setting deps.... during testing...")
-				// loadedHooks.SetDeps(tc.Mocks)
-				t.logger.Debug(Emoji+"Before simulating the request", zap.Any("Test case", tc))
+				t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
 
 				ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
 				if ok || dIDE {
 					//changing Ip address only in case of docker
 					tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
-					t.logger.Debug(Emoji, zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
+					t.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
 				}
 				t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
 				// time.Sleep(10 * time.Second)
 				resp, err := pkg.SimulateHttp(*tc, t.logger)
-				t.logger.Debug(Emoji+"After simulating the request", zap.Any("test case id", tc.Name))
-				t.logger.Debug(Emoji+"After GetResp of the request", zap.Any("test case id", tc.Name))
+				t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
+				t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
 
 				if err != nil {
-					t.logger.Info(Emoji+"result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
+					t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 					continue
 				}
-				// println("before blocking simulate")
 
-				// resp := loadedHooks.GetResp()
-				// println("after blocking simulate")
 				testPass, testResult := t.testHttp(*tc, resp)
 				passed = passed && testPass
-				t.logger.Info(Emoji+"result", zap.Any("testcase id", tc.Name), zap.Any("passed", testPass))
+				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", testPass))
 				testStatus := models.TestStatusPending
 				if testPass {
 					testStatus = models.TestStatusPassed
@@ -285,7 +277,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		// store the result of the testrun as test-report
 		testResults, err := testReportFS.GetResults(testReport.Name)
 		if err != nil {
-			t.logger.Error(Emoji+"failed to fetch test results", zap.Error(err))
+			t.logger.Error("failed to fetch test results", zap.Error(err))
 			// return passed
 			continue
 		}
@@ -307,7 +299,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		// stop the user application
 		loadedHooks.StopUserApplication()
 	}
-	t.logger.Info(Emoji+"test run completed", zap.Bool("passed overall", result))
+	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop(true)
@@ -349,12 +341,11 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	// _, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
 	// if err != nil {
 	// 	msg := "error in flattening http response"
-	// 	t.logger.Error(Emoji+msg, zap.Error(err))
+	// 	t.logger.Error(msg, zap.Error(err))
 	// 	return false, res
 	// }
 	// noise := httpSpec.Assertions["noise"]
 	noise := tc.Noise
-
 
 	var (
 		bodyNoise   []string
@@ -385,8 +376,8 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 			return false, res
 		}
 		// debug log for cleanExp and cleanAct
-		t.logger.Debug(Emoji+"cleanExp", zap.Any("", cleanExp))
-		t.logger.Debug(Emoji+"cleanAct", zap.Any("", cleanAct))
+		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
+		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
 	} else {
 		if !Contains(noise, "body") && tc.HttpResp.Body != actualResponse.Body {
 			pass = false
@@ -453,7 +444,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 			if json.Valid([]byte(actualResponse.Body)) {
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
-					t.logger.Warn(Emoji+"failed to compute json diff", zap.Error(err))
+					t.logger.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
 					keyStr := op.Path
@@ -499,7 +490,7 @@ func replaceHostToIP(currentURL string, ipAddress string) string {
 	}
 
 	if ipAddress == "" {
-		fmt.Errorf(Emoji,"failed to replace url in case of docker env")
+		fmt.Errorf(Emoji, "failed to replace url in case of docker env")
 		return currentURL
 	}
 

@@ -45,44 +45,44 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	if appCmd == "" && len(appContainer) != 0 {
 
 		if len(appNetwork) == 0 {
-			h.logger.Error(Emoji + "please provide docker network name when running with IDE")
+			h.logger.Error("please provide docker network name when running with IDE")
 			return fmt.Errorf(Emoji + "docker network name not found")
 		}
 
-		h.logger.Debug(Emoji + "User Application is running inside docker using IDE")
+		h.logger.Debug("User Application is running inside docker using IDE")
 		//search for the container and process it
 		err := h.processDockerEnv("", appContainer, appNetwork)
 		if err != nil {
 			return err
 		}
-		h.logger.Info(Emoji + "User application container fetced successfully")
+		h.logger.Info("User application container fetced successfully")
 		return nil
 	}
 
 	ok, cmd := h.IsDockerRelatedCmd(appCmd)
 	if ok {
 
-		h.logger.Debug(Emoji+"Running user application on Docker", zap.Any("Docker env", cmd))
+		h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
 
 		if cmd == "docker-compose" {
 			if len(appContainer) == 0 {
-				h.logger.Error(Emoji+"please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
+				h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
 				return fmt.Errorf(Emoji + "container name not found")
 			}
 
 			if len(appNetwork) == 0 {
-				h.logger.Error(Emoji+"please provide docker network name in case of docker-compose file", zap.Any("AppCmd", appCmd))
+				h.logger.Error("please provide docker network name in case of docker-compose file", zap.Any("AppCmd", appCmd))
 				return fmt.Errorf(Emoji + "docker network name not found")
 			}
-			h.logger.Debug(Emoji, zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork))
+			h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork))
 		} else if cmd == "docker" {
 			var err error
 			appContainerName, appDockerNetwork, err = parseDockerCommand(appCmd)
-			h.logger.Debug(Emoji, zap.String("Parsed container name", appContainerName))
-			h.logger.Debug(Emoji, zap.String("Parsed docker network", appDockerNetwork))
+			h.logger.Debug("", zap.String("Parsed container name", appContainerName))
+			h.logger.Debug("", zap.String("Parsed docker network", appDockerNetwork))
 
 			if err != nil {
-				h.logger.Error(Emoji+"failed to parse container or network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+				h.logger.Error("failed to parse container or network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
 				return err
 			}
 
@@ -102,7 +102,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			return err
 		}
 	} else { //Supports only linux
-		h.logger.Debug(Emoji+"Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
+		h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
 		// to notify the kernel hooks that the user application command is running in native linux.
 		key := 0
@@ -115,22 +115,22 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			errCh <- err
 		}()
 
-		h.logger.Debug(Emoji + "Waiting for any error from user application")
+		h.logger.Debug("Waiting for any error from user application")
 
 		// Check if there is an error in the channel without blocking
 		select {
 		case err := <-errCh:
 			if err != nil {
-				h.logger.Error(Emoji+"failed to launch the user application", zap.Any("err", err.Error()))
+				h.logger.Error("failed to launch the user application", zap.Any("err", err.Error()))
 				return err
 			}
 		default:
-			h.logger.Debug(Emoji + "no error found while running user application")
+			h.logger.Debug("no error found while running user application")
 			// No error received yet, continue with further flow
 		}
 	}
 
-	h.logger.Info(Emoji + "User application started successfully")
+	h.logger.Info("User application started successfully")
 	return nil
 }
 
@@ -157,11 +157,11 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 		select {
 		case err := <-appErrCh:
 			if err != nil {
-				h.logger.Error(Emoji+"failed to launch the user application container", zap.Any("err", err.Error()))
+				h.logger.Error("failed to launch the user application container", zap.Any("err", err.Error()))
 				return err
 			}
 		default:
-			h.logger.Debug(Emoji + "no error found while running user application container")
+			h.logger.Debug("no error found while running user application container")
 			// No error received yet, continue with further flow
 		}
 	}
@@ -173,7 +173,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	go func() {
 		// listen for the docker daemon events
 		defer func() {
-			h.logger.Debug(Emoji + "exiting from goroutine of docker daemon event listener")
+			h.logger.Debug("exiting from goroutine of docker daemon event listener")
 		}()
 
 		endTime := time.Now().Add(30 * time.Second)
@@ -204,71 +204,71 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 				dockerErrCh <- fmt.Errorf("found sudden interrupt")
 				return
 			case <-logTicker.C:
-				h.logger.Info(Emoji+"still waiting for the container to start.", zap.String("containerName", appContainer))
+				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
 				if e.Type == events.ContainerEventType && e.Action == "create" {
 					// Fetch container details
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
 					if err != nil {
-						h.logger.Debug(Emoji+"failed to inspect container", zap.Error(err))
+						h.logger.Debug("failed to inspect container", zap.Error(err))
 						continue
 					}
 
 					// Check if the container's name matches the desired name
 					if containerDetails.Name != "/"+appContainer {
-						h.logger.Debug(Emoji+"ignoring container creation for unrelated container", zap.String("containerName", containerDetails.Name))
+						h.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", containerDetails.Name))
 						continue
 					}
 
-					h.logger.Debug(Emoji+"container created for desired app", zap.Any("ID", e.ID))
+					h.logger.Debug("container created for desired app", zap.Any("ID", e.ID))
 
 					containerPid := 0
 					containerIp := ""
 					containerFound := false
 					for {
 						if time.Now().After(endTime) {
-							h.logger.Error(Emoji+"failed to find the user application container", zap.Any("appContainer", appContainer))
+							h.logger.Error("failed to find the user application container", zap.Any("appContainer", appContainer))
 							break
 						}
 						inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
 						if err != nil {
-							// h.logger.Debug(Emoji+fmt.Sprintf("failed to get inspect:%v", inspect), zap.Error(err))
+							// h.logger.Debug(fmt.Sprintf("failed to get inspect:%v", inspect), zap.Error(err))
 							continue
 						}
 
-						h.logger.Debug(Emoji+"checking for container pid", zap.Any("inspect.State.Pid", inspect.State.Pid))
+						h.logger.Debug("checking for container pid", zap.Any("inspect.State.Pid", inspect.State.Pid))
 						if inspect.State.Pid != 0 {
-							h.logger.Debug(Emoji, zap.Any("inspect.State.Pid", inspect.State.Pid))
+							h.logger.Debug("", zap.Any("inspect.State.Pid", inspect.State.Pid))
 
 							if inspect.NetworkSettings != nil && inspect.NetworkSettings.Networks != nil {
 								networkDetails, ok := inspect.NetworkSettings.Networks[appNetwork]
 								if ok && networkDetails != nil {
-									h.logger.Debug(Emoji + fmt.Sprintf("the ip of the docker container: %v", networkDetails.IPAddress))
+									h.logger.Debug(fmt.Sprintf("the ip of the docker container: %v", networkDetails.IPAddress))
 									if models.GetMode() == models.MODE_TEST {
-										h.logger.Debug(Emoji + "setting container ip address")
+										h.logger.Debug("setting container ip address")
 										containerIp = networkDetails.IPAddress
-										h.logger.Debug(Emoji+"receiver channel received the ip address", zap.Any("containerIp found", containerIp))
+										h.logger.Debug("receiver channel received the ip address", zap.Any("containerIp found", containerIp))
 									}
 								} else {
-									h.logger.Debug(Emoji+"Network details for given network not found", zap.Any("network", appNetwork))
+									h.logger.Debug("Network details for given network not found", zap.Any("network", appNetwork))
 								}
 							} else {
-								h.logger.Debug(Emoji + "Network settings or networks not available in inspect data")
+								h.logger.Debug("Network settings or networks not available in inspect data")
 							}
 							containerPid = inspect.State.Pid
 							containerFound = true
-							h.logger.Debug(Emoji + "container found...")
+							h.logger.Debug("container found...")
 							break
 						}
 					}
 					if containerFound {
-						h.logger.Debug(Emoji + fmt.Sprintf("the user application container pid: %v", containerPid))
+						h.logger.Debug(fmt.Sprintf("the user application container pid: %v", containerPid))
 						inode := getInodeNumber([15]int32{int32(containerPid)})
-						h.logger.Debug(Emoji, zap.Any("user inode", inode))
+						h.logger.Debug("", zap.Any("user inode", inode))
 						// send the inode of the container to ebpf hooks to filter the network traffic
 						err := h.SendNameSpaceId(0, inode)
 						if err == nil {
-							h.logger.Debug(Emoji+"application inode sent to kernel successfully", zap.Any("user inode", inode), zap.Any("time", time.Now().UnixNano()))
+							h.logger.Debug("application inode sent to kernel successfully", zap.Any("user inode", inode), zap.Any("time", time.Now().UnixNano()))
 						}
 						done <- true
 						if models.GetMode() == models.MODE_TEST {
@@ -284,11 +284,11 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	select {
 	case err := <-dockerErrCh:
 		if err != nil {
-			h.logger.Error(Emoji+"failed to find the user application container", zap.Any("err", err.Error()))
+			h.logger.Error("failed to find the user application container", zap.Any("err", err.Error()))
 			return err
 		}
 	case <-done:
-		h.logger.Debug(Emoji+"container found and processed successfully", zap.Any("time", time.Now().UnixNano()))
+		h.logger.Debug("container found and processed successfully", zap.Any("time", time.Now().UnixNano()))
 		// No error received yet, continue with further flow
 	}
 
@@ -304,7 +304,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 		return fmt.Errorf("could not inject keploy container to the application's network with error [%v]", err)
 	}
 
-	h.logger.Debug(Emoji + "processDockerEnv executed successfully")
+	h.logger.Debug("processDockerEnv executed successfully")
 	return nil
 }
 
@@ -319,7 +319,7 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	cmd.Stderr = os.Stderr
 	h.userAppCmd = cmd
 
-	h.logger.Debug(Emoji, zap.Any("executing cmd", cmd.String()))
+	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
 
 	// Run the command, this handles non-zero exit code get from application.
 	err := cmd.Run()

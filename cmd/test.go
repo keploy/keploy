@@ -34,7 +34,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				t.logger.Error(Emoji + "failed to read the testcase path input")
+				t.logger.Error("failed to read the testcase path input")
 				return err
 			}
 
@@ -64,7 +64,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			appCmd, err := cmd.Flags().GetString("command")
 			if err != nil {
-				t.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
+				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -78,7 +78,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			appContainer, err := cmd.Flags().GetString("containerName")
 
 			if err != nil {
-				t.logger.Error(Emoji+"Failed to get the application's docker container name", zap.Error((err)))
+				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 			var hasContainerName bool
 			if isDockerCmd {
@@ -97,7 +97,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			networkName, err := cmd.Flags().GetString("networkName")
 
 			if err != nil {
-				t.logger.Error(Emoji+"Failed to get the application's docker network name", zap.Error((err)))
+				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
@@ -110,9 +110,9 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 			}
 			if err != nil {
-				t.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
+				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
-			t.logger.Info(Emoji, zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
+			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay)
 			return nil

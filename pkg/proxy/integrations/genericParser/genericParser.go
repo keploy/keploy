@@ -35,26 +35,26 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		tcsMocks := h.GetTcsMocks()
 		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
-			logger.Error(hooks.Emoji+"failed to set the read deadline for the client connection", zap.Error(err))
+			logger.Error("failed to set the read deadline for the client connection", zap.Error(err))
 			return err
 		}
 
 		for {
 			buffer, err := util.ReadBytes(clientConn)
 			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-				logger.Error(hooks.Emoji+"failed to read the request message in proxy for generic dependency", zap.Error(err))
+				logger.Error("failed to read the request message in proxy for generic dependency", zap.Error(err))
 				// errChannel <- err
 				return err
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Debug(hooks.Emoji + "the timeout for the client read in generic")
+				logger.Debug("the timeout for the client read in generic")
 				break
 			}
 			genericRequests = append(genericRequests, buffer)
 		}
 
 		if len(genericRequests) == 0 {
-			logger.Debug(hooks.Emoji + "the generic request buffer is empty")
+			logger.Debug("the generic request buffer is empty")
 			continue
 		}
 		// bestMatchedIndx := 0
@@ -71,7 +71,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			encoded, _ := PostgresDecoder(genericResponse.Message[0].Data)
 			_, err := clientConn.Write([]byte(encoded))
 			if err != nil {
-				logger.Error(hooks.Emoji+"failed to write request message to the client application", zap.Error(err))
+				logger.Error("failed to write request message to the client application", zap.Error(err))
 				// errChannel <- err
 				return err
 			}
@@ -87,7 +87,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	for {
 		buffer, err := util.ReadBytes(conn)
 		if err != nil {
-			logger.Error(hooks.Emoji+"failed to read the packet message in proxy for generic dependency", zap.Error(err))
+			logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
 			errChannel <- err
 			return err
 		}
@@ -120,7 +120,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	}
 	_, err := destConn.Write(requestBuffer)
 	if err != nil {
-		logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
 	genericResponses := []models.GenericPayload{}
@@ -144,7 +144,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		select {
 		// case <-start.C:
-		case <- sigChan:
+		case <-sigChan:
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				h.AppendMocks(&models.Mock{
 					Version: models.V1Beta2,
@@ -162,7 +162,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			// Write the request message to the destination
 			_, err := destConn.Write(buffer)
 			if err != nil {
-				logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+				logger.Error("failed to write request message to the destination server", zap.Error(err))
 				return err
 			}
 
@@ -196,13 +196,12 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				})
 			}
 
-
 			isPreviousChunkRequest = true
 		case buffer := <-destBufferChannel:
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
-				logger.Error(hooks.Emoji+"failed to write response to the client", zap.Error(err))
+				logger.Error("failed to write response to the client", zap.Error(err))
 				return err
 			}
 
@@ -246,7 +245,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // if isFirstRequest {
 		// err := clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		// if err != nil {
-		// 	logger.Error(hooks.Emoji+"failed to set the read deadline for the client connection", zap.Error(err))
+		// 	logger.Error("failed to set the read deadline for the client connection", zap.Error(err))
 		// 	return err
 		// }
 		// // }
@@ -258,12 +257,12 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// for {
 		// 	buffer, err := util.ReadBytes(clientConn)
 		// 	if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-		// 		logger.Error(hooks.Emoji+"failed to read the request message in proxy for generic dependency", zap.Error(err))
+		// 		logger.Error("failed to read the request message in proxy for generic dependency", zap.Error(err))
 		// 		// errChannel <- err
 		// 		return err
 		// 	}
 		// 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-		// 		logger.Debug(hooks.Emoji + "the timeout for the client read in generic")
+		// 		logger.Debug( "the timeout for the client read in generic")
 		// 		break
 		// 	}
 		// 	// if len(buffer) == 0 {
@@ -271,7 +270,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 	// }
 		// 	_, err = destConn.Write(buffer)
 		// 	if err != nil {
-		// 		logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+		// 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		// 		// errChannel <- err
 		// 		return err
 		// 	}
@@ -307,18 +306,18 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // requestBuffers := [][]byte{}
 		// err = destConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		// if err != nil {
-		// 	logger.Error(hooks.Emoji+"failed to set the read deadline for the destination connection", zap.Error(err))
+		// 	logger.Error("failed to set the read deadline for the destination connection", zap.Error(err))
 		// 	return err
 		// }
 		// for {
 		// 	buffer, err := util.ReadBytes(destConn)
 		// 	if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-		// 		logger.Error(hooks.Emoji+"failed to read the request message in proxy for generic dependency", zap.Error(err))
+		// 		logger.Error("failed to read the request message in proxy for generic dependency", zap.Error(err))
 		// 		// errChannel <- err
 		// 		return err
 		// 	}
 		// 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-		// 		logger.Debug(hooks.Emoji + "the timeout for the destination read in generic")
+		// 		logger.Debug("the timeout for the destination read in generic")
 		// 		break
 		// 	}
 		// 	// if len(buffer) == 0 {
@@ -326,7 +325,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// 	// }
 		// 	_, err = clientConn.Write(buffer)
 		// 	if err != nil {
-		// 		logger.Error(hooks.Emoji+"failed to write request message to the client application", zap.Error(err))
+		// 		logger.Error("failed to write request message to the client application", zap.Error(err))
 		// 		// errChannel <- err
 		// 		return err
 		// 	}
@@ -363,10 +362,9 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 	// fmt.Println("writing buffer to destination", requestBuffer)
 		// // 	_, err := destConn.Write(buffer)
 		// // 	if err != nil {
-		// // 		logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+		// // 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		// // 		return err
 		// // 	}
-
 
 		// if len(genericRequests) > 0 && len(genericResponses) > 0 {
 		// 	h.AppendMocks(&models.Mock{
@@ -387,13 +385,13 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// clientConn.SetReadDeadline(time.Time{})
 		// buffer, err := util.ReadBytes(clientConn)
 		// if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-		// 	logger.Error(hooks.Emoji+"failed to read the request message in proxy for generic dependency", zap.Error(err))
+		// 	logger.Error("failed to read the request message in proxy for generic dependency", zap.Error(err))
 		// 	// errChannel <- err
 		// 	return err
 		// }
 		// _, err = destConn.Write(buffer)
 		// if err != nil {
-		// 	logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+		// 	logger.Error("failed to write request message to the destination server", zap.Error(err))
 		// 	return err
 		// }
 		// genericRequests = append(genericRequests,
@@ -431,7 +429,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 	// fmt.Println("writing buffer to client", responseBuffer)
 		// // 	_, err := clientConn.Write(buffer)
 		// // 	if err != nil {
-		// // 		logger.Error(hooks.Emoji+"failed to write response to the client", zap.Error(err))
+		// // 		logger.Error("failed to write response to the client", zap.Error(err))
 		// // 		return err
 		// // 	}
 
@@ -472,7 +470,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // } else {
 		// // 	_, err := destConn.Write(requestBuffer)
 		// // 	if err != nil {
-		// // 		logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+		// // 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		// // 		return err
 		// // 	}
 		// // 	encodedBuffer := base64.StdEncoding.EncodeToString(requestBuffer)
@@ -495,7 +493,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 	for {
 		// // 		buffer, err := util.ReadBytes(clientConn)
 		// // 		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-		// // 			logger.Error(hooks.Emoji+"failed to read the response message in proxy for generic dependency", zap.Error(err))
+		// // 			logger.Error("failed to read the response message in proxy for generic dependency", zap.Error(err))
 		// // 			errChannel <- err
 		// // 			return
 		// // 		}
@@ -504,7 +502,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 		}
 		// // 		_, err = destConn.Write(buffer)
 		// // 		if err != nil {
-		// // 			logger.Error(hooks.Emoji+"failed to write response message to the destination server", zap.Error(err))
+		// // 			logger.Error("failed to write response message to the destination server", zap.Error(err))
 		// // 			errChannel <- err
 		// // 			return
 		// // 		}
@@ -523,7 +521,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 	for {
 		// // 		buffer, err := util.ReadBytes(destConn)
 		// // 		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-		// // 			logger.Error(hooks.Emoji+"failed to read the response message in proxy for generic dependency", zap.Error(err))
+		// // 			logger.Error("failed to read the response message in proxy for generic dependency", zap.Error(err))
 
 		// // 			errChannel <- err
 		// // 			return
@@ -537,7 +535,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 		}
 		// // 		_, err = clientConn.Write(buffer)
 		// // 		if err != nil {
-		// // 			logger.Error(hooks.Emoji+"failed to write response message to the client server", zap.Error(err))
+		// // 			logger.Error("failed to write response message to the client server", zap.Error(err))
 		// // 			errChannel <- err
 		// // 			return
 		// // 		}
@@ -552,7 +550,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 	// fmt.Println("writing buffer to destination", requestBuffer)
 		// // 	// _, err := destConn.Write(buffer)
 		// // 	// if err != nil {
-		// // 	// 	logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
+		// // 	// 	logger.Error("failed to write request message to the destination server", zap.Error(err))
 		// // 	// 	return err
 		// // 	// }
 
@@ -579,7 +577,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// // 	// fmt.Println("writing buffer to client", responseBuffer)
 		// // 	// _, err := clientConn.Write(buffer)
 		// // 	// if err != nil {
-		// // 	// 	logger.Error(hooks.Emoji+"failed to write response to the client", zap.Error(err))
+		// // 	// 	logger.Error("failed to write response to the client", zap.Error(err))
 		// // 	// 	return err
 		// // 	// }
 
