@@ -57,7 +57,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			started := time.Now()
 			requestBuffer, err = util.ReadBytes(clientConn)
 			if err != nil {
-				logger.Error(Emoji+"failed to read request from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
+				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
 				return
 			}
 			requestBuffers = append(requestBuffers, requestBuffer)
@@ -70,7 +70,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		logger.Debug(fmt.Sprintf("the lopp starts for clientConnId: %v and the time delay: %v", clientConnId, time.Since(startedDecoding)))
 		opReq, requestHeader, mongoRequest, err := Decode((requestBuffer), logger)
 		if err != nil {
-			logger.Error(Emoji+"failed to decode the mongo wire message from the client", zap.Error(err), zap.Any("clientConnId", clientConnId))
+			logger.Error("failed to decode the mongo wire message from the client", zap.Error(err), zap.Any("clientConnId", clientConnId))
 			return
 		}
 		mongoRequests = append(mongoRequests, models.MongoRequest{
@@ -84,7 +84,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				logger.Debug("into the for loop for request stream")
 				requestBuffer1, err := util.ReadBytes(clientConn)
 				if err != nil {
-					logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
+					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 					return
 				}
 				requestBuffers = append(requestBuffers, requestBuffer)
@@ -96,7 +96,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				}
 				_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 				if err != nil {
-					logger.Error(Emoji+"failed to decode the mongo wire message from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
+					logger.Error("failed to decode the mongo wire message from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
 					return
 				}
 				if mongoReqVal, ok := mongoReq.(models.MongoOpMessage); ok && !hasSecondSetBit(mongoReqVal.FlagBits) {
@@ -320,7 +320,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			requestBuffer, lstr, err = util.ReadBytes1(clientConn)
 			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
-				logger.Error(Emoji+"failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 				return
 			}
 			readRequestDelay = time.Since(started)
@@ -334,7 +334,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		)
 		opReq, requestHeader, mongoRequest, err := Decode(requestBuffer, logger)
 		if err != nil {
-			logger.Error(Emoji+"failed to decode the mongo wire message from the client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+			logger.Error("failed to decode the mongo wire message from the client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
 		mongoRequests = append(mongoRequests, models.MongoRequest{
@@ -348,7 +348,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		// write the request message to the mongo server
 		_, err = destConn.Write(requestBuffer)
 		if err != nil {
-			logger.Error(Emoji+"failed to write the request buffer to mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+			logger.Error("failed to write the request buffer to mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
 		logger.Debug(fmt.Sprintf("the request in the mongo parser after passing to dest: %v", len(requestBuffer)), zap.Any("client connId", clientConnId), zap.Any("dest connId", destConnId))
@@ -362,7 +362,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				requestBuffer1, tmpStr, err := util.ReadBytes1(clientConn)
 				logStr += tmpStr
 				if err != nil {
-					logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
 				readRequestDelay = time.Since(started)
@@ -375,7 +375,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				_, err = destConn.Write(requestBuffer1)
 				if err != nil {
 					// fmt.Println(logStr)
-					logger.Error(Emoji+"failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+					logger.Error("failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
 
@@ -389,7 +389,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				// fmt.Println("the response from the mongo server: ", string(requestBuffer1))
 				_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 				if err != nil {
-					logger.Error(Emoji+"failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+					logger.Error("failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
 				if mongoReqVal, ok := mongoReq.(models.MongoOpMessage); ok && !hasSecondSetBit(mongoReqVal.FlagBits) {
@@ -414,7 +414,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
 		logStr += tmpStr
 		if err != nil {
-			logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+			logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
 		readResponseDelay := time.Since(started)
@@ -426,7 +426,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		_, err = clientConn.Write(responseBuffer)
 		if err != nil {
 			// fmt.Println(logStr)
-			logger.Error(Emoji+"failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+			logger.Error("failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
 
@@ -434,7 +434,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 
 		_, responseHeader, mongoResponse, err := Decode(responseBuffer, logger)
 		if err != nil {
-			logger.Error(Emoji+"failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+			logger.Error("failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
 		mongoResponses = append(mongoResponses, models.MongoResponse{
@@ -454,7 +454,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				responseBuffer, err = util.ReadBytes(destConn)
 				logStr += tmpStr
 				if err != nil {
-					logger.Error(Emoji+"failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
 				logger.Debug(fmt.Sprintf("the response in the mongo parser before passing to client: %v", len(responseBuffer)), zap.Any("client connId", clientConnId), zap.Any("dest connId", destConnId))
@@ -469,7 +469,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				_, err = clientConn.Write(responseBuffer)
 				if err != nil {
 					// fmt.Println(logStr)
-					logger.Error(Emoji+"failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+					logger.Error("failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
 				logger.Debug(fmt.Sprintf("the response in the mongo parser after passing to client: %v", len(responseBuffer)), zap.Any("client connId", clientConnId), zap.Any("dest connId", destConnId))
@@ -484,7 +484,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				// fmt.Println("the response from the mongo server: ", string(responseBuffer1))
 				_, respHeader, mongoResp, err := Decode(responseBuffer, logger)
 				if err != nil {
-					logger.Error(Emoji+"failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
+					logger.Error("failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
 				if mongoRespVal, ok := mongoResp.(models.MongoOpMessage); ok && !hasSecondSetBit(mongoRespVal.FlagBits) {
