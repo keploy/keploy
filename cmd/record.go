@@ -36,7 +36,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				r.logger.Error(Emoji + "failed to read the testcase path input")
+				r.logger.Error("failed to read the testcase path input")
 				return err
 			}
 
@@ -65,7 +65,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appCmd, err := cmd.Flags().GetString("command")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
+				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -79,7 +79,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appContainer, err := cmd.Flags().GetString("containerName")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the application's docker container name", zap.Error((err)))
+				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 			var hasContainerName bool
 			if isDockerCmd {
@@ -98,16 +98,16 @@ func (r *Record) GetCmd() *cobra.Command {
 			networkName, err := cmd.Flags().GetString("networkName")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the application's docker network name", zap.Error((err)))
+				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
+				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
 
-			r.logger.Info(Emoji, zap.Any("keploy test and mock path", path))
+			r.logger.Info("", zap.Any("keploy test and mock path", path))
 
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay)
