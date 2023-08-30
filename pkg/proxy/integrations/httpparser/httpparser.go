@@ -476,6 +476,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			return nil
 		}
 		handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
+	}
 
 	// read the response from the actual server
 	resp, err = util.ReadBytes(destConn)
