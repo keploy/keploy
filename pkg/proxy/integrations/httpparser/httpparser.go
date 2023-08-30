@@ -494,7 +494,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
-		if err != nil {
+	if err != nil {
 		logger.Error("failed to parse the http request message", zap.Error(err))
 		return nil
 	}
@@ -514,7 +514,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		logger.Error("failed to parse the http response message", zap.Error(err))
 		return nil
 	}
-		var respBody []byte
+	var respBody []byte
 	if respParsed.Body != nil { // Read
 		if respParsed.Header.Get("Content-Encoding") == "gzip" {
 			check := respParsed.Body
