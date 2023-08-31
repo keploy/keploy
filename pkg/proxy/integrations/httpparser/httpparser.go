@@ -448,10 +448,35 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return nil
 	}
-	finalReq = append(finalReq, request...)
-
-	//Handle chunked requests
-	handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
+		finalReq = append(finalReq, request...)
+	//check if the expect : 100-continue header is present
+	lines := strings.Split(string(request), "\n")
+	var expectHeader string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Expect:") {
+			expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
+			break
+		}
+	}
+	if expectHeader == "100-continue" {
+		//Read if the response from the client is 100-continue
+		resp, err = util.ReadBytes(destConn)
+		if err != nil {
+			logger.Error("failed to read the response message from the user client", zap.Error(err))
+			return nil
+		}
+		// write the response message to the client
+		_, err = clientConn.Write(resp)
+		if err != nil {
+			logger.Error("failed to write response message to the user client", zap.Error(err))
+			return nil
+		}
+		if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
+			logger.Error("failed to get the 100 continue response from the user client")
+			return nil
+		}
+		handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
+	}
 
 	// read the response from the actual server
 	resp, err = util.ReadBytes(destConn)
