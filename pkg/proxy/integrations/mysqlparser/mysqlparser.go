@@ -43,6 +43,9 @@ func encodeOutgoingMySql(clientConnId, destConnId int, requestBuffer []byte, cli
 	)
 	for {
 		data, source, err := ReadFirstBuffer(clientConn, destConn)
+		if len(data) == 0 {
+			break
+		}
 		if err != nil {
 			logger.Error("failed to read initial data", zap.Error(err))
 			return
