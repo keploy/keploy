@@ -137,11 +137,12 @@ func isJavaInstalled() bool {
 	return err == nil
 }
 
-// JavaCAExists checks if the CA is already installed in the Java keystore
-func JavaCAExists(alias string) bool {
-	cmd := exec.Command("keytool", "-list", "-alias", alias, "-cacerts", "-storepass", "changeit")
+// JavaCAExists checks if the CA is already installed in the specified Java keystore
+func JavaCAExists(alias, storepass, cacertsPath string) bool {
+	cmd := exec.Command("keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 
 	err := cmd.Run()
+
 	return err == nil
 }
 
@@ -181,12 +182,12 @@ func InstallJavaCA(logger *zap.Logger, caPath string) {
 		// You can modify these as per your requirements
 		storePass := "changeit"
 		alias := "keployCA"
-		if JavaCAExists(alias) {
+		if JavaCAExists(alias, storePass, cacertsPath) {
 			logger.Info("Java detected and CA already exists", zap.String("path", cacertsPath))
 			return
 		}
 
-		cmd := exec.Command("keytool", "-import", "-trustcacerts", "-cacerts", "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
+		cmd := exec.Command("keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
 
 		cmdOutput, err := cmd.CombinedOutput()
 		if err != nil {
