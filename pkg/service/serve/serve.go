@@ -63,7 +63,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "")
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "",pid)
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)

@@ -53,7 +53,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer)
+	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0)
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
@@ -68,7 +68,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return false
 	}
-	t.logger.Debug( fmt.Sprintf("the session indices are:%v", sessions))
+	t.logger.Debug(fmt.Sprintf("the session indices are:%v", sessions))
 
 	result := true
 
@@ -100,7 +100,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", testSet))
 		return true
 	}
-	t.logger.Debug( fmt.Sprintf("the testcases for %s are: %v", testSet, tcs))
+	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", testSet, tcs))
 	// fmt.Println("the tests are: ", tcs)
 
 	configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, testSet))
@@ -108,17 +108,17 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		return false
 	}
 
-	t.logger.Debug( fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, tcsMocks))
+	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, tcsMocks))
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
 	t.logger.Debug("", zap.Any("app pid", pid))
 	if len(appCmd) == 0 && pid != 0 {
-		t.logger.Debug( "running keploy tests along with other unit tests")
+		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
 		// start user application
 		if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
-			t.logger.Debug( "failed to process the user application")
+			t.logger.Debug("failed to process the user application")
 			return false
 		}
 	}
@@ -134,7 +134,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	// starts the testrun
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 	if err != nil {
-		t.logger.Error( err.Error())
+		t.logger.Error(err.Error())
 		return false
 	}
 
@@ -177,7 +177,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		t.logger.Debug("", zap.Any("User Ip", userIp))
 	}
 
-	t.logger.Info("", zap.Any("no of test cases", len(tcs)))
+	t.logger.Info("", zap.Any("no of test cases", len(tcs)), zap.Any("test-set", testSet))
 	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(delay)*time.Second)))
 
 	// added delay to hold running keploy tests until application starts
@@ -196,7 +196,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			// 	loadedHooks.AppendDeps(&mocks[tc.Name][i])
 			// }
 
-			t.logger.Debug( "Before setting deps.... during testing...")
+			// t.logger.Debug("Before setting deps.... during testing...")
 			// loadedHooks.SetDeps(tc.Mocks)
 			t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
 
@@ -318,7 +318,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	t.logger.Debug("the result after", zap.Any("", result), zap.Any("testreport name", testReport.Name))
 
 	if len(appCmd) == 0 && pid != 0 {
-		t.logger.Debug( "no need to stop the user application when running keploy tests along with unit tests")
+		t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 	} else {
 		// stop the user application
 		loadedHooks.StopUserApplication()
