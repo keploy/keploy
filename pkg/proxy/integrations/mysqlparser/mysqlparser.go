@@ -3,6 +3,7 @@ package mysqlparser
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"time"
 
@@ -274,10 +275,10 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 				return nil, err
 			}
 		}
-		operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(queryBuffer), logger, destConn)
-		if len(queryBuffer) == 0 || operation == "COM_STMT_CLOSE" {
+		if len(queryBuffer) == 0 {
 			break
 		}
+		operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(queryBuffer), logger, destConn)
 
 		mysqlRequests = append([]models.MySQLRequest{}, models.MySQLRequest{
 			Header: &models.MySQLPacketHeader{
@@ -308,7 +309,9 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 			logger.Error("failed to write query response to mysql client", zap.Error(err))
 			return nil, err
 		}
-
+		if len(queryResponse) == 0 {
+			break
+		}
 		responseOperation, responseHeader, mysqlResp, err := DecodeMySQLPacket(bytesToMySQLPacket(queryResponse), logger, destConn)
 		if err != nil {
 			logger.Error("Failed to decode the MySQL packet from the destination server", zap.Error(err))
@@ -353,7 +356,7 @@ func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysq
 
 func bytesToMySQLPacket(buffer []byte) MySQLPacket {
 	if buffer == nil || len(buffer) < 4 {
-		fmt.Println("Error: buffer is nil or too short to be a valid MySQL packet")
+		log.Fatalf("Error: buffer is nil or too short to be a valid MySQL packet")
 		return MySQLPacket{}
 	}
 	length := binary.LittleEndian.Uint32(append(buffer[0:3], 0))
