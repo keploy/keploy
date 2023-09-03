@@ -1,0 +1,493 @@
+
+       ▓██▓▄
+    ▓▓▓▓██▓█▓▄
+     ████████▓▒
+          ▀▓▓███▄      ▄▄   ▄               ▌
+         ▄▌▌▓▓████▄    ██ ▓█▀  ▄▌▀▄  ▓▓▌▄   ▓█  ▄▌▓▓▌▄ ▌▌   ▓
+       ▓█████████▌▓▓   ██▓█▄  ▓█▄▓▓ ▐█▌  ██ ▓█  █▌  ██  █▌ █▓
+      ▓▓▓▓▀▀▀▀▓▓▓▓▓▓▌  ██  █▓  ▓▌▄▄ ▐█▓▄▓█▀ █▓█ ▀█▄▄█▀   █▓█
+       ▓▌                           ▐█▌                   █▌
+        ▓
+  
+v0.7.7-alpha-dev
+
+2023-09-05T07:18:12.583Z	🐰 Keploy: INFO	cmd/test.go:115		{"keploy test and mock path": "/home/ritikjain.linux/gk-workspace/keploy/keploy", "keploy testReport path": "/home/ritikjain.linux/gk-workspace/keploy/keploy/testReports"}
+2023-09-05T07:18:12.583Z	🐰 Keploy: DEBUG	cmd/test.go:126	the ports are	{"ports": [5672]}
+2023-09-05T07:18:16.777Z	🐰 Keploy: INFO	hooks/loader.go:686	keploy initialized and probes added to the kernel.
+2023-09-05T07:18:16.778Z	🐰 Keploy: DEBUG	hooks/loader.go:697		{"Keploy Inode number": 4026531836}
+2023-09-05T07:18:16.778Z	🐰 Keploy: DEBUG	hooks/loader.go:268	Sending keploy pid to kernel	{"pid": 68637}
+2023-09-05T07:18:16.778Z	🐰 Keploy: DEBUG	hooks/loader.go:700	Keploy Pid sent successfully...
+2023-09-05T07:18:16.778Z	🐰 Keploy: DEBUG	proxy/proxy.go:213	checking java path from default java home
+2023-09-05T07:18:16.820Z	🐰 Keploy: DEBUG	proxy/proxy.go:228		{"java_home": "/usr/lib/jvm/java-17-openjdk-arm64", "caCertsPath": "/usr/lib/jvm/java-17-openjdk-arm64/lib/security/cacerts", "caPath": "/usr/local/share/ca-certificates/ca.crt"}
+2023-09-05T07:18:17.045Z	🐰 Keploy: INFO	proxy/proxy.go:231	Java detected and CA already exists	{"path": "/usr/lib/jvm/java-17-openjdk-arm64/lib/security/cacerts"}
+2023-09-05T07:18:17.729Z	🐰 Keploy: DEBUG	proxy/proxy.go:325	Running Dns Server in Test mode...
+2023-09-05T07:18:17.729Z	🐰 Keploy: INFO	proxy/proxy.go:326	Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.
+2023-09-05T07:18:17.729Z	🐰 Keploy: DEBUG	proxy/proxy.go:381	Proxy IPv4:Port 3232236815:16789
+2023-09-05T07:18:17.729Z	🐰 Keploy: DEBUG	proxy/proxy.go:382	Proxy IPV6:Port Addr [0 0 0 1]:16789
+2023-09-05T07:18:17.729Z	🐰 Keploy: INFO	proxy/proxy.go:383	Proxy started at port:16789
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	proxy/proxy.go:501		{"ProxyAddress4": "192.168.5.15"}
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	proxy/proxy.go:504		{"ProxyAddress6": "::1"}
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	test/test.go:71	the session indices are:[test-set-0 test-set-2 test-set-1]
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	yaml/yaml.go:213	no tests are recorded for the session	{"index": "test-set-0"}
+2023-09-05T07:18:17.730Z	🐰 Keploy: INFO	test/test.go:100	No testcases are recorded for the user application	{"for session": "test-set-0"}
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	proxy/proxy.go:551		{"ProxyAddress in dns server": "192.168.5.15:16789"}
+2023-09-05T07:18:17.730Z	🐰 Keploy: INFO	proxy/proxy.go:568	starting DNS server at addr:192.168.5.15:16789
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	proxy/proxy.go:513	Proxy server is listening on :[::]:16789
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	proxy/proxy.go:514	Proxy will accept both ipv4 and ipv6 connections	{"Ipv4": "192.168.5.15", "Ipv6": "::1"}
+2023-09-05T07:18:17.730Z	🐰 Keploy: DEBUG	test/test.go:103	the testcases for test-set-2 are: [0x4004b52800 0x4004b52400 0x4004b52000]
+2023-09-05T07:18:17.731Z	🐰 Keploy: DEBUG	test/test.go:111	the config mocks for test-set-2 are: []
+the testcase mocks are: [0x4004947000 0x4004947200 0x4004947400 0x4004947500 0x4004947600 0x4004947700 0x4004947d00 0x4004947e00 0x4004947f00 0x4004b90000 0x4004b90300 0x4004b90400 0x4004b90500 0x4004b90600 0x4004b90700 0x4004b90800 0x4004b90900 0x4004b90b00 0x4004b90c00 0x4004b90d00 0x4004b90e00 0x4004b90f00 0x4004b91000 0x4004b91100 0x4004b91200 0x4004b91300 0x4004b91400 0x4004b91500 0x4004b91600 0x4004b91700 0x4004b91900 0x4004b91c00 0x4004b91d00 0x4004b91e00 0x4004d74600 0x4004d74700 0x4004d74800 0x4004d74b00 0x4004d74c00 0x4004d74d00 0x4004d74e00 0x4004d75000 0x4004d75300 0x4004d75500 0x4004d75600 0x4004d75700 0x4004d75800 0x4004d75a00 0x4004d75d00 0x4004d75f00 0x4004b38100 0x4004b38300 0x4004b38700 0x4004b38800 0x4004b38c00 0x4004b38d00]
+2023-09-05T07:18:17.732Z	🐰 Keploy: DEBUG	test/test.go:115		{"app pid": 0}
+2023-09-05T07:18:17.732Z	🐰 Keploy: DEBUG	hooks/launch.go:105	Running user application on Linux	{"pid of keploy": 68637}
+2023-09-05T07:18:17.732Z	🐰 Keploy: DEBUG	hooks/launch.go:118	Waiting for any error from user application
+2023-09-05T07:18:17.732Z	🐰 Keploy: DEBUG	hooks/launch.go:128	no error found while running user application
+2023-09-05T07:18:17.732Z	🐰 Keploy: INFO	hooks/launch.go:133	User application started successfully
+2023-09-05T07:18:17.732Z	🐰 Keploy: INFO	test/test.go:180		{"no of test cases": 3, "test-set": "test-set-2"}
+2023-09-05T07:18:17.732Z	🐰 Keploy: DEBUG	test/test.go:181	the delay is 25s
+2023-09-05T07:18:17.732Z	🐰 Keploy: DEBUG	hooks/launch.go:322		{"executing cmd": "/usr/bin/java -jar /home/ritikjain.linux/gk-workspace/spring-postures-mq/target/spring-postgres-mq-0.0.1-SNAPSHOT.jar"}
+2023-09-05T07:18:18.205Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:18.205Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:18.205Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 52314, "Time": 1693898298}
+2023-09-05T07:18:18.205Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 1000, "KernelPid": 69526}
+2023-09-05T07:18:18.205Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 52314}
+2023-09-05T07:18:18.205Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 3
+2023-09-05T07:18:18.206Z	🐰 Keploy: ERROR	httpparser/httpparser.go:377	Didn't match any prexisting http mock
+go.keploy.io/server/pkg/proxy/integrations/httpparser.decodeOutgoingHttp
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/integrations/httpparser/httpparser.go:377
+go.keploy.io/server/pkg/proxy/integrations/httpparser.ProcessOutgoingHttp
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/integrations/httpparser/httpparser.go:74
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/proxy.go:875
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	proxy/proxy.go:916	time taken by proxy to execute the flow	{"Duration(ms)": 1}
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 52318, "Time": 1693898298}
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 1000, "KernelPid": 69526}
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 52318}
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 93
+2023-09-05T07:18:18.206Z	🐰 Keploy: ERROR	httpparser/httpparser.go:377	Didn't match any prexisting http mock
+go.keploy.io/server/pkg/proxy/integrations/httpparser.decodeOutgoingHttp
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/integrations/httpparser/httpparser.go:377
+go.keploy.io/server/pkg/proxy/integrations/httpparser.ProcessOutgoingHttp
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/integrations/httpparser/httpparser.go:74
+go.keploy.io/server/pkg/proxy.(*ProxySet).handleConnection
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/proxy.go:875
+2023-09-05T07:18:18.206Z	🐰 Keploy: DEBUG	proxy/proxy.go:916	time taken by proxy to execute the flow	{"Duration(ms)": 0}
+API call failed: I/O error on GET request for "http://localhost:1000/your-endpoint": Unexpected end of file from server
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+ :: Spring Boot ::                (v3.1.2)
+
+2023-09-05T07:18:18.526Z  INFO 69526 --- [           main] c.e.s.SpringPostgresMqApplication        : Starting SpringPostgresMqApplication v0.0.1-SNAPSHOT using Java 17.0.8.1 with PID 69526 (/home/ritikjain.linux/gk-workspace/spring-postures-mq/target/spring-postgres-mq-0.0.1-SNAPSHOT.jar started by root in /home/ritikjain.linux/gk-workspace/keploy)
+2023-09-05T07:18:18.528Z  INFO 69526 --- [           main] c.e.s.SpringPostgresMqApplication        : No active profile set, falling back to 1 default profile: "default"
+2023-09-05T07:18:19.042Z  INFO 69526 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2023-09-05T07:18:19.079Z  INFO 69526 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 31 ms. Found 1 JPA repository interfaces.
+2023-09-05T07:18:19.483Z  INFO 69526 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port(s): 8080 (http)
+2023-09-05T07:18:19.493Z  INFO 69526 --- [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2023-09-05T07:18:19.493Z  INFO 69526 --- [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.11]
+2023-09-05T07:18:19.548Z  INFO 69526 --- [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2023-09-05T07:18:19.550Z  INFO 69526 --- [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 956 ms
+2023-09-05T07:18:19.666Z  INFO 69526 --- [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2023-09-05T07:18:19.712Z  INFO 69526 --- [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.2.6.Final
+2023-09-05T07:18:19.713Z  INFO 69526 --- [           main] org.hibernate.cfg.Environment            : HHH000406: Using bytecode reflection optimizer
+2023-09-05T07:18:19.818Z  INFO 69526 --- [           main] o.h.b.i.BytecodeProviderInitiator        : HHH000021: Bytecode provider name : bytebuddy
+2023-09-05T07:18:19.924Z  INFO 69526 --- [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2023-09-05T07:18:20.071Z  INFO 69526 --- [           main] o.h.b.i.BytecodeProviderInitiator        : HHH000021: Bytecode provider name : bytebuddy
+2023-09-05T07:18:20.421Z  INFO 69526 --- [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000490: Using JtaPlatform implementation: [org.hibernate.engine.transaction.jta.platform.internal.NoJtaPlatform]
+2023-09-05T07:18:20.432Z  INFO 69526 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2023-09-05T07:18:20.458Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:20.458Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:20.458Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 52328, "Time": 1693898300}
+2023-09-05T07:18:20.458Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 5432, "KernelPid": 69526}
+2023-09-05T07:18:20.458Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 52328}
+2023-09-05T07:18:20.463Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 90
+2023-09-05T07:18:20.464Z	🐰 Keploy: DEBUG	proxy/proxy.go:894	into psql desp mode, before passing
+2023-09-05T07:18:21.464Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:22.464Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:23.465Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:24.466Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:25.468Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:26.470Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:27.473Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:27.485Z  INFO 69526 --- [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection org.postgresql.jdbc.PgConnection@15f8701f
+2023-09-05T07:18:27.489Z  INFO 69526 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2023-09-05T07:18:27.592Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:27.592Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:27.592Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 59110, "Time": 1693898307}
+2023-09-05T07:18:27.592Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 5432, "KernelPid": 69526}
+2023-09-05T07:18:27.592Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 59110}
+2023-09-05T07:18:27.592Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 22
+2023-09-05T07:18:27.592Z	🐰 Keploy: DEBUG	proxy/proxy.go:894	into psql desp mode, before passing
+2023-09-05T07:18:28.475Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:28.594Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:29.475Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:29.594Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:30.476Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:30.596Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:31.477Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:31.486Z  INFO 69526 --- [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2023-09-05T07:18:31.597Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:31.846Z  WARN 69526 --- [           main] JpaBaseConfiguration$JpaWebConfiguration : spring.jpa.open-in-view is enabled by default. Therefore, database queries may be performed during view rendering. Explicitly configure spring.jpa.open-in-view to disable this warning
+2023-09-05T07:18:32.118Z  INFO 69526 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port(s): 8080 (http) with context path ''
+2023-09-05T07:18:32.127Z  INFO 69526 --- [           main] c.e.s.SpringPostgresMqApplication        : Started SpringPostgresMqApplication in 13.871 seconds (process running for 14.389)
+2023-09-05T07:18:32.131Z  INFO 69526 --- [   scheduling-1] o.s.a.r.c.CachingConnectionFactory       : Attempting to connect to: [localhost:5672]
+2023-09-05T07:18:32.133Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:32.133Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:32.133Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 40492, "Time": 1693898312}
+2023-09-05T07:18:32.133Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 5672, "KernelPid": 69526}
+2023-09-05T07:18:32.133Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 40492}
+2023-09-05T07:18:32.140Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 54
+2023-09-05T07:18:32.140Z	🐰 Keploy: DEBUG	proxy/proxy.go:921	trying to forward requests to target	{"Destination Addr": "127.0.0.1:5672"}
+2023-09-05T07:18:32.198Z  INFO 69526 --- [   scheduling-1] o.s.a.r.c.CachingConnectionFactory       : Created new connection: rabbitConnectionFactory#36bf84e:0/SimpleConnection@7ef6c436 [delegate=amqp://guest@127.0.0.1:5672/, localPort=40492]
+Message sent to RabbitMQ!
+2023-09-05T07:18:32.480Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:32.480Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:32.597Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:32.611Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:32.611Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:32.611Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 40506, "Time": 1693898312}
+2023-09-05T07:18:32.611Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 5432, "KernelPid": 69526}
+2023-09-05T07:18:32.611Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 40506}
+2023-09-05T07:18:32.611Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 82
+2023-09-05T07:18:32.611Z	🐰 Keploy: DEBUG	proxy/proxy.go:894	into psql desp mode, before passing
+2023-09-05T07:18:33.482Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:33.482Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:33.600Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:33.600Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:33.612Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:34.484Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:34.484Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:34.601Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:34.601Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:34.614Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:35.485Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:35.485Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:35.601Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:35.602Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:35.615Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:36.485Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:36.485Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:36.603Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:36.604Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:36.616Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+Message sent to RabbitMQ!
+2023-09-05T07:18:37.486Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:37.486Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:37.604Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:37.604Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:37.617Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:37.632Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:37.632Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:37.632Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 40520, "Time": 1693898317}
+2023-09-05T07:18:37.632Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 5432, "KernelPid": 69526}
+2023-09-05T07:18:37.632Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 40520}
+2023-09-05T07:18:37.632Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 76
+2023-09-05T07:18:37.632Z	🐰 Keploy: DEBUG	proxy/proxy.go:894	into psql desp mode, before passing
+2023-09-05T07:18:38.487Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:38.487Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:38.605Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:38.605Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:38.621Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:38.621Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:38.634Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:39.488Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:39.488Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:39.608Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:39.608Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:39.623Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:39.623Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:39.636Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:40.490Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:40.490Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:40.609Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:40.609Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:40.623Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:40.624Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:40.638Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:41.491Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:41.491Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:41.610Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:41.610Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:41.624Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:41.624Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:41.638Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+Message sent to RabbitMQ!
+2023-09-05T07:18:42.493Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:42.493Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:42.611Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:42.611Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:42.625Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:42.625Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:42.642Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:42.657Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:42.657Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:42.657Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 56248, "Time": 1693898322}
+2023-09-05T07:18:42.657Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 5432, "KernelPid": 69526}
+2023-09-05T07:18:42.657Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 56248}
+2023-09-05T07:18:42.657Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 18
+2023-09-05T07:18:42.659Z	🐰 Keploy: DEBUG	proxy/proxy.go:894	into psql desp mode, before passing
+2023-09-05T07:18:42.733Z	🐰 Keploy: DEBUG	test/test.go:201	Before simulating the request	{"Test case": {"version":"api.keploy.io/v1beta2","kind":"Http","name":"test-1","created":1693898177,"updated":0,"captured":0,"http_req":{"method":"POST","proto_major":1,"proto_minor":1,"url":"http://localhost:8080/api/notes","url_params":null,"header":{"Accept":"*/*","Content-Length":"52","Content-Type":"application/json","Host":"localhost:8080","User-Agent":"curl/7.81.0"},"body":"{\"title\":\"Sample Title\", \"content\":\"Sample Content\"}","body_type":"","binary":"","form":null},"http_resp":{"status_code":200,"header":{"Content-Type":"application/json","Date":"Tue, 05 Sep 2023 07:16:16 GMT"},"body":"{\"id\":1,\"title\":\"Sample Title\",\"content\":\"Sample Content\"}","body_type":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"all_keys":null,"grpcResp":{"headers":{"pseudo_headers":null,"ordinary_headers":null},"body":{"compression_flag":0,"message_length":0,"decoded_data":""},"trailers":{"pseudo_headers":null,"ordinary_headers":null}},"grpcReq":{"headers":{"pseudo_headers":null,"ordinary_headers":null},"body":{"compression_flag":0,"message_length":0,"decoded_data":""}},"anchors":null,"noise":["header.Date"],"mocks":null,"type":""}}
+2023-09-05T07:18:42.734Z	🐰 Keploy: DEBUG	test/test.go:209	the url of the testcase: http://localhost:8080/api/notes
+2023-09-05T07:18:42.734Z	🐰 Keploy: INFO	pkg/util.go:63	making a http request	{"test case id": "test-1"}
+2023-09-05T07:18:42.734Z	🐰 Keploy: DEBUG	pkg/util.go:75	Sending request to user app:&{POST http://localhost:8080/api/notes HTTP/1.1 1 1 map[Accept:[*/*] Content-Length:[52] Content-Type:[application/json] Host:[localhost:8080] Keploy_test_id:[test-1] User-Agent:[curl/7.81.0]] {{"title":"Sample Title", "content":"Sample Content"}} 0x380660 52 [] true localhost:8080 map[] map[] <nil> map[]   <nil> <nil> <nil> {{}}}
+2023-09-05T07:18:42.780Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 1, "current event size": 258}
+2023-09-05T07:18:42.803Z  INFO 69526 --- [nio-8080-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2023-09-05T07:18:42.803Z  INFO 69526 --- [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2023-09-05T07:18:42.804Z  INFO 69526 --- [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 1 ms
+2023-09-05T07:18:43.494Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:43.612Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:43.612Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:43.627Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:43.627Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:43.644Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:43.644Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:43.661Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:44.496Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:44.613Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:44.613Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:44.627Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:44.628Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:44.645Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:44.645Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:44.661Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:45.078Z	🐰 Keploy: DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-09-05T07:18:45.497Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:45.546Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 0, "current event size": 197}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 0, "current event size": 5}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	test/test.go:212	After simulating the request	{"test case id": "test-1"}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	test/test.go:213	After GetResp of the request	{"test case id": "test-1"}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	test/test.go:396	cleanExp	{"": "{\"content\":\"Sample Content\",\"id\":1,\"title\":\"Sample Title\"}"}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	test/test.go:397	cleanAct	{"": "{\"content\":\"Sample Content\",\"id\":1,\"title\":\"Sample Title\"}"}
+Testrun passed for testcase with id: [32m[1m"[0m[32mtest-1[0m[32m[1m"[0m
+
+--------------------------------------------------------------------
+
+2023-09-05T07:18:45.547Z	🐰 Keploy: INFO	test/test.go:225	result	{"testcase id": "test-1", "passed": true}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	test/test.go:201	Before simulating the request	{"Test case": {"version":"api.keploy.io/v1beta2","kind":"Http","name":"test-3","created":1693898195,"updated":0,"captured":0,"http_req":{"method":"DELETE","proto_major":1,"proto_minor":1,"url":"http://localhost:8080/api/notes/1","url_params":null,"header":{"Accept":"*/*","Host":"localhost:8080","User-Agent":"curl/7.81.0"},"body":"","body_type":"","binary":"","form":null},"http_resp":{"status_code":200,"header":{"Content-Length":"0","Date":"Tue, 05 Sep 2023 07:16:34 GMT"},"body":"","body_type":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"all_keys":null,"grpcResp":{"headers":{"pseudo_headers":null,"ordinary_headers":null},"body":{"compression_flag":0,"message_length":0,"decoded_data":""},"trailers":{"pseudo_headers":null,"ordinary_headers":null}},"grpcReq":{"headers":{"pseudo_headers":null,"ordinary_headers":null},"body":{"compression_flag":0,"message_length":0,"decoded_data":""}},"anchors":null,"noise":["header.Date"],"mocks":null,"type":""}}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	test/test.go:209	the url of the testcase: http://localhost:8080/api/notes/1
+2023-09-05T07:18:45.547Z	🐰 Keploy: INFO	pkg/util.go:63	making a http request	{"test case id": "test-3"}
+2023-09-05T07:18:45.547Z	🐰 Keploy: DEBUG	pkg/util.go:75	Sending request to user app:&{DELETE http://localhost:8080/api/notes/1 HTTP/1.1 1 1 map[Accept:[*/*] Host:[localhost:8080] Keploy_test_id:[test-3] User-Agent:[curl/7.81.0]] {} 0x3a5650 0 [] true localhost:8080 map[] map[] <nil> map[]   <nil> <nil> <nil> {{}}}
+2023-09-05T07:18:45.578Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 1, "current event size": 158}
+2023-09-05T07:18:45.579Z	🐰 Keploy: DEBUG	connection/tracker.go:136	Got a close event from eBPF	{"TotalReadBytes": 258, "TotalWrittenBytes": 202}
+2023-09-05T07:18:45.614Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:45.615Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:45.628Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:45.628Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:45.646Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:45.646Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:45.662Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:46.079Z	🐰 Keploy: DEBUG	connection/factory.go:68	skipping tracker in test mode
+2023-09-05T07:18:46.498Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:46.615Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:46.615Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:46.629Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:46.629Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:46.646Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:46.646Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:46.663Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+Message sent to RabbitMQ!
+2023-09-05T07:18:47.502Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:47.616Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:47.617Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:47.629Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:47.629Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:47.647Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:47.647Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:47.664Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:47.678Z	🐰 Keploy: DEBUG	proxy/proxy.go:757		{"PID in proxy:": 68637}
+2023-09-05T07:18:47.679Z	🐰 Keploy: DEBUG	proxy/proxy.go:758		{"Filtering in Proxy": false}
+2023-09-05T07:18:47.679Z	🐰 Keploy: DEBUG	proxy/proxy.go:765	Inside handleConnection of proxyServer	{"source port": 56260, "Time": 1693898327}
+2023-09-05T07:18:47.679Z	🐰 Keploy: DEBUG	proxy/proxy.go:782		{"DestIp6": [0,0,65535,2130706433], "DestPort": 5432, "KernelPid": 69526}
+2023-09-05T07:18:47.679Z	🐰 Keploy: DEBUG	hooks/loader.go:227	successfully removed entry from redirect proxy map	{"(Key)/SourcePort": 56260}
+2023-09-05T07:18:47.679Z	🐰 Keploy: DEBUG	proxy/proxy.go:813	the clientConnId: 20
+2023-09-05T07:18:47.679Z	🐰 Keploy: DEBUG	proxy/proxy.go:894	into psql desp mode, before passing
+2023-09-05T07:18:48.081Z	🐰 Keploy: DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-09-05T07:18:48.504Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:48.508Z	🐰 Keploy: DEBUG	test/test.go:212	After simulating the request	{"test case id": "test-3"}
+2023-09-05T07:18:48.508Z	🐰 Keploy: DEBUG	test/test.go:213	After GetResp of the request	{"test case id": "test-3"}
+Testrun passed for testcase with id: [32m[1m"[0m[32mtest-3[0m[32m[1m"[0m
+
+--------------------------------------------------------------------
+
+2023-09-05T07:18:48.508Z	🐰 Keploy: INFO	test/test.go:225	result	{"testcase id": "test-3", "passed": true}
+2023-09-05T07:18:48.508Z	🐰 Keploy: DEBUG	test/test.go:201	Before simulating the request	{"Test case": {"version":"api.keploy.io/v1beta2","kind":"Http","name":"test-2","created":1693898196,"updated":0,"captured":0,"http_req":{"method":"GET","proto_major":1,"proto_minor":1,"url":"http://localhost:8080/api/notes/1","url_params":null,"header":{"Accept":"*/*","Host":"localhost:8080","User-Agent":"curl/7.81.0"},"body":"","body_type":"","binary":"","form":null},"http_resp":{"status_code":200,"header":{"Content-Type":"application/json","Date":"Tue, 05 Sep 2023 07:16:30 GMT"},"body":"{\"id\":1,\"title\":\"Sample Title\",\"content\":\"Sample Content\"}","body_type":"","status_message":"","proto_major":0,"proto_minor":0,"binary":""},"all_keys":null,"grpcResp":{"headers":{"pseudo_headers":null,"ordinary_headers":null},"body":{"compression_flag":0,"message_length":0,"decoded_data":""},"trailers":{"pseudo_headers":null,"ordinary_headers":null}},"grpcReq":{"headers":{"pseudo_headers":null,"ordinary_headers":null},"body":{"compression_flag":0,"message_length":0,"decoded_data":""}},"anchors":null,"noise":["header.Date"],"mocks":null,"type":""}}
+2023-09-05T07:18:48.508Z	🐰 Keploy: DEBUG	test/test.go:209	the url of the testcase: http://localhost:8080/api/notes/1
+2023-09-05T07:18:48.508Z	🐰 Keploy: INFO	pkg/util.go:63	making a http request	{"test case id": "test-2"}
+2023-09-05T07:18:48.508Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 0, "current event size": 92}
+2023-09-05T07:18:48.509Z	🐰 Keploy: DEBUG	pkg/util.go:75	Sending request to user app:&{GET http://localhost:8080/api/notes/1 HTTP/1.1 1 1 map[Accept:[*/*] Host:[localhost:8080] Keploy_test_id:[test-2] User-Agent:[curl/7.81.0]] {} 0x3a5650 0 [] true localhost:8080 map[] map[] <nil> map[]   <nil> <nil> <nil> {{}}}
+2023-09-05T07:18:48.512Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 1, "current event size": 155}
+2023-09-05T07:18:48.512Z	🐰 Keploy: DEBUG	connection/tracker.go:136	Got a close event from eBPF	{"TotalReadBytes": 158, "TotalWrittenBytes": 92}
+2023-09-05T07:18:48.621Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:48.621Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:48.631Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:48.631Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:48.649Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:48.650Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:48.666Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:48.667Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:48.681Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:49.083Z	🐰 Keploy: DEBUG	connection/factory.go:68	skipping tracker in test mode
+2023-09-05T07:18:49.507Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:49.622Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:49.622Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:49.632Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:49.632Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:49.651Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:49.651Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:49.667Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:49.668Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:49.684Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:50.510Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:50.624Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:50.625Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:50.633Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:50.633Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:50.651Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:50.651Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:50.668Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:50.669Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:469	the postgres request buffer is empty
+2023-09-05T07:18:50.684Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:51.086Z	🐰 Keploy: DEBUG	connection/tracker.go:74	Either connection is alive or request is a mutlipart/file-upload
+2023-09-05T07:18:51.512Z	🐰 Keploy: DEBUG	postgresParser/postgres_parser.go:461	the timeout for the client read in generic
+2023-09-05T07:18:51.527Z ERROR 69526 --- [nio-8080-exec-3] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] in context with path [] threw exception [Request processing failed: org.springframework.transaction.TransactionSystemException: Could not commit JPA transaction] with root cause
+
+java.util.NoSuchElementException: null
+	at java.base/java.util.ArrayDeque.removeFirst(ArrayDeque.java:362) ~[na:na]
+	at org.postgresql.core.v3.QueryExecutorImpl.processResults(QueryExecutorImpl.java:2164) ~[postgresql-42.6.0.jar!/:42.6.0]
+	at org.postgresql.core.v3.QueryExecutorImpl.execute(QueryExecutorImpl.java:368) ~[postgresql-42.6.0.jar!/:42.6.0]
+	at org.postgresql.core.v3.QueryExecutorImpl.execute(QueryExecutorImpl.java:327) ~[postgresql-42.6.0.jar!/:42.6.0]
+	at org.postgresql.jdbc.PgConnection.executeTransactionCommand(PgConnection.java:965) ~[postgresql-42.6.0.jar!/:42.6.0]
+	at org.postgresql.jdbc.PgConnection.commit(PgConnection.java:987) ~[postgresql-42.6.0.jar!/:42.6.0]
+	at com.zaxxer.hikari.pool.ProxyConnection.commit(ProxyConnection.java:377) ~[HikariCP-5.0.1.jar!/:na]
+	at com.zaxxer.hikari.pool.HikariProxyConnection.commit(HikariProxyConnection.java) ~[HikariCP-5.0.1.jar!/:na]
+	at org.hibernate.resource.jdbc.internal.AbstractLogicalConnectionImplementor.commit(AbstractLogicalConnectionImplementor.java:86) ~[hibernate-core-6.2.6.Final.jar!/:6.2.6.Final]
+	at org.hibernate.resource.transaction.backend.jdbc.internal.JdbcResourceLocalTransactionCoordinatorImpl$TransactionDriverControlImpl.commit(JdbcResourceLocalTransactionCoordinatorImpl.java:268) ~[hibernate-core-6.2.6.Final.jar!/:6.2.6.Final]
+	at org.hibernate.engine.transaction.internal.TransactionImpl.commit(TransactionImpl.java:101) ~[hibernate-core-6.2.6.Final.jar!/:6.2.6.Final]
+	at org.springframework.orm.jpa.JpaTransactionManager.doCommit(JpaTransactionManager.java:561) ~[spring-orm-6.0.11.jar!/:6.0.11]
+	at org.springframework.transaction.support.AbstractPlatformTransactionManager.processCommit(AbstractPlatformTransactionManager.java:743) ~[spring-tx-6.0.11.jar!/:6.0.11]
+	at org.springframework.transaction.support.AbstractPlatformTransactionManager.commit(AbstractPlatformTransactionManager.java:711) ~[spring-tx-6.0.11.jar!/:6.0.11]
+	at org.springframework.transaction.interceptor.TransactionAspectSupport.commitTransactionAfterReturning(TransactionAspectSupport.java:660) ~[spring-tx-6.0.11.jar!/:6.0.11]
+	at org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:410) ~[spring-tx-6.0.11.jar!/:6.0.11]
+	at org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119) ~[spring-tx-6.0.11.jar!/:6.0.11]
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184) ~[spring-aop-6.0.11.jar!/:6.0.11]
+	at org.springframework.dao.support.PersistenceExceptionTranslationInterceptor.invoke(PersistenceExceptionTranslationInterceptor.java:137) ~[spring-tx-6.0.11.jar!/:6.0.11]
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184) ~[spring-aop-6.0.11.jar!/:6.0.11]
+	at org.springframework.data.jpa.repository.support.CrudMethodMetadataPostProcessor$CrudMethodMetadataPopulatingMethodInterceptor.invoke(CrudMethodMetadataPostProcessor.java:164) ~[spring-data-jpa-3.1.2.jar!/:3.1.2]
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184) ~[spring-aop-6.0.11.jar!/:6.0.11]
+	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97) ~[spring-aop-6.0.11.jar!/:6.0.11]
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184) ~[spring-aop-6.0.11.jar!/:6.0.11]
+	at org.springframework.aop.framework.JdkDynamicAopProxy.invoke(JdkDynamicAopProxy.java:244) ~[spring-aop-6.0.11.jar!/:6.0.11]
+	at jdk.proxy2/jdk.proxy2.$Proxy106.findById(Unknown Source) ~[na:na]
+	at com.example.springpostgresmq.service.NoteService.findById(NoteService.java:27) ~[classes!/:0.0.1-SNAPSHOT]
+	at com.example.springpostgresmq.controller.NoteController.getNote(NoteController.java:25) ~[classes!/:0.0.1-SNAPSHOT]
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method) ~[na:na]
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77) ~[na:na]
+	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43) ~[na:na]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:568) ~[na:na]
+	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:205) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:150) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:884) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:797) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1081) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:974) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1011) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.servlet.FrameworkServlet.doGet(FrameworkServlet.java:903) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:564) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885) ~[spring-webmvc-6.0.11.jar!/:6.0.11]
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:205) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:149) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51) ~[tomcat-embed-websocket-10.1.11.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:174) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:149) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:174) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:149) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:174) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:149) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116) ~[spring-web-6.0.11.jar!/:6.0.11]
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:174) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:149) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:166) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:341) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:391) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:894) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1740) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1191) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:61) ~[tomcat-embed-core-10.1.11.jar!/:na]
+	at java.base/java.lang.Thread.run(Thread.java:833) ~[na:na]
+
+2023-09-05T07:18:51.555Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 0, "current event size": 251}
+2023-09-05T07:18:51.555Z	🐰 Keploy: DEBUG	test/test.go:212	After simulating the request	{"test case id": "test-2"}
+2023-09-05T07:18:51.555Z	🐰 Keploy: DEBUG	test/test.go:213	After GetResp of the request	{"test case id": "test-2"}
+2023-09-05T07:18:51.555Z	🐰 Keploy: DEBUG	test/test.go:396	cleanExp	{"": "{\"content\":\"Sample Content\",\"id\":1,\"title\":\"Sample Title\"}"}
+2023-09-05T07:18:51.555Z	🐰 Keploy: DEBUG	test/test.go:397	cleanAct	{"": "{\"error\":\"Internal Server Error\",\"path\":\"/api/notes/1\",\"status\":500,\"timestamp\":\"2023-09-05T07:18:51.544+00:00\"}"}
+Testrun failed for testcase with id: [31m[1m"[0m[31mtest-2[0m[31m[1m"[0m
+
+--------------------------------------------------------------------
+
++-------------------------------------------------------------------------------------------------------------+
+| [91m                                               DIFFS TEST-2                                                [0m |
++-------------------------------------------------------------------------------------------------------------+
+|                     EXPECT STATUS                    |                   ACTUAL STATUS                      2023-09-05T07:18:51.556Z	🐰 Keploy: DEBUG	connection/tracker.go:101	Got a data event from eBPF	{"Direction": 0, "current event size": 5}
+|
+| -----------------------------------------------------+----------------------------------------------------- |
+|                          200                         |                        500                           |
+|                                                      |                                                      |
+|                                                                                                             |
+|                      EXPECT BODY                     |                    ACTUAL BODY                       |
+| -----------------------------------------------------+----------------------------------------------------- |
+|    {                                                 |  {                                                   |
+|   -  "content": "Sample Content",                    | +  "error": "Internal Server Error"                  |
+|   -  "id": 1,                                        | +  "path": "/api/notes/1"                            |
+|   -  "title": "Sample Title"                         | +  "status": 500                                     |
+|    }                                                 | +  "timestamp": "2023-09-05T07:18:51.544+00:00"      |
+|                                                      |  }                                                   |
+|                                                      |                                                      |
+|                                                                                                             |
++-------------------------------------------------------------------------------------------------------------+
+2023-09-05T07:18:51.556Z	🐰 Keploy: INFO	test/test.go:225	result	{"testcase id": "test-2", "passed": false}
+2023-09-05T07:18:51.557Z	🐰 Keploy: DEBUG	test/test.go:316	the result before	{"": true, "testreport name": "report-2"}
+2023-09-05T07:18:51.557Z	🐰 Keploy: DEBUG	test/test.go:318	the result after	{"": false, "testreport name": "report-2"}
+2023-09-05T07:18:51.558Z	🐰 Keploy: INFO	hooks/loader.go:292	User application stopped successfully...
+2023-09-05T07:18:51.558Z	🐰 Keploy: DEBUG	yaml/yaml.go:213	no tests are recorded for the session	{"index": "test-set-1"}
+2023-09-05T07:18:51.558Z	🐰 Keploy: INFO	test/test.go:100	No testcases are recorded for the user application	{"for session": "test-set-1"}
+2023-09-05T07:18:51.558Z	🐰 Keploy: INFO	test/test.go:80	test run completed	{"passed overall": false}
+2023-09-05T07:18:51.558Z	🐰 Keploy: INFO	hooks/loader.go:303	Exiting keploy program gracefully.
+2023-09-05T07:18:51.558Z	🐰 Keploy: ERROR	hooks/ringBufReader.go:89	failed to receive signal from ringbuf socketDataEvent reader	{"error": "epoll wait: file already closed"}
+go.keploy.io/server/pkg/hooks.socketDataEventCallback
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/hooks/ringBufReader.go:89
+2023-09-05T07:18:51.559Z	🐰 Keploy: INFO	hooks/loader.go:292	User application stopped successfully...
+panic: runtime error: index out of range [0] with length 0
+
+goroutine 32 [running]:
+io.(*multiReader).Read(0x40001202b8, {0x4001011000, 0x400, 0x400})
+	/snap/go/10323/src/io/multi.go:30 +0x2a0
+go.keploy.io/server/pkg/proxy.(*CustomConn).Read(0x0?, {0x4001011000?, 0x40001b95b8?, 0x0?})
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/proxy.go:69 +0x74
+go.keploy.io/server/pkg/proxy/util.ReadBytes({0xffff6c38c9d0, 0x4000f575c0})
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/util/util.go:171 +0x7c
+go.keploy.io/server/pkg/proxy.callNext.func1()
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/proxy.go:941 +0x54
+created by go.keploy.io/server/pkg/proxy.callNext in goroutine 23
+	/home/ritikjain.linux/gk-workspace/keploy/pkg/proxy/proxy.go:940 +0x47c
+exit status 2
