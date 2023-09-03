@@ -114,26 +114,37 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
-			// pid, err := cmd.Flags().GetUint32("pid")
+			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+			// for _, v := range ports {
 
-			// if err != nil {
-			// 	t.logger.Error("Failed to get the pid of the application", zap.Error((err)))
 			// }
 
-			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay)
+			t.logger.Debug("the ports are", zap.Any("ports", ports))
+
+			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay, ports)
 			return nil
 		},
 	}
 
-	// testCmd.Flags().Uint32("pid", 0, "Process id of your application.")
+	// testCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
+	// testCmd.MarkFlagRequired("pid")
 
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
-	// testCmd.MarkFlagRequired("command")
+	// testCmd.MarkFlagRequired("c")
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
+
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	// recordCmd.MarkFlagRequired("networkName")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+
+	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
 
