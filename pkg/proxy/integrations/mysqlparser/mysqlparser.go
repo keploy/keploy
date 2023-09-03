@@ -2,7 +2,6 @@ package mysqlparser
 
 import (
 	"encoding/binary"
-	"fmt"
 	"log"
 	"net"
 	"time"
@@ -174,24 +173,23 @@ func decodeOutgoingMySQL(clientConnId, destConnId int, requestBuffer []byte, cli
 	for {
 		configMocks := h.GetConfigMocks()
 		tcsMocks := h.GetTcsMocks()
-		fmt.Println(configMocks, tcsMocks)
+		logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		var (
 			mysqlRequests = []models.MySQLRequest{}
 			// mongoResponses = []models.MongoResponse{}
 		)
 
-		fmt.Println(mysqlRequests)
+		logger.Debug("MySQL requests", zap.Any("mysqlRequests", mysqlRequests))
 		if firstLoop || doHandshakeAgain {
 			packet := configMocks[0].Spec.MySqlResponses[0].Message
 			opr := configMocks[0].Spec.MySqlResponses[0].Header.PacketType
 			binaryPacket, err := encodeToBinary(&packet, opr, 0)
 			if err != nil {
-				fmt.Println("Error:", err)
+				logger.Error("Failed to encode to binary", zap.Error(err))
 				return
 			}
 			_, err = clientConn.Write(binaryPacket)
 			requestBuffer, err = util.ReadBytes(clientConn)
-			fmt.Println(requestBuffer)
 			// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
 			handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[1].Message
 			opr2 := configMocks[0].Spec.MySqlResponses[1].Header.PacketType
@@ -218,7 +216,11 @@ func decodeOutgoingMySQL(clientConnId, destConnId int, requestBuffer []byte, cli
 				}
 				return
 			}
-			fmt.Println(oprRequest, requestHeader, mysqlRequest, err)
+			logger.Debug("Decoded MySQL packet details",
+				zap.String("oprRequest", oprRequest),
+				zap.Any("requestHeader", requestHeader),
+				zap.Any("mysqlRequest", mysqlRequest),
+				zap.Error(err))
 			handshakeResponseFromConfig := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Message
 			opr2 := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header.PacketType
 			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, opr2, mockResponseRead+1)
