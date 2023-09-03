@@ -37,7 +37,7 @@ func NewTester(logger *zap.Logger) Tester {
 
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
-func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
+func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint) bool {
 	models.SetMode(models.MODE_TEST)
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
@@ -55,7 +55,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 
 	// start the proxies
-	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd, appContainer)
+	ps := proxy.BootProxies(t.logger, proxy.Option{}, appCmd, appContainer, passThorughPorts)
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)

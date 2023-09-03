@@ -109,8 +109,18 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
 
+			ports, err := cmd.Flags().GetUintSlice("ports")
+			if err != nil {
+				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+			// for _, v := range ports {
+				
+			// }
+	
+			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
-			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay)
+			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay, ports)
 			return nil
 			// server.Server(version, kServices, conf, logger)
 			// server.Server(version)
@@ -134,6 +144,11 @@ func (r *Record) GetCmd() *cobra.Command {
 
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	// recordCmd.MarkFlagRequired("delay")
+
+	recordCmd.Flags().UintSlice("ports", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	// recordCmd.Flags().UintSlice()
+
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true
 

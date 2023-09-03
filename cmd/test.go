@@ -114,7 +114,18 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
-			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay)
+			ports, err := cmd.Flags().GetUintSlice("ports")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+			// for _, v := range ports {
+				
+			// }
+	
+			t.logger.Debug("the ports are", zap.Any("ports", ports))	
+
+			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay, ports)
 			return nil
 		},
 	}
@@ -131,6 +142,10 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	// recordCmd.MarkFlagRequired("networkName")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+	
+	testCmd.Flags().UintSlice("ports", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
 

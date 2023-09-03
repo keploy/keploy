@@ -21,7 +21,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 }
 
 // func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer, appNetwork string, Delay uint64) {
-func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork string, Delay uint64) {
+func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
 	models.SetMode(models.MODE_RECORD)
 
 	ys := yaml.NewYamlStore(r.logger)
@@ -40,7 +40,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}
 
 	// start the proxies
-	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd, appContainer)
+	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd, appContainer, ports)
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)
