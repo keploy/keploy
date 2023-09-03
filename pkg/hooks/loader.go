@@ -184,7 +184,7 @@ func (h *Hook) ResetDeps() int {
 	return 1
 }
 
-// This function sends the keploy graphql server port to be filtered in the eBPF program.
+// SendKeployServerPort sends the keploy graphql server port to be filtered in the eBPF program.
 func (h *Hook) SendKeployServerPort(port uint32) error {
 	h.logger.Debug("sending keploy server port", zap.Any("port", port))
 	key := 0
@@ -240,6 +240,7 @@ func (h *Hook) PrintRedirectProxyMap() {
 	h.logger.Debug("--------Redirect Proxy Map-------")
 }
 
+// GetDestinationInfo retrieves destination information associated with a source port.
 func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
@@ -251,7 +252,8 @@ func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	return &destInfo, nil
 }
 
-// this function is used in case of running keploy tests along with unit tests of application
+// SendAppPid sends the application's process ID (PID) to the kernel.
+// This function is used when running Keploy tests along with unit tests of the application.
 func (h *Hook) SendAppPid(pid uint32) error {
 	h.logger.Debug("Sending app pid to kernel", zap.Any("app Pid", pid))
 	err := h.appPidMap.Update(uint32(0), &pid, ebpf.UpdateAny)
