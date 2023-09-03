@@ -320,6 +320,9 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 			logger.Error("Failed to decode the MySQL packet from the destination server", zap.Error(err))
 			continue
 		}
+		if len(queryResponse) == 0 || responseOperation == "COM_STMT_CLOSE" {
+			break
+		}
 		mysqlResponses = append([]models.MySQLResponse{}, models.MySQLResponse{
 			Header: &models.MySQLPacketHeader{
 				PacketLength: responseHeader.PayloadLength,

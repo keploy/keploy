@@ -112,7 +112,6 @@ func encodeToBinary(packet interface{}, operation string, sequence int) ([]byte,
 		header := make([]byte, 4)
 		binary.LittleEndian.PutUint32(header, uint32(len(data)))
 		header[3] = byte(sequence)
-		fmt.Println(uint32(len(data)))
 		return append(header, data...), nil
 	} else {
 		return data, nil
@@ -149,8 +148,14 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetData, err = decodeComStmtPrepare(data)
 		lastCommand = 0x16
 	case data[0] == 0x19: // COM_STMT_CLOSE
-		packetType = "COM_STMT_CLOSE"
-		packetData, err = decodeComStmtClose(data)
+		if len(data) > 5 {
+
+			packetType = "COM_STMT_CLOSE_WITH_PREPARE"
+			packetData, err = decodeComStmtCloseMoreData(data)
+		} else {
+			packetType = "COM_STMT_CLOSE"
+			packetData, err = decodeComStmtClose(data)
+		}
 		lastCommand = 0x19
 	case data[0] == 0x11: // COM_CHANGE_USER
 		packetType = "COM_CHANGE_USER"
