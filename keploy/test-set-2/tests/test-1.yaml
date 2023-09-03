@@ -20,8 +20,8 @@ spec:
         status_code: 200
         header:
             Content-Type: application/json
-            Date: Thu, 31 Aug 2023 10:05:49 GMT
-        body: '{"id":12,"title":"Sample Title","content":"Sample Content"}'
+            Date: Tue, 05 Sep 2023 07:16:16 GMT
+        body: '{"id":1,"title":"Sample Title","content":"Sample Content"}'
         body_type: ""
         status_message: ""
         proto_major: 0
@@ -29,6 +29,5 @@ spec:
     objects: []
     assertions:
         noise:
-            - body.id
             - header.Date
-    created: 1693476351
+    created: 1693898177
