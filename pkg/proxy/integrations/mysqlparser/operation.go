@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-//common
+// common
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
 	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
@@ -152,11 +152,12 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 
 			packetType = "COM_STMT_CLOSE_WITH_PREPARE"
 			packetData, err = decodeComStmtCloseMoreData(data)
+			lastCommand = 0x16
 		} else {
 			packetType = "COM_STMT_CLOSE"
 			packetData, err = decodeComStmtClose(data)
+			lastCommand = 0x19
 		}
-		lastCommand = 0x19
 	case data[0] == 0x11: // COM_CHANGE_USER
 		packetType = "COM_CHANGE_USER"
 		packetData, err = decodeComChangeUser(data)
