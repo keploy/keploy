@@ -71,7 +71,7 @@ func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks
 		h.AppendMocks(encodeOutgoingHttp(request, clientConn, destConn, logger))
 		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(request, clientConn, destConn, logger))
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, h, logger, 0)
+		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -281,13 +281,13 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, depth int) {
+func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	//Matching algorithmm
 	//Get the mocks
 	tcsMocks := h.GetTcsMocks()
 	var bestMatch *models.Mock
 	//Check if the expected header is present
-	if depth == 0 && bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
+	if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
 		//Send the 100 continue response
 		_, err := clienConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 		if err != nil {
@@ -302,8 +302,6 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		}
 		//Append the new request buffer to the old request buffer
 		requestBuffer = append(requestBuffer, newRequest...)
-		//Call the decode function again with the new request buffer
-		decodeOutgoingHttp(requestBuffer, clienConn, destConn, h, logger, depth+1)
 	}
 	//Parse the request buffer
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
@@ -494,9 +492,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			logger.Error("failed to get the 100 continue response from the user client")
 			return nil
 		}
-		handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
 	}
-
+	handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
 	// read the response from the actual server
 	resp, err = util.ReadBytes(destConn)
 	if err != nil {
