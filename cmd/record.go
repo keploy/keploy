@@ -36,7 +36,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				r.logger.Error(Emoji + "failed to read the testcase path input")
+				r.logger.Error("failed to read the testcase path input")
 				return err
 			}
 
@@ -65,7 +65,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appCmd, err := cmd.Flags().GetString("command")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the command to run the user application", zap.Error((err)))
+				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -79,7 +79,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appContainer, err := cmd.Flags().GetString("containerName")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the application's docker container name", zap.Error((err)))
+				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 			var hasContainerName bool
 			if isDockerCmd {
@@ -98,17 +98,17 @@ func (r *Record) GetCmd() *cobra.Command {
 			networkName, err := cmd.Flags().GetString("networkName")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the application's docker network name", zap.Error((err)))
+				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
-				r.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
+				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
 
-			r.logger.Info(Emoji, zap.Any("keploy test and mock path", path))
-
+			r.logger.Info("", zap.Any("keploy test and mock path", path))
+			
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay)
 			return nil
@@ -117,14 +117,13 @@ func (r *Record) GetCmd() *cobra.Command {
 		},
 	}
 
-	// recordCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
-	// recordCmd.MarkFlagRequired("pid")
+	// recordCmd.Flags().Uint32("pid", 0, "Process id of your application.")
 
 	recordCmd.Flags().StringP("path", "p", "", "Path to the local directory where generated testcases/mocks should be stored")
 	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
 
 	recordCmd.Flags().StringP("command", "c", "", "Command to start the user application")
-	// recordCmd.MarkFlagRequired("c")
+	// recordCmd.MarkFlagRequired("command")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
 	// recordCmd.MarkFlagRequired("containerName")

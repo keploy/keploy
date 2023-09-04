@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"go.uber.org/zap"
 
+	"go.uber.org/zap"
 
 	// "math/rand"
 	"net"
@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
+	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 )
@@ -29,7 +30,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 		}
 		buffer, err := ReadBytes(conn)
 		if err != nil {
-			logger.Error(Emoji+"failed to read the packet message in proxy for generic dependency", zap.Error(err))
+			logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
 			errChannel <- err
 			return err
 		}
@@ -38,17 +39,16 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	return nil
 }
 
-
 func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *zap.Logger) ([]byte, error) {
 
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination connection")
 	}
-	logger.Debug(Emoji+"trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	for _, v := range requestBuffer {
 		_, err := destConn.Write(v)
 		if err != nil {
-			logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+			logger.Error("failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 			return nil, err
 		}
 	}
@@ -62,39 +62,37 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *
 	go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	// read response from destination
 	// destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-	
-	go ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 
+	go ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 
 	// for {
 
-			select {
-			case buffer := <-clientBufferChannel:
-				// Write the request message to the destination
-				_, err := destConn.Write(buffer)
-				if err != nil {
-					logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
-					return nil, err
-				}
-				logger.Debug("the iteration for the generic request ends with requests:" + strconv.Itoa(len(buffer)))
-				return buffer, nil
-			case buffer := <-destBufferChannel:
-				// Write the response message to the client
-				_, err := clientConn.Write(buffer)
-				if err != nil {
-					logger.Error(Emoji+"failed to write response to the client", zap.Error(err))
-					return nil, err
-				}
-	
-				
-				logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)))
-			case err := <-errChannel:
-				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-					return nil, err
-				}
-				return nil, nil 
-			}
-		
+	select {
+	case buffer := <-clientBufferChannel:
+		// Write the request message to the destination
+		_, err := destConn.Write(buffer)
+		if err != nil {
+			logger.Error("failed to write request message to the destination server", zap.Error(err))
+			return nil, err
+		}
+		logger.Debug("the iteration for the generic request ends with requests:" + strconv.Itoa(len(buffer)))
+		return buffer, nil
+	case buffer := <-destBufferChannel:
+		// Write the response message to the client
+		_, err := clientConn.Write(buffer)
+		if err != nil {
+			logger.Error("failed to write response to the client", zap.Error(err))
+			return nil, err
+		}
+
+		logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)))
+	case err := <-errChannel:
+		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
 	// }
 
 	return nil, nil
@@ -400,7 +398,9 @@ func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) 
 		shingles1 := CreateShingles(encoded, k)
 		shingles2 := CreateShingles(reqBuff, k)
 		similarity := JaccardSimilarity(shingles1, shingles2)
-		// fmt.Printf("Jaccard Similarity: %f\n", similarity)
+
+		log.Debugf("Jaccard Similarity:%f\n", similarity)
+
 		if mxSim < similarity {
 			mxSim = similarity
 			mxIdx = idx
@@ -428,7 +428,9 @@ func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *
 	for _, mock := range tcsMocks {
 		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
 		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
-			// fmt.Println("matched in first loop")
+
+			log.Debug(Emoji, "matched in first loop")
+
 			return true, mock
 		}
 	}
@@ -441,7 +443,9 @@ func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *
 	if IsAsciiPrintable(string(reqBuff)) {
 		idx := findStringMatch(string(reqBuff), mockString)
 		if idx != -1 {
-			// fmt.Println("Returning mock from String Match !!")
+
+			log.Debug(Emoji, "Returning mock from String Match")
+
 			return true, tcsMocks[idx]
 		}
 	}

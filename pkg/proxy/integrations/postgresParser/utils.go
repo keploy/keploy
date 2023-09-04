@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
+	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
@@ -97,7 +98,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 		// 	continue
 		// }
 		if string(encoded) == string(reqBuff) || mock.Spec.PostgresReq.Payload == com {
-			fmt.Println("matched in first loop")
+			log.Debug(Emoji,"matched in first loop")
 
 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
 			h.SetConfigMocks(configMocks)
@@ -111,7 +112,8 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 			}
 		}
 		if i >= 8 {
-			// fmt.Println("matched in second loop")
+			log.Debug(Emoji,"matched in second loop")
+
 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
 			h.SetConfigMocks(configMocks)
 			return true, mock.Spec.PostgresResp.Payload
@@ -128,7 +130,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 		i := 0
 		for i = 0; i < len(com); i++ {
 			if com[i] == mock.Spec.PostgresReq.Payload[i] {
-				// fmt.Println("matched in second loop")
+				log.Debug(Emoji,"matched in second loop")
 			}
 		}
 		if i >= len(com)/2 {

@@ -50,24 +50,24 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 			}
 			parsedHttpReq, err := pkg.ParseHTTPRequest(tracker.RecvBuf)
 			if err != nil {
-				factory.logger.Error(Emoji+"failed to parse the http request from byte array", zap.Error(err))
+				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err))
 				continue
 			}
 			parsedHttpRes, err := pkg.ParseHTTPResponse(tracker.SentBuf, parsedHttpReq)
 			if err != nil {
-				factory.logger.Error(Emoji+"failed to parse the http response from byte array", zap.Error(err))
+				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
 				continue
 			}
 
 			switch models.GetMode() {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
-				factory.logger.Debug(Emoji + "capturing ingress call from tracker in record mode")
+				factory.logger.Debug("capturing ingress call from tracker in record mode")
 				capture(path, db, parsedHttpReq, parsedHttpRes, factory.logger)
 			case models.MODE_TEST:
-				factory.logger.Debug(Emoji + "skipping tracker in test mode")
+				factory.logger.Debug("skipping tracker in test mode")
 			default:
-				factory.logger.Warn(Emoji+"Keploy mode is not set to record or test. Tracker is being skipped.",
+				factory.logger.Warn("Keploy mode is not set to record or test. Tracker is being skipped.",
 					zap.Any("current mode", models.GetMode()))
 			}
 
@@ -107,14 +107,14 @@ func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.
 
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
-		logger.Error(Emoji+"failed to read the http request body", zap.Error(err))
+		logger.Error("failed to read the http request body", zap.Error(err))
 		return
 	}
 
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logger.Error(Emoji+"failed to read the http response body", zap.Error(err))
+		logger.Error("failed to read the http response body", zap.Error(err))
 		return
 	}
 
@@ -153,7 +153,7 @@ func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.
 		// Mocks: mocks,
 	})
 	if err != nil {
-		logger.Error(Emoji+"failed to record the ingress requests", zap.Error(err))
+		logger.Error("failed to record the ingress requests", zap.Error(err))
 		return
 	}
 }
