@@ -286,6 +286,23 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	//Get the mocks
 	tcsMocks := h.GetTcsMocks()
 	var bestMatch *models.Mock
+	//Check if the expected header is present
+	if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
+		//Send the 100 continue response
+		_, err := clienConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+		if err != nil {
+			logger.Error("failed to write the 100 continue response to the user application", zap.Error(err))
+			return
+		}
+		//Read the request buffer again
+		newRequest, err := util.ReadBytes(clienConn)
+		if err != nil {
+			logger.Error("failed to read the request buffer from the user application", zap.Error(err))
+			return
+		}
+		//Append the new request buffer to the old request buffer
+		requestBuffer = append(requestBuffer, newRequest...)
+	}
 	//Parse the request buffer
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
 	if err != nil {
@@ -448,7 +465,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return nil
 	}
-		finalReq = append(finalReq, request...)
+	finalReq = append(finalReq, request...)
 	//check if the expect : 100-continue header is present
 	lines := strings.Split(string(request), "\n")
 	var expectHeader string
@@ -475,9 +492,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			logger.Error("failed to get the 100 continue response from the user client")
 			return nil
 		}
-		handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
 	}
-
+	handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
 	// read the response from the actual server
 	resp, err = util.ReadBytes(destConn)
 	if err != nil {
