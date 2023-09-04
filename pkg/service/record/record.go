@@ -25,8 +25,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	models.SetMode(models.MODE_RECORD)
 
 	ys := yaml.NewYamlStore(r.logger)
-	// start the proxies
-	// ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd)
+
 	dirName, err := ys.NewSessionIndex(path)
 	if err != nil {
 		r.logger.Error("failed to find the directroy name for the session", zap.Error(err))
@@ -35,12 +34,12 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	path += "/" + dirName
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks := hooks.NewHook(path, ys, r.logger)
-	if err := loadedHooks.LoadHooks(appCmd, appContainer); err != nil {
+	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
 		return
 	}
 
-	// start the proxies
-	ps := proxy.BootProxies(r.logger, proxy.Option{}, appCmd, appContainer)
+	// start the BootProxy
+	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0)
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)
