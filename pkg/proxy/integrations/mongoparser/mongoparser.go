@@ -49,6 +49,8 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 	for {
 		configMocks := h.GetConfigMocks()
 		tcsMocks := h.GetTcsMocks()
+		logger.Debug(fmt.Sprintf("the config mocks are: %v\nthe testcase mocks are: %v", configMocks, tcsMocks))
+
 		var (
 			mongoRequests = []models.MongoRequest{}
 			err           error
@@ -156,6 +158,9 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 								continue
 							}
 							scoreSum := 0.0
+							if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+								continue
+							}
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
 								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
 								scoreSum += score
@@ -249,6 +254,9 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 						case wiremessage.OpMsg:
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 								continue
+							} 
+							if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+								continue
 							}
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
 								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
@@ -273,6 +281,11 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 
 			responseTo := mongoRequests[0].Header.RequestID
 			logger.Debug("the index mostly matched with the current request", zap.Any("indx", bestMatchIndex), zap.Any("responseTo", responseTo))
+			if bestMatchIndex < 0 {
+				logger.Debug(fmt.Sprintf("the bestMatchIndex before looping on MongoResponses is:%d", bestMatchIndex))
+				continue
+			}
+
 			for _, resp := range tcsMocks[bestMatchIndex].Spec.MongoResponses {
 				respMessage := resp.Message.(*models.MongoOpMessage)
 

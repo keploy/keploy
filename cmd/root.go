@@ -110,7 +110,6 @@ func (r *Root) execute() {
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	// rootCmd.Flags().IntP("pid", "", 0, "Please enter the process id on which your application is running.")
-
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
 	// Manually parse flags to determine debug mode early
@@ -118,7 +117,7 @@ func (r *Root) execute() {
 	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
 
-	r.subCommands = append(r.subCommands, NewCmdExample(r.logger), NewCmdTest(r.logger), NewCmdRecord(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger),NewCmdExample(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {
