@@ -14,7 +14,7 @@ import (
 	// "encoding/json"
 	"encoding/base64"
 	// "fmt"
-	"github.com/jackc/pgproto3"
+	// "github.com/jackc/pgproto3"
 	"go.keploy.io/server/pkg/proxy/util"
 
 	// "bytes"
@@ -324,7 +324,7 @@ func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *
 func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 
 	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn, clientConn)
-	frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
+	// frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
 	pgRequests := []models.GenericPayload{}
 
 	logger.Debug("Encoding outgoing generic call from postgres parser !!")
@@ -349,12 +349,12 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
-	msg2, err := frontend.Receive(requestBuffer)
-	if err != nil {
-		logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
-		// return err
-	}
-	println("msg2 is ", msg2)
+	// msg2, err := frontend.Receive(requestBuffer)
+	// if err != nil {
+	// 	logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
+	// 	// return err
+	// }
+	// println("msg2 is ", msg2)
 
 	pgResponses := []models.GenericPayload{}
 
@@ -380,12 +380,12 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 				logger.Error("failed to write request message to the destination server", zap.Error(err))
 				return err
 			}
-			msg2, err := frontend.Receive(buffer)
-			if err != nil {
-				logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
-				// return err
-			}
-			println("msg2 is ", msg2)
+			// msg2, err := frontend.Receive(buffer)
+			// if err != nil {
+			// 	logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
+			// 	// return err
+			// }
+			// println("msg2 is ", msg2)
 			// logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
@@ -460,7 +460,7 @@ func decodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 	pgRequests := [][]byte{requestBuffer}
 	tcsMocks := h.GetTcsMocks()
 	// change auth to md5 instead of scram
-	ChangeAuthToMD5(tcsMocks, h,logger)
+	ChangeAuthToMD5(tcsMocks, h, logger)
 	// time.Sleep(3 * time.Second)
 	for {
 		// time.Sleep(5 * time.Second)

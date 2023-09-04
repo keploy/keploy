@@ -2,7 +2,7 @@ module go.keploy.io/server
 
 go 1.20
 
-replace github.com/jackc/pgproto3 => /Users/sarthak_1/Documents/Keploy/v2/pgproto3
+// replace github.com/jackc/pgproto3 => /Users/sarthak_1/Documents/Keploy/v2/pgproto3
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
@@ -44,6 +44,7 @@ require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/certificate-transparency-go v1.1.4 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/jackc/chunkreader v1.0.0 // indirect
 	github.com/jackc/chunkreader/v2 v2.0.0 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jmoiron/sqlx v1.3.3 // indirect
