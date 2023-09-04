@@ -35,7 +35,7 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
-					fmt.Println("matched in first loop")
+					// fmt.Println("matched in first loop")
 					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 					h.SetConfigMocks(tcsMocks)
 					return true, mock.Spec.GenericResponses
@@ -63,7 +63,7 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 	// }
 	idx := findBinaryMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
-		fmt.Println("matched in first loop")
+		// fmt.Println("matched in second loop")
 		bestMatch := tcsMocks[idx].Spec.GenericResponses
 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 		h.SetConfigMocks(tcsMocks)
@@ -90,7 +90,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				shingles1 := CreateShingles(encoded, k)
 				shingles2 := CreateShingles(reqBuff, k)
 				similarity := JaccardSimilarity(shingles1, shingles2)
-				fmt.Printf("Jaccard Similarity: %f\n", similarity)
+				// fmt.Printf("Jaccard Similarity: %f\n", similarity)
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx

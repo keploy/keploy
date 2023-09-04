@@ -3,6 +3,7 @@ package postgresparser
 import (
 	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"encoding/binary"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.uber.org/zap"
 )
 
 func remainingBits(superset, subset []byte) []byte {
@@ -109,7 +111,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 			}
 		}
 		if i >= 8 {
-			fmt.Println("matched in second loop")
+			// fmt.Println("matched in second loop")
 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
 			h.SetConfigMocks(configMocks)
 			return true, mock.Spec.PostgresResp.Payload
@@ -126,7 +128,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 		i := 0
 		for i = 0; i < len(com); i++ {
 			if com[i] == mock.Spec.PostgresReq.Payload[i] {
-				fmt.Println("matched in second loop")
+				// fmt.Println("matched in second loop")
 			}
 		}
 		if i >= len(com)/2 {
@@ -221,9 +223,7 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 	return k
 }
 
-
 func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
-
 	for idx, mock := range tcsMocks {
 		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
@@ -234,8 +234,7 @@ func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
 				// }
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-				// fmt.Println("encoded is ", string(encoded))
-				// fmt.Println("reqBuff is ", bufStr)
+
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
 					// fmt.Println("matched in first loop")
 					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
@@ -245,24 +244,7 @@ func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 			}
 		}
 	}
-	// com := PostgresEncoder(reqBuff)
-	// convert all the configmocks to string array
-	// mockString := make([]string, len(tcsMocks))
-	// for i := 0; i < len(tcsMocks); i++ {
-	// 	mockString[i] = string(tcsMocks[i].Spec.PostgresReq.Payload)
-	// }
-	// // find the closest match
-	// if IsAsciiPrintable(string(reqBuff)) {
-	// 	fmt.Println("Inside String Match")
-	// 	idx := findStringMatch(string(reqBuff), mockString)
-	// 	if idx != -1 {
-	// 		nMatch := tcsMocks[idx].Spec.PostgresResp.Payload
-	// 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-	// 		h.SetConfigMocks(tcsMocks)
-	// 		fmt.Println("Returning mock from String Match !!")
-	// 		return true, nMatch
-	// 	}
-	// }
+
 	idx := findBinaryStreamMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
 		// fmt.Println("matched in first loop")
@@ -309,7 +291,7 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 				_ = base64.StdEncoding.EncodeToString(reqBuff)
 				// }
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-				// fmt.Println("INSIDE FOR LOOP")
+
 				k := AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := CreateShingles(encoded, k)
 				shingles2 := CreateShingles(reqBuff, k)
@@ -350,4 +332,32 @@ func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
 		return 0.0
 	}
 	return float64(intersectionSize) / float64(unionSize)
+}
+
+func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
+	for _, mock := range tcsMocks {
+
+		// if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+		for requestIndex, reqBuff := range mock.Spec.GenericRequests {
+
+			// bufStr := string(reqBuff)
+			// if !IsAsciiPrintable(bufStr) {
+			// bufStr := base64.StdEncoding.EncodeToString(reqBuff)
+			// }
+			encode, _ := PostgresDecoder(reqBuff.Message[0].Data)
+			if isStartupPacket(encode) && checkScram(mock.Spec.GenericResponses[requestIndex].Message[0].Data,log) { //||reqBuff.Message[0].Data == "AAAAeAADAAB1c2VyAGtlcGxveS11c2VyAGRhdGFiYXNlAGtlcGxveS10ZXN0AGNsaWVudF9lbmNvZGluZwBVVEY4AERhdGVTdHlsZQBJU08AVGltZVpvbmUARXRjL1VUQwBleHRyYV9mbG9hdF9kaWdpdHMAMgAA" {
+				log.Debug("CHANGING TO MD5 for Response")
+				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
+			}
+			//just change it to more robust and after that write decoode encode logic for all
+			if strings.Contains(reqBuff.Message[0].Data, "cAAAADdTQ1JB") {
+				log.Debug("CHANGING TO MD5 for Request and Response")
+				mock.Spec.GenericRequests[requestIndex].Message[0].Data = "cAAAAChtZDUzNTc3MWY3N2YxMDA4YmEzMDRkYjlkMmJmODM3YmZlOQA="
+				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADFzZXJ2ZXJfdmVyc2lvbgAxMC41IChEZWJpYW4gMTAuNS0yLnBnZGc5MCsxKQBTAAAAJnNlc3Npb25fYXV0aG9yaXphdGlvbgBrZXBsb3ktdXNlcgBTAAAAI3N0YW5kYXJkX2NvbmZvcm1pbmdfc3RyaW5ncwBvbgBTAAAAFVRpbWVab25lAEV0Yy9VVEMASwAAAAwAAAA3L5+du1oAAAAFSQ=="
+			}
+
+		}
+
+	}
+	h.SetTcsMocks(tcsMocks)
 }

@@ -14,11 +14,12 @@ import (
 	// "encoding/json"
 	"encoding/base64"
 	// "fmt"
+	"github.com/jackc/pgproto3"
 	"go.keploy.io/server/pkg/proxy/util"
+
 	// "bytes"
 
 	"errors"
-
 
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -166,7 +167,6 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 		// read request message from the postgres client and see if it's authentication buffer
 		// if its auth buffer then just save it in global config
 
-
 		for {
 			msgRequestbuffer, _, err = util.ReadBytes1(clientConn)
 			if err != nil {
@@ -184,11 +184,9 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 
 		// for making readable first identify message type and add the Unmarshaled value for that query object
 
-
 		logger.Debug(Emoji+"The mock is ", zap.String("payload of req ::: :: ::", base64.StdEncoding.EncodeToString(msgRequestbuffer)))
 
 		// logger.Debug(Emoji, "Inside for loop", string(msgRequestbuffer))
-
 
 		// write the request message to postgres server
 		_, err = destConn.Write(msgRequestbuffer)
@@ -242,7 +240,6 @@ func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logge
 
 }
 
-
 // This is the encoding function for the non streaming postgres messages
 
 func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
@@ -254,7 +251,6 @@ func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 	logger.Debug("testMocks length is ", zap.Any("testmocks", len(tcsMocks)))
 	logger.Debug("configMocks length is ", zap.Any("configMocks", len(configMocks)))
-
 
 	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn)
 	// frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
@@ -322,10 +318,11 @@ func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	// return
 }
 
-
 // This is the encoding function for the streaming postgres wiremessage
 func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 
+	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn, clientConn)
+	frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
 	pgRequests := []models.GenericPayload{}
 
 	logger.Info("Encoding outgoing generic call from postgres parser !!")
@@ -345,13 +342,19 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 		})
 	}
 	_, err := destConn.Write(requestBuffer)
+	logger.Info("Writing the request buffer to the destination server", zap.Any("requestBuffer", string(requestBuffer)))
 	if err != nil {
 		logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
+	msg2, err := frontend.Receive(requestBuffer)
+	if err != nil {
+		logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
+		// return err
+	}
+	println("msg2 is ", msg2)
 
 	pgResponses := []models.GenericPayload{}
-
 
 	clientBufferChannel := make(chan []byte)
 	destBufferChannel := make(chan []byte)
@@ -363,8 +366,8 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 
 	isPreviousChunkRequest := false
 
-	// ticker := time.NewTicker(1 * time.Second)
-	// logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
+	// if clientBufferChannel is selected write to destination
+	// if destBufferChannel is selected write to client
 	for {
 
 		select {
@@ -375,7 +378,12 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 				logger.Error(hooks.Emoji+"failed to write request message to the destination server", zap.Error(err))
 				return err
 			}
-
+			msg2, err := frontend.Receive(buffer)
+			if err != nil {
+				logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
+				// return err
+			}
+			println("msg2 is ", msg2)
 			// logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
@@ -396,7 +404,6 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 			// }
 			if bufStr != "" {
 
-
 				pgRequests = append(pgRequests, models.GenericPayload{
 
 					Origin: models.FromClient,
@@ -416,8 +423,6 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 			if err != nil {
 
 				logger.Error(hooks.Emoji+"failed to write response to the pg client", zap.Error(err))
-
-				return err
 			}
 
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
@@ -444,18 +449,18 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 	}
 }
 
-
 // This is the decoding function for the postgres wiremessage
 func decodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 	pgRequests := [][]byte{requestBuffer}
-
+	tcsMocks := h.GetTcsMocks()
+	// change auth to md5 instead of scram
+	ChangeAuthToMD5(tcsMocks, h,logger)
+	// time.Sleep(3 * time.Second)
 	for {
-		tcsMocks := h.GetTcsMocks()
+		// time.Sleep(5 * time.Second)
 		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
-
 			logger.Error(hooks.Emoji+"failed to set the read deadline for the pg client connection", zap.Error(err))
-
 			return err
 		}
 

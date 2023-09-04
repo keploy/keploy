@@ -2,6 +2,8 @@ module go.keploy.io/server
 
 go 1.20
 
+replace github.com/jackc/pgproto3 => /Users/sarthak_1/Documents/Keploy/v2/pgproto3
+
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
@@ -12,7 +14,6 @@ require (
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.15.0
-	github.com/gorilla/mux v1.8.0
 	github.com/k0kubun/pp/v3 v3.2.0
 	github.com/miekg/dns v1.1.55
 	github.com/moby/term v0.5.0 // indirect
@@ -73,6 +74,7 @@ require (
 require (
 	github.com/go-git/go-git/v5 v5.8.1
 	github.com/hashicorp/go-version v1.6.0
+	github.com/jackc/pgproto3 v1.1.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 )
 
