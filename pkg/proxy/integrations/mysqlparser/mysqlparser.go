@@ -226,7 +226,9 @@ func decodeOutgoingMySQL(clientConnId, destConnId int, requestBuffer []byte, cli
 			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, opr2, mockResponseRead+1)
 
 			_, err = clientConn.Write(responseBinary)
-
+			if opr2 == "RESULT_SET_PACKET" {
+				time.Sleep(1000 * time.Millisecond)
+			}
 			mockResponseRead++
 		}
 
