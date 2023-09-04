@@ -148,7 +148,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetData, err = decodeComStmtPrepare(data)
 		lastCommand = 0x16
 	case data[0] == 0x19: // COM_STMT_CLOSE
-		if len(data) > 5 {
+		if len(data) > 11 {
 
 			packetType = "COM_STMT_CLOSE_WITH_PREPARE"
 			packetData, err = decodeComStmtCloseMoreData(data)
