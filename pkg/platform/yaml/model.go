@@ -184,6 +184,16 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			logger.Error("failed to marshal postgres of external call into yaml", zap.Error(err))
 			return nil, err
 		}
+	case models.GRPC_EXPORT:
+		gRPCSpec := spec.GrpcSpec{
+			GrpcReq:  *mock.Spec.GRPCReq,
+			GrpcResp: *mock.Spec.GRPCResp,
+		}
+		err := yamlDoc.Spec.Encode(gRPCSpec)
+		if err != nil {
+			logger.Error(Emoji+"failed to marshal gRPC of external call into yaml", zap.Error(err))
+			return nil, err
+		}
 	default:
 		logger.Error("failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
@@ -215,9 +225,20 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		tc.HttpReq = httpSpec.Request
 		tc.HttpResp = httpSpec.Response
 		tc.Noise = httpSpec.Assertions["noise"]
-		// mocks, err := decodeMocks(yamlMocks, logger)
-		// tc.Mocks = mocks
-		// unmarshal its mocks from yaml docs to go struct
+	// mocks, err := decodeMocks(yamlMocks, logger)
+	// tc.Mocks = mocks
+	// unmarshal its mocks from yaml docs to go struct
+	case models.GRPC_EXPORT:
+		grpcSpec := spec.GrpcSpec{}
+		err := yamlTestcase.Spec.Decode(&grpcSpec)
+		if err != nil {
+			logger.Error(Emoji+"failed to unmarshal a yaml doc into the gRPC testcase", zap.Error(err))
+			return nil, err
+		}
+		tc.GrpcReq = grpcSpec.GrpcReq
+		tc.GrpcResp = grpcSpec.GrpcResp
+		//mocks, err := decodeMocks(yamlMocks, logger)
+		//tc.Mocks = mocks
 	default:
 		logger.Error("failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
 		return nil, errors.New("yaml doc of unknown type")
@@ -268,6 +289,16 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			// 	MongoResponseHeader: &mongoSpec.ResponseHeader,
 			// 	// MongoRequest: ,
 			// }
+		case models.GRPC_EXPORT:
+			grpcSpec := spec.GrpcSpec{}
+			err := m.Spec.Decode(&grpcSpec)
+			if err != nil {
+				logger.Error(Emoji+"failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{GRPCResp: &grpcSpec.GrpcResp,
+				GRPCReq: &grpcSpec.GrpcReq,
+			}
 		case models.GENERIC:
 			genericSpec := spec.GenericSpec{}
 			err := m.Spec.Decode(&genericSpec)
