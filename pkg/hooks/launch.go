@@ -161,7 +161,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 				return err
 			}
 		default:
-			h.logger.Debug("no error found while running user application container")
+			h.logger.Info("no error found while running user application container")
 			// No error received yet, continue with further flow
 		}
 	}
@@ -288,7 +288,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			return err
 		}
 	case <-done:
-		h.logger.Debug("container found and processed successfully", zap.Any("time", time.Now().UnixNano()))
+		h.logger.Info("container found and processed successfully", zap.Any("time", time.Now().UnixNano()))
 		// No error received yet, continue with further flow
 	}
 

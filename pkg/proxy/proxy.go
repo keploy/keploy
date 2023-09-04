@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -147,6 +148,35 @@ func JavaCAExists(alias, storepass, cacertsPath string) bool {
 	return err == nil
 }
 
+// get jdk path from application pid using proc file system in case of running application via IDE's
+func getJavaHomeFromPID(pid string) (string, error) {
+	cmdlinePath := fmt.Sprintf("/proc/%s/cmdline", pid)
+	file, err := os.Open(cmdlinePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanWords) // cmdline arguments are separated by NULL bytes
+
+	if scanner.Scan() {
+		javaExecPath := filepath.Dir(filepath.Dir(scanner.Text()))
+		index := strings.Index(javaExecPath, "/bin/java")
+
+		if index != -1 {
+			path := javaExecPath[:index+len("/bin/java")]
+			if strings.HasSuffix(path, "/bin/java") {
+				jdkPath := strings.TrimSuffix(strings.TrimSpace(path), "/bin/java")
+				return jdkPath, nil
+			}
+
+		}
+	}
+	fmt.Println("Not sending error because there is none")
+	return "", fmt.Errorf("failed to find JAVA_HOME from PID")
+}
+
 // getJavaHome returns the JAVA_HOME path
 func getJavaHome() (string, error) {
 	cmd := exec.Command("java", "-XshowSettings:properties", "-version")
@@ -170,19 +200,32 @@ func getJavaHome() (string, error) {
 }
 
 // InstallJavaCA installs the CA in the Java keystore
-func InstallJavaCA(logger *zap.Logger, caPath string) {
+func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32) {
 	// check if java is installed
 	if isJavaInstalled() {
-		javaHome, err := getJavaHome()
+		var javaHome string
+		var err error
+		if pid != 0 { // in case of unit tests, we know the pid beforehand
+			logger.Debug("checking java path from proc file system", zap.Any("pid", pid))
+			javaHome, err = getJavaHomeFromPID(strconv.Itoa(int(pid)))
+		} else {
+			logger.Debug("checking java path from default java home")
+			javaHome, err = getJavaHome()
+		}
+
 		if err != nil {
 			logger.Error("Java detected but failed to find JAVA_HOME", zap.Error(err))
 			return
 		}
+
 		// Assuming modern Java structure (without /jre/)
 		cacertsPath := fmt.Sprintf("%s/lib/security/cacerts", javaHome)
 		// You can modify these as per your requirements
 		storePass := "changeit"
 		alias := "keployCA"
+
+		logger.Debug("", zap.Any("java_home", javaHome), zap.Any("caCertsPath", cacertsPath), zap.Any("caPath", caPath))
+
 		if JavaCAExists(alias, storePass, cacertsPath) {
 			logger.Info("Java detected and CA already exists", zap.String("path", cacertsPath))
 			return
@@ -191,18 +234,19 @@ func InstallJavaCA(logger *zap.Logger, caPath string) {
 		cmd := exec.Command("keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
 
 		cmdOutput, err := cmd.CombinedOutput()
+
 		if err != nil {
 			logger.Error("Java detected but failed to import CA", zap.Error(err), zap.String("output", string(cmdOutput)))
 			return
 		}
 
 		logger.Info("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
-		logger.Info("Successfully imported CA",zap.Any("",cmdOutput))
+		logger.Info("Successfully imported CA", zap.Any("", cmdOutput))
 	}
 }
 
-// BootProxies starts proxy servers on the idle local port, Default:16789
-func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
+// BootProxy starts proxy server on the idle local port, Default:16789
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -222,7 +266,7 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 	}
 
 	// install CA in the java keystore if java is installed
-	InstallJavaCA(logger, caPath)
+	InstallJavaCA(logger, caPath, pid)
 
 	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
@@ -442,6 +486,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return nil, fmt.Errorf(Emoji+"failed to load server certificate and key: %v", err)
 	}
 
+	// fmt.Printf("[TLS]The certificate for the client is:\n%v\n",serverTlsCert)
 	return &serverTlsCert, nil
 }
 
@@ -523,9 +568,6 @@ func (ps *ProxySet) startDnsServer() {
 	if err != nil {
 		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
 	}
-
-	ps.logger.Info(fmt.Sprintf("DNS server started at port:%v", ps.Port))
-
 }
 
 // For DNS caching

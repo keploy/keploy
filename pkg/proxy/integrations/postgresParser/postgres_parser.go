@@ -253,7 +253,7 @@ func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn)
 	// frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
-	logger.Info("Encoding outgoing Postgres call !!")
+	logger.Debug("Encoding outgoing Postgres call !!")
 	// write the request message to the postgres server
 
 	// _, err := destConn.Write(requestBuffer)
@@ -322,7 +322,7 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 
 	pgRequests := []models.GenericPayload{}
 
-	logger.Info("Encoding outgoing generic call from postgres parser !!")
+	logger.Debug("Encoding outgoing generic call from postgres parser !!")
 	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
 	// }
 	if bufStr != "" {

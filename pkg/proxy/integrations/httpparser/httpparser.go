@@ -95,6 +95,7 @@ func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logge
 				return
 			}
 		}
+		logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
 		*finalReq = append(*finalReq, requestChunked...)
 		contentLength -= len(requestChunked)
 		_, err = destConn.Write(requestChunked)
@@ -122,6 +123,7 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 					return
 				}
 			}
+			logger.Debug("This is a chunk of request[chunking]: " + string(requestChunked))
 			*finalReq = append(*finalReq, requestChunked...)
 			_, err = destConn.Write(requestChunked)
 			if err != nil {
@@ -154,6 +156,7 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 				return
 			}
 		}
+		logger.Debug("This is a chunk of response[content-length]: " + string(resp))
 		*finalResp = append(*finalResp, resp...)
 		contentLength -= len(resp)
 		// write the response message to the user client
@@ -187,6 +190,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 					return
 				}
 			}
+			logger.Debug("This is a chunk of response[chunking]: " + string(resp))
 			*finalResp = append(*finalResp, resp...)
 			// write the response message to the user client
 			_, err = clientConn.Write(resp)
@@ -465,6 +469,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return nil
 	}
+	logger.Debug("This is the initial request: " + string(request))
 	finalReq = append(finalReq, request...)
 	//check if the expect : 100-continue header is present
 	lines := strings.Split(string(request), "\n")
