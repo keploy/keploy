@@ -25,6 +25,10 @@ import (
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
+	"github.com/google/gopacket/pcapgo"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -59,7 +63,7 @@ type CustomConn struct {
 }
 
 func (c *CustomConn) Read(p []byte) (int, error) {
-	if len(p) == 0{
+	if len(p) == 0 {
 		fmt.Println("the length is 0 for the reading")
 	}
 	return c.r.Read(p)
@@ -283,52 +287,52 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 		log.Fatalf(Emoji+"Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
 	}
 
-	// randomID := generateRandomID()
-	// go func() {
+	randomID := generateRandomID()
+	go func() {
 
-	// 	pcapFileName := fmt.Sprintf("capture_%s.pcap", randomID)
+		pcapFileName := fmt.Sprintf("capture_%s.pcap", randomID)
 
-	// 	// Create a new PCAP file
-	// 	pcapFile, err := os.Create(pcapFileName)
-	// 	if err != nil {
-	// 		log.Fatal("Error creating PCAP file:", err)
-	// 	}
-	// 	defer pcapFile.Close()
+		// Create a new PCAP file
+		pcapFile, err := os.Create(pcapFileName)
+		if err != nil {
+			log.Fatal("Error creating PCAP file:", err)
+		}
+		defer pcapFile.Close()
 
-	// 	// Create a new PCAP writer
-	// 	pcapWriter := pcapgo.NewWriter(pcapFile)
-	// 	pcapWriter.WriteFileHeader(65536, layers.LinkTypeEthernet) // Adjust parameters as needed
+		// Create a new PCAP writer
+		pcapWriter := pcapgo.NewWriter(pcapFile)
+		pcapWriter.WriteFileHeader(65536, layers.LinkTypeEthernet) // Adjust parameters as needed
 
-	// 	// Create a packet source to capture packets from an interface
-	// 	iface := "any" // Replace with your network interface name
-	// 	handle, err := pcap.OpenLive(iface, 1600, true, pcap.BlockForever)
-	// 	if err != nil {
-	// 		log.Fatal("Error opening interface:", err)
-	// 	}
-	// 	defer handle.Close()
+		// Create a packet source to capture packets from an interface
+		iface := "any" // Replace with your network interface name
+		handle, err := pcap.OpenLive(iface, 1600, true, pcap.BlockForever)
+		if err != nil {
+			log.Fatal("Error opening interface:", err)
+		}
+		defer handle.Close()
 
-	// 	// Set up a packet filter for port 16789
-	// 	filter := "port 16789"
-	// 	err = handle.SetBPFFilter(filter)
-	// 	if err != nil {
-	// 		log.Fatal("Error setting BPF filter:", err)
-	// 	}
+		// Set up a packet filter for port 16789
+		filter := "port 16789"
+		err = handle.SetBPFFilter(filter)
+		if err != nil {
+			log.Fatal("Error setting BPF filter:", err)
+		}
 
-	// 	// Start capturing packets
-	// 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	// 	for packet := range packetSource.Packets() {
-	// 		// Convert packet data to bytes
-	// 		packetData := packet.Data()
+		// Start capturing packets
+		packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+		for packet := range packetSource.Packets() {
+			// Convert packet data to bytes
+			packetData := packet.Data()
 
-	// 		// Write packet data to the PCAP file
-	// 		err = pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packetData)
-	// 		if err != nil {
-	// 			log.Println("Error writing packet data:", err)
-	// 		}
-	// 	}
+			// Write packet data to the PCAP file
+			err = pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packetData)
+			if err != nil {
+				log.Println("Error writing packet data:", err)
+			}
+		}
 
-	// 	log.Println("Packet capture complete")
-	// }()
+		log.Println("Packet capture complete")
+	}()
 
 	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPv4:Port %v:%v", proxySet.IP4, proxySet.Port))
 	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPV6:Port Addr %v:%v", proxySet.IP6, proxySet.Port))
@@ -595,7 +599,7 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		msg.Answer = append(msg.Answer, answers...)
 		fmt.Printf("Answers[After appending to msg]:\n%v\n", msg.Answer)
 	}
-
+	// ask if these needs to be debug logs
 	fmt.Printf(Emoji+"dns msg sending back:\n%v\n", msg)
 	fmt.Printf(Emoji+"dns msg RCODE sending back:\n%v\n", msg.Rcode)
 	ps.logger.Debug(Emoji + "Writing dns info back to the client...")
@@ -782,28 +786,28 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	//Dialing for tls connection
 	destConnId := 0
 	// if models.GetMode() != models.MODE_TEST {
-		destConnId = rand.Intn(101)
-		if isTLS {
-			ps.logger.Debug(Emoji, zap.Any("isTLS", isTLS))
-			config := &tls.Config{
-				InsecureSkipVerify: false,
-				ServerName:         destinationUrl,
-			}
-			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-			if err != nil && models.GetMode() != models.MODE_TEST {
-				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-				conn.Close()
-				return
-			}
-		} else {
-			dst, err = net.Dial("tcp", actualAddress)
-			if err != nil && models.GetMode() != models.MODE_TEST {
-				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-				conn.Close()
-				return
-				// }
-			}
+	destConnId = rand.Intn(101)
+	if isTLS {
+		ps.logger.Debug(Emoji, zap.Any("isTLS", isTLS))
+		config := &tls.Config{
+			InsecureSkipVerify: false,
+			ServerName:         destinationUrl,
 		}
+		dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+		if err != nil && models.GetMode() != models.MODE_TEST {
+			ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			conn.Close()
+			return
+		}
+	} else {
+		dst, err = net.Dial("tcp", actualAddress)
+		if err != nil && models.GetMode() != models.MODE_TEST {
+			ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			conn.Close()
+			return
+			// }
+		}
+	}
 	// }
 
 	switch {
