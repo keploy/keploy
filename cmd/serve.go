@@ -61,21 +61,30 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 			if err != nil {
 				s.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				return
 			}
 
 			pid, err := cmd.Flags().GetUint32("pid")
 
 			if err != nil {
 				s.logger.Error("Failed to get the pid of the application", zap.Error((err)))
+				return
 			}
 
 			port, err := cmd.Flags().GetUint32("port")
 
 			if err != nil {
 				s.logger.Error("Failed to get the port of keploy server", zap.Error((err)))
+				return
 			}
 
-			s.server.Serve(path, testReportPath, delay, pid, port)
+			language, err := cmd.Flags().GetString("language")
+			if err != nil {
+				s.logger.Error("failed to read the programming language")
+				return
+			}
+
+			s.server.Serve(path, testReportPath, delay, pid, port, language)
 		},
 	}
 
@@ -89,6 +98,9 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	serveCmd.MarkFlagRequired("delay")
+
+	serveCmd.Flags().StringP("language", "l", "", "application programming language")
+	serveCmd.MarkFlagRequired("language")
 
 	return serveCmd
 }

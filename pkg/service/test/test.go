@@ -52,8 +52,8 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		return false
 	}
 
-	// start the proxies
-	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, passThorughPorts)
+	// start the proxy
+	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts)
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
