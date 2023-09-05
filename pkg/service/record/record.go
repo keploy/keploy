@@ -39,7 +39,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}
 
 	// start the BootProxy
-	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0)
+	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "")
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	ps.SetHook(loadedHooks)
