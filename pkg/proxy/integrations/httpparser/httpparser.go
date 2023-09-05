@@ -112,7 +112,7 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 		buffer := make([]byte, 4096)
 		for {
 			// Read chunk size line
-			sizeLine, err := bufio.NewReader(destConn).ReadString('\n')
+			sizeLine, err := bufio.NewReader(clientConn).ReadString('\n')
 			if err != nil {
 				logger.Error("failed to read the request message from the client", zap.Error(err))
 				return
@@ -124,7 +124,7 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 				logger.Error("failed to parse the chunk size", zap.Error(err))
 				return
 			}
-
+			logger.Debug("This is the chunk size[chunking]: " + strconv.Itoa(int(size)))
 			var req []byte
 			if size == 0 {
 				req = []byte("0\r\n\r\n")
@@ -138,9 +138,9 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 				// Use chunk data
 				req = buffer[:n]
 			}
-
+			logger.Debug("This is a chunk of request[chunking]: " + string(req))
 			*finalReq = append(*finalReq, req...)
-			_, err = clientConn.Write(req)
+			_, err = destConn.Write(req)
 			if err != nil {
 				logger.Error("failed to write request message to the destination server", zap.Error(err))
 				return
@@ -151,7 +151,7 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 			}
 
 			// Read trailing CRLF
-			_, err = io.ReadFull(destConn, buffer[:2])
+			_, err = io.ReadFull(clientConn, buffer[:2])
 			if err != nil {
 				logger.Error("failed to read the request message from the client", zap.Error(err))
 				return
@@ -210,7 +210,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				logger.Error("failed to parse the chunk size", zap.Error(err))
 				return
 			}
-
+			logger.Debug("This is the chunk size[chunking]: " + strconv.Itoa(int(size)))
 			var resp []byte
 			if size == 0 {
 				resp = []byte("0\r\n\r\n")
@@ -224,7 +224,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				// Use chunk data
 				resp = buffer[:n]
 			}
-
+			logger.Debug("This is a chunk of response[chunking]: " + string(resp))
 			*finalResp = append(*finalResp, resp...)
 			_, err = clientConn.Write(resp)
 			if err != nil {
