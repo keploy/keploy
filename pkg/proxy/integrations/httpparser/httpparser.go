@@ -124,7 +124,7 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 				logger.Error("failed to parse the chunk size", zap.Error(err))
 				return
 			}
-			logger.Debug("This is the chunk size[chunking]: " + strconv.Itoa(int(size)))
+			logger.Debug("This is the chunk size[chunking]: " + strconv.FormatInt(size, 10))
 			var req []byte
 			if size == 0 {
 				req = []byte("0\r\n\r\n")
@@ -150,7 +150,7 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 				break
 			}
 
-			// Read trailing CRLF
+			// Read trailing CRLF.(/r/n)
 			_, err = io.ReadFull(clientConn, buffer[:2])
 			if err != nil {
 				logger.Error("failed to read the request message from the client", zap.Error(err))
@@ -210,7 +210,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				logger.Error("failed to parse the chunk size", zap.Error(err))
 				return
 			}
-			logger.Debug("This is the chunk size[chunking]: " + strconv.Itoa(int(size)))
+			logger.Debug("This is the chunk size[chunking]: " + strconv.FormatInt(size, 10))
 			var resp []byte
 			if size == 0 {
 				resp = []byte("0\r\n\r\n")
@@ -236,7 +236,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				break
 			}
 
-			// Read trailing CRLF
+			// Read trailing CRLF.(/r/n)
 			_, err = io.ReadFull(destConn, buffer[:2])
 			if err != nil {
 				logger.Error("failed to read the response message from the destination server", zap.Error(err))
@@ -247,7 +247,8 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 }
 
 func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, request []byte) {
-	lines := strings.Split(string(request), "\n")
+	logger.Debug("This is the request: " + string(request))
+	lines := strings.Split(string(*finalReq), "\n")
 	var contentLengthHeader string
 	var transferEncodingHeader string
 	for _, line := range lines {
@@ -267,7 +268,7 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 			return
 		}
 		//Get the length of the body in the request.
-		bodyLength := len(request) - strings.Index(string(request), "\r\n\r\n") - 4
+		bodyLength := len(*finalReq) - strings.Index(string(*finalReq), "\r\n\r\n") - 4
 		contentLength -= bodyLength
 		if contentLength > 0 {
 			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
@@ -539,13 +540,18 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			logger.Error("failed to get the 100 continue response from the user client")
 			return nil
 		}
-		//Read the request buffer again to avoid timeout issues.
+		//Reading the request buffer again
 		request, err = util.ReadBytes(clientConn)
 		if err != nil {
-			logger.Error("failed to read the request body from the user client", zap.Error(err))
+			logger.Error("failed to read the request message from the user client", zap.Error(err))
 			return nil
 		}
-		//Append the new request buffer to the old request buffer
+		// write the request message to the actual destination server
+		_, err = destConn.Write(request)
+		if err != nil {
+			logger.Error("failed to write request message to the destination server", zap.Error(err))
+			return nil
+		}
 		finalReq = append(finalReq, request...)
 	}
 	handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
@@ -564,6 +570,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	finalResp = append(finalResp, resp...)
 	logger.Debug("This is the initial response: " + string(resp))
 	handleChunkedResponses(&finalResp, clientConn, destConn, logger, resp)
+	logger.Debug("This is the final response: " + string(finalResp))
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
