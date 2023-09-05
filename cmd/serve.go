@@ -61,18 +61,21 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 			if err != nil {
 				s.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				return
 			}
 
 			pid, err := cmd.Flags().GetUint32("pid")
 
 			if err != nil {
 				s.logger.Error("Failed to get the pid of the application", zap.Error((err)))
+				return
 			}
 
 			port, err := cmd.Flags().GetUint32("port")
 
 			if err != nil {
 				s.logger.Error("Failed to get the port of keploy server", zap.Error((err)))
+				return
 			}
 
 			language, err := cmd.Flags().GetString("language")
