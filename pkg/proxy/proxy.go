@@ -833,62 +833,61 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			}
 			// }
 		}
-    clientConnId := rand.Intn(101)
+		clientConnId := rand.Intn(101)
 		connEstablishedAt := time.Now()
-    readRequestDelay := time.Since(connEstablishedAt)
+		readRequestDelay := time.Since(connEstablishedAt)
 		mysqlparser.ProcessOutgoingMySql(clientConnId, destConnId, []byte{}, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
 
 	} else {
-      reader := bufio.NewReader(conn)
-      initialData := make([]byte, 5)
-      testBuffer, err := reader.Peek(len(initialData))
-      if err != nil {
-        ps.logger.Error("failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-        return
-      }
-      isTLS := isTLSHandshake(testBuffer)
-      multiReader := io.MultiReader(reader, conn)
-      conn = &CustomConn{
-        Conn:   conn,
-        r:      multiReader,
-        logger: ps.logger,
-      }
-      if isTLS {
-        conn, err = handleTLSConnection(conn)
-        if err != nil {
-          ps.logger.Error("failed to handle TLS connection", zap.Error(err))
-          return
-        }
-      }
-      connEstablishedAt := time.Now()
-      rand.Seed(time.Now().UnixNano())
-      clientConnId := rand.Intn(101)
-      buffer, err := util.ReadBytes(conn)
-      ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
-      readRequestDelay := time.Since(connEstablishedAt)
-      if err != nil {
-        ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-        return
-      }
-
+		reader := bufio.NewReader(conn)
+		initialData := make([]byte, 5)
+		testBuffer, err := reader.Peek(len(initialData))
+		if err != nil {
+			ps.logger.Error("failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+			return
+		}
+		isTLS := isTLSHandshake(testBuffer)
+		multiReader := io.MultiReader(reader, conn)
+		conn = &CustomConn{
+			Conn:   conn,
+			r:      multiReader,
+			logger: ps.logger,
+		}
+		if isTLS {
+			conn, err = handleTLSConnection(conn)
+			if err != nil {
+				ps.logger.Error("failed to handle TLS connection", zap.Error(err))
+				return
+			}
+		}
+		connEstablishedAt := time.Now()
+		rand.Seed(time.Now().UnixNano())
+		clientConnId := rand.Intn(101)
+		buffer, err := util.ReadBytes(conn)
+		ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
+		readRequestDelay := time.Since(connEstablishedAt)
+		if err != nil {
+			ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+			return
+		}
 
 		//Dialing for tls connection
 		destConnId := 0
 		//if models.GetMode() != models.MODE_TEST {
-			destConnId = rand.Intn(101)
-			if isTLS {
-				ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
-				config := &tls.Config{
-					InsecureSkipVerify: false,
-					ServerName:         destinationUrl,
-				}
-				dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-				if err != nil && models.GetMode() != models.MODE_TEST {
-					ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-					conn.Close()
-					return
-				}
-			} else {
+		destConnId = rand.Intn(101)
+		if isTLS {
+			ps.logger.Info(Emoji, zap.Any("isTLS", isTLS))
+			config := &tls.Config{
+				InsecureSkipVerify: false,
+				ServerName:         destinationUrl,
+			}
+			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			if err != nil && models.GetMode() != models.MODE_TEST {
+				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		} else {
 			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil && models.GetMode() != models.MODE_TEST {
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
@@ -896,56 +895,56 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 				return
 				// }
 			}
+			switch {
+			case httpparser.IsOutgoingHTTP(buffer):
+				// capture the otutgoing http text messages]
+				// if models.GetMode() == models.MODE_RECORD {
+				// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+				// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+				// }
+				// var deps []*models.Mock = ps.hook.GetDeps()
+				// fmt.Println("before http egress call, deps array: ", deps)
+				httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
+				// fmt.Println("after http egress call, deps array: ", deps)
+
+				// ps.hook.SetDeps(deps)
+			case mongoparser.IsOutgoingMongo(buffer):
+				// var deps []*models.Mock = ps.hook.GetDeps()
+				// fmt.Println("before mongo egress call, deps array: ", deps)
+				ps.logger.Debug("into mongo parsing mode")
+				mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
+				// fmt.Println("after mongo egress call, deps array: ", deps)
+
+				// ps.hook.SetDeps(deps)
+
+				// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+				// for _, v := range deps {
+				// 	ps.hook.AppendDeps(v)
+				// }
+			case postgresparser.IsOutgoingPSQL(buffer):
+
+				ps.logger.Debug("into psql desp mode, before passing")
+
+				postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
+			case grpcparser.IsOutgoingGRPC(buffer):
+				grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, ps.logger)
+			default:
+				ps.logger.Debug("the external dependecy call is not supported")
+				genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
+				// fmt.Println("into default desp mode, before passing")
+				// err = callNext(buffer, conn, dst, ps.logger)
+				// if err != nil {
+				// 	ps.logger.Error("failed to call next", zap.Error(err))
+				// 	conn.Close()
+				// 	return
+				// }
+				// fmt.Println("into default desp mode, after passing")
+
+			}
 		}
 	}
 	// }
-  
-	switch {
-	case httpparser.IsOutgoingHTTP(buffer):
-		// capture the otutgoing http text messages]
-		// if models.GetMode() == models.MODE_RECORD {
-		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-		// }
-		// var deps []*models.Mock = ps.hook.GetDeps()
-		// fmt.Println("before http egress call, deps array: ", deps)
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
-		// fmt.Println("after http egress call, deps array: ", deps)
 
-		// ps.hook.SetDeps(deps)
-	case mongoparser.IsOutgoingMongo(buffer):
-		// var deps []*models.Mock = ps.hook.GetDeps()
-		// fmt.Println("before mongo egress call, deps array: ", deps)
-		ps.logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
-		// fmt.Println("after mongo egress call, deps array: ", deps)
-
-		// ps.hook.SetDeps(deps)
-
-		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-		// for _, v := range deps {
-		// 	ps.hook.AppendDeps(v)
-		// }
-	case postgresparser.IsOutgoingPSQL(buffer):
-
-		ps.logger.Debug("into psql desp mode, before passing")
-
-		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
-	case grpcparser.IsOutgoingGRPC(buffer):
-		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, ps.logger)
-	default:
-		ps.logger.Debug("the external dependecy call is not supported")
-		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
-		// fmt.Println("into default desp mode, before passing")
-		// err = callNext(buffer, conn, dst, ps.logger)
-		// if err != nil {
-		// 	ps.logger.Error("failed to call next", zap.Error(err))
-		// 	conn.Close()
-		// 	return
-		// }
-		// fmt.Println("into default desp mode, after passing")
-
-	}
 	// Closing the user client connection
 	conn.Close()
 	duration := time.Since(start)
