@@ -60,10 +60,10 @@ func IsTime(stringDate string) bool {
 func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, error) {
 	resp := &models.HttpResp{}
 
-	logger.Info(Emoji+"making a http request", zap.Any("test case id", tc.Name))
+	logger.Info("making a http request", zap.Any("test case id", tc.Name))
 	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
-		logger.Error(Emoji+"failed to create a http request from the yaml document", zap.Error(err))
+		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
 		return nil, err
 	}
 	req.Header = ToHttpHeader(tc.HttpReq.Header)
@@ -72,7 +72,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 	req.ProtoMinor = tc.HttpReq.ProtoMinor
 	req.Close = true
 
-	logger.Debug(Emoji + fmt.Sprintf("Sending request to user app:%v", req))
+	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// Creating the client and disabling redirects
 	client := &http.Client{
@@ -83,13 +83,13 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 
 	httpResp, err := client.Do(req)
 	if err != nil {
-		logger.Error(Emoji+"failed sending testcase request to app", zap.Error(err))
+		logger.Error("failed sending testcase request to app", zap.Error(err))
 		return nil, err
 	}
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		logger.Error(Emoji+"failed reading response body", zap.Error(err))
+		logger.Error("failed reading response body", zap.Error(err))
 		return nil, err
 	}
 

@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 
+
+	"strings"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml/spec"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -27,6 +30,28 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		Name:    tc.Name,
 	}
 	// mocks := []NetworkTrafficDoc{}
+
+	// find noisy fields
+	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
+	if err != nil {
+		msg := "error in flattening http response"
+		logger.Error(msg, zap.Error(err))
+	}
+	// noise := httpSpec.Assertions["noise"]
+	noise := tc.Noise
+
+	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
+		// check if k is date
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+
+		// maybe we need to concatenate the values
+		return pkg.IsTime(strings.Join(vals, ", "))
+	})...)
+
 	switch tc.Kind {
 	case models.HTTP:
 		err := doc.Spec.Encode(spec.HttpSpec{
@@ -38,7 +63,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			},
 		})
 		if err != nil {
-			logger.Error(Emoji+"failed to encode testcase into a yaml doc", zap.Error(err))
+			logger.Error("failed to encode testcase into a yaml doc", zap.Error(err))
 			return nil, err
 		}
 		// mocks, err = encodeMocks(tc.Mocks, logger)
@@ -46,7 +71,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		// 	return nil, err
 		// }
 	default:
-		logger.Error(Emoji + "failed to marshal the testcase into yaml due to invalid kind of testcase")
+		logger.Error("failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
 	}
 	return doc, nil
@@ -71,7 +96,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			}
 			err := req.Message.Encode(v.Message)
 			if err != nil {
-				logger.Error(Emoji+"failed to encode mongo request wiremessage into yaml", zap.Error(err))
+				logger.Error("failed to encode mongo request wiremessage into yaml", zap.Error(err))
 				return nil, err
 			}
 			requests = append(requests, req)
@@ -84,7 +109,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			}
 			err := resp.Message.Encode(v.Message)
 			if err != nil {
-				logger.Error(Emoji+"failed to encode mongo response wiremessage into yaml", zap.Error(err))
+				logger.Error("failed to encode mongo response wiremessage into yaml", zap.Error(err))
 				return nil, err
 			}
 			responses = append(responses, resp)
@@ -99,19 +124,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 		}
 		// err := mongoSpec.Request.Encode(mock.Spec.MongoRequest)
 		// if err != nil {
-		// 	logger.Error(Emoji+"failed to encode mongo request wiremessage into yaml", zap.Error(err))
+		// 	logger.Error("failed to encode mongo request wiremessage into yaml", zap.Error(err))
 		// 	return nil, err
 		// }
 
 		// err = mongoSpec.Response.Encode(mock.Spec.MongoResponse)
 		// if err != nil {
-		// 	logger.Error(Emoji+"failed to encode mongo response wiremessage into yaml", zap.Error(err))
+		// 	logger.Error("failed to encode mongo response wiremessage into yaml", zap.Error(err))
 		// 	return nil, err
 		// }
 
 		err := yamlDoc.Spec.Encode(mongoSpec)
 		if err != nil {
-			logger.Error(Emoji+"failed to marshal the mongo input-output as yaml", zap.Error(err))
+			logger.Error("failed to marshal the mongo input-output as yaml", zap.Error(err))
 			return nil, err
 		}
 	case models.SQL:
@@ -164,7 +189,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 		}
 		err := yamlDoc.Spec.Encode(httpSpec)
 		if err != nil {
-			logger.Error(Emoji+"failed to marshal the http input-output as yaml", zap.Error(err))
+			logger.Error("failed to marshal the http input-output as yaml", zap.Error(err))
 			return nil, err
 		}
 	case models.GENERIC:
@@ -176,7 +201,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 		}
 		err := yamlDoc.Spec.Encode(genericSpec)
 		if err != nil {
-			logger.Error(Emoji+"failed to marshal binary input-output of external call into yaml", zap.Error(err))
+			logger.Error("failed to marshal binary input-output of external call into yaml", zap.Error(err))
 			return nil, err
 		}
 	case models.Postgres:
@@ -195,14 +220,23 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			PostgresResponses: mock.Spec.PostgresResponses,
 		}
 
-
 		err := yamlDoc.Spec.Encode(postgresSpec)
 		if err != nil {
-			logger.Error(Emoji+"failed to marshal postgres of external call into yaml", zap.Error(err))
+			logger.Error("failed to marshal postgres of external call into yaml", zap.Error(err))
+			return nil, err
+		}
+	case models.GRPC_EXPORT:
+		gRPCSpec := spec.GrpcSpec{
+			GrpcReq:  *mock.Spec.GRPCReq,
+			GrpcResp: *mock.Spec.GRPCResp,
+		}
+		err := yamlDoc.Spec.Encode(gRPCSpec)
+		if err != nil {
+			logger.Error(Emoji+"failed to marshal gRPC of external call into yaml", zap.Error(err))
 			return nil, err
 		}
 	default:
-		logger.Error(Emoji + "failed to marshal the recorded mock into yaml due to invalid kind of mock")
+		logger.Error("failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
 	}
 
@@ -225,18 +259,29 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		httpSpec := spec.HttpSpec{}
 		err := yamlTestcase.Spec.Decode(&httpSpec)
 		if err != nil {
-			logger.Error(Emoji+"failed to unmarshal a yaml doc into the http testcase", zap.Error(err))
+			logger.Error("failed to unmarshal a yaml doc into the http testcase", zap.Error(err))
 			return nil, err
 		}
 		tc.Created = httpSpec.Created
 		tc.HttpReq = httpSpec.Request
 		tc.HttpResp = httpSpec.Response
 		tc.Noise = httpSpec.Assertions["noise"]
-		// mocks, err := decodeMocks(yamlMocks, logger)
-		// tc.Mocks = mocks
-		// unmarshal its mocks from yaml docs to go struct
+	// mocks, err := decodeMocks(yamlMocks, logger)
+	// tc.Mocks = mocks
+	// unmarshal its mocks from yaml docs to go struct
+	case models.GRPC_EXPORT:
+		grpcSpec := spec.GrpcSpec{}
+		err := yamlTestcase.Spec.Decode(&grpcSpec)
+		if err != nil {
+			logger.Error(Emoji+"failed to unmarshal a yaml doc into the gRPC testcase", zap.Error(err))
+			return nil, err
+		}
+		tc.GrpcReq = grpcSpec.GrpcReq
+		tc.GrpcResp = grpcSpec.GrpcResp
+		//mocks, err := decodeMocks(yamlMocks, logger)
+		//tc.Mocks = mocks
 	default:
-		logger.Error(Emoji+"failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
+		logger.Error("failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
 		return nil, errors.New("yaml doc of unknown type")
 	}
 	return &tc, nil
@@ -256,7 +301,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			httpSpec := spec.HttpSpec{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
+				logger.Error("failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -270,7 +315,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			mongoSpec := spec.MongoSpec{}
 			err := m.Spec.Decode(&mongoSpec)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal a yaml doc into mongo mock", zap.Error(err), zap.Any("mock name", m.Name))
+				logger.Error("failed to unmarshal a yaml doc into mongo mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
 
@@ -285,6 +330,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			// 	MongoResponseHeader: &mongoSpec.ResponseHeader,
 			// 	// MongoRequest: ,
 			// }
+
 		case models.SQL:
 			mysqlSpec := spec.MySQLSpec{}
 			err := m.Spec.Decode(&mysqlSpec)
@@ -298,11 +344,23 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				return nil, err
 			}
 			mock.Spec = *mockSpec
+      
+		case models.GRPC_EXPORT:
+			grpcSpec := spec.GrpcSpec{}
+			err := m.Spec.Decode(&grpcSpec)
+			if err != nil {
+				logger.Error(Emoji+"failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{GRPCResp: &grpcSpec.GrpcResp,
+				GRPCReq: &grpcSpec.GrpcReq,
+			}
+
 		case models.GENERIC:
 			genericSpec := spec.GenericSpec{}
 			err := m.Spec.Decode(&genericSpec)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
+				logger.Error("failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -316,7 +374,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			// postgresSpec := spec.PostgresSpec{}
 			// err := m.Spec.Decode(&postgresSpec)
 			// if err != nil {
-			// 	logger.Error(Emoji+"failed to unmarshal a yaml doc into postgres mock", zap.Error(err), zap.Any("mock name", m.Name))
+			// 	logger.Error("failed to unmarshal a yaml doc into postgres mock", zap.Error(err), zap.Any("mock name", m.Name))
 			// 	return nil, err
 			// }
 			// mock.Spec = models.MockSpec{
@@ -326,7 +384,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			genericSpec := spec.PostgresSpec{}
 			err := m.Spec.Decode(&genericSpec)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
+				logger.Error("failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -336,7 +394,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				GenericResponses: genericSpec.PostgresResponses,
 			}
 		default:
-			logger.Error(Emoji+"failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
+			logger.Error("failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
 			return nil, errors.New("yaml doc of unknown type")
 		}
 		mocks = append(mocks, &mock)
@@ -520,7 +578,7 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 			requestMessage := &models.MongoOpMessage{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal yml document into mongo OpMsg request wiremessage", zap.Error(err))
+				logger.Error("failed to unmarshal yml document into mongo OpMsg request wiremessage", zap.Error(err))
 				// return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}
@@ -529,7 +587,7 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 			requestMessage := &models.MongoOpReply{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal yml document into mongo OpReply wiremessage", zap.Error(err))
+				logger.Error("failed to unmarshal yml document into mongo OpReply wiremessage", zap.Error(err))
 				// return fmt.Errorf("failed to decode the mongo OpReply of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}
@@ -545,7 +603,7 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 			requestMessage := &models.MongoOpQuery{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal yml document into mongo OpQuery wiremessage", zap.Error(err))
+				logger.Error("failed to unmarshal yml document into mongo OpQuery wiremessage", zap.Error(err))
 				// return fmt.Errorf("failed to decode the mongo OpReply of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}
@@ -578,7 +636,7 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 			responseMessage := &models.MongoOpMessage{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
+				logger.Error("failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
 				// return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}
@@ -592,7 +650,7 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 			responseMessage := &models.MongoOpReply{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
+				logger.Error("failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
 				// return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}
@@ -608,7 +666,7 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 			responseMessage := &models.MongoOpQuery{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(Emoji+"failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
+				logger.Error("failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
 				// return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}

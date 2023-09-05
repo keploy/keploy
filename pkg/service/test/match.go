@@ -12,7 +12,7 @@ import (
 func unmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	var result interface{}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		log.Error(Emoji+"cannot convert json string into json object", zap.Error(err))
+		log.Error("cannot convert json string into json object", zap.Error(err))
 		return nil, err
 	} else {
 		return result, nil

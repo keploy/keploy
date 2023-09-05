@@ -12,7 +12,6 @@ require (
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.15.0
-	github.com/gorilla/mux v1.8.0
 	github.com/k0kubun/pp/v3 v3.2.0
 	github.com/miekg/dns v1.1.55
 	github.com/moby/term v0.5.0 // indirect
@@ -21,14 +20,13 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.2 // indirect
 	github.com/spf13/cobra v1.7.0
-	github.com/stretchr/testify v1.8.2 // indirect
 	github.com/wI2L/jsondiff v0.4.0
 	github.com/yudai/gojsondiff v1.0.0
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.24.0
 	golang.org/x/crypto v0.11.0 // indirect
 	golang.org/x/sys v0.10.0
-	google.golang.org/protobuf v1.28.1 // indirect
+	google.golang.org/protobuf v1.30.0 // indirect
 )
 
 require github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
@@ -49,11 +47,12 @@ require (
 	github.com/jmoiron/sqlx v1.3.3 // indirect
 	github.com/klauspost/compress v1.15.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
-	github.com/mattn/go-isatty v0.0.17 // indirect
+	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/mattn/go-runewidth v0.0.14 // indirect
 	github.com/onsi/ginkgo v1.16.5 // indirect
 	github.com/onsi/gomega v1.27.10 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/protocolbuffers/protoscope v0.0.0-20221109213918-8e7a6aafa2c9 // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/sergi/go-diff v1.3.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
@@ -71,27 +70,36 @@ require (
 )
 
 require (
+	github.com/99designs/gqlgen v0.17.36
+	github.com/agnivade/levenshtein v1.1.1
 	github.com/go-git/go-git/v5 v5.8.1
 	github.com/hashicorp/go-version v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
+	github.com/vektah/gqlparser/v2 v2.5.8
 )
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/ProtonMail/go-crypto v0.0.0-20230717121422-5aa5874ade95 // indirect
 	github.com/acomagu/bufpipe v1.0.4 // indirect
-	github.com/agnivade/levenshtein v1.1.1
 	github.com/cloudflare/circl v1.3.3 // indirect
+	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.4.1 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.3 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pjbgf/sha1cd v0.3.0 // indirect
+	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/skeema/knownhosts v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/urfave/cli/v2 v2.25.5 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
+	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )

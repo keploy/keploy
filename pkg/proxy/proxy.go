@@ -17,8 +17,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+
+	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/helpers"
@@ -56,12 +59,13 @@ type ProxySet struct {
 
 type CustomConn struct {
 	net.Conn
-	r io.Reader
+	r      io.Reader
+	logger *zap.Logger
 }
 
 func (c *CustomConn) Read(p []byte) (int, error) {
-	if len(p) == 0{
-		fmt.Println("the length is 0 for the reading")
+	if len(p) == 0 {
+		c.logger.Debug("the length is 0 for the reading from customConn")
 	}
 	return c.r.Read(p)
 }
@@ -137,12 +141,41 @@ func isJavaInstalled() bool {
 	return err == nil
 }
 
-// JavaCAExists checks if the CA is already installed in the Java keystore
-func JavaCAExists(alias string) bool {
-	cmd := exec.Command("keytool", "-list", "-alias", alias, "-cacerts", "-storepass", "changeit")
+// JavaCAExists checks if the CA is already installed in the specified Java keystore
+func JavaCAExists(alias, storepass, cacertsPath string) bool {
+	cmd := exec.Command("keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 
 	err := cmd.Run()
+
 	return err == nil
+}
+
+// get jdk path from application pid using proc file system in case of running application via IDE's
+func getJavaHomeFromPID(pid string) (string, error) {
+	cmdlinePath := fmt.Sprintf("/proc/%s/cmdline", pid)
+	file, err := os.Open(cmdlinePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanWords) // cmdline arguments are separated by NULL bytes
+
+	if scanner.Scan() {
+		javaExecPath := filepath.Dir(filepath.Dir(scanner.Text()))
+		index := strings.Index(javaExecPath, "/bin/java")
+
+		if index != -1 {
+			path := javaExecPath[:index+len("/bin/java")]
+			if strings.HasSuffix(path, "/bin/java") {
+				jdkPath := strings.TrimSuffix(strings.TrimSpace(path), "/bin/java")
+				return jdkPath, nil
+			}
+
+		}
+	}
+	return "", fmt.Errorf("failed to find JAVA_HOME from PID")
 }
 
 // getJavaHome returns the JAVA_HOME path
@@ -168,40 +201,64 @@ func getJavaHome() (string, error) {
 }
 
 // InstallJavaCA installs the CA in the Java keystore
-func InstallJavaCA(logger *zap.Logger, caPath string) {
+func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32, isJavaServe bool) {
 	// check if java is installed
 	if isJavaInstalled() {
-		javaHome, err := getJavaHome()
+		var javaHome string
+		var err error
+		logger.Debug("", zap.Any("isJavaServe", isJavaServe))
+		if pid != 0 && isJavaServe { // in case of unit tests, we know the pid beforehand
+			logger.Debug("checking java path from proc file system", zap.Any("pid", pid))
+			javaHome, err = getJavaHomeFromPID(strconv.Itoa(int(pid)))
+		} else {
+			logger.Debug("checking java path from default java home")
+			javaHome, err = getJavaHome()
+		}
+
 		if err != nil {
-			logger.Error(Emoji+"Java detected but failed to find JAVA_HOME", zap.Error(err))
+			logger.Error("Java detected but failed to find JAVA_HOME", zap.Error(err))
 			return
 		}
+
 		// Assuming modern Java structure (without /jre/)
 		cacertsPath := fmt.Sprintf("%s/lib/security/cacerts", javaHome)
 		// You can modify these as per your requirements
 		storePass := "changeit"
 		alias := "keployCA"
-		if JavaCAExists(alias) {
-			logger.Info(Emoji+"Java detected and CA already exists", zap.String("path", cacertsPath))
+
+		logger.Debug("", zap.Any("java_home", javaHome), zap.Any("caCertsPath", cacertsPath), zap.Any("caPath", caPath))
+
+		if JavaCAExists(alias, storePass, cacertsPath) {
+			logger.Info("Java detected and CA already exists", zap.String("path", cacertsPath))
 			return
 		}
 
-		cmd := exec.Command("keytool", "-import", "-trustcacerts", "-cacerts", "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
+		cmd := exec.Command("keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
 
 		cmdOutput, err := cmd.CombinedOutput()
+
 		if err != nil {
-			logger.Error(Emoji+"Java detected but failed to import CA", zap.Error(err), zap.String("output", string(cmdOutput)))
+			logger.Error("Java detected but failed to import CA", zap.Error(err), zap.String("output", string(cmdOutput)))
 			return
 		}
 
-		logger.Info(Emoji+"Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
-		fmt.Printf("Successfully imported CA:\n%s\n", cmdOutput)
-
+		logger.Info("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
+		logger.Info("Successfully imported CA", zap.Any("", cmdOutput))
 	}
 }
 
-// BootProxies starts proxy servers on the idle local port, Default:16789
-func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *ProxySet {
+func containsJava(input string) bool {
+	// Convert the input string and the search term "java" to lowercase for a case-insensitive comparison.
+	inputLower := strings.ToLower(input)
+	searchTerm := "java"
+	searchTermLower := strings.ToLower(searchTerm)
+
+	// Use strings.Contains to check if the lowercase input contains the lowercase search term.
+	return strings.Contains(inputLower, searchTermLower)
+}
+
+// BootProxy starts proxy server on the idle local port, Default:16789
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -210,18 +267,21 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 
 	fs, err := os.Create(caPath)
 	if err != nil {
-		logger.Error(Emoji+"failed to create custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
+		logger.Error("failed to create custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
 		return nil
 	}
 
 	_, err = fs.Write(caCrt)
 	if err != nil {
-		logger.Error(Emoji+"failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
+		logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
 		return nil
 	}
 
+	//check if serve command is used by java application
+	isJavaServe := containsJava(lang)
+
 	// install CA in the java keystore if java is installed
-	InstallJavaCA(logger, caPath)
+	InstallJavaCA(logger, caPath, pid, isJavaServe)
 
 	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
@@ -275,8 +335,8 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 		go proxySet.startProxy()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
-			proxySet.logger.Debug(Emoji + "Running Dns Server in Test mode...")
-			proxySet.logger.Info(Emoji + "Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
+			proxySet.logger.Debug("Running Dns Server in Test mode...")
+			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
 			go proxySet.startDnsServer()
 		}
 	} else {
@@ -331,9 +391,9 @@ func BootProxies(logger *zap.Logger, opt Option, appCmd, appContainer string) *P
 	// 	log.Println("Packet capture complete")
 	// }()
 
-	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPv4:Port %v:%v", proxySet.IP4, proxySet.Port))
-	proxySet.logger.Debug(Emoji + fmt.Sprintf("Proxy IPV6:Port Addr %v:%v", proxySet.IP6, proxySet.Port))
-	proxySet.logger.Info(Emoji + fmt.Sprintf("Proxy started at port:%v", proxySet.Port))
+	proxySet.logger.Debug(fmt.Sprintf("Proxy IPv4:Port %v:%v", proxySet.IP4, proxySet.Port))
+	proxySet.logger.Debug(fmt.Sprintf("Proxy IPV6:Port Addr %v:%v", proxySet.IP6, proxySet.Port))
+	proxySet.logger.Info(fmt.Sprintf("Proxy started at port:%v", proxySet.Port))
 
 	return &proxySet
 }
@@ -441,6 +501,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return nil, fmt.Errorf(Emoji+"failed to load server certificate and key: %v", err)
 	}
 
+	// fmt.Printf("[TLS]The certificate for the client is:\n%v\n",serverTlsCert)
 	return &serverTlsCert, nil
 }
 
@@ -450,20 +511,20 @@ func (ps *ProxySet) startProxy() {
 	port := ps.Port
 
 	proxyAddress4 := util.ToIP4AddressStr(ps.IP4)
-	ps.logger.Debug(Emoji, zap.Any("ProxyAddress4", proxyAddress4))
+	ps.logger.Debug("", zap.Any("ProxyAddress4", proxyAddress4))
 
 	proxyAddress6 := util.ToIPv6AddressStr(ps.IP6)
-	ps.logger.Debug(Emoji, zap.Any("ProxyAddress6", proxyAddress6))
+	ps.logger.Debug("", zap.Any("ProxyAddress6", proxyAddress6))
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", port))
 	if err != nil {
-		ps.logger.Error(Emoji+fmt.Sprintf("failed to start proxy on port:%v", port), zap.Error(err))
+		ps.logger.Error(fmt.Sprintf("failed to start proxy on port:%v", port), zap.Error(err))
 		return
 	}
 	ps.Listener = listener
 
-	ps.logger.Debug(Emoji + fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
-	ps.logger.Debug(Emoji+"Proxy will accept both ipv4 and ipv6 connections", zap.Any("Ipv4", proxyAddress4), zap.Any("Ipv6", proxyAddress6))
+	ps.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
+	ps.logger.Debug("Proxy will accept both ipv4 and ipv6 connections", zap.Any("Ipv4", proxyAddress4), zap.Any("Ipv6", proxyAddress6))
 
 	// TODO: integerate method For TLS connections
 	// config := &tls.Config{
@@ -475,7 +536,7 @@ func (ps *ProxySet) startProxy() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			ps.logger.Error(Emoji+"failed to accept connection to the proxy", zap.Error(err))
+			ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
 			// retry++
 			// if retry < 5 {
 			// 	continue
@@ -500,7 +561,7 @@ func readableProxyAddress(ps *ProxySet) string {
 func (ps *ProxySet) startDnsServer() {
 
 	proxyAddress4 := readableProxyAddress(ps)
-	ps.logger.Debug(Emoji, zap.Any("ProxyAddress in dns server", proxyAddress4))
+	ps.logger.Debug("", zap.Any("ProxyAddress in dns server", proxyAddress4))
 
 	//TODO: Need to make it configurable
 	ps.DnsServerTimeout = 1 * time.Second
@@ -517,14 +578,11 @@ func (ps *ProxySet) startDnsServer() {
 
 	ps.DnsServer = server
 
-	ps.logger.Info(Emoji + fmt.Sprintf("starting DNS server at addr:%v", server.Addr))
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr:%v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-		ps.logger.Error(Emoji+"failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
+		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
 	}
-
-	ps.logger.Info(Emoji + fmt.Sprintf("DNS server started at port:%v", ps.Port))
-
 }
 
 // For DNS caching
@@ -539,13 +597,13 @@ func generateCacheKey(name string, qtype uint16) string {
 
 func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
-	ps.logger.Debug(Emoji, zap.Any("Source socket info", w.RemoteAddr().String()))
+	ps.logger.Debug("", zap.Any("Source socket info", w.RemoteAddr().String()))
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
-	ps.logger.Debug(Emoji + "Got some Dns queries")
+	ps.logger.Debug("Got some Dns queries")
 	for _, question := range r.Question {
-		ps.logger.Debug(Emoji, zap.Any("Record Type", question.Qtype), zap.Any("Received Query", question.Name))
+		ps.logger.Debug("", zap.Any("Record Type", question.Qtype), zap.Any("Received Query", question.Name))
 
 		key := generateCacheKey(question.Name, question.Qtype)
 
@@ -565,44 +623,44 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
 						A:   net.ParseIP(util.ToIP4AddressStr(ps.IP4)),
 					}}
-					ps.logger.Debug(Emoji+"failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", util.ToIP4AddressStr(ps.IP4)))
+					ps.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", util.ToIP4AddressStr(ps.IP4)))
 				} else if question.Qtype == dns.TypeAAAA {
 					if ps.dockerAppCmd {
 						// answers = []dns.RR{&dns.AAAA{
 						// 	Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
 						// 	AAAA: net.ParseIP(""),
 						// }}
-						ps.logger.Debug(Emoji + "failed to resolve dns query (in docker case) hence sending empty record")
+						ps.logger.Debug("failed to resolve dns query (in docker case) hence sending empty record")
 					} else {
 						answers = []dns.RR{&dns.AAAA{
 							Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
 							AAAA: net.ParseIP(util.ToIPv6AddressStr(ps.IP6)),
 						}}
-						ps.logger.Debug(Emoji+"failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", util.ToIPv6AddressStr(ps.IP6)))
+						ps.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", util.ToIPv6AddressStr(ps.IP6)))
 					}
 				}
 
-				fmt.Printf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers)
+				ps.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
 			}
 
 			// Cache the answer
 			cache.Lock()
 			cache.m[key] = answers
 			cache.Unlock()
-			fmt.Printf("Answers[after caching it]:\n%v\n", answers)
+			ps.logger.Debug(fmt.Sprintf("Answers[after caching it]:\n%v\n", answers))
 		}
 
-		fmt.Printf("Answers[before appending to msg]:\n%v\n", answers)
+		ps.logger.Debug(fmt.Sprintf("Answers[before appending to msg]:\n%v\n", answers))
 		msg.Answer = append(msg.Answer, answers...)
-		fmt.Printf("Answers[After appending to msg]:\n%v\n", msg.Answer)
+		ps.logger.Debug(fmt.Sprintf("Answers[After appending to msg]:\n%v\n", msg.Answer))
 	}
 
-	fmt.Printf(Emoji+"dns msg sending back:\n%v\n", msg)
-	fmt.Printf(Emoji+"dns msg RCODE sending back:\n%v\n", msg.Rcode)
-	ps.logger.Debug(Emoji + "Writing dns info back to the client...")
+	ps.logger.Debug(fmt.Sprintf("dns msg sending back:\n%v\n", msg))
+	ps.logger.Debug(fmt.Sprintf("dns msg RCODE sending back:\n%v\n", msg.Rcode))
+	ps.logger.Debug("Writing dns info back to the client...")
 	err := w.WriteMsg(msg)
 	if err != nil {
-		ps.logger.Error(Emoji+"failed to write dns info back to the client", zap.Error(err))
+		ps.logger.Error("failed to write dns info back to the client", zap.Error(err))
 	}
 }
 
@@ -620,7 +678,7 @@ func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) [
 	// Perform the lookup with the context
 	ips, err := resolver.LookupIPAddr(ctx, domain)
 	if err != nil {
-		logger.Debug(Emoji+fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
+		logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
 		return nil
 	}
 
@@ -641,7 +699,7 @@ func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) [
 	}
 
 	if len(answers) > 0 {
-		logger.Debug(Emoji + "net.LookupIP resolved the ip address...")
+		logger.Debug("net.LookupIP resolved the ip address...")
 	}
 
 	// for i, ans := range answers {
@@ -709,32 +767,32 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
-	ps.logger.Debug(Emoji, zap.Any("PID in proxy:", os.Getpid()))
-	ps.logger.Debug(Emoji, zap.Any("Filtering in Proxy", ps.FilterPid))
+	ps.logger.Debug("", zap.Any("PID in proxy:", os.Getpid()))
+	ps.logger.Debug("", zap.Any("Filtering in Proxy", ps.FilterPid))
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
 	// ps.hook.PrintRedirectProxyMap()
 
-	ps.logger.Debug(Emoji+"Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
+	ps.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
 	//TODO:  fix this bug, getting source port same as proxy port.
 	if uint16(sourcePort) == uint16(ps.Port) {
-		ps.logger.Debug(Emoji+"Inside handleConnection: Got source port == proxy port", zap.Int("Source port", sourcePort), zap.Int("Proxy port", int(ps.Port)))
+		ps.logger.Debug("Inside handleConnection: Got source port == proxy port", zap.Int("Source port", sourcePort), zap.Int("Proxy port", int(ps.Port)))
 		return
 	}
 
 	destInfo, err := ps.hook.GetDestinationInfo(uint16(sourcePort))
 	if err != nil {
-		ps.logger.Error(Emoji+"failed to fetch the destination info", zap.Any("Source port", sourcePort), zap.Any("err:", err))
+		ps.logger.Error("failed to fetch the destination info", zap.Any("Source port", sourcePort), zap.Any("err:", err))
 		return
 	}
 
 	if destInfo.IpVersion == 4 {
-		ps.logger.Debug(Emoji, zap.Any("DestIp4", destInfo.DestIp4), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
+		ps.logger.Debug("", zap.Any("DestIp4", destInfo.DestIp4), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
 	} else if destInfo.IpVersion == 6 {
-		ps.logger.Debug(Emoji, zap.Any("DestIp6", destInfo.DestIp6), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
+		ps.logger.Debug("", zap.Any("DestIp6", destInfo.DestIp6), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
 	}
 
 	// releases the occupied source port when done fetching the destination info
@@ -781,33 +839,37 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		mysqlparser.ProcessOutgoingMySql(clientConnId, destConnId, []byte{}, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
 
 	} else {
-		reader := bufio.NewReader(conn)
-		initialData := make([]byte, 5)
-	  testBuffer, err := reader.Peek(len(initialData))
-		if err != nil {
-		        ps.logger.Error(Emoji+"failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-		}
-		isTLS := isTLSHandshake(testBuffer)
-    multiReader := io.MultiReader(reader, conn)
-		conn = &CustomConn{r: multiReader, Conn: conn}
-		if isTLS {
-			conn, err = handleTLSConnection(conn)
-			if err != nil {
-				ps.logger.Error(Emoji+"failed to handle TLS connection", zap.Error(err))
-				return
-			}
-		}
-    connEstablishedAt := time.Now()
-	  rand.Seed(time.Now().UnixNano())
-	  clientConnId := rand.Intn(101)
-		buffer, err := util.ReadBytes(conn)
-		ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
-		readRequestDelay := time.Since(connEstablishedAt)
-		if err != nil {
-			ps.logger.Error(Emoji+"failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-			return
-		}
+      reader := bufio.NewReader(conn)
+      initialData := make([]byte, 5)
+      testBuffer, err := reader.Peek(len(initialData))
+      if err != nil {
+        ps.logger.Error("failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+        return
+      }
+      isTLS := isTLSHandshake(testBuffer)
+      multiReader := io.MultiReader(reader, conn)
+      conn = &CustomConn{
+        Conn:   conn,
+        r:      multiReader,
+        logger: ps.logger,
+      }
+      if isTLS {
+        conn, err = handleTLSConnection(conn)
+        if err != nil {
+          ps.logger.Error("failed to handle TLS connection", zap.Error(err))
+          return
+        }
+      }
+      connEstablishedAt := time.Now()
+      rand.Seed(time.Now().UnixNano())
+      clientConnId := rand.Intn(101)
+      buffer, err := util.ReadBytes(conn)
+      ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
+      readRequestDelay := time.Since(connEstablishedAt)
+      if err != nil {
+        ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+        return
+      }
 
 
 		//Dialing for tls connection
@@ -835,60 +897,64 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 				// }
 			}
 		}
+	}
 	// }
+  
+	switch {
+	case httpparser.IsOutgoingHTTP(buffer):
+		// capture the otutgoing http text messages]
+		// if models.GetMode() == models.MODE_RECORD {
+		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// }
+		// var deps []*models.Mock = ps.hook.GetDeps()
+		// fmt.Println("before http egress call, deps array: ", deps)
+		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
+		// fmt.Println("after http egress call, deps array: ", deps)
 
-		switch {
-		case httpparser.IsOutgoingHTTP(buffer):
-			// capture the otutgoing http text messages]
-			// if models.GetMode() == models.MODE_RECORD {
-			// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-			// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-			// }
-			// var deps []*models.Mock = ps.hook.GetDeps()
-			// fmt.Println("before http egress call, deps array: ", deps)
-			httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
-			// fmt.Println("after http egress call, deps array: ", deps)
+		// ps.hook.SetDeps(deps)
+	case mongoparser.IsOutgoingMongo(buffer):
+		// var deps []*models.Mock = ps.hook.GetDeps()
+		// fmt.Println("before mongo egress call, deps array: ", deps)
+		ps.logger.Debug("into mongo parsing mode")
+		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
+		// fmt.Println("after mongo egress call, deps array: ", deps)
 
-			// ps.hook.SetDeps(deps)
-		case mongoparser.IsOutgoingMongo(buffer):
-			// var deps []*models.Mock = ps.hook.GetDeps()
-			// fmt.Println("before mongo egress call, deps array: ", deps)
-			ps.logger.Debug("into mongo parsing mode")
-			mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
-			// fmt.Println("after mongo egress call, deps array: ", deps)
+		// ps.hook.SetDeps(deps)
 
-			// ps.hook.SetDeps(deps)
+		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+		// for _, v := range deps {
+		// 	ps.hook.AppendDeps(v)
+		// }
+	case postgresparser.IsOutgoingPSQL(buffer):
 
-			// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
-			// for _, v := range deps {
-			// 	ps.hook.AppendDeps(v)
-			// }
-		case postgresparser.IsOutgoingPSQL(buffer):
-			fmt.Println("into psql desp mode, before passing")
-			postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
+		ps.logger.Debug("into psql desp mode, before passing")
 
-		default:
-			ps.logger.Debug(Emoji + "the external dependecy call is not supported")
-			genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
-			// fmt.Println("into default desp mode, before passing")
-			// err = callNext(buffer, conn, dst, ps.logger)
-			// if err != nil {
-			// 	ps.logger.Error(Emoji+"failed to call next", zap.Error(err))
-			// 	conn.Close()
-			// 	return
-			// }
-			// fmt.Println("into default desp mode, after passing")
-		}
+		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
+	case grpcparser.IsOutgoingGRPC(buffer):
+		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, ps.logger)
+	default:
+		ps.logger.Debug("the external dependecy call is not supported")
+		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
+		// fmt.Println("into default desp mode, before passing")
+		// err = callNext(buffer, conn, dst, ps.logger)
+		// if err != nil {
+		// 	ps.logger.Error("failed to call next", zap.Error(err))
+		// 	conn.Close()
+		// 	return
+		// }
+		// fmt.Println("into default desp mode, after passing")
+
 	}
 	// Closing the user client connection
 	conn.Close()
 	duration := time.Since(start)
-	ps.logger.Debug(Emoji+"time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
+	ps.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 }
 
 func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
 
-	logger.Debug(Emoji+"trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 
 	defer destConn.Close()
 
@@ -898,17 +964,17 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 
 	_, err := destConn.Write(requestBuffer)
 	if err != nil {
-		logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+		logger.Error("failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 		return err
 	}
 
 	for {
-		fmt.Println("inside connection")
+		logger.Debug("Inside connection")
 		// go routine to read from client
 		go func() {
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
-				logger.Error(Emoji+"failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
+				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
 				return
 			}
 			destinationWriteChannel <- buffer
@@ -918,7 +984,7 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 		go func() {
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
-				logger.Error(Emoji+"failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 				return
 			}
 
@@ -930,14 +996,14 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 			// Write the request message to the actual destination server
 			_, err := destConn.Write(requestBuffer)
 			if err != nil {
-				logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+				logger.Error("failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 				return err
 			}
 		case responseBuffer := <-clientWriteChannel:
 			// Write the response message to the client
 			_, err := clientConn.Write(responseBuffer)
 			if err != nil {
-				logger.Error(Emoji+"failed to write response to the client", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
+				logger.Error("failed to write response to the client", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
 				return err
 			}
 		}
@@ -948,18 +1014,18 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 func (ps *ProxySet) StopProxyServer() {
 	err := ps.Listener.Close()
 	if err != nil {
-		ps.logger.Error(Emoji+"failed to stop proxy server", zap.Error(err))
+		ps.logger.Error("failed to stop proxy server", zap.Error(err))
 	}
 
 	// stop dns server only in case of test mode.
 	if ps.DnsServer != nil {
 		err = ps.DnsServer.Shutdown()
 		if err != nil {
-			ps.logger.Error(Emoji+"failed to stop dns server", zap.Error(err))
+			ps.logger.Error("failed to stop dns server", zap.Error(err))
 		}
-		ps.logger.Info(Emoji + "Dns server stopped")
+		ps.logger.Info("Dns server stopped")
 	}
-	ps.logger.Info(Emoji + "proxy stopped...")
+	ps.logger.Info("proxy stopped...")
 }
 
 func generateRandomID() string {

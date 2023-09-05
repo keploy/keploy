@@ -25,10 +25,13 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Docker CLI (docker-compose)
+# Install Docker engine
 RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
     sh get-docker.sh && \
     rm get-docker.sh
+
+# Install docker-compose to PATH
+RUN apt install docker-compose -y
 
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy

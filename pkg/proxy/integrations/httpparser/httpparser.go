@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -72,7 +73,7 @@ func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks
 	case models.MODE_TEST:
 		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
 	default:
-		logger.Info(Emoji+"Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
+		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
@@ -84,21 +85,22 @@ func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logge
 		requestChunked, err := util.ReadBytes(clientConn)
 		if err != nil {
 			if err == io.EOF {
-				logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
+				logger.Error("connection closed by the user client", zap.Error(err))
 				break
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
+				logger.Info("Stopped getting data from the connection", zap.Error(err))
 				break
 			} else {
-				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+				logger.Error("failed to read the response message from the destination server", zap.Error(err))
 				return
 			}
 		}
+		logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
 		*finalReq = append(*finalReq, requestChunked...)
 		contentLength -= len(requestChunked)
 		_, err = destConn.Write(requestChunked)
 		if err != nil {
-			logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+			logger.Error("failed to write request message to the destination server", zap.Error(err))
 			return
 		}
 	}
@@ -112,19 +114,20 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 			requestChunked, err := util.ReadBytes(clientConn)
 			if err != nil {
 				if err == io.EOF {
-					logger.Error(Emoji+"connection closed by the user client", zap.Error(err))
+					logger.Error("connection closed by the user client", zap.Error(err))
 					break
 				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					break
 				} else {
-					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					logger.Error("failed to read the response message from the destination server", zap.Error(err))
 					return
 				}
 			}
+			logger.Debug("This is a chunk of request[chunking]: " + string(requestChunked))
 			*finalReq = append(*finalReq, requestChunked...)
 			_, err = destConn.Write(requestChunked)
 			if err != nil {
-				logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+				logger.Error("failed to write request message to the destination server", zap.Error(err))
 				return
 			}
 			if string(requestChunked) == "0\r\n\r\n" {
@@ -143,22 +146,23 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 		if err != nil {
 			//Check if the connection closed.
 			if err == io.EOF {
-				logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
+				logger.Error("connection closed by the destination server", zap.Error(err))
 				break
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Info(Emoji+"Stopped getting data from the connection", zap.Error(err))
+				logger.Info("Stopped getting data from the connection", zap.Error(err))
 				break
 			} else {
-				logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+				logger.Error("failed to read the response message from the destination server", zap.Error(err))
 				return
 			}
 		}
+		logger.Debug("This is a chunk of response[content-length]: " + string(resp))
 		*finalResp = append(*finalResp, resp...)
 		contentLength -= len(resp)
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
-			logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+			logger.Error("failed to write response message to the user client", zap.Error(err))
 			return
 		}
 	}
@@ -175,22 +179,23 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 			if err != nil {
 				//Check if the connection closed.
 				if err == io.EOF {
-					logger.Error(Emoji+"connection closed by the destination server", zap.Error(err))
+					logger.Error("connection closed by the destination server", zap.Error(err))
 					break
 				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					//Check if the deadline is reached.
-					logger.Info(Emoji + "Stopped getting buffer from the destination server")
+					logger.Info( "Stopped getting buffer from the destination server")
 					break
 				} else {
-					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					logger.Error("failed to read the response message from the destination server", zap.Error(err))
 					return
 				}
 			}
+			logger.Debug("This is a chunk of response[chunking]: " + string(resp))
 			*finalResp = append(*finalResp, resp...)
 			// write the response message to the user client
 			_, err = clientConn.Write(resp)
 			if err != nil {
-				logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+				logger.Error("failed to write response message to the user client", zap.Error(err))
 				return
 			}
 			if string(resp) == "0\r\n\r\n" {
@@ -217,7 +222,7 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+			logger.Error("failed to get the content-length header", zap.Error(err))
 			return
 		}
 		//Get the length of the body in the request.
@@ -248,7 +253,7 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			logger.Error(Emoji+"failed to get the content-length header", zap.Error(err))
+			logger.Error("failed to get the content-length header", zap.Error(err))
 			return
 		}
 		bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
@@ -261,12 +266,12 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 	}
 }
 
-//Checks if the response is gzipped
+// Checks if the response is gzipped
 func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 	bufReader := bufio.NewReader(check)
 	peekedBytes, err := bufReader.Peek(2)
 	if err != nil && err != io.EOF {
-		fmt.Println("Error peeking:", err)
+		log.Debug("Error peeking:", err)
 		return false, nil
 	}
 	if len(peekedBytes) < 2 {
@@ -279,29 +284,46 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 	}
 }
 
-//Decodes the mocks in test mode so that they can be sent to the user application.
+// Decodes the mocks in test mode so that they can be sent to the user application.
 func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	//Matching algorithmm
 	//Get the mocks
 	tcsMocks := h.GetTcsMocks()
 	var bestMatch *models.Mock
+	//Check if the expected header is present
+	if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
+		//Send the 100 continue response
+		_, err := clienConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+		if err != nil {
+			logger.Error("failed to write the 100 continue response to the user application", zap.Error(err))
+			return
+		}
+		//Read the request buffer again
+		newRequest, err := util.ReadBytes(clienConn)
+		if err != nil {
+			logger.Error("failed to read the request buffer from the user application", zap.Error(err))
+			return
+		}
+		//Append the new request buffer to the old request buffer
+		requestBuffer = append(requestBuffer, newRequest...)
+	}
 	//Parse the request buffer
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
 	if err != nil {
-		logger.Error(Emoji+"failed to parse the http request message", zap.Error(err))
+		logger.Error("failed to parse the http request message", zap.Error(err))
 		return
 	}
 
 	reqbody, err := ioutil.ReadAll(req.Body)
 	if err != nil {
-		logger.Error(Emoji+"failed to read from request body", zap.Error(err))
+		logger.Error("failed to read from request body", zap.Error(err))
 
 	}
 
 	//parse request url
 	reqURL, err := url.Parse(req.URL.String())
 	if err != nil {
-		logger.Error(Emoji+"failed to parse request url", zap.Error(err))
+		logger.Error("failed to parse request url", zap.Error(err))
 	}
 
 	//check if req body is a json
@@ -310,47 +332,49 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	var eligibleMock []*models.Mock
 
 	for _, mock := range tcsMocks {
-		isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
+		if mock.Kind == models.HTTP {
+			isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
 
-		//the body of mock and request aren't of same type
-		if isMockBodyJSON != isReqBodyJSON {
-			continue
-		}
+			//the body of mock and request aren't of same type
+			if isMockBodyJSON != isReqBodyJSON {
+				continue
+			}
 
-		//parse request body url
-		parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
-		if err != nil {
-			logger.Error(Emoji+"failed to parse mock url", zap.Error(err))
-			continue
-		}
+			//parse request body url
+			parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
+			if err != nil {
+				logger.Error("failed to parse mock url", zap.Error(err))
+				continue
+			}
 
-		//Check if the path matches
-		if parsedURL.Path != reqURL.Path {
-			//If it is not the same, continue
-			continue
-		}
+			//Check if the path matches
+			if parsedURL.Path != reqURL.Path {
+				//If it is not the same, continue
+				continue
+			}
 
-		//Check if the method matches
-		if mock.Spec.HttpReq.Method != models.Method(req.Method) {
-			//If it is not the same, continue
-			continue
-		}
+			//Check if the method matches
+			if mock.Spec.HttpReq.Method != models.Method(req.Method) {
+				//If it is not the same, continue
+				continue
+			}
 
-		// Check if the header keys match
-		if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
-			// Different headers, so not a match
-			continue
-		}
+			// Check if the header keys match
+			if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
+				// Different headers, so not a match
+				continue
+			}
 
-		if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
-			// Different query params, so not a match
-			continue
+			if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
+				// Different query params, so not a match
+				continue
+			}
+			eligibleMock = append(eligibleMock, mock)
 		}
-		eligibleMock = append(eligibleMock, mock)
 	}
 
 	if len(eligibleMock) == 0 {
-		logger.Error(Emoji + "Didn't match any prexisting http mock")
+		logger.Error( "Didn't match any prexisting http mock")
 		util.Passthrough(clienConn, destConn, [][]byte{requestBuffer}, logger)
 		return
 	}
@@ -376,7 +400,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	// 	return
 	// }
 	// httpSpec := deps[0]
-	stub := h.FetchDep(0)
+	stub := h.FetchDep(bestMatchIndex)
 	// fmt.Println("http mock in test: ", stub)
 
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
@@ -384,7 +408,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	body := stub.Spec.HttpResp.Body
 	var respBody string
 	var responseString string
-	
+
 	// Fetching the response headers
 	header := pkg.ToHttpHeader(stub.Spec.HttpResp.Header)
 
@@ -394,15 +418,15 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		gw := gzip.NewWriter(&compressedBuffer)
 		_, err := gw.Write([]byte(body))
 		if err != nil {
-			logger.Error(Emoji+"failed to compress the response body", zap.Error(err))
+			logger.Error("failed to compress the response body", zap.Error(err))
 			return
 		}
 		err = gw.Close()
 		if err != nil {
-			logger.Error(Emoji+"failed to close the gzip writer", zap.Error(err))
+			logger.Error("failed to close the gzip writer", zap.Error(err))
 			return
 		}
-		logger.Debug("the length of the response body: " +strconv.Itoa(len(compressedBuffer.String())))
+		logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
 		respBody = compressedBuffer.String()
 		// responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
 	} else {
@@ -423,7 +447,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	logger.Debug("the content-length header" + headers)
 	_, err = clienConn.Write([]byte(responseString))
 	if err != nil {
-		logger.Error(Emoji+"failed to write the mock output to the user application", zap.Error(err))
+		logger.Error("failed to write the mock output to the user application", zap.Error(err))
 		return
 	}
 	// pop the mocked output from the dependency queue
@@ -442,24 +466,49 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	// write the request message to the actual destination server
 	_, err = destConn.Write(request)
 	if err != nil {
-		logger.Error(Emoji+"failed to write request message to the destination server", zap.Error(err))
+		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return nil
 	}
+	logger.Debug("This is the initial request: " + string(request))
 	finalReq = append(finalReq, request...)
-
-	//Handle chunked requests
+	//check if the expect : 100-continue header is present
+	lines := strings.Split(string(request), "\n")
+	var expectHeader string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Expect:") {
+			expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
+			break
+		}
+	}
+	if expectHeader == "100-continue" {
+		//Read if the response from the client is 100-continue
+		resp, err = util.ReadBytes(destConn)
+		if err != nil {
+			logger.Error("failed to read the response message from the user client", zap.Error(err))
+			return nil
+		}
+		// write the response message to the client
+		_, err = clientConn.Write(resp)
+		if err != nil {
+			logger.Error("failed to write response message to the user client", zap.Error(err))
+			return nil
+		}
+		if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
+			logger.Error("failed to get the 100 continue response from the user client")
+			return nil
+		}
+	}
 	handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
-
 	// read the response from the actual server
 	resp, err = util.ReadBytes(destConn)
 	if err != nil {
-		logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+		logger.Error("failed to read the response message from the destination server", zap.Error(err))
 		return nil
 	}
 	// write the response message to the user client
 	_, err = clientConn.Write(resp)
 	if err != nil {
-		logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
+		logger.Error("failed to write response message to the user client", zap.Error(err))
 		return nil
 	}
 	finalResp = append(finalResp, resp...)
@@ -468,7 +517,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	// converts the request message buffer to http request
 	req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
 	if err != nil {
-		logger.Error(Emoji+"failed to parse the http request message", zap.Error(err))
+		logger.Error("failed to parse the http request message", zap.Error(err))
 		return nil
 	}
 	var reqBody []byte
@@ -477,14 +526,14 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			logger.Error(Emoji+"failed to read the http request body", zap.Error(err))
+			logger.Error("failed to read the http request body", zap.Error(err))
 			return nil
 		}
 	}
 	// converts the response message buffer to http response
 	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResp)), req)
 	if err != nil {
-		logger.Error(Emoji+"failed to parse the http response message", zap.Error(err))
+		logger.Error("failed to parse the http response message", zap.Error(err))
 		return nil
 	}
 	var respBody []byte
@@ -492,11 +541,11 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		if respParsed.Header.Get("Content-Encoding") == "gzip" {
 			check := respParsed.Body
 			ok, reader := checkIfGzipped(check)
-			fmt.Println("ok: ", ok)
+			logger.Debug("",zap.Any("isGzipped",ok))
 			if ok {
 				gzipReader, err := gzip.NewReader(reader)
 				if err != nil {
-					logger.Error(Emoji+"failed to create a gzip reader", zap.Error(err))
+					logger.Error("failed to create a gzip reader", zap.Error(err))
 					return nil
 				}
 				respParsed.Body = gzipReader
@@ -504,7 +553,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			logger.Error(Emoji+"failed to read the the http repsonse body", zap.Error(err))
+			logger.Error("failed to read the the http repsonse body", zap.Error(err))
 			return nil
 		}
 	}

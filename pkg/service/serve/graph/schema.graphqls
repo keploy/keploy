@@ -1,0 +1,23 @@
+# GraphQL schema example
+#
+# https://gqlgen.com/getting-started/
+
+
+type TestSetStatus {
+  status: String!
+}
+
+type RunTestSetResponse {
+  success: Boolean!
+  testRunId: String!
+  message: String
+}
+
+type Query {
+  testSets: [String!]!
+  testSetStatus(testRunId: String!): TestSetStatus!
+}
+
+type Mutation {
+  runTestSet(testSet: String!): RunTestSetResponse!
+}
