@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"embed"
 	"fmt"
-	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	"io"
 	"io/ioutil"
 	"log"
@@ -21,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/helpers"
@@ -174,7 +175,6 @@ func getJavaHomeFromPID(pid string) (string, error) {
 
 		}
 	}
-	fmt.Println("Not sending error because there is none")
 	return "", fmt.Errorf("failed to find JAVA_HOME from PID")
 }
 
@@ -201,12 +201,13 @@ func getJavaHome() (string, error) {
 }
 
 // InstallJavaCA installs the CA in the Java keystore
-func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32) {
+func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32, isJavaServe bool) {
 	// check if java is installed
 	if isJavaInstalled() {
 		var javaHome string
 		var err error
-		if pid != 0 { // in case of unit tests, we know the pid beforehand
+		logger.Debug("", zap.Any("isJavaServe", isJavaServe))
+		if pid != 0 && isJavaServe { // in case of unit tests, we know the pid beforehand
 			logger.Debug("checking java path from proc file system", zap.Any("pid", pid))
 			javaHome, err = getJavaHomeFromPID(strconv.Itoa(int(pid)))
 		} else {
@@ -246,8 +247,18 @@ func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32) {
 	}
 }
 
-// BootProxy starts proxy servers on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, passThroughPorts []uint) *ProxySet {
+func containsJava(input string) bool {
+	// Convert the input string and the search term "java" to lowercase for a case-insensitive comparison.
+	inputLower := strings.ToLower(input)
+	searchTerm := "java"
+	searchTermLower := strings.ToLower(searchTerm)
+
+	// Use strings.Contains to check if the lowercase input contains the lowercase search term.
+	return strings.Contains(inputLower, searchTermLower)
+}
+
+// BootProxy starts proxy server on the idle local port, Default:16789
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -266,8 +277,11 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		return nil
 	}
 
+	//check if serve command is used by java application
+	isJavaServe := containsJava(lang)
+
 	// install CA in the java keystore if java is installed
-	InstallJavaCA(logger, caPath, pid)
+	InstallJavaCA(logger, caPath, pid, isJavaServe)
 
 	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
