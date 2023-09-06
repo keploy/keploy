@@ -93,6 +93,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				similarity := JaccardSimilarity(shingles1, shingles2)
 				log.Debugf(hooks.Emoji, "Jaccard Similarity:%f\n", similarity)
 
+
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx
