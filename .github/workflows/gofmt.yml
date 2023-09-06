@@ -1,0 +1,26 @@
+name: Gofmt Check
+
+on:
+  pull_request:
+    paths:
+      - '**/*.go'
+
+jobs:
+  gofmt:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check Out Code
+      uses: actions/checkout@v2
+
+    - name: Set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: '1.20' # Replace with your desired Go version when available
+
+    - name: Run Gofmt
+      run: |
+        gofmt -l -w .
+        if [ -n "$(gofmt -l .)" ]; then
+          echo "Some Go files are not formatted properly. Please run 'gofmt' on your code and submit the PR again." >&2
+          exit 1
