@@ -40,7 +40,7 @@ func (s *mockTester) MockTest(path string, Delay uint64, pid uint32, dirName str
 	}
 
 	// start the proxy
-	ps := proxy.BootProxies(s.logger, proxy.Option{}, "", "")
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "")
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)

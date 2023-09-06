@@ -28,7 +28,7 @@ func (s *mockRecorder) MockRecord(path string, Delay uint64, pid uint32, dirName
 
 	models.SetMode(models.MODE_RECORD)
 	ys := yaml.NewYamlStore(s.logger)
-	
+
 	path += "/" + dirName
 
 	// Initiate the hooks
@@ -38,7 +38,7 @@ func (s *mockRecorder) MockRecord(path string, Delay uint64, pid uint32, dirName
 	}
 
 	// start the proxy
-	ps := proxy.BootProxies(s.logger, proxy.Option{}, "", "")
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "")
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
