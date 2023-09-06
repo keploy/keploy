@@ -221,6 +221,10 @@ func decodeOutgoingMySQL(clientConnId, destConnId int, requestBuffer []byte, cli
 				zap.Any("requestHeader", requestHeader),
 				zap.Any("mysqlRequest", mysqlRequest),
 				zap.Error(err))
+			if mockResponseRead >= len(tcsMocks) {
+				logger.Error("Mock response reading pointer out of bounds")
+				return
+			}
 			handshakeResponseFromConfig := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Message
 			opr2 := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header.PacketType
 			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, opr2, mockResponseRead+1)
