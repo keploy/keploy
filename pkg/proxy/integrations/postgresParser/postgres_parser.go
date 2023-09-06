@@ -50,10 +50,8 @@ func IsOutgoingPSQL(buffer []byte) bool {
 func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-
 		encodeStreamOutgoing(requestBuffer, clientConn, destConn, h, logger)
-		// startProxy(requestBuffer, clientConn, destConn, logger, h)
-		// SaveOutgoingPSQL(requestBuffer, clientConn, destConn, logger, h)
+
 	case models.MODE_TEST:
 		// decodeOutgoingPSQL(requestBuffer, clientConn, destConn, h, logger)
 		decodeStreamOutgoing(requestBuffer, clientConn, destConn, h, logger)
@@ -100,226 +98,6 @@ func decodeBuffer(buffer []byte) (*PSQLMessage, error) {
 	return psqlMessage, nil
 }
 
-func SaveOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook) []*models.Mock {
-
-	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn, clientConn)
-	// frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
-	x := 0
-
-	logger.Debug("x count is ", zap.Int("x", x))
-	// In case of java note the byte array used for authentication
-
-	logger.Debug("Encoding outgoing Postgres call !!")
-
-	// write the request message to the postgres server
-
-	_, err := destConn.Write(requestBuffer)
-
-	if err != nil {
-		logger.Error("failed to write the request buffer to postgres server", zap.Error(err), zap.String("postgres server address", destConn.RemoteAddr().String()))
-		return nil
-	}
-
-	// // read reply message from the postgres server
-	responseBuffer, _, err := util.ReadBytes1(destConn)
-	if err != nil {
-		logger.Error("failed to read reply from the postgres server", zap.Error(err), zap.String("postgres server address", destConn.RemoteAddr().String()))
-		return nil
-	}
-
-	// write the reply to postgres client
-	_, err = clientConn.Write(responseBuffer)
-	if err != nil {
-		logger.Error("failed to write the reply message to postgres client", zap.Error(err))
-		return nil
-	}
-	logger.Debug("Response buffer " + string(responseBuffer))
-
-	postgresMock := &models.Mock{
-		Version: models.V1Beta1,
-		Name:    "mocks",
-		Kind:    models.Postgres,
-		Spec: models.MockSpec{
-			PostgresReq: &models.Backend{
-				Identfier: "PostgresReq",
-				Length:    uint32(len(requestBuffer)),
-				Payload:   base64.StdEncoding.EncodeToString(requestBuffer),
-			},
-			PostgresResp: &models.Frontend{
-				Identfier: "PostgresResponse",
-				Length:    uint32(len(responseBuffer)),
-				Payload:   base64.StdEncoding.EncodeToString(responseBuffer),
-			},
-		},
-	}
-
-	if postgresMock != nil {
-		h.AppendMocks(postgresMock)
-	}
-
-	// may be bodylen 0 is reason
-
-	// declare postgres mock here
-
-	var msgRequestbuffer []byte
-
-	for {
-		// read request message from the postgres client and see if it's authentication buffer
-		// if its auth buffer then just save it in global config
-
-		for {
-			msgRequestbuffer, _, err = util.ReadBytes1(clientConn)
-			if err != nil {
-				logger.Error("failed to read the message from the postgres client", zap.Error(err))
-				// return nil
-			}
-
-			if len(msgRequestbuffer) != 0 {
-				break
-			}
-
-		}
-
-		// check the packet type and add config name accordingly
-
-		// for making readable first identify message type and add the Unmarshaled value for that query object
-
-
-		logger.Debug(Emoji+"The mock is ", zap.String("payload of req ::: :: ::", base64.StdEncoding.EncodeToString(msgRequestbuffer)))
-
-		// logger.Debug(Emoji, "Inside for loop", string(msgRequestbuffer))
-
-		// write the request message to postgres server
-		_, err = destConn.Write(msgRequestbuffer)
-		if err != nil {
-			logger.Error("failed to write the request message to postgres server", zap.Error(err), zap.String("postgres server address", destConn.LocalAddr().String()))
-			// return nil
-		}
-
-		msgResponseBuffer, _, err := util.ReadBytes1(destConn)
-		if msgResponseBuffer == nil {
-			logger.Debug("msgResponseBuffer is nil")
-		}
-
-		if err != nil {
-			logger.Error("failed to read the response message from postgres server", zap.Error(err), zap.String("postgres server address", destConn.RemoteAddr().String()))
-			// return nil
-		}
-
-		// write the response message to postgres client
-		_, err = clientConn.Write(msgResponseBuffer)
-
-		logger.Debug("After getting response from postgres server")
-
-		// it is failing here
-		if err != nil {
-			logger.Error("failed to write the response wiremessage to postgres client ", zap.Error(err))
-			// return nil
-		}
-		postgresMock := &models.Mock{
-			Version: models.V1Beta1,
-			Name:    "mocks",
-			Kind:    models.Postgres,
-			Spec: models.MockSpec{
-				PostgresReq: &models.Backend{
-					Identfier: "PostgresReq",
-					Length:    uint32(len(msgRequestbuffer)),
-					Payload:   base64.StdEncoding.EncodeToString(msgRequestbuffer),
-				},
-				PostgresResp: &models.Frontend{
-					Identfier: "PostgresResponse",
-					Length:    uint32(len(msgResponseBuffer)),
-					Payload:   base64.StdEncoding.EncodeToString(msgResponseBuffer),
-				},
-			},
-		}
-
-		if postgresMock != nil {
-			h.AppendMocks(postgresMock)
-		}
-
-	}
-
-}
-
-// This is the encoding function for the non streaming postgres messages
-
-func decodeOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
-	// decode the request buffer
-	configMocks := h.GetConfigMocks()
-
-	tcsMocks := h.GetTcsMocks()
-	logger.Debug("", zap.Any("len of tcs mocks", len(tcsMocks)))
-
-	logger.Debug("testMocks length is ", zap.Any("testmocks", len(tcsMocks)))
-	logger.Debug("configMocks length is ", zap.Any("configMocks", len(configMocks)))
-
-	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn)
-	// frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
-	logger.Debug("Encoding outgoing Postgres call !!")
-	// write the request message to the postgres server
-
-	// _, err := destConn.Write(requestBuffer)
-	encode, err := PostgresDecoder(tcsMocks[0].Spec.PostgresResp.Payload)
-	if err != nil {
-		logger.Error("failed to write the request buffer to postgres server", zap.Error(err), zap.String("postgres server address", destConn.RemoteAddr().String()))
-		return
-	}
-
-	// write the reply to postgres client
-	_, err = clientConn.Write(encode)
-	if err != nil {
-		logger.Error("failed to write the reply message to postgres client", zap.Error(err))
-		return
-	}
-
-	var msgRequestbuffer []byte
-	var msgResponseBuffer []byte
-
-	for {
-
-		for {
-			msgRequestbuffer, _, err = util.ReadBytes1(clientConn)
-			if err != nil {
-				logger.Error("failed to read the message from the postgres client", zap.Error(err))
-				// return nil
-			}
-
-			if len(msgRequestbuffer) != 0 {
-				break
-			}
-
-		}
-
-		// mock2, err := PostgresDecoder(tcsMocks[y].Spec.PostgresReq.Payload)
-		matched, decoded := Fuzzymatch(configMocks, tcsMocks, msgRequestbuffer, h)
-
-		if err != nil {
-			logger.Error("failed to write the request buffer to postgres server", zap.Error(err), zap.String("postgres server address", destConn.RemoteAddr().String()))
-			return
-		}
-
-		if err != nil {
-			logger.Error("failed to write the request buffer to postgres server", zap.Error(err), zap.String("postgres server address", destConn.RemoteAddr().String()))
-			return
-		}
-		if matched {
-			logger.Debug("Found a match !!!!")
-			msgResponseBuffer, _ = PostgresDecoder(decoded)
-		} else {
-			logger.Debug("Not found a match !!!!")
-			logger.Debug("Actual req is", zap.Any("Actual req", PostgresEncoder(msgRequestbuffer)))
-		}
-		_, err = clientConn.Write(msgResponseBuffer)
-		if err != nil {
-			logger.Error("failed to write the response wiremessage to postgres client ", zap.Error(err))
-			return
-		}
-
-	}
-	// return
-}
-
 // This is the encoding function for the streaming postgres wiremessage
 func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 
@@ -344,17 +122,11 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 		})
 	}
 	_, err := destConn.Write(requestBuffer)
-	logger.Info("Writing the request buffer to the destination server", zap.Any("requestBuffer", string(requestBuffer)))
+	logger.Debug("Writing the request buffer to the destination server", zap.Any("requestBuffer", string(requestBuffer)))
 	if err != nil {
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
-	// msg2, err := frontend.Receive(requestBuffer)
-	// if err != nil {
-	// 	logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
-	// 	// return err
-	// }
-	// println("msg2 is ", msg2)
 
 	pgResponses := []models.GenericPayload{}
 
