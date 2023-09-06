@@ -398,7 +398,9 @@ func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) 
 		shingles1 := CreateShingles(encoded, k)
 		shingles2 := CreateShingles(reqBuff, k)
 		similarity := JaccardSimilarity(shingles1, shingles2)
+
 		log.Debugf("Jaccard Similarity:%f\n", similarity)
+
 		if mxSim < similarity {
 			mxSim = similarity
 			mxIdx = idx
@@ -426,7 +428,9 @@ func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *
 	for _, mock := range tcsMocks {
 		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
 		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
+
 			log.Debug(Emoji, "matched in first loop")
+
 			return true, mock
 		}
 	}
@@ -439,7 +443,9 @@ func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *
 	if IsAsciiPrintable(string(reqBuff)) {
 		idx := findStringMatch(string(reqBuff), mockString)
 		if idx != -1 {
+
 			log.Debug(Emoji, "Returning mock from String Match")
+
 			return true, tcsMocks[idx]
 		}
 	}
