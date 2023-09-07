@@ -844,22 +844,23 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	destConnId := 0
 	// if models.GetMode() != models.MODE_TEST {
 	destConnId = rand.Intn(101)
+	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Dectination ConnectionID", destConnId))
 	if isTLS {
-		ps.logger.Debug("", zap.Any("isTLS", isTLS))
+	logger.Debug("", zap.Any("isTLS", isTLS))
 		config := &tls.Config{
 			InsecureSkipVerify: false,
 			ServerName:         destinationUrl,
 		}
 		dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
 		if err != nil && models.GetMode() != models.MODE_TEST {
-			ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 			conn.Close()
 			return
 		}
 	} else {
 		dst, err = net.Dial("tcp", actualAddress)
 		if err != nil && models.GetMode() != models.MODE_TEST {
-			ps.logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+			logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 			conn.Close()
 			return
 			// }
@@ -869,9 +870,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	for _, port := range ps.PassThroughPorts {
 		if port == uint(destInfo.DestPort) {
-			err = callNext(buffer, conn, dst, ps.logger)
+			err = callNext(buffer, conn, dst, logger)
 			if err != nil {
-				ps.logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
+				logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
 				return
 			}
 		}
@@ -881,42 +882,42 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
 		// if models.GetMode() == models.MODE_RECORD {
-		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
-		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, ps.logger))
+		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, logger))
+		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, logger))
 		// }
 		// var deps []*models.Mock = ps.hook.GetDeps()
 		// fmt.Println("before http egress call, deps array: ", deps)
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, ps.logger)
+		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger)
 		// fmt.Println("after http egress call, deps array: ", deps)
 
 		// ps.hook.SetDeps(deps)
 	case mongoparser.IsOutgoingMongo(buffer):
 		// var deps []*models.Mock = ps.hook.GetDeps()
 		// fmt.Println("before mongo egress call, deps array: ", deps)
-		ps.logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger)
+		logger.Debug("into mongo parsing mode")
+		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
 		// fmt.Println("after mongo egress call, deps array: ", deps)
 
 		// ps.hook.SetDeps(deps)
 
-		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, ps.logger)
+		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, logger)
 		// for _, v := range deps {
 		// 	ps.hook.AppendDeps(v)
 		// }
 	case postgresparser.IsOutgoingPSQL(buffer):
 
-		ps.logger.Debug("into psql desp mode, before passing")
+		logger.Debug("into psql desp mode, before passing")
 
-		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, ps.logger)
+		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
 	case grpcparser.IsOutgoingGRPC(buffer):
-		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, ps.logger)
+		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
 	default:
-		ps.logger.Debug("the external dependecy call is not supported")
-		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, ps.logger)
+		logger.Debug("the external dependecy call is not supported")
+		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
 		// fmt.Println("into default desp mode, before passing")
-		// err = callNext(buffer, conn, dst, ps.logger)
+		// err = callNext(buffer, conn, dst, logger)
 		// if err != nil {
-		// 	ps.logger.Error("failed to call next", zap.Error(err))
+		// 	logger.Error("failed to call next", zap.Error(err))
 		// 	conn.Close()
 		// 	return
 		// }
@@ -927,7 +928,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// Closing the user client connection
 	conn.Close()
 	duration := time.Since(start)
-	ps.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
+	logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 }
 
 func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
