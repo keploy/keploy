@@ -54,6 +54,7 @@ type ProxySet struct {
 	DnsServer        *dns.Server
 	DnsServerTimeout time.Duration
 	dockerAppCmd     bool
+	PassThroughPorts []uint
 }
 
 type CustomConn struct {
@@ -257,7 +258,7 @@ func containsJava(input string) bool {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -328,6 +329,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		IP6:          proxyAddr6,
 		logger:       logger,
 		dockerAppCmd: (dCmd || dIDE),
+		PassThroughPorts: passThroughPorts,
 	}
 
 	if isPortAvailable(opt.Port) {
@@ -865,6 +867,16 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 	// }
 
+	for _, port := range ps.PassThroughPorts {
+		if port == uint(destInfo.DestPort) {
+			err = callNext(buffer, conn, dst, ps.logger)
+			if err != nil {
+				ps.logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
+				return
+			}
+		}
+	}
+
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
@@ -928,14 +940,16 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 	destinationWriteChannel := make(chan []byte)
 	clientWriteChannel := make(chan []byte)
 
-	_, err := destConn.Write(requestBuffer)
-	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-		return err
+	if requestBuffer != nil {
+		_, err := destConn.Write(requestBuffer)
+		if err != nil {
+			logger.Error("failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+			return err
+		}
 	}
 
 	for {
-		logger.Debug("Inside connection")
+		// logger.Debug("Inside connection")
 		// go routine to read from client
 		go func() {
 			buffer, err := util.ReadBytes(clientConn)

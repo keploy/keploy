@@ -35,6 +35,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 			return err
 		}
 		bufferChannel <- buffer
+		break
 	}
 	return nil
 }
@@ -55,11 +56,11 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *
 	// defer destConn.Close()
 
 	// channels for writing messages from proxy to destination or client
-	clientBufferChannel := make(chan []byte)
+	// clientBufferChannel := make(chan []byte)
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error)
 	// read requests from client
-	go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
+	// go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	// read response from destination
 	// destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 
@@ -68,15 +69,15 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *
 	// for {
 
 	select {
-	case buffer := <-clientBufferChannel:
-		// Write the request message to the destination
-		_, err := destConn.Write(buffer)
-		if err != nil {
-			logger.Error("failed to write request message to the destination server", zap.Error(err))
-			return nil, err
-		}
-		logger.Debug("the iteration for the generic request ends with requests:" + strconv.Itoa(len(buffer)))
-		return buffer, nil
+	// case buffer := <-clientBufferChannel:
+	// 	// Write the request message to the destination
+	// 	_, err := destConn.Write(buffer)
+	// 	if err != nil {
+	// 		logger.Error("failed to write request message to the destination server", zap.Error(err))
+	// 		return nil, err
+	// 	}
+	// 	logger.Debug("the iteration for the generic request ends with requests:" + strconv.Itoa(len(buffer)))
+	// 	return buffer, nil
 	case buffer := <-destBufferChannel:
 		// Write the response message to the client
 		_, err := clientConn.Write(buffer)
@@ -85,7 +86,7 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *
 			return nil, err
 		}
 
-		logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)))
+		logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
 	case err := <-errChannel:
 		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 			return nil, err

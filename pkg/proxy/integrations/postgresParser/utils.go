@@ -2,8 +2,9 @@ package postgresparser
 
 import (
 	"encoding/base64"
-	"fmt"
 	"strings"
+
+	// "fmt"
 
 	"encoding/binary"
 	"errors"
@@ -45,7 +46,7 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		fmt.Println(Emoji+"failed to decode the data", err)
+		// fmt.Println(Emoji+"failed to decode the data", err)
 		return nil, err
 	}
 	// println("Decoded data is :", string(data))
