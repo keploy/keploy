@@ -84,7 +84,18 @@ func (s *Serve) GetCmd() *cobra.Command {
 				return
 			}
 
-			s.server.Serve(path, testReportPath, delay, pid, port, language)
+			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				s.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return 
+			}
+			// for _, v := range ports {
+
+			// }
+
+			s.logger.Debug("the ports are", zap.Any("ports", ports))
+
+			s.server.Serve(path, testReportPath, delay, pid, port, language, ports)
 		},
 	}
 
@@ -98,6 +109,8 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	serveCmd.MarkFlagRequired("delay")
+
+	serveCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	serveCmd.Flags().StringP("language", "l", "", "application programming language")
 	serveCmd.MarkFlagRequired("language")

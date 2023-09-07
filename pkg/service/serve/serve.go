@@ -40,7 +40,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint32, lang string) {
+func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint) {
 
 	if port == 0 {
 		port = defaultPort
@@ -64,7 +64,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, nil)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts)
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
