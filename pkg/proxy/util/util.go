@@ -17,6 +17,7 @@ import (
 
 	"github.com/agnivade/levenshtein"
 	"github.com/cloudflare/cfssl/log"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 )
@@ -40,7 +41,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	return nil
 }
 
-func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *zap.Logger) ([]byte, error) {
+func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int),  logger *zap.Logger) ([]byte, error) {
 
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination connection")
@@ -64,7 +65,12 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *
 	// read response from destination
 	// destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 
-	go ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer recover(pkg.GenerateRandomID())
+
+		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+	}() 
 
 	// for {
 

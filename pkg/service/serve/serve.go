@@ -14,6 +14,7 @@ import (
 
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -52,8 +53,14 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	testReportFS := yaml.NewTestReportFS(s.logger)
 	ys := yaml.NewYamlStore(s.logger)
 
+	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(path, ys, s.logger)
+	loadedHooks := hooks.NewHook(path, ys, routineId, s.logger)
+
+	// Recover from panic and gracfully shutdown
+	defer loadedHooks.Recover(routineId)
+
+	// load the ebpf hooks into the kernel
 	if err := loadedHooks.LoadHooks("", "", pid); err != nil {
 		return
 	}
@@ -64,10 +71,10 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts, loadedHooks)
 
 	// proxy update its state in the ProxyPorts map
-	ps.SetHook(loadedHooks)
+	// ps.SetHook(loadedHooks)
 
 	// Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
@@ -102,6 +109,9 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 
 	// Start your server in a goroutine
 	go func() {
+		// Recover from panic and gracefully shutdown
+		defer loadedHooks.Recover(pkg.GenerateRandomID())
+
 		log.Printf(Emoji+"connect to http://localhost:%d/ for GraphQL playground", port)
 		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf(Emoji+"listen: %s\n", err)

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -67,7 +68,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			for _, vgen := range genericRequests {
 				logger.Debug("the genericRequests are:", zap.Any("h", string(vgen)))
 			}
-			requestBuffer, err = util.Passthrough(clientConn, destConn, genericRequests, logger)
+			requestBuffer, err = util.Passthrough(clientConn, destConn, genericRequests, h.Recover, logger)
 			// if err != nil {
 			// 	return err
 			// }
@@ -144,9 +145,19 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error)
 	// read requests from client
-	go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+		
+		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
+	}() 
 	// read response from destination
-	go ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
+		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+	}() 
 
 	isPreviousChunkRequest := false
 
