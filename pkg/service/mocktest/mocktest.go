@@ -2,7 +2,6 @@ package mocktest
 
 import (
 	"fmt"
-	"path/filepath"
 	"sync"
 
 	"go.keploy.io/server/pkg/hooks"
@@ -26,21 +25,23 @@ func NewMockTester(logger *zap.Logger) MockTester {
 	}
 }
 
-func (s *mockTester) MockTest(path string, Delay uint64, pid uint32, dirName string) {
+func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
+
+	fmt.Println("hi")
 
 	models.SetMode(models.MODE_TEST)
-	ys := yaml.NewYamlStore(s.logger)
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)
 
 	s.logger.Debug("path of mocks : " + path)
 
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(path, ys, s.logger)
+	loadedHooks := hooks.NewHook(ys, s.logger)
 	if err := loadedHooks.LoadHooks("", "", pid); err != nil {
 		return
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "")
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{})
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)
@@ -50,14 +51,14 @@ func (s *mockTester) MockTest(path string, Delay uint64, pid uint32, dirName str
 		return
 	}
 
-	configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, dirName))
+	configMocks, tcsMocks, err := ys.ReadMocks("")
+
 	if err != nil {
 		loadedHooks.Stop(true)
 		ps.StopProxyServer()
 		return
 	}
 
-	s.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", dirName, configMocks, tcsMocks))
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 

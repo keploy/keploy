@@ -1,13 +1,19 @@
 package yaml
+
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"go.keploy.io/server/pkg/models"
+	"go.uber.org/zap"
 )
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
@@ -73,7 +79,6 @@ func Flatten(j interface{}) map[string][]string {
 	}
 	return o
 }
-
 
 func AddHttpBodyToMap(body string, m map[string][]string) error {
 	// add body
@@ -252,4 +257,68 @@ func Contains(elems []string, v string) bool {
 		}
 	}
 	return false
+}
+
+func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
+	indx := 0
+	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		return fmt.Sprintf("test-set-%v", indx), nil
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return "", err
+	}
+
+	for _, v := range files {
+		// fmt.Println("name for the file", v.Name())
+		fileName := filepath.Base(v.Name())
+		fileNamePackets := strings.Split(fileName, "-")
+		if len(fileNamePackets) == 3 {
+			fileIndx, err := strconv.Atoi(fileNamePackets[2])
+			if err != nil {
+				Logger.Debug("failed to convert the index string to integer", zap.Error(err))
+				continue
+			}
+			if indx < fileIndx + 1 {
+				indx = fileIndx + 1
+			}
+		}
+	}
+	return fmt.Sprintf("test-set-%v", indx), nil
+}
+
+func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
+	indices := []string{}
+	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		return indices, nil
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return indices, err
+	}
+
+	for _, v := range files {
+		// Define the regular expression pattern
+		pattern := `^test-set-\d{1,}$`
+
+		// Compile the regular expression
+		regex, err := regexp.Compile(pattern)
+		if err != nil {
+			return indices, err
+		}
+
+		// Check if the string matches the pattern
+		if regex.MatchString(v.Name()) {
+			// fmt.Println("name for the file", v.Name())
+
+			indices = append(indices, v.Name())
+		}
+	}
+	return indices, nil
 }

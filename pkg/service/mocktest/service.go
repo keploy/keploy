@@ -1,5 +1,5 @@
 package mocktest
 
 type MockTester interface {
-	MockTest(path string, Delay uint64, pid uint32, dir string)
+	MockTest(path string, pid uint32, dir string)
 }

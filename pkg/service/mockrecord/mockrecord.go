@@ -24,21 +24,19 @@ func NewMockRecorder(logger *zap.Logger) MockRecorder {
 	}
 }
 
-func (s *mockRecorder) MockRecord(path string, Delay uint64, pid uint32, dirName string) {
+func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_RECORD)
-	ys := yaml.NewYamlStore(s.logger)
-
-	path += "/" + dirName
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)
 
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(path, ys, s.logger)
+	loadedHooks := hooks.NewHook(ys, s.logger)
 	if err := loadedHooks.LoadHooks("", "", pid); err != nil {
 		return
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "")
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{})
 
 	// proxy update its state in the ProxyPorts map
 	ps.SetHook(loadedHooks)

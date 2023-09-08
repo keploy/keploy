@@ -44,11 +44,11 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
 	// ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
-	ys := yaml.NewYamlStore(t.logger)
+	ys := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(path, ys, routineId, t.logger)
+	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
@@ -69,7 +69,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		return false
 	}
 
-	sessions, err := ys.ReadSessionIndices(path)
+	sessions, err := yaml.ReadSessionIndices(path, t.logger)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return false
@@ -79,7 +79,6 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	result := true
 
 	for _, sessionIndex := range sessions {
-
 		testRes := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
 		result = result && testRes
 	}
@@ -100,7 +99,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
 	result := true
-
 	tcs, err := ys.ReadTestcase(filepath.Join(path, testSet, "tests"), nil)
 	if err != nil {
 		return true

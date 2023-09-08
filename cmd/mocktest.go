@@ -51,13 +51,7 @@ func (s *MockTest) GetCmd() *cobra.Command {
 				s.logger.Debug(Emoji, zap.Any("testPath", path))
 			}
 
-			path += "/keploy"
-
-			delay, err := cmd.Flags().GetUint64("delay")
-
-			if err != nil {
-				s.logger.Error(Emoji+"Failed to get the delay flag", zap.Error((err)))
-			}
+			path += "/stubs"
 
 			pid, err := cmd.Flags().GetUint32("pid")
 
@@ -65,13 +59,13 @@ func (s *MockTest) GetCmd() *cobra.Command {
 				s.logger.Error(Emoji+"Failed to get the pid of the application", zap.Error((err)))
 			}
 
-			dir, err := cmd.Flags().GetString("testSuite")
+			dir, err := cmd.Flags().GetString("mockName")
 			if err != nil {
-				s.logger.Error(Emoji + "failed to read the testSuite name")
+				s.logger.Error(Emoji + "failed to read the mockName name")
 				return
 			}
 
-			s.mockTester.MockTest(path, delay, pid, dir)
+			s.mockTester.MockTest(path, pid, dir)
 		},
 	}
 
@@ -81,11 +75,8 @@ func (s *MockTest) GetCmd() *cobra.Command {
 	serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 	serveCmd.MarkFlagRequired("path")
 
-	serveCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
-	serveCmd.MarkFlagRequired("delay")
-
-	serveCmd.Flags().StringP("testSuite", "t", "", "User provided test suite")
-	serveCmd.MarkFlagRequired("testSuite")
+	serveCmd.Flags().StringP("mockName", "m", "", "User provided test suite")
+	serveCmd.MarkFlagRequired("mockName")
 
 	return serveCmd
 }
