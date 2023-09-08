@@ -346,7 +346,7 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		configMockName = ys.MockName + "-config"
 	}
 
-	if _, err := os.Stat(filepath.Join(path, configMockName+".yaml")); err == nil {
+	if _, err := os.Stat(path + "/" + configMockName + ".yaml"); err == nil {
 		// _, err := os.Stat(filepath.Join(path, "config.yaml"))
 		// if err != nil {
 		// 	ys.Logger.Error("failed to find the config yaml", zap.Error(err))
@@ -369,7 +369,7 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		mockName = ys.MockName + "-mocks"
 	}
 
-	if _, err := os.Stat(filepath.Join(path, mockName+".yaml")); err == nil {
+	if _, err := os.Stat(path + "/" + mockName + ".yaml"); err == nil {
 		// _, err = os.Stat(filepath.Join(path, "mocks.yaml"))
 		// if err != nil {
 		// 	ys.Logger.Error("failed to find the mock yaml", zap.Error(err))
