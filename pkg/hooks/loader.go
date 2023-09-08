@@ -41,14 +41,14 @@ type Hook struct {
 	keployServerPort *ebpf.Map
 
 	platform.TestCaseDB
-	logger        *zap.Logger
-	proxyPortList []uint32
-	tcsMocks      []*models.Mock
-	configMocks   []*models.Mock
-	path          string
-	mu            *sync.Mutex
-	mutex         sync.RWMutex
-	userAppCmd    *exec.Cmd
+	logger      *zap.Logger
+	proxyPort   uint32
+	tcsMocks    []*models.Mock
+	configMocks []*models.Mock
+	path        string
+	mu          *sync.Mutex
+	mutex       sync.RWMutex
+	userAppCmd  *exec.Cmd
 
 	// ebpf objects and events
 	stopper  chan os.Signal
@@ -102,6 +102,14 @@ func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 		userIpAddress: make(chan string),
 		idc:           idc,
 	}
+}
+
+func (h *Hook) SetProxyPort(port uint32) {
+	h.proxyPort = port
+}
+
+func (h *Hook) GetProxyPort() uint32 {
+	return h.proxyPort
 }
 
 func (h *Hook) GetDepsSize() int {

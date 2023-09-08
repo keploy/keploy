@@ -71,7 +71,7 @@ func (conn *Tracker) IsComplete() bool {
 
 	// Check if 1 second has passed since the last activity.
 	if elapsedTime >= uint64(time.Second*2) {
-		conn.logger.Debug("Either connection is alive or request is a mutlipart/file-upload")
+		// conn.logger.Debug("Either connection is alive or request is a mutlipart/file-upload")
 		// return true
 	}
 

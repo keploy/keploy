@@ -108,6 +108,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 }
 func (ps *ProxySet) SetHook(hook *hooks.Hook) {
 	ps.hook = hook
+	ps.hook.SetProxyPort(ps.Port)
 }
 
 func getDistroInfo() string {
@@ -324,11 +325,11 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	dIDE := (appCmd == "" && len(appContainer) != 0)
 
 	var proxySet = ProxySet{
-		Port:         opt.Port,
-		IP4:          proxyAddr4,
-		IP6:          proxyAddr6,
-		logger:       logger,
-		dockerAppCmd: (dCmd || dIDE),
+		Port:             opt.Port,
+		IP4:              proxyAddr4,
+		IP6:              proxyAddr6,
+		logger:           logger,
+		dockerAppCmd:     (dCmd || dIDE),
 		PassThroughPorts: passThroughPorts,
 	}
 
@@ -549,27 +550,25 @@ func (ps *ProxySet) startProxy() {
 	}
 }
 
-func readableProxyAddress(ps *ProxySet) string {
+// func readableProxyAddress(ps *ProxySet) string {
 
-	if ps != nil {
-		port := ps.Port
-		proxyAddress := util.ToIP4AddressStr(ps.IP4)
-		return fmt.Sprintf(proxyAddress+":%v", port)
-	}
-	return ""
-}
+// 	if ps != nil {
+// 		port := ps.Port
+// 		proxyAddress := util.ToIP4AddressStr(ps.IP4)
+// 		return fmt.Sprintf(proxyAddress+":%v", port)
+// 	}
+// 	return ""
+// }
 
 func (ps *ProxySet) startDnsServer() {
 
-	proxyAddress4 := readableProxyAddress(ps)
-	ps.logger.Debug("", zap.Any("ProxyAddress in dns server", proxyAddress4))
-
+	dnsServerAddr := fmt.Sprintf(":%v", ps.Port)
 	//TODO: Need to make it configurable
 	ps.DnsServerTimeout = 1 * time.Second
 
 	handler := ps
 	server := &dns.Server{
-		Addr:      proxyAddress4,
+		Addr:      dnsServerAddr,
 		Net:       "udp",
 		Handler:   handler,
 		UDPSize:   65535,
@@ -579,7 +578,7 @@ func (ps *ProxySet) startDnsServer() {
 
 	ps.DnsServer = server
 
-	ps.logger.Info(fmt.Sprintf("starting DNS server at addr:%v", server.Addr))
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
 		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
