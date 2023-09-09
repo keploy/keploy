@@ -30,21 +30,21 @@ Golang Application
 	sudo -E keploy record -c "/path/to/user/app/binary"
 	
 	Test:
-	sudo -E keploy test -c "/path/to/user/app/binary" --delay 2
+	sudo -E keploy test -c "/path/to/user/app/binary" --startup-time 2
 
 Node Application
 	Record:
 	sudo -E keploy record -c “npm start --prefix /path/to/node/app"
 	
 	Test:
-	sudo -E keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+	sudo -E keploy test -c “npm start --prefix /path/to/node/app" --startup-time 2
 
 Java 
 	Record:
 	sudo -E keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+	sudo -E keploy test -c "java -jar /path/to/java-project/target/jar" --startup-time 2
 
 Docker
 	Alias:
@@ -55,7 +55,7 @@ Docker
 	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName --rm myApplicationImage"
 
 	Test:
-	keploy test -c "docker run -p 8080:8080  --name myContainerName --network myNetworkName --rm myApplicationImage" --delay 1
+	keploy test -c "docker run -p 8080:8080  --name myContainerName --network myNetworkName --rm myApplicationImage" --startup-time 1
 `
 
 type Example struct {

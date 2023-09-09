@@ -127,7 +127,7 @@ When using **docker-compose** to start the application, it's important to ensure
 
 
 ```shell
-keploy test -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<containerName>" --delay 20
+keploy test -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<containerName>" --startup-time 20
 ```
 
 Voilà! 🧑🏻‍💻 We have the tests with data mocks running! 🐰🎉
@@ -181,14 +181,14 @@ sudo -E keploy record -c "go run main.go"
 To run the testcases and generate a test coverage report, use this terminal command:
 
 ```zsh
-sudo -E keploy test -c "CMD_TO_RUN_APP" --delay 10
+sudo -E keploy test -c "CMD_TO_RUN_APP" --startup-time 10
 
 ```
 
 For example, if you're using a Golang framework, the command would be:
 
 ```zsh
-sudo -E keploy test -c "go run main.go" --delay 10
+sudo -E keploy test -c "go run main.go" --startup-time 10
 ```
 </details>
 
