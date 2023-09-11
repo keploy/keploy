@@ -594,8 +594,17 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		logger.Error("failed to parse the http response message", zap.Error(err))
 		return nil
 	}
+
+	//Checking if the body of the response is empty or does not exist.
+	bufReader := bufio.NewReader(respParsed.Body)
+	_, err = bufReader.Peek(2)
+	canRead := true
+	if err != nil && err != io.EOF {
+		logger.Debug("The body of the final response is empty", zap.Error(err))
+		canRead = false
+	}
 	var respBody []byte
-	if respParsed.Body != nil { // Read
+	if canRead { // Read
 		if respParsed.Header.Get("Content-Encoding") == "gzip" {
 			check := respParsed.Body
 			ok, reader := checkIfGzipped(check)
