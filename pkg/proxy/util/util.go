@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -86,7 +87,7 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, logger *
 			return nil, err
 		}
 
-		logger.Debug("the iteration for the generic response ends with responses:" + strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
+		logger.Debug("the iteration for the generic response ends with responses:"+strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
 	case err := <-errChannel:
 		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 			return nil, err
@@ -161,24 +162,31 @@ func PeekBytes(reader *bufio.Reader) ([]byte, error) {
 // It returns the content as a byte array.
 func ReadBytes(reader io.Reader) ([]byte, error) {
 	var buffer []byte
+	const maxEmptyReads = 5
+	emptyReads := 0
 
 	for {
-		// Create a temporary buffer to hold the incoming bytes
 		buf := make([]byte, 1024)
-		// rand.Seed(time.Now().UnixNano())
-
-		// Read bytes from the Reader
 		n, err := reader.Read(buf)
-		// fmt.Println("read bytes: ", n, ", err: ", err)
-		if err != nil && err != io.EOF {
-			return nil, err
+
+		if n > 0 {
+			buffer = append(buffer, buf[:n]...)
+			emptyReads = 0 // reset the counter because we got some data
 		}
 
-		// Append the bytes to the buffer
-		buffer = append(buffer, buf[:n]...)
+		if err != nil {
+			if err == io.EOF {
+				emptyReads++
+				if emptyReads >= maxEmptyReads {
+					return buffer, err // multiple EOFs in a row, probably a true EOF
+				}
+				time.Sleep(time.Millisecond * 100) // sleep before trying again
+				continue
+			}
+			return buffer, err
+		}
 
-		// If we've reached the end of the input stream, break out of the loop
-		if err == io.EOF || n != 1024 {
+		if n < len(buf) {
 			break
 		}
 	}
