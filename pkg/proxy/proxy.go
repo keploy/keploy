@@ -24,6 +24,8 @@ import (
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 
 	"github.com/cloudflare/cfssl/csr"
+	cfsslLog "github.com/cloudflare/cfssl/log"
+
 	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
@@ -465,6 +467,9 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
 	// log.Printf("This is the server name: %s", clientHello.ServerName)
 	destinationUrl = clientHello.ServerName
+
+	cfsslLog.Level = cfsslLog.LevelError
+
 	serverReq := &csr.CertificateRequest{
 		//Make the name accordng to the ip of the request
 		CN: clientHello.ServerName,
