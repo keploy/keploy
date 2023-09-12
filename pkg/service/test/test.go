@@ -46,17 +46,23 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	// ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
 	ys := yaml.NewYamlStore(t.logger)
 
+	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(path, ys, t.logger)
+	loadedHooks := hooks.NewHook(path, ys, routineId, t.logger)
+
+	// Recover from panic and gracfully shutdown
+	defer loadedHooks.Recover(routineId)
+
+	// load the ebpf hooks into the kernel
 	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
 		return false
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts)
+	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks)
 
 	// proxy update its state in the ProxyPorts map
-	ps.SetHook(loadedHooks)
+	// ps.SetHook(loadedHooks)
 
 	//Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
@@ -89,6 +95,9 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 }
 
 func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string) bool {
+
+	// Recover from panic and gracfully shutdown
+	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
 	result := true
 

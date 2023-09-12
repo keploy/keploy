@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	// "fmt"
 	// "github.com/jackc/pgproto3"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/util"
 
 	// "bytes"
@@ -134,9 +135,19 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error)
 	// read requests from client
-	go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
+		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
+	}()
 	// read response from destination
-	go ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
+		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+	}() 
 
 	isPreviousChunkRequest := false
 
@@ -197,7 +208,6 @@ func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h
 			if err != nil {
 
 				logger.Error(hooks.Emoji+"failed to write response to the pg client", zap.Error(err))
-
 
 				return err
 
