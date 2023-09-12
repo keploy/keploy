@@ -199,12 +199,12 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 
 // Handled chunked responses when transfer-encoding is given.
 func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
-	//If the transfer-encoding header is chunked
 	if transferEncodingHeader == "chunked" {
+		reader := bufio.NewReader(destConn)
 		buffer := make([]byte, 4096) // Adjust buffer size as necessary
 		for {
 			// Read chunk size line
-			sizeLine, err := bufio.NewReader(destConn).ReadString('\n')
+			sizeLine, err := reader.ReadString('\n')
 			if err != nil {
 				logger.Error("failed to read the response message from the destination server", zap.Error(err))
 				return
@@ -217,19 +217,25 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				return
 			}
 			logger.Debug("This is the chunk size[chunking]: " + strconv.FormatInt(size, 10))
-			var resp []byte
+
 			if size == 0 {
-				resp = []byte("0\r\n\r\n")
-			} else {
-				// Read chunk data
-				n, err := io.ReadFull(destConn, buffer[:size])
+				_, err = clientConn.Write([]byte("0\r\n\r\n"))
 				if err != nil {
-					// handle error
-					return
+					logger.Error("failed to write response message to the user client", zap.Error(err))
 				}
-				// Use chunk data
-				resp = buffer[:n]
+				break
 			}
+
+			var resp []byte
+			// Read chunk data
+			n, err := io.ReadFull(reader, buffer[:size])
+			if err != nil {
+				logger.Error("failed to read chunk data", zap.Error(err))
+				return
+			}
+
+			// Use chunk data
+			resp = buffer[:n]
 			logger.Debug("This is a chunk of response[chunking]: " + string(resp))
 			*finalResp = append(*finalResp, resp...)
 			_, err = clientConn.Write(resp)
@@ -237,13 +243,9 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				logger.Error("failed to write response message to the user client", zap.Error(err))
 				return
 			}
-			// Check if size is zero, indicating end of message
-			if size == 0 {
-				break
-			}
 
-			// Read trailing CRLF.(/r/n)
-			_, err = io.ReadFull(destConn, buffer[:2])
+			// Read trailing CRLF(\r\n).
+			_, err = io.ReadFull(reader, buffer[:2])
 			if err != nil {
 				logger.Error("failed to read the response message from the destination server", zap.Error(err))
 				return
@@ -251,6 +253,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 		}
 	}
 }
+
 
 func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, request []byte) {
 	logger.Debug("This is the request: " + string(request))
