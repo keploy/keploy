@@ -307,11 +307,7 @@ func read(path, name string) ([]*NetworkTrafficDoc, error) {
 func (ys *Yaml) WriteMock(mock *models.Mock) error {
 
 	if ys.MockName != "" {
-		if mock.Name != "" {
-			mock.Name = ys.MockName + "-" + mock.Name
-		} else {
-			mock.Name = ys.MockName
-		}
+		mock.Name = ys.MockName
 	}
 
 	mockYaml, err := EncodeMock(mock, ys.Logger)
@@ -341,60 +337,49 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		path = ys.MockPath
 	}
 
-	configMockName := "config"
-	if ys.MockName != "" {
-		configMockName = ys.MockName + "-config"
-	}
-
 	mockName := "mocks"
 	if ys.MockName != "" {
-		mockName = ys.MockName + "-mocks"
+		mockName = ys.MockName
 	}
 
-	configMockPath, err := ValidatePath(path + "/" + configMockName + ".yaml")
-	if err != nil {
-		return nil, nil, err
-	}
 	mockPath, err := ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if _, err := os.Stat(configMockPath); err == nil {
+	if _, err := os.Stat(mockPath); err == nil {
 		// _, err := os.Stat(filepath.Join(path, "config.yaml"))
 		// if err != nil {
 		// 	ys.Logger.Error("failed to find the config yaml", zap.Error(err))
 		// 	return nil, nil, err
 		// }
-		configYamls, err := read(path, configMockName)
+		fmt.Println("mockPath")
+		fmt.Println(path)
+		fmt.Println(mockName)
+
+		yamls, err := read(path, mockName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, nil, err
 		}
-		configMocks, err = decodeMocks(configYamls, ys.Logger)
+		mocks, err := decodeMocks(yamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, nil, err
 		}
+
+		fmt.Println("mockLen")
+		fmt.Println(len(mocks))
+
+		for _, mock := range mocks {
+			if mock.Spec.Metadata["type"] == "config" {
+				configMocks = append(configMocks, mock)
+			} else {
+				tcsMocks = append(tcsMocks, mock)
+			}
+		}
 	}
 
-	if _, err := os.Stat(mockPath); err == nil {
-		// _, err = os.Stat(filepath.Join(path, "mocks.yaml"))
-		// if err != nil {
-		// 	ys.Logger.Error("failed to find the mock yaml", zap.Error(err))
-		// 	return nil, nil, err
-		// }
-		mockYamls, err := read(path, mockName)
-		if err != nil {
-			ys.Logger.Error("failed to read the mocks from yaml for testcases", zap.Error(err), zap.Any("session", filepath.Base(path)))
-			return nil, nil, err
-		}
-		tcsMocks, err = decodeMocks(mockYamls, ys.Logger)
-		if err != nil {
-			ys.Logger.Error("failed to decode the testcase mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
-			return nil, nil, err
-		}
-	}
 	return configMocks, tcsMocks, nil
 
 }

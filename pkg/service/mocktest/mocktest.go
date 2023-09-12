@@ -1,7 +1,6 @@
 package mocktest
 
 import (
-	"fmt"
 	"sync"
 
 	"go.keploy.io/server/pkg"
@@ -27,8 +26,6 @@ func NewMockTester(logger *zap.Logger) MockTester {
 }
 
 func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
-
-	fmt.Println("hi")
 
 	models.SetMode(models.MODE_TEST)
 	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)

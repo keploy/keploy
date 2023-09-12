@@ -329,9 +329,6 @@ func ValidatePath(path string) (string, error) {
 	if strings.Contains(path, "..") {
 		return "", errors.New("invalid path: contains '..' indicating directory traversal")
 	}
-	if strings.ContainsAny(path, "/\\") {
-		return "", errors.New("invalid path: contains directory separators")
-	}
 	if strings.Count(path, ".") > 1 {
 		return "", errors.New("invalid path: contains more than one '.' character")
 	}

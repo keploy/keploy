@@ -11,7 +11,6 @@ import (
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
-	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
@@ -88,59 +87,59 @@ func IdentifyPacket(data []byte) (models.Packet, error) {
 	return nil, errors.New("unknown packet type or data too short for declared length")
 }
 
-// improve the matching by the headers , and the body of the request. Use pgproto3 library to encode and decode
-func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, string) {
-	//first check if the request is a startup packet
-	com := PostgresEncoder(reqBuff)
+// // improve the matching by the headers , and the body of the request. Use pgproto3 library to encode and decode
+// func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, string) {
+// 	//first check if the request is a startup packet
+// 	com := PostgresEncoder(reqBuff)
 
-	for idx, mock := range configMocks {
-		encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
-		// if _, ok := maps[mock.Spec.PostgresResp.Payload]; ok {
-		// 	continue
-		// }
-		if string(encoded) == string(reqBuff) || mock.Spec.PostgresReq.Payload == com {
-			log.Debug(Emoji,"matched in first loop")
+// 	for idx, mock := range configMocks {
+// 		encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
+// 		// if _, ok := maps[mock.Spec.PostgresResp.Payload]; ok {
+// 		// 	continue
+// 		// }
+// 		if string(encoded) == string(reqBuff) || mock.Spec.PostgresReq.Payload == com {
+// 			log.Debug(Emoji,"matched in first loop")
 
-			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
-			h.SetConfigMocks(configMocks)
-			return true, mock.Spec.PostgresResp.Payload
-		}
-		i := 0
-		// instead of this match with actual data
-		for i = 0; i < len(com); i++ {
-			if com[i] != mock.Spec.PostgresReq.Payload[i] {
-				break
-			}
-		}
-		if i >= 8 {
-			log.Debug(Emoji,"matched in second loop")
+// 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
+// 			h.SetConfigMocks(configMocks)
+// 			return true, mock.Spec.PostgresResp.Payload
+// 		}
+// 		i := 0
+// 		// instead of this match with actual data
+// 		for i = 0; i < len(com); i++ {
+// 			if com[i] != mock.Spec.PostgresReq.Payload[i] {
+// 				break
+// 			}
+// 		}
+// 		if i >= 8 {
+// 			log.Debug(Emoji,"matched in second loop")
 
-			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
-			h.SetConfigMocks(configMocks)
-			return true, mock.Spec.PostgresResp.Payload
-		}
-	}
+// 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
+// 			h.SetConfigMocks(configMocks)
+// 			return true, mock.Spec.PostgresResp.Payload
+// 		}
+// 	}
 
-	// fmt.Println("encoded request is :",com)
-	// from mocks
-	for _, mock := range tcsMocks {
-		encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
-		if string(encoded) == string(reqBuff) {
-			return true, mock.Spec.PostgresResp.Payload
-		}
-		i := 0
-		for i = 0; i < len(com); i++ {
-			if com[i] == mock.Spec.PostgresReq.Payload[i] {
-				log.Debug(Emoji,"matched in second loop")
-			}
-		}
-		if i >= len(com)/2 {
-			return true, mock.Spec.PostgresResp.Payload
-		}
-	}
+// 	// fmt.Println("encoded request is :",com)
+// 	// from mocks
+// 	for _, mock := range tcsMocks {
+// 		encoded, _ := PostgresDecoder(mock.Spec.PostgresReq.Payload)
+// 		if string(encoded) == string(reqBuff) {
+// 			return true, mock.Spec.PostgresResp.Payload
+// 		}
+// 		i := 0
+// 		for i = 0; i < len(com); i++ {
+// 			if com[i] == mock.Spec.PostgresReq.Payload[i] {
+// 				log.Debug(Emoji,"matched in second loop")
+// 			}
+// 		}
+// 		if i >= len(com)/2 {
+// 			return true, mock.Spec.PostgresResp.Payload
+// 		}
+// 	}
 
-	return false, ""
-}
+// 	return false, ""
+// }
 
 type Request struct {
 	Data     []byte
@@ -348,7 +347,7 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 			// bufStr := base64.StdEncoding.EncodeToString(reqBuff)
 			// }
 			encode, _ := PostgresDecoder(reqBuff.Message[0].Data)
-			if isStartupPacket(encode) && checkScram(mock.Spec.GenericResponses[requestIndex].Message[0].Data,log) { //||reqBuff.Message[0].Data == "AAAAeAADAAB1c2VyAGtlcGxveS11c2VyAGRhdGFiYXNlAGtlcGxveS10ZXN0AGNsaWVudF9lbmNvZGluZwBVVEY4AERhdGVTdHlsZQBJU08AVGltZVpvbmUARXRjL1VUQwBleHRyYV9mbG9hdF9kaWdpdHMAMgAA" {
+			if isStartupPacket(encode) && checkScram(mock.Spec.GenericResponses[requestIndex].Message[0].Data, log) { //||reqBuff.Message[0].Data == "AAAAeAADAAB1c2VyAGtlcGxveS11c2VyAGRhdGFiYXNlAGtlcGxveS10ZXN0AGNsaWVudF9lbmNvZGluZwBVVEY4AERhdGVTdHlsZQBJU08AVGltZVpvbmUARXRjL1VUQwBleHRyYV9mbG9hdF9kaWdpdHMAMgAA" {
 				log.Debug("CHANGING TO MD5 for Response")
 				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
 			}
