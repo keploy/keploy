@@ -285,11 +285,11 @@ func (h *Hook) SetKeployModeInKernel(mode uint32) {
 		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
-func (h *Hook) getProcessesByPGID(parentPID int) {
+func (h *Hook) killProcessesAndTheirChildren(parentPID int) {
 
 	pids := []int{}
 
-	h.findChildProcesses(fmt.Sprintf("%d", parentPID), &pids)
+	h.findAndCollectChildProcesses(fmt.Sprintf("%d", parentPID), &pids)
 
 	for _, childPID := range pids {
 		err := syscall.Kill(childPID, syscall.SIGKILL)
@@ -299,7 +299,7 @@ func (h *Hook) getProcessesByPGID(parentPID int) {
 	}
 }
 
-func (h *Hook) findChildProcesses(parentPID string, pids *[]int) {
+func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 
 	cmd := exec.Command("pgrep", "-P", parentPID)
 	parentIDint, err := strconv.Atoi(parentPID)
@@ -320,7 +320,7 @@ func (h *Hook) findChildProcesses(parentPID string, pids *[]int) {
 
 	for _, childPID := range childPIDs {
 		if childPID != "" {
-			h.findChildProcesses(childPID, pids)
+			h.findAndCollectChildProcesses(childPID, pids)
 		}
 	}
 }
@@ -328,7 +328,10 @@ func (h *Hook) findChildProcesses(parentPID string, pids *[]int) {
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
-		h.getProcessesByPGID(h.userAppCmd.Process.Pid)
+		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
+			return
+		}
+		h.killProcessesAndTheirChildren(h.userAppCmd.Process.Pid)
 	}
 }
 
@@ -347,6 +350,8 @@ func (h *Hook) Recover(id int) {
 func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
+		// stop the user application cmd
+		h.StopUserApplication()
 		h.logger.Info("Received signal, exiting program..")
 
 	} else {
@@ -366,9 +371,6 @@ func (h *Hook) Stop(forceStop bool) {
 			// log.Fatalf("closing ringbuf reader: %s", err)
 		}
 	}
-
-	// stop the user application cmd
-	h.StopUserApplication()
 
 	// closing all events
 	//other
