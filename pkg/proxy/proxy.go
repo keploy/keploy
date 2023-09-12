@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 
 	"github.com/cloudflare/cfssl/csr"
@@ -108,9 +109,9 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 
 	// return n, nil
 }
-func (ps *ProxySet) SetHook(hook *hooks.Hook) {
-	ps.hook = hook
-}
+// func (ps *ProxySet) SetHook(hook *hooks.Hook) {
+// 	ps.hook = hook
+// }
 
 func getDistroInfo() string {
 	osRelease, err := ioutil.ReadFile("/etc/os-release")
@@ -260,7 +261,7 @@ func containsJava(input string) bool {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -332,15 +333,24 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		logger:           logger,
 		dockerAppCmd:     (dCmd || dIDE),
 		PassThroughPorts: passThroughPorts,
+		hook: h,
 	}
 
 	if isPortAvailable(opt.Port) {
-		go proxySet.startProxy()
+		go func() {
+			defer h.Recover(pkg.GenerateRandomID())
+
+			proxySet.startProxy()
+		}() 
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
 			proxySet.logger.Debug("Running Dns Server in Test mode...")
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
-			go proxySet.startDnsServer()
+			go func() {
+				defer h.Recover(pkg.GenerateRandomID())
+
+				proxySet.startDnsServer()
+			}() 
 		}
 	} else {
 		// TODO: Release eBPF resources if failed abruptly
@@ -550,7 +560,11 @@ func (ps *ProxySet) startProxy() {
 			break
 		}
 
-		go ps.handleConnection(conn, port)
+		go func() {
+			defer ps.hook.Recover(pkg.GenerateRandomID())
+
+			ps.handleConnection(conn, port)
+		}() 
 	}
 }
 
@@ -900,7 +914,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	for _, port := range ps.PassThroughPorts {
 		if port == uint(destInfo.DestPort) {
-			err = callNext(buffer, conn, dst, logger)
+			err = ps.callNext(buffer, conn, dst, logger)
 			if err != nil {
 				logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
 				return
@@ -961,7 +975,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 }
 
-func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
+func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
 
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 
@@ -983,6 +997,8 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 		// logger.Debug("Inside connection")
 		// go routine to read from client
 		go func() {
+			defer ps.hook.Recover(pkg.GenerateRandomID())
+
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
@@ -993,6 +1009,8 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 
 		// go routine to read from destination
 		go func() {
+			defer ps.hook.Recover(pkg.GenerateRandomID())
+
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
 				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
@@ -1037,10 +1055,4 @@ func (ps *ProxySet) StopProxyServer() {
 		ps.logger.Info("Dns server stopped")
 	}
 	ps.logger.Info("proxy stopped...")
-}
-
-func generateRandomID() string {
-	rand.Seed(time.Now().UnixNano())
-	id := rand.Intn(100000) // Adjust the range as needed
-	return fmt.Sprintf("%d", id)
 }

@@ -20,6 +20,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/clients"
 	"go.keploy.io/server/pkg/clients/docker"
 	"go.keploy.io/server/pkg/hooks/connection"
@@ -49,6 +50,7 @@ type Hook struct {
 	mu            *sync.Mutex
 	mutex         sync.RWMutex
 	userAppCmd    *exec.Cmd
+	mainRoutineId int
 
 	// ebpf objects and events
 	stopper  chan os.Signal
@@ -88,7 +90,7 @@ type Hook struct {
 	idc clients.InternalDockerClient
 }
 
-func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
+func NewHook(path string, db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hook {
 	idc, err := docker.NewInternalDockerClient(logger)
 	if err != nil {
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
@@ -101,6 +103,7 @@ func NewHook(path string, db platform.TestCaseDB, logger *zap.Logger) *Hook {
 		path:          path,
 		userIpAddress: make(chan string),
 		idc:           idc,
+		mainRoutineId: mainRoutineId,
 	}
 }
 
@@ -294,6 +297,18 @@ func (h *Hook) StopUserApplication() {
 	}
 }
 
+func (h *Hook) Recover(id int) {
+
+	if r := recover(); r != nil {
+		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
+		h.Stop(true)
+		if id != h.mainRoutineId {
+			log.Panic(r)
+			os.Exit(1)
+		}
+	}
+}
+
 func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
@@ -400,6 +415,9 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 
 	connectionFactory := connection.NewFactory(time.Minute, h.logger)
 	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
 		for {
 			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB)
 			time.Sleep(1 * time.Second)
@@ -681,7 +699,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	h.closeRet = cl_
 	// defer cl_.Close()
 
-	LaunchPerfBufferConsumers(objs, connectionFactory, stopper, h.logger)
+	h.LaunchPerfBufferConsumers(connectionFactory)
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 

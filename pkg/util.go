@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/araddon/dateparse"
 	"go.keploy.io/server/pkg/models"
@@ -121,4 +123,11 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 		return nil, err
 	}
 	return response, nil
+}
+
+// Generate unique random id
+func GenerateRandomID() int {
+	rand.Seed(time.Now().UnixNano())
+	id := rand.Intn(1000000000) // Adjust the range as needed
+	return id
 }

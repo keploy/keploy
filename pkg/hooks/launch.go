@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker/client"
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 )
 
@@ -111,6 +112,9 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		errCh := make(chan error, 1)
 		go func() {
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+
 			err := h.runApp(appCmd, false)
 			errCh <- err
 		}()
@@ -150,6 +154,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	//User is using keploy with IDE when appCmd is empty
 	if len(appCmd) != 0 {
 		go func() {
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+
 			err := h.runApp(appCmd, true)
 			appErrCh <- err
 		}()
@@ -171,6 +178,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
 		// listen for the docker daemon events
 		defer func() {
 			h.logger.Debug("exiting from goroutine of docker daemon event listener")
