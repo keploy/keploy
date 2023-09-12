@@ -43,7 +43,7 @@ func setupLogger() *zap.Logger {
 	return logger
 }
 
-func customTimeEncoder (t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 	emoji := "\U0001F430" + " Keploy:"
 	enc.AppendString(emoji + " " + t.Format(time.RFC3339) + " ")
 }
@@ -91,10 +91,10 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 var rootExamples = `
 Record:
-keployV2 record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network --rm <applicationImage>" --containerName "<containerName>" --delay 1
+keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network --rm <applicationImage>" --containerName "<containerName>" --delay 1
 
 Test:
-keployV2 test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
+keploy test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
 `
 
 func checkForDebugFlag(args []string) bool {
@@ -124,7 +124,7 @@ func (r *Root) execute() {
 	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
 
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger),NewCmdExample(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {
