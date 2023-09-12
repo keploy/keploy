@@ -888,7 +888,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	destConnId := 0
 	// if models.GetMode() != models.MODE_TEST {
 	destConnId = rand.Intn(101)
-	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Dectination ConnectionID", destConnId))
+	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 	if isTLS {
 		logger.Debug("", zap.Any("isTLS", isTLS))
 		config := &tls.Config{
