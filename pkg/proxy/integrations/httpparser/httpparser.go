@@ -611,7 +611,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			logger.Error("failed to read the the http repsonse body", zap.Error(err))
+			logger.Error("failed to read the the http response body", zap.Error(err))
 			return nil
 		}
 		logger.Debug("This is the response body: " + string(respBody))
