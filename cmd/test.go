@@ -102,7 +102,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			delay, err := cmd.Flags().GetUint64("delay")
 			if delay <= 5 {
-				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start udse --delay to set custom delay\n", delay)
+				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
 				if isDockerCmd {
 					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6\n`)
 				} else {
