@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -284,16 +285,50 @@ func (h *Hook) SetKeployModeInKernel(mode uint32) {
 		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
+func (h *Hook) getProcessesByPGID(parentPID int) {
+
+	pids := []int{}
+
+	h.findChildProcesses(fmt.Sprintf("%d", parentPID), &pids)
+
+	for _, childPID := range pids {
+		err := syscall.Kill(childPID, syscall.SIGKILL)
+		if err != nil {
+			h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
+		}
+	}
+}
+
+func (h *Hook) findChildProcesses(parentPID string, pids *[]int) {
+
+	cmd := exec.Command("pgrep", "-P", parentPID)
+	parentIDint, err := strconv.Atoi(parentPID)
+	if err != nil {
+		h.logger.Error("failed to convert parent PID to int", zap.Any("error converting parent PID to int", err.Error()))
+	}
+
+	*pids = append(*pids, parentIDint)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	outputStr := string(output)
+	childPIDs := strings.Split(outputStr, "\n")
+	childPIDs = childPIDs[:len(childPIDs)-1]
+
+	for _, childPID := range childPIDs {
+		if childPID != "" {
+			h.findChildProcesses(childPID, pids)
+		}
+	}
+}
 
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
-		err := h.userAppCmd.Process.Kill()
-		if err != nil {
-			h.logger.Error("failed to stop user application", zap.Error(err))
-		} else {
-			h.logger.Info("User application stopped successfully...")
-		}
+		h.getProcessesByPGID(h.userAppCmd.Process.Pid)
 	}
 }
 
