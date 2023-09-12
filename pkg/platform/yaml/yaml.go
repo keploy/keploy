@@ -346,6 +346,20 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		configMockName = ys.MockName + "-config"
 	}
 
+	mockName := "mocks"
+	if ys.MockName != "" {
+		mockName = ys.MockName + "-mocks"
+	}
+
+	err := ValidatePath(path + "/" + configMockName + ".yaml")
+	if err != nil {
+		return nil, nil, err
+	}
+	err = ValidatePath(path + "/" + mockName + ".yaml")
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if _, err := os.Stat(path + "/" + configMockName + ".yaml"); err == nil {
 		// _, err := os.Stat(filepath.Join(path, "config.yaml"))
 		// if err != nil {
@@ -362,11 +376,6 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, nil, err
 		}
-	}
-
-	mockName := "mocks"
-	if ys.MockName != "" {
-		mockName = ys.MockName + "-mocks"
 	}
 
 	if _, err := os.Stat(path + "/" + mockName + ".yaml"); err == nil {

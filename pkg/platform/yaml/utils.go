@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -282,7 +283,7 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 				Logger.Debug("failed to convert the index string to integer", zap.Error(err))
 				continue
 			}
-			if indx < fileIndx + 1 {
+			if indx < fileIndx+1 {
 				indx = fileIndx + 1
 			}
 		}
@@ -321,4 +322,18 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 		}
 	}
 	return indices, nil
+}
+
+func ValidatePath(path string) error {
+	// Validate the input to prevent directory traversal attack
+	if strings.Contains(path, "..") {
+		return errors.New("invalid path: contains '..' indicating directory traversal")
+	}
+	if strings.ContainsAny(path, "/\\") {
+		return errors.New("invalid path: contains directory separators")
+	}
+	if strings.Count(path, ".") > 1 {
+		return errors.New("invalid path: contains more than one '.' character")
+	}
+	return nil
 }
