@@ -109,6 +109,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 
 	// return n, nil
 }
+
 // func (ps *ProxySet) SetHook(hook *hooks.Hook) {
 // 	ps.hook = hook
 // }
@@ -333,7 +334,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		logger:           logger,
 		dockerAppCmd:     (dCmd || dIDE),
 		PassThroughPorts: passThroughPorts,
-		hook: h,
+		hook:             h,
 	}
 
 	if isPortAvailable(opt.Port) {
@@ -341,7 +342,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			defer h.Recover(pkg.GenerateRandomID())
 
 			proxySet.startProxy()
-		}() 
+		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
 			proxySet.logger.Debug("Running Dns Server in Test mode...")
@@ -350,7 +351,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 				defer h.Recover(pkg.GenerateRandomID())
 
 				proxySet.startDnsServer()
-			}() 
+			}()
 		}
 	} else {
 		// TODO: Release eBPF resources if failed abruptly
@@ -564,7 +565,7 @@ func (ps *ProxySet) startProxy() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 
 			ps.handleConnection(conn, port)
-		}() 
+		}()
 	}
 }
 
@@ -736,18 +737,20 @@ func isTLSHandshake(data []byte) bool {
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
-func handleTLSConnection(conn net.Conn) (net.Conn, error) {
+func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	// fmt.Println(Emoji, "Handling TLS connection from", conn.RemoteAddr().String())
 	//Load the CA certificate and private key
 
 	var err error
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
-		log.Fatalf(Emoji, "Failed to parse CA private key: %v", err)
+		ps.logger.Error(Emoji+"Failed to parse CA private key: ", zap.Error(err))
+		return &dns.Transfer{}, err
 	}
 	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
-		log.Fatalf(Emoji, "Failed to parse CA certificate: %v", err)
+		ps.logger.Error(Emoji+"Failed to parse CA certificate: ", zap.Error(err))
+		return &dns.Transfer{}, err
 	}
 
 	// Create a TLS configuration
@@ -767,7 +770,8 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	err = tlsConn.Handshake()
 
 	if err != nil {
-		log.Panic(Emoji+"failed to complete TLS handshake with the client with error: ", err)
+		ps.logger.Error(Emoji+"failed to complete TLS handshake with the client with error: ", zap.Error(err))
+		return &dns.Transfer{}, err
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
@@ -837,7 +841,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		logger: ps.logger,
 	}
 	if isTLS {
-		conn, err = handleTLSConnection(conn)
+		conn, err = ps.handleTLSConnection(conn)
 		if err != nil {
 			ps.logger.Error("failed to handle TLS connection", zap.Error(err))
 			return
