@@ -324,16 +324,16 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	return indices, nil
 }
 
-func ValidatePath(path string) error {
+func ValidatePath(path string) (string, error) {
 	// Validate the input to prevent directory traversal attack
 	if strings.Contains(path, "..") {
-		return errors.New("invalid path: contains '..' indicating directory traversal")
+		return "", errors.New("invalid path: contains '..' indicating directory traversal")
 	}
 	if strings.ContainsAny(path, "/\\") {
-		return errors.New("invalid path: contains directory separators")
+		return "", errors.New("invalid path: contains directory separators")
 	}
 	if strings.Count(path, ".") > 1 {
-		return errors.New("invalid path: contains more than one '.' character")
+		return "", errors.New("invalid path: contains more than one '.' character")
 	}
-	return nil
+	return path, nil
 }

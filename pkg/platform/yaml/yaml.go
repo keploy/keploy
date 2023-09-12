@@ -351,16 +351,16 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		mockName = ys.MockName + "-mocks"
 	}
 
-	err := ValidatePath(path + "/" + configMockName + ".yaml")
+	configMockPath, err := ValidatePath(path + "/" + configMockName + ".yaml")
 	if err != nil {
 		return nil, nil, err
 	}
-	err = ValidatePath(path + "/" + mockName + ".yaml")
+	mockPath, err := ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if _, err := os.Stat(path + "/" + configMockName + ".yaml"); err == nil {
+	if _, err := os.Stat(configMockPath); err == nil {
 		// _, err := os.Stat(filepath.Join(path, "config.yaml"))
 		// if err != nil {
 		// 	ys.Logger.Error("failed to find the config yaml", zap.Error(err))
@@ -378,7 +378,7 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		}
 	}
 
-	if _, err := os.Stat(path + "/" + mockName + ".yaml"); err == nil {
+	if _, err := os.Stat(mockPath); err == nil {
 		// _, err = os.Stat(filepath.Join(path, "mocks.yaml"))
 		// if err != nil {
 		// 	ys.Logger.Error("failed to find the mock yaml", zap.Error(err))
