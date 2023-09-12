@@ -25,6 +25,8 @@ import (
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 
 	"github.com/cloudflare/cfssl/csr"
+	cfsslLog "github.com/cloudflare/cfssl/log"
+
 	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
@@ -325,11 +327,11 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	dIDE := (appCmd == "" && len(appContainer) != 0)
 
 	var proxySet = ProxySet{
-		Port:         opt.Port,
-		IP4:          proxyAddr4,
-		IP6:          proxyAddr6,
-		logger:       logger,
-		dockerAppCmd: (dCmd || dIDE),
+		Port:             opt.Port,
+		IP4:              proxyAddr4,
+		IP6:              proxyAddr6,
+		logger:           logger,
+		dockerAppCmd:     (dCmd || dIDE),
 		PassThroughPorts: passThroughPorts,
 		hook: h,
 	}
@@ -475,6 +477,9 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
 	// log.Printf("This is the server name: %s", clientHello.ServerName)
 	destinationUrl = clientHello.ServerName
+
+	cfsslLog.Level = cfsslLog.LevelError
+
 	serverReq := &csr.CertificateRequest{
 		//Make the name accordng to the ip of the request
 		CN: clientHello.ServerName,
@@ -757,8 +762,12 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	// fmt.Println("before the parsed req: ", string(req))
 
 	// _, err = tlsConn.Read(req)
+
+	// Perform the handshake
+	err = tlsConn.Handshake()
+
 	if err != nil {
-		log.Panic(Emoji+"failed reading the request message with error: ", err)
+		log.Panic(Emoji+"failed to complete TLS handshake with the client with error: ", err)
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
@@ -837,7 +846,28 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	connEstablishedAt := time.Now()
 	rand.Seed(time.Now().UnixNano())
 	clientConnId := rand.Intn(101)
-	buffer, err := util.ReadBytes(conn)
+
+	// attempt to read the conn until buffer is either filled or connection is closed
+	var buffer []byte
+	buffer, err = util.ReadBytes(conn)
+	if err != nil && err != io.EOF {
+		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+		return
+	}
+
+	if err == io.EOF && len(buffer) == 0 {
+		ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
+		return
+	}
+
+	ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
+	// buffer, err := util.ReadBytes(conn)
+	// // handle if the buffer is empty
+	// if len(buffer) == 0 {
+	// 	ps.logger.Debug("received empty buffer, so retrying reading buffer", zap.Error(err), zap.Any("proxy port", port))
+	// 	buffer, err = util.ReadBytes(conn)
+	// 	return
+	// }
 	ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
 	readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
@@ -860,7 +890,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	destConnId = rand.Intn(101)
 	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Dectination ConnectionID", destConnId))
 	if isTLS {
-	logger.Debug("", zap.Any("isTLS", isTLS))
+		logger.Debug("", zap.Any("isTLS", isTLS))
 		config := &tls.Config{
 			InsecureSkipVerify: false,
 			ServerName:         destinationUrl,
