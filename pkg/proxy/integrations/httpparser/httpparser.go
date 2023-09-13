@@ -68,12 +68,11 @@ func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(request,  clientConn,  destConn, logger))
-		mocksList, err := encodeOutgoingHttp(request, clientConn, destConn, logger)
+		_, err := encodeOutgoingHttp(request, clientConn, destConn, logger, h)
 		if err != nil {
 			logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
-			h.AppendMocks(mocksList)
 
 		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(request, clientConn, destConn, logger))
 	case models.MODE_TEST:
@@ -201,7 +200,7 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
 	if transferEncodingHeader == "chunked" {
 		reader := bufio.NewReader(destConn)
-		buffer := make([]byte, 4096) // Adjust buffer size as necessary
+		buffer := make([]byte, 4096) // Buffer size can be adjusted according to need.
 		for {
 			// Read chunk size line
 			sizeLine, err := reader.ReadString('\n')
@@ -209,7 +208,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				logger.Error("failed to read the response message from the destination server", zap.Error(err))
 				return
 			}
-
+			logger.Debug("This is the chunk size[chunking]: " + strings.TrimSpace(sizeLine))
 			// Parse chunk size
 			size, err := strconv.ParseInt(strings.TrimSpace(sizeLine), 16, 64)
 			if err != nil {
@@ -217,7 +216,6 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				return
 			}
 			logger.Debug("This is the chunk size[chunking]: " + strconv.FormatInt(size, 10))
-
 			if size == 0 {
 				_, err = clientConn.Write([]byte("0\r\n\r\n"))
 				if err != nil {
@@ -238,6 +236,8 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 			resp = buffer[:n]
 			logger.Debug("This is a chunk of response[chunking]: " + string(resp))
 			*finalResp = append(*finalResp, resp...)
+			//Prepend the size to the response.
+			resp = append([]byte(fmt.Sprintf("%x\r\n", size)), resp...)
 			_, err = clientConn.Write(resp)
 			if err != nil {
 				logger.Error("failed to write response message to the user client", zap.Error(err))
@@ -253,7 +253,6 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 		}
 	}
 }
-
 
 func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, request []byte) {
 	logger.Debug("This is the request: " + string(request))
@@ -508,171 +507,177 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger) (*models.Mock, error) {
-	defer destConn.Close()
+func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook) (*models.Mock, error) {
 	var resp []byte
 	var finalResp []byte
 	var finalReq []byte
 	var err error
-	// write the request message to the actual destination server
+	defer destConn.Close()
+	//Writing the request to the server.
 	_, err = destConn.Write(request)
-	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err))
-		return nil, err
-	}
-	logger.Debug("This is the initial request: " + string(request))
-	finalReq = append(finalReq, request...)
-	//check if the expect : 100-continue header is present
-	lines := strings.Split(string(request), "\n")
-	var expectHeader string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "Expect:") {
-			expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
-			break
-		}
-	}
-	if expectHeader == "100-continue" {
-		//Read if the response from the server is 100-continue
-		resp, err = util.ReadBytes(destConn)
 		if err != nil {
-			logger.Error("failed to read the response message from the user client", zap.Error(err))
+			logger.Error("failed to write request message to the destination server", zap.Error(err))
 			return nil, err
 		}
-		// write the response message to the client
+		logger.Debug("This is the initial request: " + string(request))
+		finalReq = append(finalReq, request...)
+	for {
+		//check if the expect : 100-continue header is present
+		lines := strings.Split(string(finalReq), "\n")
+		var expectHeader string
+		for _, line := range lines {
+			if strings.HasPrefix(line, "Expect:") {
+				expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
+				break
+			}
+		}
+		if expectHeader == "100-continue" {
+			//Read if the response from the server is 100-continue
+			resp, err = util.ReadBytes(destConn)
+			if err != nil {
+				logger.Error("failed to read the response message from the server after 100-continue request", zap.Error(err))
+				return nil, err
+			}
+			// write the response message to the client
+			_, err = clientConn.Write(resp)
+			if err != nil {
+				logger.Error("failed to write response message to the user client", zap.Error(err))
+				return nil, err
+			}
+			logger.Debug("This is the response from the server after the expect header" + string(resp))
+			if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
+				logger.Error("failed to get the 100 continue response from the user client")
+				return nil, err
+			}
+			//Reading the request buffer again
+			request, err = util.ReadBytes(clientConn)
+			if err != nil {
+				logger.Error("failed to read the request message from the user client", zap.Error(err))
+				return nil, err
+			}
+			// write the request message to the actual destination server
+			_, err = destConn.Write(request)
+			if err != nil {
+				logger.Error("failed to write request message to the destination server", zap.Error(err))
+				return nil, err
+			}
+			finalReq = append(finalReq, request...)
+		}
+		handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
+		// read the response from the actual server
+		resp, err = util.ReadBytes(destConn)
+		if err != nil {
+			if err == io.EOF {
+				logger.Debug("Response complete, exiting the loop.")
+				break
+			} else {
+				logger.Error("failed to read the response message from the destination server", zap.Error(err))
+				return nil, err
+			}
+		}
+		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
 			logger.Error("failed to write response message to the user client", zap.Error(err))
 			return nil, err
 		}
-		logger.Debug("This is the response from the server after the expect header" + string(resp))
-		if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
-			logger.Error("failed to get the 100 continue response from the user client")
-			return nil, err
-		}
-		//Reading the request buffer again
-		request, err = util.ReadBytes(clientConn)
+		finalResp = append(finalResp, resp...)
+		logger.Debug("This is the initial response: " + string(resp))
+		handleChunkedResponses(&finalResp, clientConn, destConn, logger, resp)
+		logger.Debug("This is the final response: " + string(finalResp))
+		var req *http.Request
+		// converts the request message buffer to http request
+		req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
 		if err != nil {
-			logger.Error("failed to read the request message from the user client", zap.Error(err))
+			logger.Error("failed to parse the http request message", zap.Error(err))
 			return nil, err
 		}
-		// write the request message to the actual destination server
-		_, err = destConn.Write(request)
-		if err != nil {
-			logger.Error("failed to write request message to the destination server", zap.Error(err))
-			return nil, err
-		}
-		finalReq = append(finalReq, request...)
-	}
-	handleChunkedRequests(&finalReq, clientConn, destConn, logger, request)
-	// read the response from the actual server
-	resp, err = util.ReadBytes(destConn)
-	if err != nil {
-		logger.Error("failed to read the response message from the destination server", zap.Error(err))
-		return nil, err
-	}
-	// write the response message to the user client
-	_, err = clientConn.Write(resp)
-	if err != nil {
-		logger.Error("failed to write response message to the user client", zap.Error(err))
-		return nil, err
-	}
-	finalResp = append(finalResp, resp...)
-	logger.Debug("This is the initial response: " + string(resp))
-	handleChunkedResponses(&finalResp, clientConn, destConn, logger, resp)
-	logger.Debug("This is the final response: " + string(finalResp))
-	var req *http.Request
-	// converts the request message buffer to http request
-	req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
-	if err != nil {
-		logger.Error("failed to parse the http request message", zap.Error(err))
-		return nil, err
-	}
-	var reqBody []byte
-	if req.Body != nil { // Read
-		var err error
-		reqBody, err = io.ReadAll(req.Body)
-		if err != nil {
-			// TODO right way to log errors
-			logger.Error("failed to read the http request body", zap.Error(err))
-			return nil, err
-		}
-	}
-	// converts the response message buffer to http response
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResp)), req)
-	if err != nil {
-		logger.Error("failed to parse the http response message", zap.Error(err))
-		return nil, err
-	}
-	var respBody []byte
-	//Checking if the body of the response is empty or does not exist.
-	bufReader := bufio.NewReader(respParsed.Body)
-	_, err = bufReader.Peek(2)
-	// canRead := true
-	if err != nil && err != io.EOF {
-		logger.Debug("The body of the final response is empty", zap.Error(err))
-		// canRead = false
-		respParsed.Body = nil
-	}
-
-	if respParsed.Body != nil { // Read
-		if respParsed.Header.Get("Content-Encoding") == "gzip" {
-			check := respParsed.Body
-			ok, reader := checkIfGzipped(check)
-			logger.Debug("", zap.Any("isGzipped", ok))
-			if ok {
-				gzipReader, err := gzip.NewReader(reader)
-				if err != nil {
-					logger.Error("failed to create a gzip reader", zap.Error(err))
-					return nil, err
-				}
-				respParsed.Body = gzipReader
+		var reqBody []byte
+		if req.Body != nil { // Read
+			var err error
+			reqBody, err = io.ReadAll(req.Body)
+			if err != nil {
+				// TODO right way to log errors
+				logger.Error("failed to read the http request body", zap.Error(err))
+				return nil, err
 			}
 		}
-		respBody, err = io.ReadAll(respParsed.Body)
+		// converts the response message buffer to http response
+		respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResp)), req)
 		if err != nil {
-			logger.Error("failed to read the the http response body", zap.Error(err))
+			logger.Error("failed to parse the http response message", zap.Error(err))
 			return nil, err
 		}
-		logger.Debug("This is the response body: " + string(respBody))
-	}
-	// store the request and responses as mocks
-	meta := map[string]string{
-		"name":      "Http",
-		"type":      models.HttpClient,
-		"operation": req.Method,
-	}
-	// httpMock := &models.Mock{
-	// 	Version: models.V1Beta2,
-	// 	Name:    "",
-	// 	Kind:    models.HTTP,
-	// }
+		var respBody []byte
+		//Checking if the body of the response is empty or does not exist.
+		bufReader := bufio.NewReader(respParsed.Body)
+		_, err = bufReader.Peek(2)
+		// canRead := true
+		if err != nil && err != io.EOF {
+			logger.Debug("The body of the final response is empty", zap.Error(err))
+			// canRead = false
+			respParsed.Body = nil
+		}
 
-	// // encode the message into yaml
-	// err = httpMock.Spec.Encode(&spec.HttpSpec{
-	// 		Metadata: meta,
-	// 		Request: spec.HttpReqYaml{
-	// 			Method:     spec.Method(req.Method),
-	// 			ProtoMajor: req.ProtoMajor,
-	// 			ProtoMinor: req.ProtoMinor,
-	// 			URL:        req.URL.String(),
-	// 			Header:     pkg.ToYamlHttpHeader(req.Header),
-	// 			Body:       string(reqBody),
-	// 			URLParams: pkg.UrlParams(req),
-	// 		},
-	// 		Response: spec.HttpRespYaml{
-	// 			StatusCode: resp.StatusCode,
-	// 			Header:     pkg.ToYamlHttpHeader(resp.Header),
-	// 			Body: string(respBody),
-	// 		},
-	// })
-	// if err != nil {
-	// 	logger.Error("failed to encode the http messsage into the yaml")
-	// 	return nil
-	// }
+		if respParsed.Body != nil { // Read
+			if respParsed.Header.Get("Content-Encoding") == "gzip" {
+				check := respParsed.Body
+				ok, reader := checkIfGzipped(check)
+				logger.Debug("", zap.Any("isGzipped", ok))
+				if ok {
+					gzipReader, err := gzip.NewReader(reader)
+					if err != nil {
+						logger.Error("failed to create a gzip reader", zap.Error(err))
+						return nil, err
+					}
+					respParsed.Body = gzipReader
+				}
+			}
+			respBody, err = io.ReadAll(respParsed.Body)
+			if err != nil {
+				logger.Error("failed to read the the http response body", zap.Error(err))
+				return nil, err
+			}
+			logger.Debug("This is the response body: " + string(respBody))
+		}
+		// store the request and responses as mocks
+		meta := map[string]string{
+			"name":      "Http",
+			"type":      models.HttpClient,
+			"operation": req.Method,
+		}
+		// httpMock := &models.Mock{
+		// 	Version: models.V1Beta2,
+		// 	Name:    "",
+		// 	Kind:    models.HTTP,
+		// }
 
-	// return httpMock
+		// // encode the message into yaml
+		// err = httpMock.Spec.Encode(&spec.HttpSpec{
+		// 		Metadata: meta,
+		// 		Request: spec.HttpReqYaml{
+		// 			Method:     spec.Method(req.Method),
+		// 			ProtoMajor: req.ProtoMajor,
+		// 			ProtoMinor: req.ProtoMinor,
+		// 			URL:        req.URL.String(),
+		// 			Header:     pkg.ToYamlHttpHeader(req.Header),
+		// 			Body:       string(reqBody),
+		// 			URLParams: pkg.UrlParams(req),
+		// 		},
+		// 		Response: spec.HttpRespYaml{
+		// 			StatusCode: resp.StatusCode,
+		// 			Header:     pkg.ToYamlHttpHeader(resp.Header),
+		// 			Body: string(respBody),
+		// 		},
+		// })
+		// if err != nil {
+		// 	logger.Error("failed to encode the http messsage into the yaml")
+		// 	return nil
+		// }
 
-		return &models.Mock{
+		// return httpMock
+
+		h.AppendMocks(&models.Mock{
 			Version: models.V1Beta2,
 			Name:    "mocks",
 			Kind:    models.HTTP,
@@ -694,7 +699,29 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 				},
 				Created: time.Now().Unix(),
 			},
-		}, nil
+		})
+		finalReq = []byte("")
+		finalResp = []byte("")
+
+		finalReq, err = util.ReadBytes(clientConn)
+		if err != nil {
+			logger.Debug("failed to read the request message from the user client", zap.Error(err))
+			logger.Debug("This was the last response from the server: " + string(resp))
+			break
+		}
+		// write the request message to the actual destination server
+		_, err = destConn.Write(finalReq)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}else{
+			logger.Info("failed to write request message to the destination server", zap.Error(err))
+			return nil, err
+			}
+		}
+
+	}
+	return nil, nil
 
 	// if val, ok := Deps[string(port)]; ok {
 	// keploy.Deps = append(keploy.Deps, httpMock)
