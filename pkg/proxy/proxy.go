@@ -118,6 +118,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	// return n, nil
 }
 
+
 // func (ps *ProxySet) SetHook(hook *hooks.Hook) {
 // 	ps.hook = hook
 // }
@@ -256,6 +257,8 @@ func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32, isJavaServe bo
 
 		logger.Info("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
 		logger.Info("Successfully imported CA", zap.Any("", cmdOutput))
+	} else {
+		logger.Debug("Java is not installed on the system")
 	}
 }
 
@@ -577,27 +580,25 @@ func (ps *ProxySet) startProxy() {
 	}
 }
 
-func readableProxyAddress(ps *ProxySet) string {
+// func readableProxyAddress(ps *ProxySet) string {
 
-	if ps != nil {
-		port := ps.Port
-		proxyAddress := util.ToIP4AddressStr(ps.IP4)
-		return fmt.Sprintf(proxyAddress+":%v", port)
-	}
-	return ""
-}
+// 	if ps != nil {
+// 		port := ps.Port
+// 		proxyAddress := util.ToIP4AddressStr(ps.IP4)
+// 		return fmt.Sprintf(proxyAddress+":%v", port)
+// 	}
+// 	return ""
+// }
 
 func (ps *ProxySet) startDnsServer() {
 
-	proxyAddress4 := readableProxyAddress(ps)
-	ps.logger.Debug("", zap.Any("ProxyAddress in dns server", proxyAddress4))
-
+	dnsServerAddr := fmt.Sprintf(":%v", ps.Port)
 	//TODO: Need to make it configurable
 	ps.DnsServerTimeout = 1 * time.Second
 
 	handler := ps
 	server := &dns.Server{
-		Addr:      proxyAddress4,
+		Addr:      dnsServerAddr,
 		Net:       "udp",
 		Handler:   handler,
 		UDPSize:   65535,
@@ -607,7 +608,7 @@ func (ps *ProxySet) startDnsServer() {
 
 	ps.DnsServer = server
 
-	ps.logger.Info(fmt.Sprintf("starting DNS server at addr:%v", server.Addr))
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
 		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
