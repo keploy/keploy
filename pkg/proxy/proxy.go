@@ -245,6 +245,8 @@ func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32, isJavaServe bo
 
 		logger.Info("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
 		logger.Info("Successfully imported CA", zap.Any("", cmdOutput))
+	} else {
+		logger.Debug("Java is not installed on the system")
 	}
 }
 
@@ -845,7 +847,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	destConnId = rand.Intn(101)
 	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Dectination ConnectionID", destConnId))
 	if isTLS {
-	logger.Debug("", zap.Any("isTLS", isTLS))
+		logger.Debug("", zap.Any("isTLS", isTLS))
 		config := &tls.Config{
 			InsecureSkipVerify: false,
 			ServerName:         destinationUrl,
