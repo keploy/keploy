@@ -41,7 +41,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint) {
+func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64) {
 
 	if port == 0 {
 		port = defaultPort
@@ -92,6 +92,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 			TestReportPath: testReportPath,
 			Delay:          Delay,
 			AppPid:         pid,
+			ApiTimeout:     apiTimeout,
 		},
 	}))
 
