@@ -3,6 +3,7 @@ package grpcparser
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
@@ -61,6 +62,11 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		defer wg.Done()
 		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder)
 		if err != nil {
+			// check for EOF error
+			if err == io.EOF {
+				logger.Debug("EOF error received from client. Closing connection")
+				return
+			}
 			logger.Error("failed to transfer frame from client to server", zap.Error(err))
 		}
 	}()
@@ -92,6 +98,9 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 	for {
 		frame, err := framer.ReadFrame()
 		if err != nil {
+			if err == io.EOF {
+				return err
+			}
 			return fmt.Errorf("error reading frame %v", err)
 		}
 		//PrintFrame(frame)
