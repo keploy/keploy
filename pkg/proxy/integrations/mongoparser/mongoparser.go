@@ -32,7 +32,7 @@ func IsOutgoingMongo(buffer []byte) bool {
 	return int(messageLength) == len(buffer)
 }
 
-func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func ProcessOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		logger.Debug("the outgoing mongo in record mode")
@@ -44,7 +44,7 @@ func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cl
 	}
 }
 
-func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{requestBuffer}
 	for {
@@ -319,7 +319,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 }
 
 // func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) []*models.Mock {
-func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	rand.Seed(time.Now().UnixNano())
 	// clientConnId := rand.Intn(101)
 	for {

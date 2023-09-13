@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
@@ -45,6 +46,13 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+// idCounter is used to generate random ID for each request
+var idCounter int64 = -1
+
+func getNextID() int64 {
+	return atomic.AddInt64(&idCounter, 1)
+}
 
 type ProxySet struct {
 	IP4              uint32
@@ -849,7 +857,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 	connEstablishedAt := time.Now()
 	rand.Seed(time.Now().UnixNano())
-	clientConnId := rand.Intn(101)
+	clientConnId := getNextID()
 
 	// attempt to read the conn until buffer is either filled or connection is closed
 	var buffer []byte
@@ -889,9 +897,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	//Dialing for tls connection
-	destConnId := 0
 	// if models.GetMode() != models.MODE_TEST {
-	destConnId = rand.Intn(101)
+	destConnId := getNextID()
 	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 	if isTLS {
 		logger.Debug("", zap.Any("isTLS", isTLS))
