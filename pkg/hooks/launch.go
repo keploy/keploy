@@ -25,12 +25,6 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
-var (
-	dockerClient     *client.Client
-	appDockerNetwork string
-	appContainerName string
-)
-
 const (
 	// TODO : Remove hard-coded container name.
 	KeployContainerName = "keploy-v2"
@@ -44,11 +38,6 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	}
 
 	if appCmd == "" && len(appContainer) != 0 {
-
-		if len(appNetwork) == 0 {
-			h.logger.Error("please provide docker network name when running with IDE")
-			return fmt.Errorf(Emoji + "docker network name not found")
-		}
 
 		h.logger.Debug("User Application is running inside docker using IDE")
 		//search for the container and process it
@@ -70,32 +59,27 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
 				return fmt.Errorf(Emoji + "container name not found")
 			}
-
-			if len(appNetwork) == 0 {
-				h.logger.Error("please provide docker network name in case of docker-compose file", zap.Any("AppCmd", appCmd))
-				return fmt.Errorf(Emoji + "docker network name not found")
-			}
 			h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork))
 		} else if cmd == "docker" {
 			var err error
-			appContainerName, appDockerNetwork, err = parseDockerCommand(appCmd)
-			h.logger.Debug("", zap.String("Parsed container name", appContainerName))
-			h.logger.Debug("", zap.String("Parsed docker network", appDockerNetwork))
+			cont, net, err := parseDockerCommand(appCmd)
+			h.logger.Debug("", zap.String("Parsed container name", cont))
+			h.logger.Debug("", zap.String("Parsed docker network", net))
 
 			if err != nil {
-				h.logger.Error("failed to parse container or network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+				h.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
 				return err
 			}
 
-			if len(appContainer) == 0 {
-
-				appContainer = appContainerName
+			if len(appContainer) != 0 && appContainer != cont {
+				h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
 			}
 
-			if len(appNetwork) == 0 {
-
-				appNetwork = appDockerNetwork
+			if len(appNetwork) != 0 && appNetwork != net {
+				h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker networ:(%v)", appNetwork, net))
 			}
+
+			appContainer, appNetwork = cont, net
 		}
 
 		err := h.processDockerEnv(appCmd, appContainer, appNetwork)
@@ -148,7 +132,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
-	dockerClient := makeDockerClient()
+	dockerClient := h.idc
 	appErrCh := make(chan error, 1)
 
 	//User is using keploy with IDE when appCmd is empty
@@ -217,10 +201,10 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
 				if e.Type == events.ContainerEventType && e.Action == "create" {
-					// Fetch container details
+					// Fetch container details by inspecting using container ID to check if container is created
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
 					if err != nil {
-						h.logger.Debug("failed to inspect container", zap.Error(err))
+						h.logger.Debug("failed to inspect container by container Id", zap.Error(err))
 						continue
 					}
 
@@ -240,46 +224,111 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 							h.logger.Error("failed to find the user application container", zap.Any("appContainer", appContainer))
 							break
 						}
-						inspect, err := dockerClient.ContainerInspect(context.Background(), appContainer)
+
+						//Inspecting the application container again since the ip and pid takes some time to be linked to the container.
+						containerDetails, err := dockerClient.ContainerInspect(context.Background(), appContainer)
 						if err != nil {
-							// h.logger.Debug(fmt.Sprintf("failed to get inspect:%v", inspect), zap.Error(err))
+							// h.logger.Debug(fmt.Sprintf("failed to get inspect:%v by containerName", containerDetails), zap.Error(err))
 							continue
 						}
 
-						h.logger.Debug("checking for container pid", zap.Any("inspect.State.Pid", inspect.State.Pid))
-						if inspect.State.Pid != 0 {
-							h.logger.Debug("", zap.Any("inspect.State.Pid", inspect.State.Pid))
-
-							if inspect.NetworkSettings != nil && inspect.NetworkSettings.Networks != nil {
-								networkDetails, ok := inspect.NetworkSettings.Networks[appNetwork]
-								if ok && networkDetails != nil {
-									h.logger.Debug(fmt.Sprintf("the ip of the docker container: %v", networkDetails.IPAddress))
-									if models.GetMode() == models.MODE_TEST {
-										h.logger.Debug("setting container ip address")
-										containerIp = networkDetails.IPAddress
-										h.logger.Debug("receiver channel received the ip address", zap.Any("containerIp found", containerIp))
-									}
-								} else {
-									h.logger.Debug("Network details for given network not found", zap.Any("network", appNetwork))
-								}
-							} else {
-								h.logger.Debug("Network settings or networks not available in inspect data")
-							}
-							containerPid = inspect.State.Pid
+						h.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", containerDetails.State.Pid))
+						if containerDetails.State.Pid != 0 {
+							h.logger.Debug("", zap.Any("containerDetails.State.Pid", containerDetails.State.Pid))
+							containerPid = containerDetails.State.Pid
 							containerFound = true
-							h.logger.Debug("container found...")
+							h.logger.Debug(fmt.Sprintf("user container:(%v) found", appContainer))
 							break
 						}
 					}
+
 					if containerFound {
 						h.logger.Debug(fmt.Sprintf("the user application container pid: %v", containerPid))
-						inode := getInodeNumber([15]int32{int32(containerPid)})
+						inode := getInodeNumber(containerPid)
 						h.logger.Debug("", zap.Any("user inode", inode))
+
 						// send the inode of the container to ebpf hooks to filter the network traffic
 						err := h.SendNameSpaceId(0, inode)
 						if err == nil {
 							h.logger.Debug("application inode sent to kernel successfully", zap.Any("user inode", inode), zap.Any("time", time.Now().UnixNano()))
 						}
+
+						// inject the network to the keploy container
+						if containerDetails.NetworkSettings != nil {
+							h.logger.Debug(fmt.Sprintf("Network details of %v container:%v", appContainer, containerDetails.NetworkSettings.Networks))
+
+							err = h.idc.ConnectContainerToNetworks(KeployContainerName, containerDetails.NetworkSettings.Networks)
+							if err != nil {
+								dockerErrCh <- fmt.Errorf("could not inject keploy container to the application's network with error [%v]", err)
+								return
+							}
+
+							//sending new proxy ip to kernel, since dynamically injected new network has different ip for keploy.
+							kInspect, err := dockerClient.ContainerInspect(context.Background(), KeployContainerName)
+							if err != nil {
+								h.logger.Error(fmt.Sprintf("failed to get inspect keploy container:%v", kInspect))
+								dockerErrCh <- err
+								return
+							}
+
+							var newProxyIpString string
+							keployNetworks := kInspect.NetworkSettings.Networks
+							//Here we considering that the application would use only one custom network.
+							//TODO: handle for application having multiple custom networks
+							for networkName, networkSettings := range keployNetworks {
+								if networkName != "bridge" {
+									appNetwork = networkName
+									newProxyIpString = networkSettings.IPAddress
+									h.logger.Debug(fmt.Sprintf("Network Name: %s, New Proxy IP: %s\n", networkName, networkSettings.IPAddress))
+								}
+							}
+							proxyIp, err := ConvertIPToUint32(newProxyIpString)
+							if err != nil {
+								dockerErrCh <- fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", newProxyIpString)
+								return
+							}
+
+							proxyPort := h.GetProxyPort()
+							err = h.SendProxyInfo(proxyIp, proxyPort, [4]uint32{0000, 0000, 0000, 0001})
+							if err != nil {
+								h.logger.Error("failed to send new proxy ip to kernel", zap.Any("NewProxyIp", proxyIp))
+								dockerErrCh <- err
+								return
+							}
+
+							h.logger.Debug(fmt.Sprintf("New proxy ip sent to kernel:%v", proxyIp))
+						} else {
+							dockerErrCh <- fmt.Errorf("NetworkSettings not found for the %v container", appContainer)
+							return
+						}
+
+						//inspecting it again to get the ip of the container used in test mode.
+						containerDetails, err := dockerClient.ContainerInspect(context.Background(), appContainer)
+						if err != nil {
+							h.logger.Error(fmt.Sprintf("failed to get inspect app container:%v to retrive the ip", containerDetails))
+							dockerErrCh <- err
+							return
+						}
+
+						// find the application container ip in case of test mode
+						if containerDetails.NetworkSettings != nil && containerDetails.NetworkSettings.Networks != nil {
+							networkDetails, ok := containerDetails.NetworkSettings.Networks[appNetwork]
+							if ok && networkDetails != nil {
+								h.logger.Debug(fmt.Sprintf("the ip of the docker container: %v", networkDetails.IPAddress))
+								if models.GetMode() == models.MODE_TEST {
+									h.logger.Debug("setting container ip address")
+									containerIp = networkDetails.IPAddress
+									h.logger.Debug("receiver channel received the ip address", zap.Any("containerIp found", containerIp))
+								}
+							} else {
+								dockerErrCh <- fmt.Errorf("Network details for %v network not found", appNetwork)
+								return
+							}
+						} else {
+							dockerErrCh <- fmt.Errorf("Network settings or networks not available in inspect data")
+							return
+						}
+
 						done <- true
 						if models.GetMode() == models.MODE_TEST {
 							h.userIpAddress <- containerIp
@@ -294,24 +343,12 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	select {
 	case err := <-dockerErrCh:
 		if err != nil {
-			h.logger.Error("failed to find the user application container", zap.Any("err", err.Error()))
+			h.logger.Error("failed to process the user application container or network", zap.Any("err", err.Error()))
 			return err
 		}
 	case <-done:
-		h.logger.Info("container found and processed successfully", zap.Any("time", time.Now().UnixNano()))
+		h.logger.Info("container & network found and processed successfully", zap.Any("time", time.Now().UnixNano()))
 		// No error received yet, continue with further flow
-	}
-
-	// Now that the application has started, inject the Keploy container into the application's network.
-	networks, err := h.idc.ExtractNetworksForContainer(appContainer)
-	if err != nil {
-		return fmt.Errorf("could not extract network names for the application container: %s with error [%v]",
-			appContainer, err)
-	}
-
-	err = h.idc.ConnectContainerToNetworks(KeployContainerName, networks)
-	if err != nil {
-		return fmt.Errorf("could not inject keploy container to the application's network with error [%v]", err)
 	}
 
 	h.logger.Debug("processDockerEnv executed successfully")
@@ -390,7 +427,7 @@ func parseDockerCommand(dockerCmd string) (string, string, error) {
 	networkNameRegex := regexp.MustCompile(networkNamePattern)
 	networkNameMatches := networkNameRegex.FindStringSubmatch(dockerCmd)
 	if len(networkNameMatches) < 3 {
-		return "", "", fmt.Errorf("failed to parse network name")
+		return containerName, "", nil
 	}
 	networkName := networkNameMatches[2]
 
@@ -406,21 +443,19 @@ func makeDockerClient() *client.Client {
 	return cli
 }
 
-func getInodeNumber(pids [15]int32) uint64 {
+func getInodeNumber(pid int) uint64 {
 
-	for _, pid := range pids {
-		filepath := filepath.Join("/proc", strconv.Itoa(int(pid)), "ns", "pid")
+	filepath := filepath.Join("/proc", strconv.Itoa(pid), "ns", "pid")
 
-		f, err := os.Stat(filepath)
-		if err != nil {
-			fmt.Errorf("%v failed to get the inode number or namespace Id:", Emoji, err)
-			continue
-		}
-		// Dev := (f.Sys().(*syscall.Stat_t)).Dev
-		Ino := (f.Sys().(*syscall.Stat_t)).Ino
-		if Ino != 0 {
-			return Ino
-		}
+	f, err := os.Stat(filepath)
+	if err != nil {
+		fmt.Errorf("%v failed to get the inode number or namespace Id:", Emoji, err)
+		return 0
+	}
+	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
+	Ino := (f.Sys().(*syscall.Stat_t)).Ino
+	if Ino != 0 {
+		return Ino
 	}
 	return 0
 }
