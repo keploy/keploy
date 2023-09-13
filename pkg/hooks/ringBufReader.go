@@ -10,9 +10,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/ringbuf"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
@@ -24,57 +24,72 @@ var PerfEventReaders []*perf.Reader
 var RingEventReaders []*ringbuf.Reader
 
 // LaunchPerfBufferConsumers launches socket events
-func LaunchPerfBufferConsumers(objs bpfObjects, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
+func (h *Hook) LaunchPerfBufferConsumers(connectionFactory *connection.Factory) {
 
-	launchSocketOpenEvent(objs.SocketOpenEvents, connectionFactory, stopper, logger)
-	launchSocketDataEvent(objs.SocketDataEvents, connectionFactory, stopper, logger)
-	launchSocketCloseEvent(objs.SocketCloseEvents, connectionFactory, stopper, logger)
+	h.launchSocketOpenEvent(connectionFactory)
+	h.launchSocketDataEvent(connectionFactory)
+	h.launchSocketCloseEvent(connectionFactory)
 }
 
-func launchSocketOpenEvent(openEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
+func (h *Hook) launchSocketOpenEvent(connectionFactory *connection.Factory) {
 
 	// Open a perf event reader from userspace on the PERF_EVENT_ARRAY map
 	// described in the eBPF C program.
-	reader, err := perf.NewReader(openEventMap, os.Getpagesize())
+	reader, err := perf.NewReader(h.objects.SocketOpenEvents, os.Getpagesize())
 	if err != nil {
-		logger.Error("failed to create perf event reader of socketOpenEvent", zap.Error(err))
+		h.logger.Error("failed to create perf event reader of socketOpenEvent", zap.Error(err))
 		return
 	}
 	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
-	go socketOpenEventCallback(reader, connectionFactory, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
+		socketOpenEventCallback(reader, connectionFactory, h.logger)
+	}()
 }
 
-func launchSocketDataEvent(dataEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
+func (h *Hook) launchSocketDataEvent(connectionFactory *connection.Factory) {
 
 	// Open a ringbuf event reader from userspace on the RING_BUF map
 	// described in the eBPF C program.
-	reader, err := ringbuf.NewReader(dataEventMap)
+	reader, err := ringbuf.NewReader(h.objects.SocketDataEvents)
 	if err != nil {
-		logger.Error("failed to create ring buffer of socketDataEvent", zap.Error(err))
+		h.logger.Error("failed to create ring buffer of socketDataEvent", zap.Error(err))
 		return
 	}
 	// defer reader.Close()
 	RingEventReaders = append(RingEventReaders, reader)
 
-	go socketDataEventCallback(reader, connectionFactory, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
+		socketDataEventCallback(reader, connectionFactory, h.logger)
+	}()
 
 }
 
-func launchSocketCloseEvent(closeEventMap *ebpf.Map, connectionFactory *connection.Factory, stopper chan os.Signal, logger *zap.Logger) {
+func (h *Hook) launchSocketCloseEvent(connectionFactory *connection.Factory) {
 
 	// Open a perf event reader from userspace on the PERF_EVENT_ARRAY map
 	// described in the eBPF C program.
-	reader, err := perf.NewReader(closeEventMap, os.Getpagesize())
+	reader, err := perf.NewReader(h.objects.SocketCloseEvents, os.Getpagesize())
 	if err != nil {
-		logger.Error("failed to create perf event reader of socketCloseEvent", zap.Error(err))
+		h.logger.Error("failed to create perf event reader of socketCloseEvent", zap.Error(err))
 		return
 	}
 	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
-	go socketCloseEventCallback(reader, connectionFactory, logger)
+	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
+		socketCloseEventCallback(reader, connectionFactory, h.logger)
+	}()
 }
 
 var eventAttributesSize = int(unsafe.Sizeof(structs.SocketDataEvent{}))

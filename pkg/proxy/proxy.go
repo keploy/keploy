@@ -20,10 +20,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 
 	"github.com/cloudflare/cfssl/csr"
+	cfsslLog "github.com/cloudflare/cfssl/log"
+
 	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
@@ -42,6 +46,13 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+// idCounter is used to generate random ID for each request
+var idCounter int64 = -1
+
+func getNextID() int64 {
+	return atomic.AddInt64(&idCounter, 1)
+}
 
 type ProxySet struct {
 	IP4              uint32
@@ -106,10 +117,11 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 
 	// return n, nil
 }
-func (ps *ProxySet) SetHook(hook *hooks.Hook) {
-	ps.hook = hook
-	ps.hook.SetProxyPort(ps.Port)
-}
+
+
+// func (ps *ProxySet) SetHook(hook *hooks.Hook) {
+// 	ps.hook = hook
+// }
 
 func getDistroInfo() string {
 	osRelease, err := ioutil.ReadFile("/etc/os-release")
@@ -261,7 +273,7 @@ func containsJava(input string) bool {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
 
 	// assign default values if not provided
 	distro := getDistroInfo()
@@ -333,15 +345,24 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		logger:           logger,
 		dockerAppCmd:     (dCmd || dIDE),
 		PassThroughPorts: passThroughPorts,
+		hook:             h,
 	}
 
 	if isPortAvailable(opt.Port) {
-		go proxySet.startProxy()
+		go func() {
+			defer h.Recover(pkg.GenerateRandomID())
+
+			proxySet.startProxy()
+		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
 			proxySet.logger.Debug("Running Dns Server in Test mode...")
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
-			go proxySet.startDnsServer()
+			go func() {
+				defer h.Recover(pkg.GenerateRandomID())
+
+				proxySet.startDnsServer()
+			}()
 		}
 	} else {
 		// TODO: Release eBPF resources if failed abruptly
@@ -468,6 +489,9 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
 	// log.Printf("This is the server name: %s", clientHello.ServerName)
 	destinationUrl = clientHello.ServerName
+
+	cfsslLog.Level = cfsslLog.LevelError
+
 	serverReq := &csr.CertificateRequest{
 		//Make the name accordng to the ip of the request
 		CN: clientHello.ServerName,
@@ -548,7 +572,11 @@ func (ps *ProxySet) startProxy() {
 			break
 		}
 
-		go ps.handleConnection(conn, port)
+		go func() {
+			defer ps.hook.Recover(pkg.GenerateRandomID())
+
+			ps.handleConnection(conn, port)
+		}()
 	}
 }
 
@@ -718,18 +746,20 @@ func isTLSHandshake(data []byte) bool {
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
-func handleTLSConnection(conn net.Conn) (net.Conn, error) {
+func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	// fmt.Println(Emoji, "Handling TLS connection from", conn.RemoteAddr().String())
 	//Load the CA certificate and private key
 
 	var err error
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
-		log.Fatalf(Emoji, "Failed to parse CA private key: %v", err)
+		ps.logger.Error(Emoji+"Failed to parse CA private key: ", zap.Error(err))
+		return &dns.Transfer{}, err
 	}
 	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
-		log.Fatalf(Emoji, "Failed to parse CA certificate: %v", err)
+		ps.logger.Error(Emoji+"Failed to parse CA certificate: ", zap.Error(err))
+		return &dns.Transfer{}, err
 	}
 
 	// Create a TLS configuration
@@ -744,8 +774,13 @@ func handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	// fmt.Println("before the parsed req: ", string(req))
 
 	// _, err = tlsConn.Read(req)
+
+	// Perform the handshake
+	err = tlsConn.Handshake()
+
 	if err != nil {
-		log.Panic(Emoji+"failed reading the request message with error: ", err)
+		ps.logger.Error(Emoji+"failed to complete TLS handshake with the client with error: ", zap.Error(err))
+		return &dns.Transfer{}, err
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
@@ -815,7 +850,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		logger: ps.logger,
 	}
 	if isTLS {
-		conn, err = handleTLSConnection(conn)
+		conn, err = ps.handleTLSConnection(conn)
 		if err != nil {
 			ps.logger.Error("failed to handle TLS connection", zap.Error(err))
 			return
@@ -823,8 +858,29 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 	connEstablishedAt := time.Now()
 	rand.Seed(time.Now().UnixNano())
-	clientConnId := rand.Intn(101)
-	buffer, err := util.ReadBytes(conn)
+	clientConnId := getNextID()
+
+	// attempt to read the conn until buffer is either filled or connection is closed
+	var buffer []byte
+	buffer, err = util.ReadBytes(conn)
+	if err != nil && err != io.EOF {
+		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+		return
+	}
+
+	if err == io.EOF && len(buffer) == 0 {
+		ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
+		return
+	}
+
+	ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
+	// buffer, err := util.ReadBytes(conn)
+	// // handle if the buffer is empty
+	// if len(buffer) == 0 {
+	// 	ps.logger.Debug("received empty buffer, so retrying reading buffer", zap.Error(err), zap.Any("proxy port", port))
+	// 	buffer, err = util.ReadBytes(conn)
+	// 	return
+	// }
 	ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
 	readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
@@ -842,10 +898,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	//Dialing for tls connection
-	destConnId := 0
 	// if models.GetMode() != models.MODE_TEST {
-	destConnId = rand.Intn(101)
-	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Dectination ConnectionID", destConnId))
+	destConnId := getNextID()
+	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 	if isTLS {
 		logger.Debug("", zap.Any("isTLS", isTLS))
 		config := &tls.Config{
@@ -871,7 +926,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	for _, port := range ps.PassThroughPorts {
 		if port == uint(destInfo.DestPort) {
-			err = callNext(buffer, conn, dst, logger)
+			err = ps.callNext(buffer, conn, dst, logger)
 			if err != nil {
 				logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
 				return
@@ -932,7 +987,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 }
 
-func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
+func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
 
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 
@@ -954,6 +1009,8 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 		// logger.Debug("Inside connection")
 		// go routine to read from client
 		go func() {
+			defer ps.hook.Recover(pkg.GenerateRandomID())
+
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
@@ -964,6 +1021,8 @@ func callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.L
 
 		// go routine to read from destination
 		go func() {
+			defer ps.hook.Recover(pkg.GenerateRandomID())
+
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
 				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
@@ -1008,10 +1067,4 @@ func (ps *ProxySet) StopProxyServer() {
 		ps.logger.Info("Dns server stopped")
 	}
 	ps.logger.Info("proxy stopped...")
-}
-
-func generateRandomID() string {
-	rand.Seed(time.Now().UnixNano())
-	id := rand.Intn(100000) // Adjust the range as needed
-	return fmt.Sprintf("%d", id)
 }

@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"strconv"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -31,7 +32,7 @@ func IsOutgoingMongo(buffer []byte) bool {
 	return int(messageLength) == len(buffer)
 }
 
-func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func ProcessOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		logger.Debug("the outgoing mongo in record mode")
@@ -43,7 +44,7 @@ func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cl
 	}
 }
 
-func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{requestBuffer}
 	for {
@@ -254,7 +255,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 						case wiremessage.OpMsg:
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 								continue
-							} 
+							}
 							if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
 								continue
 							}
@@ -272,9 +273,9 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				}
 			}
 			if bestMatchIndex == -1 {
-				requestBuffer, err = util.Passthrough(clientConn, destConn, requestBuffers, logger)
+				requestBuffer, err = util.Passthrough(clientConn, destConn, requestBuffers, h.Recover, logger)
 				if err != nil {
-					return 
+					return
 				}
 				continue
 			}
@@ -310,7 +311,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			logger.Debug(fmt.Sprintf("the length of tcsMocks after filtering matched: %v\n", len(tcsMocks)))
 		}
 		logger.Debug("the length of the requestBuffer after matching: " + strconv.Itoa(len(requestBuffer)) + strconv.Itoa(len(requestBuffers[0])))
-		if len(requestBuffers)>0 && len(requestBuffer) == len(requestBuffers[0]) {
+		if len(requestBuffers) > 0 && len(requestBuffer) == len(requestBuffers[0]) {
 			requestBuffer = []byte("read form client connection")
 		}
 		requestBuffers = [][]byte{}
@@ -318,7 +319,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 }
 
 // func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) []*models.Mock {
-func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	rand.Seed(time.Now().UnixNano())
 	// clientConnId := rand.Intn(101)
 	for {
@@ -459,7 +460,12 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			for i := 0; ; i++ {
 				// fmt.Printf("the more_to_come is a heartbeat?: %v", isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message))
 				if i == 0 && isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
-					go recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+					go func() {
+						// Recover from panic and gracefully shutdown
+						defer h.Recover(pkg.GenerateRandomID())
+
+						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+					}()
 				}
 				// fmt.Println("into the more_to_come", logStr)
 				tmpStr := ""
@@ -516,7 +522,12 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			// fmt.Println("exiting the more_to_come")
 		}
 
-		go recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+		go func() {
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+
+			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+		}()
 		requestBuffer = []byte("read form client connection")
 
 	}

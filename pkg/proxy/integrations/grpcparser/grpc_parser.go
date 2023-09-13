@@ -10,6 +10,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 )
@@ -54,6 +55,9 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	serverSideDecoder := NewDecoder()
 	wg.Add(1)
 	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
 		defer wg.Done()
 		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder)
 		if err != nil {
@@ -65,6 +69,9 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	clientSideDecoder := NewDecoder()
 	wg.Add(1)
 	go func() {
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+
 		defer wg.Done()
 		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder)
 		if err != nil {
