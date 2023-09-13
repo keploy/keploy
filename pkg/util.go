@@ -78,6 +78,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 
 	// Creating the client and disabling redirects
 	client := &http.Client{
+		Timeout: time.Second * 5,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
