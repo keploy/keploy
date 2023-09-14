@@ -82,9 +82,6 @@ Using **Binary** (<img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891
 
 Keploy can be utilized on Linux natively and through WSL on Windows.
 
-
-<summary>Native Installation Guide</summary>
-
 ### Download the Keploy Binary.
 
 
@@ -95,8 +92,6 @@ curl --silent --location "https://github.com/keploy/keploy/releases/latest/downl
 
 sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
-
----
 
 **ARM Architecture**
 
@@ -131,8 +126,6 @@ For example, if you're using a Golang framework, the command would be:
 ```zsh
 sudo -E keploy test -c "go run main.go" --delay 10
 ```
-</details>
-
 
 <img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Docker Installation </img>
 -
