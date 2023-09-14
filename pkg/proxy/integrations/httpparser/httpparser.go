@@ -199,56 +199,32 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 // Handled chunked responses when transfer-encoding is given.
 func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
 	if transferEncodingHeader == "chunked" {
-		reader := bufio.NewReader(destConn)
-		buffer := make([]byte, 4096) // Buffer size can be adjusted according to need.
 		for {
-			// Read chunk size line
-			sizeLine, err := reader.ReadString('\n')
+			//Set deadline of 5 seconds
+			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			resp, err := util.ReadBytes(destConn)
 			if err != nil {
-				logger.Error("failed to read the response message from the destination server", zap.Error(err))
-				return
-			}
-			logger.Debug("This is the chunk size[chunking]: " + strings.TrimSpace(sizeLine))
-			// Parse chunk size
-			size, err := strconv.ParseInt(strings.TrimSpace(sizeLine), 16, 64)
-			if err != nil {
-				logger.Error("failed to parse the chunk size", zap.Error(err))
-				return
-			}
-			logger.Debug("This is the chunk size[chunking]: " + strconv.FormatInt(size, 10))
-			if size == 0 {
-				_, err = clientConn.Write([]byte("0\r\n\r\n"))
-				if err != nil {
-					logger.Error("failed to write response message to the user client", zap.Error(err))
+				//Check if the connection closed.
+				if err == io.EOF {
+					continue
+				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					//Check if the deadline is reached.
+					logger.Info(Emoji + "Stopped getting buffer from the destination server")
+					break
+				} else {
+					logger.Error(Emoji+"failed to read the response message from the destination server", zap.Error(err))
+					return
 				}
-				break
 			}
-
-			var resp []byte
-			// Read chunk data
-			n, err := io.ReadFull(reader, buffer[:size])
-			if err != nil {
-				logger.Error("failed to read chunk data", zap.Error(err))
-				return
-			}
-
-			// Use chunk data
-			resp = buffer[:n]
-			logger.Debug("This is a chunk of response[chunking]: " + string(resp))
 			*finalResp = append(*finalResp, resp...)
-			//Prepend the size to the response.
-			resp = append([]byte(fmt.Sprintf("%x\r\n", size)), resp...)
+			// write the response message to the user client
 			_, err = clientConn.Write(resp)
 			if err != nil {
-				logger.Error("failed to write response message to the user client", zap.Error(err))
+				logger.Error(Emoji+"failed to write response message to the user client", zap.Error(err))
 				return
 			}
-
-			// Read trailing CRLF(\r\n).
-			_, err = io.ReadFull(reader, buffer[:2])
-			if err != nil {
-				logger.Error("failed to read the response message from the destination server", zap.Error(err))
-				return
+			if string(resp) == "0\r\n\r\n" {
+				break
 			}
 		}
 	}
@@ -515,12 +491,12 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	defer destConn.Close()
 	//Writing the request to the server.
 	_, err = destConn.Write(request)
-		if err != nil {
-			logger.Error("failed to write request message to the destination server", zap.Error(err))
-			return nil, err
-		}
-		logger.Debug("This is the initial request: " + string(request))
-		finalReq = append(finalReq, request...)
+	if err != nil {
+		logger.Error("failed to write request message to the destination server", zap.Error(err))
+		return nil, err
+	}
+	logger.Debug("This is the initial request: " + string(request))
+	finalReq = append(finalReq, request...)
 	for {
 		//check if the expect : 100-continue header is present
 		lines := strings.Split(string(finalReq), "\n")
@@ -610,19 +586,21 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 		var respBody []byte
 		//Checking if the body of the response is empty or does not exist.
-		bufReader := bufio.NewReader(respParsed.Body)
-		_, err = bufReader.Peek(2)
+		// bufReader := bufio.NewReader(respParsed.Body)
+		// check, err := bufReader.Peek(2)
+		// logger.Debug("This is the check: " + string(check))
 		// canRead := true
-		if err != nil && err != io.EOF {
-			logger.Debug("The body of the final response is empty", zap.Error(err))
-			// canRead = false
-			respParsed.Body = nil
-		}
+		// if err != nil && err != io.EOF {
+		// 	logger.Debug("The body of the final response is empty", zap.Error(err))
+		// 	// canRead = false
+		// 	respParsed.Body = nil
+		// }
 
 		if respParsed.Body != nil { // Read
 			if respParsed.Header.Get("Content-Encoding") == "gzip" {
 				check := respParsed.Body
 				ok, reader := checkIfGzipped(check)
+				logger.Debug("The body is gzip or not" + strconv.FormatBool(ok))
 				logger.Debug("", zap.Any("isGzipped", ok))
 				if ok {
 					gzipReader, err := gzip.NewReader(reader)
@@ -705,8 +683,10 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 
 		finalReq, err = util.ReadBytes(clientConn)
 		if err != nil {
-			logger.Debug("failed to read the request message from the user client", zap.Error(err))
-			logger.Debug("This was the last response from the server: " + string(resp))
+			if err != io.EOF {
+				logger.Debug("failed to read the request message from the user client", zap.Error(err))
+				logger.Debug("This was the last response from the server: " + string(resp))
+			}
 			break
 		}
 		// write the request message to the actual destination server
@@ -715,8 +695,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			if err == io.EOF {
 				break
 			}else{
-			logger.Info("failed to write request message to the destination server", zap.Error(err))
-			return nil, err
+				logger.Info("failed to write request message to the destination server", zap.Error(err))
+				return nil, err
 			}
 		}
 
