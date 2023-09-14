@@ -77,6 +77,56 @@ Keploy ensures that redundant testcases are not generated.
 
 # Quick Installation
 
+Using **Binary** (<img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="20" height="20"> Linux</img> / <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="20" height="20"> WSL</img>)
+-
+
+Keploy can be utilized on Linux natively and through WSL on Windows.
+
+### Download the Keploy Binary.
+
+
+**AMD Architecture**
+
+```zsh
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+
+**ARM Architecture**
+
+```zsh
+curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
+```
+
+### Capturing Testcases
+To initiate the recording of API calls, execute this command in your terminal:
+
+```zsh
+sudo -E keploy record -c "CMD_TO_RUN_APP"
+```
+For instance, if you're using a simple Golang program, the command would resemble:
+
+```zsh
+sudo -E keploy record -c "go run main.go"
+```
+
+### Running Testcases
+To run the testcases and generate a test coverage report, use this terminal command:
+
+```zsh
+sudo -E keploy test -c "CMD_TO_RUN_APP" --delay 10
+
+```
+
+For example, if you're using a Golang framework, the command would be:
+
+```zsh
+sudo -E keploy test -c "go run main.go" --delay 10
+```
+
 <img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Docker Installation </img>
 -
 
@@ -133,64 +183,6 @@ keploy test -c "Docker_CMD_to_run_user_container --network keploy-network" --con
 Voilà! 🧑🏻‍💻 We have the tests with data mocks running! 🐰🎉
 
 You'll be able to see the test-cases that ran with the results report on the console as well locally in the `testReport` directory.
-
-Using **Binary** (<img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="20" height="20"> Linux</img> / <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="20" height="20"> WSL</img>)
--
-
-Keploy can be utilized on Linux natively and through WSL on Windows.
-
-<details>
-<summary>Native Installation Guide</summary>
-
-### Download the Keploy Binary.
-
-
-**AMD Architecture**
-
-```zsh
-curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
-```
-
----
-
-<details>
-<summary> ARM Architecture </summary>
-
-```zsh
-curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
-
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
-```
-</details>
-
-### Capturing Testcases
-To initiate the recording of API calls, execute this command in your terminal:
-
-```zsh
-sudo -E keploy record -c "CMD_TO_RUN_APP"
-```
-For instance, if you're using a simple Golang program, the command would resemble:
-
-```zsh
-sudo -E keploy record -c "go run main.go"
-```
-
-### Running Testcases
-To run the testcases and generate a test coverage report, use this terminal command:
-
-```zsh
-sudo -E keploy test -c "CMD_TO_RUN_APP" --delay 10
-
-```
-
-For example, if you're using a Golang framework, the command would be:
-
-```zsh
-sudo -E keploy test -c "go run main.go" --delay 10
-```
-</details>
 
 ## 🤔 Questions?
 Reach out to us. We're here to help!
