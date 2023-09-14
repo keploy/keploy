@@ -318,7 +318,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 	tempCertPath, err := ExtractCertToTemp()
 	if err != nil {
-		logger.Error(Emoji+"Failed to extract certificate to temp folder: %v", zap.Any("failed to extract certificate", err))
+		logger.Error(Emoji+"Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
 	}
 
 	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
