@@ -153,6 +153,22 @@ func isJavaInstalled() bool {
 	return err == nil
 }
 
+//to extract ca certificate to temp
+func ExtractCertToTemp() (string, error) {
+	tempFile, err := ioutil.TempFile("", "ca.crt")
+	if err != nil {
+		return "", err
+	}
+	defer tempFile.Close()
+
+	_, err = tempFile.Write(caCrt)
+	if err != nil {
+		return "", err
+	}
+
+	return tempFile.Name(), nil
+}
+
 // JavaCAExists checks if the CA is already installed in the specified Java keystore
 func JavaCAExists(alias, storepass, cacertsPath string) bool {
 	cmd := exec.Command("keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
@@ -299,6 +315,16 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
+
+	tempCertPath, err := ExtractCertToTemp()
+	if err != nil {
+		log.Fatalf(Emoji+"Failed to extract certificate to temp folder: %v", err)
+	}
+
+	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
+	if err != nil {
+		log.Fatalf(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", err)
+	}
 	// log.Printf("This is the command2: %v", cmd)
 	err = cmd.Run()
 	if err != nil {
