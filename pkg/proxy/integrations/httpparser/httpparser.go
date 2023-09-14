@@ -203,11 +203,9 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 			//Set deadline of 5 seconds
 			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			resp, err := util.ReadBytes(destConn)
-			if err != nil {
+			if err != nil && err != io.EOF {
 				//Check if the connection closed.
-				if err == io.EOF {
-					continue
-				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					//Check if the deadline is reached.
 					logger.Info(Emoji + "Stopped getting buffer from the destination server")
 					break
@@ -400,7 +398,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 	}
 
 	if len(eligibleMock) == 0 {
-		logger.Error( "Didn't match any prexisting http mock")
+		logger.Error("Didn't match any prexisting http mock")
 		util.Passthrough(clienConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
 		return
 	}
@@ -694,7 +692,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		if err != nil {
 			if err == io.EOF {
 				break
-			}else{
+			} else {
 				logger.Info("failed to write request message to the destination server", zap.Error(err))
 				return nil, err
 			}
