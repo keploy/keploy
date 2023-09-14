@@ -57,10 +57,8 @@ func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
-
 	case models.MODE_TEST:
-		// decodeOutgoingPSQL(requestBuffer, clientConn, destConn, h, logger)
-		decodeStreamOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
 
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
@@ -121,8 +119,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	}()
 
 	isPreviousChunkRequest := false
-
-	// ticker := time.NewTicker(1 * time.Second)
 	logger.Debug("the iteration for the pg request starts", zap.Any("pgReqs", len(pgRequests)), zap.Any("pgResps", len(pgResponses)))
 	for {
 
@@ -217,161 +213,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	}
 }
 
-func encodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 
-	// backend := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn, clientConn)
-	// frontend := pgproto3.NewFrontend(pgproto3.NewChunkReader(destConn), destConn, destConn)
-	pgRequests := []models.GenericPayload{}
-
-	logger.Debug("Encoding outgoing pg call from postgres parser !!")
-	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
-	// }
-	if bufStr != "" {
-
-		pgRequests = append(pgRequests, models.GenericPayload{
-
-			Origin: models.FromClient,
-			Message: []models.OutputBinary{
-				{
-					Type: "binary",
-					Data: bufStr,
-				},
-			},
-		})
-	}
-	_, err := destConn.Write(requestBuffer)
-	logger.Debug("Writing the request buffer to the destination server", zap.Any("requestBuffer", string(requestBuffer)))
-	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err))
-		return err
-	}
-
-	pgResponses := []models.GenericPayload{}
-
-	clientBufferChannel := make(chan []byte)
-	destBufferChannel := make(chan []byte)
-	errChannel := make(chan error)
-	// read requests from client
-	go func() {
-		// Recover from panic and gracefully shutdown
-		defer h.Recover(pkg.GenerateRandomID())
-
-		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
-	}()
-	// read response from destination
-	go func() {
-		// Recover from panic and gracefully shutdown
-		defer h.Recover(pkg.GenerateRandomID())
-
-		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
-	}()
-
-	isPreviousChunkRequest := false
-
-	// if clientBufferChannel is selected write to destination
-	// if destBufferChannel is selected write to client
-	for {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-		select {
-		case <-sigChan:
-			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
-				logger.Debug("the iteration for the postgres request ends with no of pgReqs:" + string(len(pgRequests)) + " and pgResps: " + string(len(pgResponses)))
-				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
-					Name:    "mocks",
-					Kind:    models.Postgres,
-					Spec: models.MockSpec{
-						PostgresRequests:  pgRequests,
-						PostgresResponses: pgResponses,
-					},
-				})
-				pgRequests = []models.GenericPayload{}
-				pgResponses = []models.GenericPayload{}
-			}
-		case buffer := <-clientBufferChannel:
-			// Write the request message to the destination
-			_, err := destConn.Write(buffer)
-			if err != nil {
-				logger.Error("failed to write request message to the destination server", zap.Error(err))
-				return err
-			}
-			// msg2, err := frontend.Receive(buffer)
-			// if err != nil {
-			// 	logger.Error(hooks.Emoji+"failed to read the response message from the destination server", zap.Error(err))
-			// 	// return err
-			// }
-			// println("msg2 is ", msg2)
-			// logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
-
-			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
-				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
-					Name:    "mocks",
-					Kind:    models.Postgres,
-					Spec: models.MockSpec{
-						PostgresRequests:  pgRequests,
-						PostgresResponses: pgResponses,
-					},
-				})
-				pgRequests = []models.GenericPayload{}
-				pgResponses = []models.GenericPayload{}
-
-			}
-			bufStr := base64.StdEncoding.EncodeToString(buffer)
-			// }
-			if bufStr != "" {
-
-				pgRequests = append(pgRequests, models.GenericPayload{
-
-					Origin: models.FromClient,
-					Message: []models.OutputBinary{
-						{
-							Type: "binary",
-							Data: bufStr,
-						},
-					},
-				})
-			}
-
-			isPreviousChunkRequest = true
-		case buffer := <-destBufferChannel:
-			// Write the response message to the client
-			_, err := clientConn.Write(buffer)
-			if err != nil {
-
-				logger.Error(hooks.Emoji+"failed to write response to the pg client", zap.Error(err))
-
-				return err
-
-			}
-
-			bufStr := base64.StdEncoding.EncodeToString(buffer)
-			// }
-			if bufStr != "" {
-
-				pgResponses = append(pgResponses, models.GenericPayload{
-
-					Origin: models.FromServer,
-					Message: []models.OutputBinary{
-						{
-							Type: "binary",
-							Data: bufStr,
-						},
-					},
-				})
-			}
-			// logger.Debug("the iteration for the pg response ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
-			isPreviousChunkRequest = false
-		case err := <-errChannel:
-			return err
-		}
-
-	}
-}
 
 // This is the decoding function for the postgres wiremessage
-func decodeStreamOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 	pgRequests := [][]byte{requestBuffer}
 	tcsMocks := h.GetTcsMocks()
 	// change auth to md5 instead of scram
