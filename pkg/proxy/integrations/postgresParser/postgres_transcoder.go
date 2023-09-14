@@ -2,6 +2,7 @@ package postgresparser
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -75,4 +76,31 @@ func printRegularPacketDetails(packet []byte) {
 	// Print the message payload (for simplicity, the payload is printed as a string)
 	payload := string(packet[5:])
 	fmt.Printf("Payload: %s\n", payload)
+}
+
+func decodeBuffer(buffer []byte) (*PSQLMessage, error) {
+	if len(buffer) < 6 {
+		return nil, errors.New("invalid buffer length")
+	}
+
+	psqlMessage := &PSQLMessage{
+		Field1: "test",
+		Field2: 123,
+	}
+
+	// Decode the ID (4 bytes)
+	psqlMessage.ID = binary.BigEndian.Uint32(buffer[:4])
+
+	// Decode the payload length (2 bytes)
+	payloadLength := binary.BigEndian.Uint16(buffer[4:6])
+
+	// Check if the buffer contains the full payload
+	if len(buffer[6:]) < int(payloadLength) {
+		return nil, errors.New("incomplete payload in buffer")
+	}
+
+	// Extract the payload from the buffer
+	psqlMessage.Payload = buffer[6 : 6+int(payloadLength)]
+
+	return psqlMessage, nil
 }

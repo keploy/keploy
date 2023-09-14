@@ -99,7 +99,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 		// 	continue
 		// }
 		if string(encoded) == string(reqBuff) || mock.Spec.PostgresReq.Payload == com {
-			log.Debug(Emoji,"matched in first loop")
+			log.Debug(Emoji, "matched in first loop")
 
 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
 			h.SetConfigMocks(configMocks)
@@ -113,7 +113,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 			}
 		}
 		if i >= 8 {
-			log.Debug(Emoji,"matched in second loop")
+			log.Debug(Emoji, "matched in second loop")
 
 			configMocks = append(configMocks[:idx], configMocks[idx+1:]...)
 			h.SetConfigMocks(configMocks)
@@ -131,7 +131,7 @@ func tempMatching(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks
 		i := 0
 		for i = 0; i < len(com); i++ {
 			if com[i] == mock.Spec.PostgresReq.Payload[i] {
-				log.Debug(Emoji,"matched in second loop")
+				log.Debug(Emoji, "matched in second loop")
 			}
 		}
 		if i >= len(com)/2 {
@@ -227,15 +227,15 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 }
 
 func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
+
 	for idx, mock := range tcsMocks {
+		if mock == nil {
+			continue
+		}
 		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
-
-				// bufStr := string(reqBuff)
-				// if !IsAsciiPrintable(bufStr) {
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-				// }
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
@@ -252,6 +252,7 @@ func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 	if idx != -1 {
 		// fmt.Println("matched in first loop")
 		bestMatch := tcsMocks[idx].Spec.GenericResponses
+		// println("Lenght of tcsMocks", len(tcsMocks), " BestMatch -->", tcsMocks[idx].Spec.GenericRequests[0].Message[0].Data)
 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 		h.SetTcsMocks(tcsMocks)
 		return true, bestMatch
@@ -338,29 +339,25 @@ func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
 }
 
 func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
+	isScram:=false
 	for _, mock := range tcsMocks {
-
 		// if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 		for requestIndex, reqBuff := range mock.Spec.GenericRequests {
-
-			// bufStr := string(reqBuff)
-			// if !IsAsciiPrintable(bufStr) {
-			// bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-			// }
 			encode, _ := PostgresDecoder(reqBuff.Message[0].Data)
-			if isStartupPacket(encode) && checkScram(mock.Spec.GenericResponses[requestIndex].Message[0].Data,log) { //||reqBuff.Message[0].Data == "AAAAeAADAAB1c2VyAGtlcGxveS11c2VyAGRhdGFiYXNlAGtlcGxveS10ZXN0AGNsaWVudF9lbmNvZGluZwBVVEY4AERhdGVTdHlsZQBJU08AVGltZVpvbmUARXRjL1VUQwBleHRyYV9mbG9hdF9kaWdpdHMAMgAA" {
+			if isStartupPacket(encode) && checkScram(mock.Spec.GenericResponses[requestIndex].Message[0].Data, log) { //||reqBuff.Message[0].Data == "AAAAeAADAAB1c2VyAGtlcGxveS11c2VyAGRhdGFiYXNlAGtlcGxveS10ZXN0AGNsaWVudF9lbmNvZGluZwBVVEY4AERhdGVTdHlsZQBJU08AVGltZVpvbmUARXRjL1VUQwBleHRyYV9mbG9hdF9kaWdpdHMAMgAA" {
 				log.Debug("CHANGING TO MD5 for Response")
 				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
+				isScram = true
+				continue
 			}
 			//just change it to more robust and after that write decoode encode logic for all
-			if strings.Contains(reqBuff.Message[0].Data, "cAAAADdTQ1JB") {
+			if strings.Contains(reqBuff.Message[0].Data, "cAAAAD") && isScram {
 				log.Debug("CHANGING TO MD5 for Request and Response")
 				mock.Spec.GenericRequests[requestIndex].Message[0].Data = "cAAAAChtZDUzNTc3MWY3N2YxMDA4YmEzMDRkYjlkMmJmODM3YmZlOQA="
 				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADFzZXJ2ZXJfdmVyc2lvbgAxMC41IChEZWJpYW4gMTAuNS0yLnBnZGc5MCsxKQBTAAAAJnNlc3Npb25fYXV0aG9yaXphdGlvbgBrZXBsb3ktdXNlcgBTAAAAI3N0YW5kYXJkX2NvbmZvcm1pbmdfc3RyaW5ncwBvbgBTAAAAFVRpbWVab25lAEV0Yy9VVEMASwAAAAwAAAA3L5+du1oAAAAFSQ=="
+				continue
 			}
-
 		}
-
 	}
 	h.SetTcsMocks(tcsMocks)
 }
