@@ -153,7 +153,7 @@ func isJavaInstalled() bool {
 	return err == nil
 }
 
-//to extract ca certificate to temp
+// to extract ca certificate to temp
 func ExtractCertToTemp() (string, error) {
 	tempFile, err := ioutil.TempFile("", "ca.crt")
 	if err != nil {
@@ -161,7 +161,8 @@ func ExtractCertToTemp() (string, error) {
 	}
 	defer tempFile.Close()
 
-	_, err = tempFile.Write(caCrt)
+	// Change the file permissions to allow read access for all users
+	err = os.Chmod(tempFile.Name(), 0666)
 	if err != nil {
 		return "", err
 	}
