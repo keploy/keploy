@@ -163,8 +163,10 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 								continue
 							}
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-								scoreSum += score
+								if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+									score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
+									scoreSum += score
+								}
 							}
 							currentScore := scoreSum / float64(len(mongoRequests))
 							if currentScore > maxMatchScore {
@@ -256,15 +258,17 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 								continue
 							}
-							if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
-								continue
-							}
+							scoreSum := 0.0
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-								if score > maxMatchScore {
-									maxMatchScore = score
-									bestMatchIndex = tcsIndx
+								if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+									score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
+									scoreSum += score
 								}
+							}
+							currentScore := scoreSum / float64(len(mongoRequests))
+							if currentScore > maxMatchScore {
+								maxMatchScore = currentScore
+								bestMatchIndex = tcsIndx
 							}
 						default:
 							logger.Error("the OpCode of the mongo wiremessage is invalid.")
