@@ -25,17 +25,16 @@ func NewRecorder(logger *zap.Logger) Recorder {
 func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
 	models.SetMode(models.MODE_RECORD)
 
-	ys := yaml.NewYamlStore(r.logger)
-
-	dirName, err := ys.NewSessionIndex(path)
+	dirName, err := yaml.NewSessionIndex(path, r.logger)
 	if err != nil {
-		r.logger.Error("failed to find the directroy name for the session", zap.Error(err))
 		return
 	}
-	path += "/" + dirName
+
+	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger)
+
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(path, ys, routineId, r.logger)
+	loadedHooks := hooks.NewHook(ys, routineId, r.logger)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)

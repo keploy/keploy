@@ -48,7 +48,6 @@ type Hook struct {
 	proxyPort     uint32
 	tcsMocks      []*models.Mock
 	configMocks   []*models.Mock
-	path          string
 	mu            *sync.Mutex
 	mutex         sync.RWMutex
 	userAppCmd    *exec.Cmd
@@ -92,7 +91,7 @@ type Hook struct {
 	idc clients.InternalDockerClient
 }
 
-func NewHook(path string, db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hook {
+func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hook {
 	idc, err := docker.NewInternalDockerClient(logger)
 	if err != nil {
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
@@ -102,7 +101,6 @@ func NewHook(path string, db platform.TestCaseDB, mainRoutineId int, logger *zap
 		// db:          db,
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
-		path:          path,
 		userIpAddress: make(chan string),
 		idc:           idc,
 		mainRoutineId: mainRoutineId,
@@ -128,7 +126,7 @@ func (h *Hook) AppendMocks(m *models.Mock) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// h.tcsMocks = append(h.tcsMocks, m)
-	err := h.TestCaseDB.WriteMock(h.path, m)
+	err := h.TestCaseDB.WriteMock(m)
 	if err != nil {
 		return err
 	}
@@ -465,7 +463,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		defer h.Recover(pkg.GenerateRandomID())
 
 		for {
-			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB)
+			connectionFactory.HandleReadyConnections(h.TestCaseDB)
 			time.Sleep(1 * time.Second)
 		}
 	}()

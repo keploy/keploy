@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/serve/graph/model"
 	"go.uber.org/zap"
 )
@@ -79,7 +80,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	}
 	testPath := r.Resolver.Path
 
-	testSets, err := r.Resolver.YS.ReadSessionIndices(testPath)
+	testSets, err := yaml.ReadSessionIndices(testPath, r.Logger)
 	if err != nil {
 		r.Resolver.Logger.Error("failed to fetch test sets", zap.Any("testPath", testPath), zap.Error(err))
 		return nil, err

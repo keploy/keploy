@@ -547,12 +547,15 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 
 	shouldRecordCalls := true
 	name := "mocks"
+	meta1 := map[string]string{
+		"operation": opReq.String(),
+	}
 
 	// Skip heartbeat from capturing in the global set of mocks. Since, the heartbeat packet always contain the "hello" boolean.
 	// See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
 	// if strings.Contains(opReq.String(), "helloOk") || strings.Contains(opReq.String(), "hello") {
 	if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
-		name = "config"
+		meta1["type"] = "config"
 		// isHeartbeatRecorded := false
 		for _, v := range configRequests {
 			// requestHeader.
@@ -583,9 +586,6 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 		}
 	}
 	if shouldRecordCalls {
-		meta1 := map[string]string{
-			"operation": opReq.String(),
-		}
 		mongoMock := &models.Mock{
 			Version: models.V1Beta2,
 			Kind:    models.Mongo,

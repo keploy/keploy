@@ -51,11 +51,11 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
-	ys := yaml.NewYamlStore(s.logger)
+	ys := yaml.NewYamlStore("", "", "", "", s.logger)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(path, ys, routineId, s.logger)
+	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
