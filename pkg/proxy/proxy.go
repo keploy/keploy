@@ -978,33 +978,16 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// fmt.Println("before mongo egress call, deps array: ", deps)
 		logger.Debug("into mongo parsing mode")
 		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
-		// fmt.Println("after mongo egress call, deps array: ", deps)
 
-		// ps.hook.SetDeps(deps)
-
-		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, logger)
-		// for _, v := range deps {
-		// 	ps.hook.AppendDeps(v)
-		// }
 	case postgresparser.IsOutgoingPSQL(buffer):
 
 		logger.Debug("into psql desp mode, before passing")
-
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
 	case grpcparser.IsOutgoingGRPC(buffer):
 		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
 	default:
 		logger.Debug("the external dependecy call is not supported")
 		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
-		// fmt.Println("into default desp mode, before passing")
-		// err = callNext(buffer, conn, dst, logger)
-		// if err != nil {
-		// 	logger.Error("failed to call next", zap.Error(err))
-		// 	conn.Close()
-		// 	return
-		// }
-		// fmt.Println("into default desp mode, after passing")
-
 	}
 
 	// Closing the user client connection
