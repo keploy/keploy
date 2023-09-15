@@ -150,7 +150,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	// recordCmd.MarkFlagRequired("networkName")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
-	testCmd.Flags().Uint64P("apiTimeout", "", 5, "User provided timeout for calling its application")
+	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
