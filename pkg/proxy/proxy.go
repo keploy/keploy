@@ -780,12 +780,12 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA private key: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA certificate: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 
 	// Create a TLS configuration
@@ -806,7 +806,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to complete TLS handshake with the client with error: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
