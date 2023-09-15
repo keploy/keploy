@@ -20,7 +20,6 @@ Sections
 - <a name="contributing-keploy">Keploy Contribution Flow</a>
   - <a name="keploy-server">Keploy Server</a>
   - <a name="keploy-docs">Keploy Documentation</a>
-  - <a name="keploy-sdks">Keploy SDK Integration</a>
 
 # <a name="contributing">General Contribution Flow</a>
 
