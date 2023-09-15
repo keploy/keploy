@@ -116,16 +116,6 @@ In the process of shipping features quickly, we may forget to keep our docs up t
 
 Please refer to [Keploy Docs Contributing Guide](https://github.com/keploy/docs/blob/main/CONTRIBUTING.md#-how-to-set-up-the-docs-website-locally) for setting up your development environment and the follow [Keploy Style Guide](https://github.com/keploy/docs/blob/main/STYLE.md).
 
-###  <a name="keploy-sdks">Keploy SDKs</a>
-
-Keploy provides stable support for ``Go``, ``Java``  and ``Ts`` language based applications. 
-
-- [x] [Go SDK](https://github.com/keploy/go-sdk)
-- [x] [Java SDK](https://github.com/keploy/java-sdk)
-- [x] [TypeScript SDK](https://github.com/keploy/typescript-sdk)
-
-Every SDKs support the popular and common Routers and Databases.
-
 
 # Contact
 
