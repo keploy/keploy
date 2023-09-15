@@ -27,7 +27,7 @@ func checkScram(packet string, log *zap.Logger) bool {
 	// fmt.Printf("Payload: %s\n", payload)
 	if messageType == 'R' {
 		// send this payload to get decode the auth type
-		err := findAuthenticationMessageType(encoded[5:])
+		err := findAuthenticationMessageType(encoded[5:], log)
 		if err != nil {
 			log.Error("error in finding authentication message type", zap.Error(err))
 			return false
@@ -125,7 +125,7 @@ const (
 	AuthTypeSASLFinal         = 12
 )
 
-func findAuthenticationMessageType(src []byte) error {
+func findAuthenticationMessageType(src []byte,log *zap.Logger ) error {
 	// constants.
 	if len(src) < 4 {
 		return errors.New("authentication message too short")
@@ -134,16 +134,16 @@ func findAuthenticationMessageType(src []byte) error {
 
 	switch authType {
 	case AuthTypeOk:
-		fmt.Println("AuthTypeOk")
+		log.Debug("AuthTypeOk")
 		return nil
 	case AuthTypeCleartextPassword:
-		fmt.Println("AuthTypeCleartextPassword")
+		log.Debug("AuthTypeCleartextPassword")
 		return nil
 	case AuthTypeMD5Password:
-		fmt.Println("AuthTypeMD5Password")
+		log.Debug("AuthTypeMD5Password")
 		return nil
 	case AuthTypeSCMCreds:
-		fmt.Println("AuthTypeSCMCreds")
+		log.Debug("AuthTypeSCMCreds")
 		return errors.New("AuthTypeSCMCreds is unimplemented")
 	case AuthTypeGSS:
 		return nil
@@ -152,30 +152,30 @@ func findAuthenticationMessageType(src []byte) error {
 	case AuthTypeSSPI:
 		return errors.New("AuthTypeSSPI is unimplemented")
 	case AuthTypeSASL:
-		fmt.Println("AuthTypeSASL")
-		DecodeSASL(src)
+		log.Debug("AuthTypeSASL")
+		DecodeSASL(src,log)
 		return nil
 	case AuthTypeSASLContinue:
-		fmt.Println("AuthTypeSASLContinue")
-	
+		log.Debug("AuthTypeSASLContinue")
+
 		return nil
 	case AuthTypeSASLFinal:
-		fmt.Println("AuthTypeSASLFinal")
+		log.Debug("AuthTypeSASLFinal")
 		return nil
 	default:
 		return fmt.Errorf("unknown authentication type: %d", authType)
 	}
 }
 
-func DecodeSASL(src []byte) error {
+func DecodeSASL(src []byte, log *zap.Logger) error {
 	var AuthMechanisms []string
-	println("AuthenticationSASL.Decode")
+	log.Debug("AuthenticationSASL.Decode")
 	if len(src) < 4 {
 		return errors.New("authentication message too short")
 	}
 
 	authType := binary.BigEndian.Uint32(src)
-	println("authType: ", authType)
+	// log.Debug("authType: ", authType)
 	if authType != AuthTypeSASL {
 		return errors.New("bad auth type")
 	}
@@ -188,7 +188,7 @@ func DecodeSASL(src []byte) error {
 			authMechanisms = authMechanisms[idx+1:]
 		}
 	}
-	println("AuthMechanisms: ", AuthMechanisms[0], AuthMechanisms[1])
+	// println("AuthMechanisms: ", AuthMechanisms[0], AuthMechanisms[1])
 
 	return nil
 }
