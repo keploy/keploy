@@ -59,7 +59,6 @@ func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	case models.MODE_TEST:
 		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
-
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -213,8 +212,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	}
 }
 
-
-
 // This is the decoding function for the postgres wiremessage
 func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
 	pgRequests := [][]byte{requestBuffer}
@@ -239,7 +236,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					return err
 				}
 
-				logger.Error("failed to read the request message in proxy for generic dependency", zap.Error(err))
+				logger.Error("failed to read the request message in proxy for postgres dependency", zap.Error(err))
 				// errChannel <- err
 				return err
 			}

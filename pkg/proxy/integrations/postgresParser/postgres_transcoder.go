@@ -1,6 +1,7 @@
 package postgresparser
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,6 +26,12 @@ func checkScram(packet string, log *zap.Logger) bool {
 	payload := string(encoded[5:])
 	// fmt.Printf("Payload: %s\n", payload)
 	if messageType == 'R' {
+		// send this payload to get decode the auth type
+		err := findAuthenticationMessageType(encoded[5:])
+		if err != nil {
+			log.Error("error in finding authentication message type", zap.Error(err))
+			return false
+		}
 		if strings.Contains(payload, "SCRAM-SHA") {
 			log.Debug("scram packet")
 			return true
@@ -103,4 +110,85 @@ func decodeBuffer(buffer []byte) (*PSQLMessage, error) {
 	psqlMessage.Payload = buffer[6 : 6+int(payloadLength)]
 
 	return psqlMessage, nil
+}
+
+const (
+	AuthTypeOk                = 0
+	AuthTypeCleartextPassword = 3
+	AuthTypeMD5Password       = 5
+	AuthTypeSCMCreds          = 6
+	AuthTypeGSS               = 7
+	AuthTypeGSSCont           = 8
+	AuthTypeSSPI              = 9
+	AuthTypeSASL              = 10
+	AuthTypeSASLContinue      = 11
+	AuthTypeSASLFinal         = 12
+)
+
+func findAuthenticationMessageType(src []byte) error {
+	// constants.
+	if len(src) < 4 {
+		return errors.New("authentication message too short")
+	}
+	authType := binary.BigEndian.Uint32(src[:4])
+
+	switch authType {
+	case AuthTypeOk:
+		fmt.Println("AuthTypeOk")
+		return nil
+	case AuthTypeCleartextPassword:
+		fmt.Println("AuthTypeCleartextPassword")
+		return nil
+	case AuthTypeMD5Password:
+		fmt.Println("AuthTypeMD5Password")
+		return nil
+	case AuthTypeSCMCreds:
+		fmt.Println("AuthTypeSCMCreds")
+		return errors.New("AuthTypeSCMCreds is unimplemented")
+	case AuthTypeGSS:
+		return nil
+	case AuthTypeGSSCont:
+		return nil
+	case AuthTypeSSPI:
+		return errors.New("AuthTypeSSPI is unimplemented")
+	case AuthTypeSASL:
+		fmt.Println("AuthTypeSASL")
+		DecodeSASL(src)
+		return nil
+	case AuthTypeSASLContinue:
+		fmt.Println("AuthTypeSASLContinue")
+	
+		return nil
+	case AuthTypeSASLFinal:
+		fmt.Println("AuthTypeSASLFinal")
+		return nil
+	default:
+		return fmt.Errorf("unknown authentication type: %d", authType)
+	}
+}
+
+func DecodeSASL(src []byte) error {
+	var AuthMechanisms []string
+	println("AuthenticationSASL.Decode")
+	if len(src) < 4 {
+		return errors.New("authentication message too short")
+	}
+
+	authType := binary.BigEndian.Uint32(src)
+	println("authType: ", authType)
+	if authType != AuthTypeSASL {
+		return errors.New("bad auth type")
+	}
+
+	authMechanisms := src[4:]
+	for len(authMechanisms) > 1 {
+		idx := bytes.IndexByte(authMechanisms, 0)
+		if idx > 0 {
+			AuthMechanisms = append(AuthMechanisms, string(authMechanisms[:idx]))
+			authMechanisms = authMechanisms[idx+1:]
+		}
+	}
+	println("AuthMechanisms: ", AuthMechanisms[0], AuthMechanisms[1])
+
+	return nil
 }
