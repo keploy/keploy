@@ -24,6 +24,7 @@ import (
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
+	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -38,7 +39,6 @@ import (
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
-	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -118,7 +118,6 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	// return n, nil
 }
 
-
 // func (ps *ProxySet) SetHook(hook *hooks.Hook) {
 // 	ps.hook = hook
 // }
@@ -152,6 +151,23 @@ var caFolder embed.FS
 func isJavaInstalled() bool {
 	_, err := exec.LookPath("java")
 	return err == nil
+}
+
+// to extract ca certificate to temp
+func ExtractCertToTemp() (string, error) {
+	tempFile, err := ioutil.TempFile("", "ca.crt")
+	if err != nil {
+		return "", err
+	}
+	defer tempFile.Close()
+
+	// Change the file permissions to allow read access for all users
+	err = os.Chmod(tempFile.Name(), 0666)
+	if err != nil {
+		return "", err
+	}
+
+	return tempFile.Name(), nil
 }
 
 // JavaCAExists checks if the CA is already installed in the specified Java keystore
@@ -300,6 +316,16 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
+
+	tempCertPath, err := ExtractCertToTemp()
+	if err != nil {
+		logger.Error(Emoji+"Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
+	}
+
+	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
+	if err != nil {
+		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
+	}
 	// log.Printf("This is the command2: %v", cmd)
 	err = cmd.Run()
 	if err != nil {
@@ -754,12 +780,12 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA private key: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA certificate: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 
 	// Create a TLS configuration
@@ -780,7 +806,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to complete TLS handshake with the client with error: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake

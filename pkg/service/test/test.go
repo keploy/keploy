@@ -38,17 +38,17 @@ func NewTester(logger *zap.Logger) Tester {
 
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
-func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint) bool {
+func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
 	models.SetMode(models.MODE_TEST)
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
 	// ys := yaml.NewYamlStore(tcsPath, mockPath, t.logger)
-	ys := yaml.NewYamlStore(t.logger)
+	ys := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(path, ys, routineId, t.logger)
+	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
@@ -69,7 +69,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		return false
 	}
 
-	sessions, err := ys.ReadSessionIndices(path)
+	sessions, err := yaml.ReadSessionIndices(path, t.logger)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return false
@@ -79,8 +79,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	result := true
 
 	for _, sessionIndex := range sessions {
-
-		testRes := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil)
+		testRes := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
 		result = result && testRes
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
@@ -94,13 +93,12 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	return true
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string) bool {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64) bool {
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
 	result := true
-
 	tcs, err := ys.ReadTestcase(filepath.Join(path, testSet, "tests"), nil)
 	if err != nil {
 		return true
@@ -217,7 +215,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 			t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
 			// time.Sleep(10 * time.Second)
-			resp, err := pkg.SimulateHttp(*tc, t.logger)
+			resp, err := pkg.SimulateHttp(*tc, t.logger, apiTimeout)
 			t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 			t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
 
