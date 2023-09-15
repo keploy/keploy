@@ -101,6 +101,10 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
+			if err != nil {
+				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
+			}
+
 			if delay <= 5 {
 				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
 				if isDockerCmd {
@@ -109,9 +113,12 @@ func (t *Test) GetCmd() *cobra.Command {
 					fmt.Println("Example usage:\n", cmd.Example, "\n")
 				}
 			}
+
+			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
 			if err != nil {
-				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
 			}
+
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
@@ -125,7 +132,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay, ports)
+			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay, ports, apiTimeout)
 			return nil
 		},
 	}
@@ -142,6 +149,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	// recordCmd.MarkFlagRequired("networkName")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+
+	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
