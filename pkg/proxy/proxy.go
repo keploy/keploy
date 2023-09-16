@@ -374,6 +374,9 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		hook:             h,
 	}
 
+	//setting the proxy port field in hook
+	proxySet.hook.SetProxyPort(opt.Port)
+
 	if isPortAvailable(opt.Port) {
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
