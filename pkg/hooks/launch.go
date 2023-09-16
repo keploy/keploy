@@ -296,7 +296,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 								return
 							}
 
-							h.logger.Debug(fmt.Sprintf("New proxy ip sent to kernel:%v", proxyIp))
+							h.logger.Debug(fmt.Sprintf("New proxy ip:%v & proxy port:%v sent to kernel", proxyIp, proxyPort))
 						} else {
 							dockerErrCh <- fmt.Errorf("NetworkSettings not found for the %v container", appContainer)
 							return
