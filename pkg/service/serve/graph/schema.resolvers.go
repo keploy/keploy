@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/serve/graph/model"
 	"go.uber.org/zap"
 )
@@ -18,7 +19,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err
 	}
-	
+
 	tester := r.Resolver.Tester
 
 	if tester == nil {
@@ -44,25 +45,25 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	testReportFS := r.Resolver.TestReportFS
 	if tester == nil {
-		r.Logger.Error( "failed to get testReportFS from resolver")
+		r.Logger.Error("failed to get testReportFS from resolver")
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
 	ys := r.Resolver.YS
 	if ys == nil {
-		r.Logger.Error( "failed to get ys from resolver")
+		r.Logger.Error("failed to get ys from resolver")
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
 	loadedHooks := r.LoadedHooks
 	if loadedHooks == nil {
-		r.Logger.Error( "failed to get loadedHooks from resolver")
+		r.Logger.Error("failed to get loadedHooks from resolver")
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
 	go func() {
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout)
 	}()
 
 	testRunID := <-testRunChan
@@ -79,7 +80,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	}
 	testPath := r.Resolver.Path
 
-	testSets, err := r.Resolver.YS.ReadSessionIndices(testPath)
+	testSets, err := yaml.ReadSessionIndices(testPath, r.Logger)
 	if err != nil {
 		r.Resolver.Logger.Error("failed to fetch test sets", zap.Any("testPath", testPath), zap.Error(err))
 		return nil, err
@@ -104,7 +105,7 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 	testReportFs := r.Resolver.TestReportFS
 
 	if testReportFs == nil {
-		r.Logger.Error( "failed to get testReportFS from resolver")
+		r.Logger.Error("failed to get testReportFS from resolver")
 		return nil, fmt.Errorf(Emoji+"failed to get the status for testRunID:%v", testRunID)
 	}
 	testReport, err := testReportFs.Read(ctx, r.Resolver.TestReportPath, testRunID)

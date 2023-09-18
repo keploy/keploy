@@ -153,6 +153,23 @@ func isJavaInstalled() bool {
 	return err == nil
 }
 
+// to extract ca certificate to temp
+func ExtractCertToTemp() (string, error) {
+	tempFile, err := ioutil.TempFile("", "ca.crt")
+	if err != nil {
+		return "", err
+	}
+	defer tempFile.Close()
+
+	// Change the file permissions to allow read access for all users
+	err = os.Chmod(tempFile.Name(), 0666)
+	if err != nil {
+		return "", err
+	}
+
+	return tempFile.Name(), nil
+}
+
 // JavaCAExists checks if the CA is already installed in the specified Java keystore
 func JavaCAExists(alias, storepass, cacertsPath string) bool {
 	cmd := exec.Command("keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
@@ -299,6 +316,16 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 	// Update the trusted CAs store
 	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
+
+	tempCertPath, err := ExtractCertToTemp()
+	if err != nil {
+		logger.Error(Emoji+"Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
+	}
+
+	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
+	if err != nil {
+		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
+	}
 	// log.Printf("This is the command2: %v", cmd)
 	err = cmd.Run()
 	if err != nil {
@@ -346,6 +373,9 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		PassThroughPorts: passThroughPorts,
 		hook:             h,
 	}
+
+	//setting the proxy port field in hook
+	proxySet.hook.SetProxyPort(opt.Port)
 
 	if isPortAvailable(opt.Port) {
 		go func() {
@@ -753,12 +783,12 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA private key: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA certificate: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 
 	// Create a TLS configuration
@@ -779,7 +809,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to complete TLS handshake with the client with error: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
@@ -951,33 +981,16 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// fmt.Println("before mongo egress call, deps array: ", deps)
 		logger.Debug("into mongo parsing mode")
 		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
-		// fmt.Println("after mongo egress call, deps array: ", deps)
 
-		// ps.hook.SetDeps(deps)
-
-		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, logger)
-		// for _, v := range deps {
-		// 	ps.hook.AppendDeps(v)
-		// }
 	case postgresparser.IsOutgoingPSQL(buffer):
 
 		logger.Debug("into psql desp mode, before passing")
-
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
 	case grpcparser.IsOutgoingGRPC(buffer):
 		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
 	default:
 		logger.Debug("the external dependecy call is not supported")
 		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
-		// fmt.Println("into default desp mode, before passing")
-		// err = callNext(buffer, conn, dst, logger)
-		// if err != nil {
-		// 	logger.Error("failed to call next", zap.Error(err))
-		// 	conn.Close()
-		// 	return
-		// }
-		// fmt.Println("into default desp mode, after passing")
-
 	}
 
 	// Closing the user client connection
