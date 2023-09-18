@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"time"
 
@@ -28,6 +30,10 @@ func setupLogger() *zap.Logger {
 	// logCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder // For the sake of the example, using the ISO8601 time format
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
 	if debugMode {
+		go func() {
+			log.Println(http.ListenAndServe("localhost:6060", nil))
+		}()
+
 		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 		logCfg.DisableStacktrace = false
 	} else {
