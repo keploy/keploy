@@ -3,6 +3,7 @@ package mongoparser
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"reflect"
@@ -60,6 +61,10 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			started := time.Now()
 			requestBuffer, err = util.ReadBytes(clientConn)
 			if err != nil {
+				if err == io.EOF {
+					logger.Debug("recieved request buffer is empty in test mode for mongo calls")
+					return
+				}
 				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
 				return
 			}
@@ -87,6 +92,10 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 				logger.Debug("into the for loop for request stream")
 				requestBuffer1, err := util.ReadBytes(clientConn)
 				if err != nil {
+					if err == io.EOF {
+						logger.Debug("recieved request buffer is empty for streaming mongo request call")
+						return
+					}
 					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 					return
 				}
@@ -335,9 +344,13 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		if string(requestBuffer) == "read form client connection" {
 			lstr := ""
 			started := time.Now()
-			requestBuffer, lstr, err = util.ReadBytes1(clientConn)
+			requestBuffer, err = util.ReadBytes(clientConn)
 			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
+				if err == io.EOF {
+					logger.Debug("recieved request buffer is empty in record mode for mongo call")
+					return
+				}
 				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 				return
 			}
@@ -377,9 +390,13 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 				// fmt.Println("into the more_to_come", logStr)
 				tmpStr := ""
 				started = time.Now()
-				requestBuffer1, tmpStr, err := util.ReadBytes1(clientConn)
+				requestBuffer1, err := util.ReadBytes(clientConn)
 				logStr += tmpStr
 				if err != nil {
+					if err == io.EOF {
+						logger.Debug("recieved request buffer is empty in record mode for mongo request")
+						return
+					}
 					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
@@ -428,10 +445,15 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		// read reply message from the mongo server
 		tmpStr := ""
 		started = time.Now()
-		responseBuffer, tmpStr, err := util.ReadBytes1(destConn)
+		responseBuffer, err := util.ReadBytes(destConn)
 		logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
 		logStr += tmpStr
 		if err != nil {
+			if err == io.EOF {
+				logger.Debug("recieved response buffer is empty in record mode for mongo call")
+				destConn.Close()
+				return
+			}
 			logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
@@ -477,6 +499,11 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 				responseBuffer, err = util.ReadBytes(destConn)
 				logStr += tmpStr
 				if err != nil {
+					if err == io.EOF {
+						logger.Debug("recieved response buffer is empty in record mode for mongo call")
+						destConn.Close()
+						return
+					}
 					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
