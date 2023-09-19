@@ -350,9 +350,6 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		// 	ys.Logger.Error("failed to find the config yaml", zap.Error(err))
 		// 	return nil, nil, err
 		// }
-		fmt.Println("mockPath")
-		fmt.Println(path)
-		fmt.Println(mockName)
 
 		yamls, err := read(path, mockName)
 		if err != nil {
@@ -365,8 +362,6 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 			return nil, nil, err
 		}
 
-		fmt.Println("mockLen")
-		fmt.Println(len(mocks))
 
 		for _, mock := range mocks {
 			if mock.Spec.Metadata["type"] == "config" {

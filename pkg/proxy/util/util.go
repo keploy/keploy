@@ -200,35 +200,6 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 	return buffer, nil
 }
 
-func ReadBytes1(reader io.Reader) ([]byte, string, error) {
-	logStr := ""
-	var buffer []byte
-
-	for {
-		// Create a temporary buffer to hold the incoming bytes
-		buf := make([]byte, 1024)
-
-		// Read bytes from the Reader
-		n, err := reader.Read(buf)
-		// fmt.Println("read bytes: ", n , ", err: ", err)
-		logStr += fmt.Sprintln("read bytes: ", n, ", err: ", err)
-		if err != nil && err != io.EOF {
-			return nil, logStr, err
-		}
-
-		// Append the bytes to the buffer
-		buffer = append(buffer, buf[:n]...)
-
-		// If we've reached the end of the input stream, break out of the loop
-		// if err == io.EOF || n != 1024 {
-		if n != 1024 {
-			break
-		}
-	}
-
-	return buffer, logStr, nil
-}
-
 func GetLocalIPv4() (net.IP, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
