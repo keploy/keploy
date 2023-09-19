@@ -1,8 +1,14 @@
-<h1 align="center"> 🚀🎉 Dive into Keploy! 🎉🚀 </h1>
+
 <p align="center">
-  Ever seen a developer logo this snazzy? 👇
-  <br>
-  <img align="center" src="https://avatars.githubusercontent.com/u/92252339?s=200&v=4" height="20%" width="20%" />
+  <img align="center" src="https://docs.keploy.io/img/keploy-logo-dark.svg?s=200&v=4" height="40%" width="40%"  alt="keploy logo"/>
+</p>
+<h3 align="center">
+<b>
+⚡️ Backend tests faster than unit-tests, from user traffic ⚡️
+</b>
+</h3 >
+<p align="center">
+🌟 The must-have tool for developers in the AI-Gen era 🌟
 </p>
 <p align="center">
 
@@ -21,11 +27,24 @@
     <img src=".github/docs.svg" /></a></p>
 
 ## 🎤 Introducing Keploy 🐰
-Keploy is a next-gen **E2E testing** tool that provides an easy way to **capture and generate tests(KTests) and data-mocks(KMocks) from real API calls**. It automatically generates mocks and stubs, making the testing process simpler and more efficient.
+Keploy is a **developer-centric** backend testing tool. It makes **backend tests with built-in-mocks**, faster than unit tests, from user traffic, making it **easy-to-use, powerful and extensible**. 🛠
+
+Ready for the magic? Here are Keploy's core features:
+
+- ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your fave testing libraries(junit, go-test, py-test, jest) to see a combined test-coverage.
 
 
-🔄 Merge KTests with your fave testing libraries to see that glorious combined test-coverage.
-🎭 KMocks are multi-talented – use 'em in existing tests, as server tests, or just to impress your friends!
+- 🤖 **EBPF Instrumentation:** Keploy uses EBPF like a secret sauce to make integration code-less, language agnostic, and oh-so-lightweight.
+
+
+- 🌐 **CI/CD Integration:** Run tests with mocks anywhere you like—locally on the CLI, in your CI pipeline, or even across a Kubernetes cluster. It's testing wherever you want it!
+
+
+- 🎭 **Multi-Purpose Mocks:** Use 'em in existing tests, as server tests, or just to impress your friends!
+
+
+- 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time! 
+
 
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/how-keploy-works.gif" width="70%" alt="Generate Test Case from API call"/>
 
@@ -54,26 +73,9 @@ Become a Keploy pro with our **[Documentation](https://docs.keploy.io/)**.
 ## 💖 Let's Build Together!
 Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is golden. Take a peek at our:
 
-🌈 [Contribution Guidelines](https://github.com/keploy/keploy/blob/main/CONTRIBUTING.md)
+📜 [Contribution Guidelines](https://github.com/keploy/keploy/blob/main/CONTRIBUTING.md)
 
 ❤️ [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
-
-## 🌟 Features
-
-### **🚀 Export, maintain, and show off tests and mocks!**
-
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="90%"  alt="Generate Test Case from API call"/>
-
-### **🤝 Shake hands with popular testing frameworks – Go-Test, JUnit, Py-Test, Jest and more!**
-
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/replay-tc.gif" width="90%"  alt="Generate Test Case from API call"/>
-
-### **🕵️ Detect noise with surgeon-like precision!**
-Filters noisy fields in API responses like (timestamps, random values) to ensure high quality tests.
-
-### **📊 Say 'Hello' to higher coverage!**
-Keploy ensures that redundant testcases are not generated.
-
 
 # Quick Installation
 
@@ -132,7 +134,7 @@ sudo -E keploy test -c "go run main.go" --delay 10
 
 Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="10" height="10"> Linux</img> & <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"> Windows</img> through [Docker](https://docs.docker.com/engine/install).
 
-> Note: <img src="https://www.pngplay.com/wp-content/uploads/3/Apple-Logo-Transparent-Images.png" width="15" height="15"> MacOS</img> users please install [Colima](https://github.com/abiosoft/colima#installation).
+> **⚠️Note:** <img src="https://www.pngplay.com/wp-content/uploads/3/Apple-Logo-Transparent-Images.png" width="15" height="15"> MacOS</img> users need to install [Colima](https://github.com/abiosoft/colima#installation). <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"/> Windows users need to install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install#install-wsl-command).
 
 
 ### Creating Alias
@@ -152,8 +154,6 @@ alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --ne
 ```
 
 ### Recording Testcases and Data Mocks
-
-
 
 Here are few points to consider before recording!
 - If you're running via **docker compose**, ensure to include the `<CONTAINER_NAME>` under your application service in the docker-compose.yaml file [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L14).
@@ -191,6 +191,23 @@ Reach out to us. We're here to help!
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
+
+
+## 🌟 Features
+
+### **🚀 Export, maintain, and show off tests and mocks!**
+
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="90%"  alt="Generate Test Case from API call"/>
+
+### **🤝 Shake hands with popular testing frameworks – Go-Test, JUnit, Py-Test, Jest and more!**
+
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/replay-tc.gif" width="90%"  alt="Generate Test Case from API call"/>
+
+### **🕵️ Detect noise with surgeon-like precision!**
+Filters noisy fields in API responses like (timestamps, random values) to ensure high quality tests.
+
+### **📊 Say 'Hello' to higher coverage!**
+Keploy ensures that redundant testcases are not generated.
 
 
 ## 🐲 The Challenges We Face!
