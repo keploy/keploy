@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -139,6 +140,9 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				})
 				pgRequests = []models.GenericPayload{}
 				pgResponses = []models.GenericPayload{}
+				clientConn.Close()
+				destConn.Close()
+				return nil
 			}
 		case buffer := <-clientBufferChannel:
 
@@ -220,8 +224,9 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	ChangeAuthToMD5(tcsMocks, h, logger)
 
 	for {
-		// time.Sleep(5 * time.Second)
-		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		// Since protocol packets have to be parsed for checking stream end,
+		// clientConnection have deadline for read to determine the end of stream.
+		err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 		if err != nil {
 			logger.Error(hooks.Emoji+"failed to set the read deadline for the pg client connection", zap.Error(err))
 			return err
@@ -291,7 +296,9 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 				logger.Debug("EOF error received from client. Closing connection in postgres !!")
 				return err
 			}
-			logger.Error("failed to read the packet message in proxy for pg dependency", zap.Error(err))
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				logger.Error("failed to read the packet message in proxy for pg dependency", zap.Error(err))
+			}
 			errChannel <- err
 			return err
 		}
