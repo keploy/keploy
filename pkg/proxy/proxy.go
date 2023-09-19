@@ -125,14 +125,13 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 func getDistroInfo() string {
 	osRelease, err := ioutil.ReadFile("/etc/os-release")
 	if err != nil {
-		fmt.Println(Emoji+"Error reading /etc/os-release:", err)
+		fmt.Errorf(Emoji+"Error reading /etc/os-release:", err)
 		return ""
 	}
 	lines := strings.Split(string(osRelease), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "NAME=") {
 			name := strings.TrimSuffix(strings.TrimPrefix(line, "NAME=\""), "\"")
-			fmt.Println("This is the name:", name)
 			return name
 		}
 	}
