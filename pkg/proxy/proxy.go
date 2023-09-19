@@ -130,9 +130,10 @@ func getDistroInfo() string {
 	}
 	lines := strings.Split(string(osRelease), "\n")
 	for _, line := range lines {
-		if strings.HasPrefix(line, "PRETTY_NAME=") {
-			return strings.Split(strings.Trim(line[len("PRETTY_NAME="):], `"`), " ")[0]
-
+		if strings.HasPrefix(line, "NAME=") {
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "NAME=\""), "\"")
+			fmt.Println("This is the name:", name)
+			return name
 		}
 	}
 	return ""
@@ -488,7 +489,7 @@ var caStorePath = map[string]string{
 
 var caStoreUpdateCmd = map[string]string{
 	"Ubuntu":   "update-ca-certificates",
-	"Linx Mint": "update-ca-certificates",
+	"Linux Mint": "update-ca-certificates",
 	"Pop!_OS":  "update-ca-certificates",
 	"Debian":   "update-ca-certificates",
 	"CentOS":   "update-ca-trust",
