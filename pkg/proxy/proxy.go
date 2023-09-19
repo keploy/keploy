@@ -469,6 +469,7 @@ func isPortAvailable(port uint32) bool {
 
 var caStorePath = map[string]string{
 	"Ubuntu":   "/usr/local/share/ca-certificates/",
+	"Linux Mint": "/usr/local/share/ca-certificates/",
 	"Pop!_OS":  "/usr/local/share/ca-certificates/",
 	"Debian":   "/usr/local/share/ca-certificates/",
 	"CentOS":   "/etc/pki/ca-trust/source/anchors/",
@@ -487,6 +488,7 @@ var caStorePath = map[string]string{
 
 var caStoreUpdateCmd = map[string]string{
 	"Ubuntu":   "update-ca-certificates",
+	"Linx Mint": "update-ca-certificates",
 	"Pop!_OS":  "update-ca-certificates",
 	"Debian":   "update-ca-certificates",
 	"CentOS":   "update-ca-trust",
