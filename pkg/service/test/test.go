@@ -188,6 +188,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(delay)*time.Second)))
 
 	// added delay to hold running keploy tests until application starts
+	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(tcs)), zap.Any("test-set", testSet))
 	time.Sleep(time.Duration(delay) * time.Second)
 	for _, tc := range tcs {
 		switch tc.Kind {
