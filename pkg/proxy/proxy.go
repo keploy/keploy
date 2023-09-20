@@ -12,7 +12,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -55,17 +54,19 @@ func getNextID() int64 {
 }
 
 type ProxySet struct {
-	IP4              uint32
-	IP6              [4]uint32
-	Port             uint32
-	hook             *hooks.Hook
-	logger           *zap.Logger
-	FilterPid        bool
-	Listener         net.Listener
-	DnsServer        *dns.Server
-	DnsServerTimeout time.Duration
-	dockerAppCmd     bool
-	PassThroughPorts []uint
+	IP4               uint32
+	IP6               [4]uint32
+	Port              uint32
+	hook              *hooks.Hook
+	logger            *zap.Logger
+	FilterPid         bool
+	clientConnections []net.Conn
+	connMutex         *sync.Mutex
+	Listener          net.Listener
+	DnsServer         *dns.Server
+	DnsServerTimeout  time.Duration
+	dockerAppCmd      bool
+	PassThroughPorts  []uint
 }
 
 type CustomConn struct {
@@ -365,14 +366,19 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	dIDE := (appCmd == "" && len(appContainer) != 0)
 
 	var proxySet = ProxySet{
-		Port:             opt.Port,
-		IP4:              proxyAddr4,
-		IP6:              proxyAddr6,
-		logger:           logger,
-		dockerAppCmd:     (dCmd || dIDE),
-		PassThroughPorts: passThroughPorts,
-		hook:             h,
+		Port:              opt.Port,
+		IP4:               proxyAddr4,
+		IP6:               proxyAddr6,
+		logger:            logger,
+		clientConnections: []net.Conn{},
+		connMutex:         &sync.Mutex{},
+		dockerAppCmd:      (dCmd || dIDE),
+		PassThroughPorts:  passThroughPorts,
+		hook:              h,
 	}
+
+	//setting the proxy port field in hook
+	proxySet.hook.SetProxyPort(opt.Port)
 
 	if isPortAvailable(opt.Port) {
 		go func() {
@@ -590,6 +596,10 @@ func (ps *ProxySet) startProxy() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				break
+			}
+
 			ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
 			// retry++
 			// if retry < 5 {
@@ -597,7 +607,9 @@ func (ps *ProxySet) startProxy() {
 			// }
 			break
 		}
-
+		ps.connMutex.Lock()
+		ps.clientConnections = append(ps.clientConnections, conn)
+		ps.connMutex.Unlock()
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 
@@ -860,11 +872,17 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
-
+	
+	clientConnId := getNextID()
 	reader := bufio.NewReader(conn)
 	initialData := make([]byte, 5)
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
+		if err == io.EOF && len(testBuffer) == 0 {
+			ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
+			conn.Close()
+			return
+		}
 		ps.logger.Error("failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 		return
 	}
@@ -883,8 +901,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 	connEstablishedAt := time.Now()
-	rand.Seed(time.Now().UnixNano())
-	clientConnId := getNextID()
 
 	// attempt to read the conn until buffer is either filled or connection is closed
 	var buffer []byte
@@ -1062,6 +1078,12 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 }
 
 func (ps *ProxySet) StopProxyServer() {
+	ps.connMutex.Lock()
+	for _, clientConn := range ps.clientConnections {
+		clientConn.Close()
+	}
+	ps.connMutex.Unlock()
+
 	err := ps.Listener.Close()
 	if err != nil {
 		ps.logger.Error("failed to stop proxy server", zap.Error(err))

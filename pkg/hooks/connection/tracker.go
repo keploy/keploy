@@ -36,8 +36,8 @@ type Tracker struct {
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 	return &Tracker{
 		connID:  connID,
-		RecvBuf: make([]byte, 0, maxBufferSize),
-		SentBuf: make([]byte, 0, maxBufferSize),
+		RecvBuf: []byte{},
+		SentBuf: []byte{},
 		mutex:   sync.RWMutex{},
 		logger:  logger,
 	}

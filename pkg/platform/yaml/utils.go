@@ -265,7 +265,7 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return fmt.Sprintf("test-set-%v", indx), nil
+		return fmt.Sprintf("%s%v", models.TestSetPattern,  indx), nil
 	}
 
 	files, err := dir.ReadDir(0)
@@ -288,7 +288,7 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 			}
 		}
 	}
-	return fmt.Sprintf("test-set-%v", indx), nil
+	return fmt.Sprintf("%s%v", models.TestSetPattern, indx), nil
 }
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
@@ -306,7 +306,8 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 
 	for _, v := range files {
 		// Define the regular expression pattern
-		pattern := `^test-set-\d{1,}$`
+		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern) 
+		// `^test-set-\d{1,}$`
 
 		// Compile the regular expression
 		regex, err := regexp.Compile(pattern)
@@ -328,9 +329,6 @@ func ValidatePath(path string) (string, error) {
 	// Validate the input to prevent directory traversal attack
 	if strings.Contains(path, "..") {
 		return "", errors.New("invalid path: contains '..' indicating directory traversal")
-	}
-	if strings.Count(path, ".") > 1 {
-		return "", errors.New("invalid path: contains more than one '.' character")
 	}
 	return path, nil
 }
