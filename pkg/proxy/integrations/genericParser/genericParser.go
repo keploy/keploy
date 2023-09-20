@@ -2,6 +2,7 @@ package genericparser
 
 import (
 	"encoding/base64"
+	"strings"
 
 	"net"
 	"os"
@@ -33,7 +34,9 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	logger.Debug("into the generic parser in test mode")
 	for {
 		tcsMocks := h.GetTcsMocks()
-		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		// Since protocol packets have to be parsed for checking stream end,
+		// clientConnection have deadline for read to determine the end of stream.
+		err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 		if err != nil {
 			logger.Error("failed to set the read deadline for the client connection", zap.Error(err))
 			return err
@@ -103,7 +106,9 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	for {
 		buffer, err := util.ReadBytes(conn)
 		if err != nil {
-			logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
+			}
 			errChannel <- err
 			return err
 		}
@@ -148,16 +153,16 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		
+
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
-	}() 
+	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
 
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
-	}() 
+	}()
 
 	isPreviousChunkRequest := false
 
@@ -183,6 +188,9 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				})
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
+				clientConn.Close()
+				destConn.Close()
+				return nil
 			}
 		case buffer := <-clientBufferChannel:
 			// Write the request message to the destination
