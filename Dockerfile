@@ -11,8 +11,10 @@ RUN go mod download
 # Copy the contents of the current directory into the build container
 COPY . /app
 
+ARG APP_VERSION="v2.0.0-dev"
+
 # Build the keploy binary
-RUN go build -o keploy .
+RUN go build -ldflags "-X main.version=$APP_VERSION" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
