@@ -369,44 +369,46 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 
 	// Run the app as the user who invoked sudo
 	username := os.Getenv("SUDO_USER")
-	uidCmd := exec.Command("id", "-u", username)
-	gidCmd := exec.Command("id", "-g", username)
+	if username != "" {
+		uidCmd := exec.Command("id", "-u", username)
+		gidCmd := exec.Command("id", "-g", username)
 
-	var uidOut, gidOut bytes.Buffer
-	uidCmd.Stdout = &uidOut
-	gidCmd.Stdout = &gidOut
+		var uidOut, gidOut bytes.Buffer
+		uidCmd.Stdout = &uidOut
+		gidCmd.Stdout = &gidOut
 
-	err := uidCmd.Run()
-	if err != nil {
-		return err
+		err := uidCmd.Run()
+		if err != nil {
+			return err
+		}
+
+		err = gidCmd.Run()
+		if err != nil {
+			return err
+		}
+
+		uidStr := strings.TrimSpace(uidOut.String())
+		gidStr := strings.TrimSpace(gidOut.String())
+
+		uid, err := strconv.ParseUint(uidStr, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		gid, err := strconv.ParseUint(gidStr, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		// Switch the user
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
 	}
-
-	err = gidCmd.Run()
-	if err != nil {
-		return err
-	}
-
-	uidStr := strings.TrimSpace(uidOut.String())
-	gidStr := strings.TrimSpace(gidOut.String())
-
-	uid, err := strconv.ParseUint(uidStr, 10, 32)
-	if err != nil {
-		return err
-	}
-
-	gid, err := strconv.ParseUint(gidStr, 10, 32)
-	if err != nil {
-		return err
-	}
-
-	// Switch the user
-	cmd.SysProcAttr = &syscall.SysProcAttr{}
-	cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
 
 	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
 
 	// Run the command, this handles non-zero exit code get from application.
-	err = cmd.Run()
+	err := cmd.Run()
 	if err != nil {
 		return err
 	}
