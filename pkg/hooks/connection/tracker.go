@@ -101,10 +101,26 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 	conn.logger.Debug("Got a data event from eBPF", zap.Any("Direction", event.Direction), zap.Any("current event size", event.MsgSize))
 	switch event.Direction {
 	case structs2.EgressTraffic:
-		conn.SentBuf = append(conn.SentBuf, event.Msg[:event.MsgSize]...)
+		// Assign the size of the message to the variable msgLengt
+		msgLength := event.MsgSize
+		// If the size of the message exceeds the maximum allowed size,
+		// set msgLength to the maximum allowed size instead
+		if event.MsgSize > structs2.EventBodyMaxSize {
+			msgLength = structs2.EventBodyMaxSize
+		}
+		// Append the message (up to msgLength) to the connection's sent buffer
+		conn.SentBuf = append(conn.SentBuf, event.Msg[:msgLength]...)
 		conn.sentBytes += uint64(event.MsgSize)
 	case structs2.IngressTraffic:
-		conn.RecvBuf = append(conn.RecvBuf, event.Msg[:event.MsgSize]...)
+		// Assign the size of the message to the variable msgLength
+		msgLength := event.MsgSize
+		// If the size of the message exceeds the maximum allowed size,
+		// set msgLength to the maximum allowed size instead
+		if event.MsgSize > structs2.EventBodyMaxSize {
+			msgLength = structs2.EventBodyMaxSize
+		}
+		// Append the message (up to msgLength) to the connection's receive buffer
+		conn.RecvBuf = append(conn.RecvBuf, event.Msg[:msgLength]...)
 		conn.recvBytes += uint64(event.MsgSize)
 	default:
 	}
