@@ -350,6 +350,8 @@ func (h *Hook) Recover(id int) {
 	if r := recover(); r != nil {
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
 		h.Stop(true)
+		// stop the user application cmd
+		h.StopUserApplication()
 		if id != h.mainRoutineId {
 			log.Panic(r)
 			os.Exit(1)
