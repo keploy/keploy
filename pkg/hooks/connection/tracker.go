@@ -85,6 +85,8 @@ func (conn *Tracker) decRecordTestCount() {
 	atomic.AddInt32(&conn.recordTestCountAtomic, -1)
 }
 
+// IsComplete() checks if the current connection has valid request & response info to capture
+// and also returns the request and response data buffer.
 func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
@@ -95,7 +97,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 	// Calculate the time elapsed since the last activity in nanoseconds.
 	elapsedTime := currentTimestamp - conn.lastActivityTimestamp
 
-	//Caveat: Added a timeout of 7 seconds, after this duration we assume that all the response data events would have come.
+	//Caveat: Added a timeout of 4 seconds, after this duration we assume that the last response data event would have come.
 	// This will ensure that we capture the requests responses where Connection:keep-alive is enabled.
 
 	recordTraffic := false
