@@ -123,20 +123,28 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 // 	ps.hook = hook
 // }
 
-func getDistroInfo() string {
+func getDistroInfo() (string, error) {
 	osRelease, err := ioutil.ReadFile("/etc/os-release")
 	if err != nil {
-		fmt.Println(Emoji+"Error reading /etc/os-release:", err)
-		return ""
+		return "", err
 	}
 	lines := strings.Split(string(osRelease), "\n")
 	for _, line := range lines {
-		if strings.HasPrefix(line, "PRETTY_NAME=") {
-			return strings.Split(strings.Trim(line[len("PRETTY_NAME="):], `"`), " ")[0]
-
+		if strings.HasPrefix(line, "NAME=") {
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "NAME=\""), "\"")
+			//Search if this name is in the caStorePath map.
+			_, ok := caStorePath[name]
+			if !ok{
+				if strings.HasPrefix(line, "ID_LIKE=") && strings.Contains(line, "debian") {
+					return "Debian", nil
+				} else if strings.HasPrefix(line, "ID_LIKE=") && (strings.Contains(line, "rhel") || strings.Contains(line, "fedora")) {
+					return "Red Hat", nil
+				}
+			}
+			return name, nil
 		}
 	}
-	return ""
+	return "", fmt.Errorf("Could not find name in /etc/os-release")
 }
 
 //go:embed asset/ca.crt
@@ -293,7 +301,10 @@ func containsJava(input string) bool {
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
 
 	// assign default values if not provided
-	distro := getDistroInfo()
+	distro, err := getDistroInfo()
+	if err != nil {
+		logger.Error("Failed to get the distro info.", zap.Error(err))
+	}
 
 	caPath := filepath.Join(caStorePath[distro], "ca.crt")
 
@@ -330,6 +341,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	// log.Printf("This is the command2: %v", cmd)
 	err = cmd.Run()
 	if err != nil {
+		logger.Error("Failed to update the system trusted store for %s:", zap.Any("distro", distro))
 		log.Fatalf(Emoji+"Failed to update system trusted store: %v", err)
 	}
 
@@ -472,6 +484,7 @@ func isPortAvailable(port uint32) bool {
 
 var caStorePath = map[string]string{
 	"Ubuntu":   "/usr/local/share/ca-certificates/",
+	"Linux Mint": "/usr/local/share/ca-certificates/",
 	"Pop!_OS":  "/usr/local/share/ca-certificates/",
 	"Debian":   "/usr/local/share/ca-certificates/",
 	"CentOS":   "/etc/pki/ca-trust/source/anchors/",
@@ -485,11 +498,11 @@ var caStorePath = map[string]string{
 	"Gentoo ":  "/usr/local/share/ca-certificates/",
 	"FreeBSD":  "/usr/local/share/certs/",
 	"OpenBSD":  "/etc/ssl/certs/",
-	"macOS":    "/usr/local/share/ca-certificates/",
 }
 
 var caStoreUpdateCmd = map[string]string{
 	"Ubuntu":   "update-ca-certificates",
+	"Linux Mint": "update-ca-certificates",
 	"Pop!_OS":  "update-ca-certificates",
 	"Debian":   "update-ca-certificates",
 	"CentOS":   "update-ca-trust",
@@ -503,7 +516,6 @@ var caStoreUpdateCmd = map[string]string{
 	"Gentoo ":  "update-ca-certificates",
 	"FreeBSD":  "trust extract-compat",
 	"OpenBSD":  "trust extract-compat",
-	"macOS":    "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain",
 }
 
 type certKeyPair struct {
