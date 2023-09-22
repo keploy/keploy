@@ -58,7 +58,7 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	configMocks, tcsMocks, err := ys.ReadMocks("")
 
 	if err != nil {
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(true, nil)
 		ps.StopProxyServer()
 		return
 	}

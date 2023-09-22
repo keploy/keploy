@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -30,6 +31,13 @@ const (
 	KeployContainerName = "keploy-v2"
 )
 
+// Define custom error variables
+var (
+	ErrInterrupted  = errors.New("exited with interrupt")
+	ErrCommandError = errors.New("exited due to command error")
+	ErrUnExpected   = errors.New("an unexpected error occurred")
+)
+
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
 	// Supports Linux, Windows
 
@@ -45,81 +53,62 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		if err != nil {
 			return err
 		}
-		h.logger.Info("User application container fetced successfully")
 		return nil
-	}
+	} else {
+		ok, cmd := h.IsDockerRelatedCmd(appCmd)
+		if ok {
 
-	ok, cmd := h.IsDockerRelatedCmd(appCmd)
-	if ok {
+			h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
 
-		h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
+			if cmd == "docker-compose" {
+				if len(appContainer) == 0 {
+					h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
+					return fmt.Errorf(Emoji + "container name not found")
+				}
+				h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork))
+			} else if cmd == "docker" {
+				var err error
+				cont, net, err := parseDockerCommand(appCmd)
+				h.logger.Debug("", zap.String("Parsed container name", cont))
+				h.logger.Debug("", zap.String("Parsed docker network", net))
 
-		if cmd == "docker-compose" {
-			if len(appContainer) == 0 {
-				h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
-				return fmt.Errorf(Emoji + "container name not found")
+				if err != nil {
+					h.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+					return err
+				}
+
+				if len(appContainer) != 0 && appContainer != cont {
+					h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
+				}
+
+				if len(appNetwork) != 0 && appNetwork != net {
+					h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker networ:(%v)", appNetwork, net))
+				}
+
+				appContainer, appNetwork = cont, net
 			}
-			h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork))
-		} else if cmd == "docker" {
-			var err error
-			cont, net, err := parseDockerCommand(appCmd)
-			h.logger.Debug("", zap.String("Parsed container name", cont))
-			h.logger.Debug("", zap.String("Parsed docker network", net))
 
+			err := h.processDockerEnv(appCmd, appContainer, appNetwork)
 			if err != nil {
-				h.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
 				return err
 			}
+		} else { //Supports only linux
+			h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
-			if len(appContainer) != 0 && appContainer != cont {
-				h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
-			}
+			// to notify the kernel hooks that the user application command is running in native linux.
+			key := 0
+			value := false
+			h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
 
-			if len(appNetwork) != 0 && appNetwork != net {
-				h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker networ:(%v)", appNetwork, net))
-			}
-
-			appContainer, appNetwork = cont, net
-		}
-
-		err := h.processDockerEnv(appCmd, appContainer, appNetwork)
-		if err != nil {
-			return err
-		}
-	} else { //Supports only linux
-		h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
-
-		// to notify the kernel hooks that the user application command is running in native linux.
-		key := 0
-		value := false
-		h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
-
-		errCh := make(chan error, 1)
-		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-
 			err := h.runApp(appCmd, false)
-			errCh <- err
-		}()
-
-		h.logger.Debug("Waiting for any error from user application")
-
-		// Check if there is an error in the channel without blocking
-		select {
-		case err := <-errCh:
 			if err != nil {
-				h.logger.Error("failed to launch the user application", zap.Any("err", err.Error()))
 				return err
 			}
-		default:
-			h.logger.Debug("no error found while running user application")
-			// No error received yet, continue with further flow
 		}
+		return nil
 	}
-
-	h.logger.Info("User application started successfully")
-	return nil
 }
 
 func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
@@ -144,21 +133,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			err := h.runApp(appCmd, true)
 			appErrCh <- err
 		}()
-
-		select {
-		case err := <-appErrCh:
-			if err != nil {
-				h.logger.Error("failed to launch the user application container", zap.Any("err", err.Error()))
-				return err
-			}
-		default:
-			h.logger.Info("no error found while running user application container")
-			// No error received yet, continue with further flow
-		}
 	}
 
 	dockerErrCh := make(chan error, 1)
-	done := make(chan bool, 1)
 
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	go func() {
@@ -321,15 +298,15 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 									h.logger.Debug("receiver channel received the ip address", zap.Any("containerIp found", containerIp))
 								}
 							} else {
-								dockerErrCh <- fmt.Errorf("Network details for %v network not found", appNetwork)
+								dockerErrCh <- fmt.Errorf("network details for %v network not found", appNetwork)
 								return
 							}
 						} else {
-							dockerErrCh <- fmt.Errorf("Network settings or networks not available in inspect data")
+							dockerErrCh <- fmt.Errorf("network settings or networks not available in inspect data")
 							return
 						}
 
-						done <- true
+						h.logger.Info("container & network found and processed successfully", zap.Any("time", time.Now().UnixNano()))
 						if models.GetMode() == models.MODE_TEST {
 							h.userIpAddress <- containerIp
 						}
@@ -346,8 +323,10 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			h.logger.Error("failed to process the user application container or network", zap.Any("err", err.Error()))
 			return err
 		}
-	case <-done:
-		h.logger.Info("container & network found and processed successfully", zap.Any("time", time.Now().UnixNano()))
+	case err := <-appErrCh:
+		if err != nil {
+			return err
+		}
 		// No error received yet, continue with further flow
 	}
 
@@ -369,13 +348,20 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
 
 	// Run the command, this handles non-zero exit code get from application.
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+
 	err := cmd.Run()
 	if err != nil {
-		return err
+		select {
+		case <-stopper:
+			return ErrInterrupted
+		default:
+			return ErrCommandError
+		}
+	} else {
+		return ErrUnExpected
 	}
-
-	//make it debug statement
-	return fmt.Errorf(Emoji, "user application exited with zero error code")
 }
 
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file

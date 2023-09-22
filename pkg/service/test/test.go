@@ -78,56 +78,106 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	result := true
 
+	stopHooksAbort := make(chan bool)
+	stopProxyServerAbort := make(chan bool)
+
+	go func() {
+		loadedHooks.Stop(false, stopHooksAbort)
+		select {
+		case <-stopProxyServerAbort:
+		default:
+			ps.StopProxyServer()
+		}
+	}()
+
+	testRes := false
+
+	exitLoop := false
+
 	for _, sessionIndex := range sessions {
-		testRes := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
+		switch testRunStatus {
+		case models.TestRunStatusAppHalted:
+			testRes = false
+			exitLoop = true
+		case models.TestRunStatusFaultUserApp:
+			testRes = false
+			exitLoop = true
+		case models.TestRunStatusUserAbort:
+			return false
+		case models.TestRunStatusFailed:
+			testRes = false
+		case models.TestRunStatusPassed:
+			testRes = true
+		}
 		result = result && testRes
+		if exitLoop {
+			break
+		}
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
 	// stop listening for the eBPF events
-	loadedHooks.Stop(true)
+	loadedHooks.Stop(true, nil)
 
 	//stop listening for proxy server
 	ps.StopProxyServer()
 
+	stopHooksAbort <- true
+	stopProxyServerAbort <- true
+
 	return true
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64) bool {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64) models.TestRunStatus {
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
-	result := true
 	tcs, err := ys.ReadTestcase(filepath.Join(path, testSet, "tests"), nil)
 	if err != nil {
-		return true
+		return models.TestRunStatusFailed
 	}
+
 	if len(tcs) == 0 {
 		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", testSet))
-		return true
+		return models.TestRunStatusPassed
 	}
+
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", testSet, tcs))
-	// fmt.Println("the tests are: ", tcs)
 
 	configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, testSet))
 	if err != nil {
-		return false
+		t.logger.Error(err.Error())
+		return models.TestRunStatusFailed
 	}
 
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, tcsMocks))
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
+	errChan := make(chan error)
 	t.logger.Debug("", zap.Any("app pid", pid))
 	if len(appCmd) == 0 && pid != 0 {
 		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
 		// start user application
-		if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
-			t.logger.Debug("failed to process the user application")
-			return false
-		}
+		t.logger.Info("running user application for test run of test set", zap.Any("test-set", testSet))
+		go func() {
+			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
+				switch err {
+				case hooks.ErrInterrupted:
+					t.logger.Info("keploy terminated user application")
+				case hooks.ErrCommandError:
+					t.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
+				case hooks.ErrUnExpected:
+					t.logger.Error("user application terminated unexpectedly")
+				default:
+					t.logger.Error("unknown error recieved from application")
+				}
+				errChan <- err
+			}
+		}()
 	}
 
 	// testReport stores the result of all testruns
@@ -142,7 +192,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 	if err != nil {
 		t.logger.Error(err.Error())
-		return false
+		return models.TestRunStatusPassed
 	}
 
 	//if running keploy-tests along with unit tests
@@ -155,8 +205,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		failure = 0
 		status  = models.TestRunStatusPassed
 	)
-
-	passed := true
 
 	// sort the testcases in
 	// sort.Slice(tcs, func(i, j int) bool {
@@ -190,7 +238,28 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	// added delay to hold running keploy tests until application starts
 	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(tcs)), zap.Any("test-set", testSet))
 	time.Sleep(time.Duration(delay) * time.Second)
+	exitLoop := false
 	for _, tc := range tcs {
+		select {
+		case err = <-errChan:
+			switch err {
+			case hooks.ErrInterrupted:
+				exitLoop = true
+				status = models.TestRunStatusUserAbort
+			case hooks.ErrCommandError:
+				exitLoop = true
+				status = models.TestRunStatusFaultUserApp
+			default:
+				exitLoop = true
+				status = models.TestRunStatusAppHalted
+				t.logger.Error("stopping testrun for the test set:", zap.Any("test-set", testSet))
+			}
+		default:
+		}
+
+		if exitLoop {
+			break
+		}
 		switch tc.Kind {
 		case models.HTTP:
 			// httpSpec := &spec.HttpSpec{}
@@ -224,12 +293,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 				continue
 			}
-			// println("before blocking simulate")
-
-			// resp := loadedHooks.GetResp()
-			// println("after blocking simulate")
 			testPass, testResult := t.testHttp(*tc, resp)
-			passed = passed && testPass
 			t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", testPass))
 			testStatus := models.TestStatusPending
 			if testPass {
@@ -268,7 +332,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				},
 				// Mocks:        httpSpec.Mocks,
 				// TestCasePath: tcsPath,
-				TestCasePath: path,
+				TestCasePath: path + testSet,
 				// MockPath:     mockPath,
 				// Noise:        httpSpec.Assertions["noise"],
 				Noise:  tc.Noise,
@@ -306,10 +370,11 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	// store the result of the testrun as test-report
 	testResults, err := testReportFS.GetResults(testReport.Name)
-	if err != nil {
+	if err != nil && (status == models.TestRunStatusFailed || status == models.TestRunStatusPassed) && (success+failure == 0) {
 		t.logger.Error("failed to fetch test results", zap.Error(err))
-		return true
+		return models.TestRunStatusFailed
 	}
+	testReport.TestSet = testSet
 	testReport.Total = len(testResults)
 	testReport.Status = string(status)
 	testReport.Tests = testResults
@@ -318,12 +383,11 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 	if err != nil {
 		t.logger.Error(err.Error())
-		return true
+		return models.TestRunStatusFailed
 	}
 
-	t.logger.Debug("the result before", zap.Any("", result), zap.Any("testreport name", testReport.Name))
-	result = result && passed
-	t.logger.Debug("the result after", zap.Any("", result), zap.Any("testreport name", testReport.Name))
+	t.logger.Debug("the result before", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
+	t.logger.Debug("the result after", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
 
 	if len(appCmd) == 0 && pid != 0 {
 		t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
@@ -332,7 +396,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		loadedHooks.StopUserApplication()
 	}
 
-	return result
+	return status
 }
 
 func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (bool, *models.Result) {
