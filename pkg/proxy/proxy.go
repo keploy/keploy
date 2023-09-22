@@ -125,13 +125,21 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 func getDistroInfo() string {
 	osRelease, err := ioutil.ReadFile("/etc/os-release")
 	if err != nil {
-		fmt.Errorf(Emoji+"Error reading /etc/os-release:", err)
 		return ""
 	}
 	lines := strings.Split(string(osRelease), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "NAME=") {
 			name := strings.TrimSuffix(strings.TrimPrefix(line, "NAME=\""), "\"")
+			//Search if this name is in the caStorePath map.
+			_, ok := caStorePath[name]
+			if !ok{
+				if strings.HasPrefix(line, "ID_LIKE=") && strings.Contains(line, "debian") {
+					return "Debian"
+				} else if strings.HasPrefix(line, "ID_LIKE=") && (strings.Contains(line, "rhel") || strings.Contains(line, "fedora")) {
+					return "Red Hat"
+				}
+			}
 			return name
 		}
 	}
@@ -293,6 +301,9 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 	// assign default values if not provided
 	distro := getDistroInfo()
+	if distro == "" {
+		logger.Error("Failed to get the distro info.")
+	}
 
 	caPath := filepath.Join(caStorePath[distro], "ca.crt")
 
@@ -329,6 +340,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	// log.Printf("This is the command2: %v", cmd)
 	err = cmd.Run()
 	if err != nil {
+		logger.Error("Failed to update the system trusted store for %s:", zap.Any("distro", distro))
 		log.Fatalf(Emoji+"Failed to update system trusted store: %v", err)
 	}
 
@@ -483,7 +495,6 @@ var caStorePath = map[string]string{
 	"Gentoo ":  "/usr/local/share/ca-certificates/",
 	"FreeBSD":  "/usr/local/share/certs/",
 	"OpenBSD":  "/etc/ssl/certs/",
-	"macOS":    "/usr/local/share/ca-certificates/",
 }
 
 var caStoreUpdateCmd = map[string]string{
@@ -502,7 +513,6 @@ var caStoreUpdateCmd = map[string]string{
 	"Gentoo ":  "update-ca-certificates",
 	"FreeBSD":  "trust extract-compat",
 	"OpenBSD":  "trust extract-compat",
-	"macOS":    "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain",
 }
 
 type certKeyPair struct {
