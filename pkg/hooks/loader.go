@@ -299,9 +299,11 @@ func (h *Hook) killProcessesAndTheirChildren(parentPID int) {
 	h.findAndCollectChildProcesses(fmt.Sprintf("%d", parentPID), &pids)
 
 	for _, childPID := range pids {
-		err := syscall.Kill(childPID, syscall.SIGKILL)
-		if err != nil {
-			h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
+		if h.userAppCmd.ProcessState == nil {
+			err := syscall.Kill(childPID, syscall.SIGKILL)
+			if err != nil {
+				h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
+			}
 		}
 	}
 }
@@ -335,6 +337,7 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
+		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
 			return
 		}
@@ -347,6 +350,8 @@ func (h *Hook) Recover(id int) {
 	if r := recover(); r != nil {
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
 		h.Stop(true)
+		// stop the user application cmd
+		h.StopUserApplication()
 		if id != h.mainRoutineId {
 			log.Panic(r)
 			os.Exit(1)
@@ -357,9 +362,9 @@ func (h *Hook) Recover(id int) {
 func (h *Hook) Stop(forceStop bool) {
 	if !forceStop {
 		<-h.stopper
+		h.logger.Info("Received signal, exiting program..")
 		// stop the user application cmd
 		h.StopUserApplication()
-		h.logger.Info("Received signal, exiting program..")
 
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")

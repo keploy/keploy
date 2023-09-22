@@ -100,7 +100,7 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 
 		record, err := reader.Read()
 		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
+			if !errors.Is(err, ringbuf.ErrClosed) {
 				logger.Error("failed to receive signal from ringbuf socketDataEvent reader", zap.Error(err))
 				return
 			}

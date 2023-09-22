@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -48,32 +49,28 @@ func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
-		// Changes the permission of created "Keploy" folder to 777
-		if strings.Contains(path, "keploy/test-suite-") {
-			err = os.Chmod(filepath.Join(strings.TrimSuffix(path, filepath.Base(path))), fs.ModePerm)
-			if err != nil {
-				Logger.Error("failed to change the ./Keploy directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-				return false, err
-			}
-		}
-		err = os.Chmod(filepath.Join(path), fs.ModePerm)
-		if err != nil {
-			Logger.Error("failed to change the created directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-			return false, err
-		}
 
 		// create the yaml file
-		yamlFile, err := os.Create(filepath.Join(path, fileName+".yaml"))
+		_, err := os.Create(filepath.Join(path, fileName+".yaml"))
 		if err != nil {
 			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
-		// changes user permission to allow write operation on yaml file
-		err = yamlFile.Chmod(fs.ModePerm)
+
+		// since, keploy requires root access. The permissions for generated files 
+		// should be updated to share it with all users.
+		keployPath := path
+		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
+			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
+		}
+		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
+		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
+		err = cmd.Run()
 		if err != nil {
-			Logger.Error("failed to set the permission of yaml file", zap.Error(err))
+			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 			return false, err
 		}
+
 		return true, nil
 	}
 	return false, nil
@@ -353,9 +350,6 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		// 	ys.Logger.Error("failed to find the config yaml", zap.Error(err))
 		// 	return nil, nil, err
 		// }
-		fmt.Println("mockPath")
-		fmt.Println(path)
-		fmt.Println(mockName)
 
 		yamls, err := read(path, mockName)
 		if err != nil {
@@ -368,8 +362,6 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 			return nil, nil, err
 		}
 
-		fmt.Println("mockLen")
-		fmt.Println(len(mocks))
 
 		for _, mock := range mocks {
 			if mock.Spec.Metadata["type"] == "config" {
