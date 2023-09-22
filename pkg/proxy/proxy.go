@@ -122,10 +122,10 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 // 	ps.hook = hook
 // }
 
-func getDistroInfo() string {
+func getDistroInfo() (string, error) {
 	osRelease, err := ioutil.ReadFile("/etc/os-release")
 	if err != nil {
-		return ""
+		return "", err
 	}
 	lines := strings.Split(string(osRelease), "\n")
 	for _, line := range lines {
@@ -135,15 +135,15 @@ func getDistroInfo() string {
 			_, ok := caStorePath[name]
 			if !ok{
 				if strings.HasPrefix(line, "ID_LIKE=") && strings.Contains(line, "debian") {
-					return "Debian"
+					return "Debian", nil
 				} else if strings.HasPrefix(line, "ID_LIKE=") && (strings.Contains(line, "rhel") || strings.Contains(line, "fedora")) {
-					return "Red Hat"
+					return "Red Hat", nil
 				}
 			}
-			return name
+			return name, nil
 		}
 	}
-	return ""
+	return "", fmt.Errorf("Could not find name in /etc/os-release")
 }
 
 //go:embed asset/ca.crt
@@ -300,9 +300,9 @@ func containsJava(input string) bool {
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
 
 	// assign default values if not provided
-	distro := getDistroInfo()
-	if distro == "" {
-		logger.Error("Failed to get the distro info.")
+	distro, err := getDistroInfo()
+	if err != nil {
+		logger.Error("Failed to get the distro info.", zap.Error(err))
 	}
 
 	caPath := filepath.Join(caStorePath[distro], "ca.crt")
