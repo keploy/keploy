@@ -25,12 +25,12 @@ type Tracker struct {
 	lastActivityTimestamp uint64
 
 	// Queues to handle multiple ingress traffic on the same connection (keep-alive)
-	totalSentBytesQueue   []uint64
-	totalRecvBytesQueue   []uint64
-	currentSentBytesQueue []uint64
-	currentRecvBytesQueue []uint64
-	currentSentBufQueue   [][]byte
-	currentRecvBufQueue   [][]byte
+	totalSentBytesQ   []uint64
+	totalRecvBytesQ   []uint64
+	currentSentBytesQ []uint64
+	currentRecvBytesQ []uint64
+	currentSentBufQ   [][]byte
+	currentRecvBufQ   [][]byte
 
 	// Individual parameters to store current request and response data
 	sentBytes uint64
@@ -39,10 +39,10 @@ type Tracker struct {
 	RecvBuf   []byte
 
 	// Additional fields to know when to capture request or response info
-	gotResponseDataEvent  bool
-	gotRequestDataEvent   bool
-	recordTestCountAtomic int32
-	firstRequest          bool
+	receivedResponse bool
+	receivedRequest  bool
+	recTestCounter   int32 //atomic counter
+	firstRequest     bool
 
 	mutex  sync.RWMutex
 	logger *zap.Logger
@@ -50,18 +50,18 @@ type Tracker struct {
 
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 	return &Tracker{
-		connID:                connID,
-		RecvBuf:               []byte{},
-		SentBuf:               []byte{},
-		totalSentBytesQueue:   []uint64{},
-		totalRecvBytesQueue:   []uint64{},
-		currentSentBytesQueue: []uint64{},
-		currentRecvBytesQueue: []uint64{},
-		currentSentBufQueue:   [][]byte{},
-		currentRecvBufQueue:   [][]byte{},
-		mutex:                 sync.RWMutex{},
-		logger:                logger,
-		firstRequest:          true,
+		connID:            connID,
+		RecvBuf:           []byte{},
+		SentBuf:           []byte{},
+		totalSentBytesQ:   []uint64{},
+		totalRecvBytesQ:   []uint64{},
+		currentSentBytesQ: []uint64{},
+		currentRecvBytesQ: []uint64{},
+		currentSentBufQ:   [][]byte{},
+		currentRecvBufQ:   [][]byte{},
+		mutex:             sync.RWMutex{},
+		logger:            logger,
+		firstRequest:      true,
 	}
 }
 
@@ -78,11 +78,11 @@ func (conn *Tracker) IsInactive(duration time.Duration) bool {
 }
 
 func (conn *Tracker) incRecordTestCount() {
-	atomic.AddInt32(&conn.recordTestCountAtomic, 1)
+	atomic.AddInt32(&conn.recTestCounter, 1)
 }
 
 func (conn *Tracker) decRecordTestCount() {
-	atomic.AddInt32(&conn.recordTestCountAtomic, -1)
+	atomic.AddInt32(&conn.recTestCounter, -1)
 }
 
 // IsComplete() checks if the current connection has valid request & response info to capture
@@ -104,18 +104,18 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 
 	requestBuf, responseBuf := []byte{}, []byte{}
 
-	//if recordTestCountAtomic > 0, it means that we have num(recordTestCountAtomic) of request and response present in the queues to record.
-	if conn.recordTestCountAtomic > 0 {
-		if (len(conn.currentRecvBytesQueue) > 0 && len(conn.totalRecvBytesQueue) > 0) &&
-			(len(conn.currentSentBytesQueue) > 0 && len(conn.totalSentBytesQueue) > 0) {
+	//if recTestCounter > 0, it means that we have num(recTestCounter) of request and response present in the queues to record.
+	if conn.recTestCounter > 0 {
+		if (len(conn.currentRecvBytesQ) > 0 && len(conn.totalRecvBytesQ) > 0) &&
+			(len(conn.currentSentBytesQ) > 0 && len(conn.totalSentBytesQ) > 0) {
 			validReq, validRes := false, false
 
-			expectedRecvBytes := conn.currentRecvBytesQueue[0]
-			actualRecvBytes := conn.totalRecvBytesQueue[0]
+			expectedRecvBytes := conn.currentRecvBytesQ[0]
+			actualRecvBytes := conn.totalRecvBytesQ[0]
 
 			//popping out the current request info
-			conn.currentRecvBytesQueue = conn.currentRecvBytesQueue[1:]
-			conn.totalRecvBytesQueue = conn.totalRecvBytesQueue[1:]
+			conn.currentRecvBytesQ = conn.currentRecvBytesQ[1:]
+			conn.totalRecvBytesQ = conn.totalRecvBytesQ[1:]
 
 			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
 				validReq = true
@@ -124,12 +124,12 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 				recordTraffic = false
 			}
 
-			expectedSentBytes := conn.currentSentBytesQueue[0]
-			actualSentBytes := conn.totalSentBytesQueue[0]
+			expectedSentBytes := conn.currentSentBytesQ[0]
+			actualSentBytes := conn.totalSentBytesQ[0]
 
 			//popping out the current response info
-			conn.currentSentBytesQueue = conn.currentSentBytesQueue[1:]
-			conn.totalSentBytesQueue = conn.totalSentBytesQueue[1:]
+			conn.currentSentBytesQ = conn.currentSentBytesQ[1:]
+			conn.totalSentBytesQ = conn.totalSentBytesQ[1:]
 
 			if conn.verifyResponseData(expectedSentBytes, actualSentBytes) {
 				validRes = true
@@ -138,15 +138,15 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 				recordTraffic = false
 			}
 
-			if len(conn.currentRecvBufQueue) > 0 && len(conn.currentSentBufQueue) > 0 { //validated request, response
-				requestBuf = conn.currentRecvBufQueue[0]
-				responseBuf = conn.currentSentBufQueue[0]
+			if len(conn.currentRecvBufQ) > 0 && len(conn.currentSentBufQ) > 0 { //validated request, response
+				requestBuf = conn.currentRecvBufQ[0]
+				responseBuf = conn.currentSentBufQ[0]
 
 				//popping out the current request & response data
-				conn.currentRecvBufQueue = conn.currentRecvBufQueue[1:]
-				conn.currentSentBufQueue = conn.currentSentBufQueue[1:]
+				conn.currentRecvBufQ = conn.currentRecvBufQ[1:]
+				conn.currentSentBufQ = conn.currentSentBufQ[1:]
 			} else {
-				conn.logger.Debug("no data buffer for request or response", zap.Any("Length of RecvBufQueue", len(conn.currentRecvBufQueue)), zap.Any("Length of SentBufQueue", len(conn.currentSentBufQueue)))
+				conn.logger.Debug("no data buffer for request or response", zap.Any("Length of RecvBufQueue", len(conn.currentRecvBufQ)), zap.Any("Length of SentBufQueue", len(conn.currentSentBufQ)))
 				recordTraffic = false
 			}
 
@@ -158,20 +158,20 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 
 		conn.logger.Debug(fmt.Sprintf("recording traffic after verifying the request and reponse data:%v", recordTraffic))
 
-		// // decrease the recordtestCount
+		// // decrease the recTestCounter
 		conn.decRecordTestCount()
 		conn.logger.Debug("verified recording", zap.Any("recordTraffic", recordTraffic))
-	} else if conn.gotResponseDataEvent && elapsedTime >= uint64(time.Second*4) { // Check if 4 second has passed since the last activity.
+	} else if conn.receivedResponse && elapsedTime >= uint64(time.Second*4) { // Check if 4 second has passed since the last activity.
 		conn.logger.Debug("might be last request on the connection")
 
-		if len(conn.currentRecvBytesQueue) > 0 && len(conn.totalRecvBytesQueue) > 0 {
+		if len(conn.currentRecvBytesQ) > 0 && len(conn.totalRecvBytesQ) > 0 {
 
-			expectedRecvBytes := conn.currentRecvBytesQueue[0]
-			actualRecvBytes := conn.totalRecvBytesQueue[0]
+			expectedRecvBytes := conn.currentRecvBytesQ[0]
+			actualRecvBytes := conn.totalRecvBytesQ[0]
 
 			//popping out the current request info
-			conn.currentRecvBytesQueue = conn.currentRecvBytesQueue[1:]
-			conn.totalRecvBytesQueue = conn.totalRecvBytesQueue[1:]
+			conn.currentRecvBytesQ = conn.currentRecvBytesQ[1:]
+			conn.totalRecvBytesQ = conn.totalRecvBytesQ[1:]
 
 			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
 				recordTraffic = true
@@ -180,14 +180,14 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 				recordTraffic = false
 			}
 
-			if len(conn.currentRecvBufQueue) > 0 { //validated request, invalided response
-				requestBuf = conn.currentRecvBufQueue[0]
+			if len(conn.currentRecvBufQ) > 0 { //validated request, invalided response
+				requestBuf = conn.currentRecvBufQ[0]
 				//popping out the current request data
-				conn.currentRecvBufQueue = conn.currentRecvBufQueue[1:]
+				conn.currentRecvBufQ = conn.currentRecvBufQ[1:]
 
 				responseBuf = conn.SentBuf
 			} else {
-				conn.logger.Debug("no data buffer for request", zap.Any("Length of RecvBufQueue", len(conn.currentRecvBufQueue)))
+				conn.logger.Debug("no data buffer for request", zap.Any("Length of RecvBufQueue", len(conn.currentRecvBufQ)))
 				recordTraffic = false
 			}
 
@@ -212,8 +212,8 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 
 func (conn *Tracker) resetConnection() {
 	conn.firstRequest = true
-	conn.gotResponseDataEvent = false
-	conn.gotRequestDataEvent = false
+	conn.receivedResponse = false
+	conn.receivedRequest = false
 	conn.recvBytes = 0
 	conn.sentBytes = 0
 	conn.SentBuf = []byte{}
@@ -231,7 +231,7 @@ func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint6
 // func (conn *Tracker) Malformed() bool {
 // 	conn.mutex.RLock()
 // 	defer conn.mutex.RUnlock()
-// 	// conn.logger.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes recieved in userspace", conn.recvBytes))
+// 	// conn.logger.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes received in userspace", conn.recvBytes))
 // 	// conn.logger.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
 // 	// conn.logger.Debug("", zap.Any("Request buffer", string(conn.RecvBuf)))
 // 	// conn.logger.Debug("", zap.Any("Response buffer", string(conn.SentBuf)))
@@ -268,17 +268,17 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		conn.sentBytes += uint64(event.MsgSize)
 
 		//Handling multiple request on same connection to support connection:keep-alive
-		if conn.firstRequest || conn.gotRequestDataEvent {
-			conn.currentRecvBytesQueue = append(conn.currentRecvBytesQueue, conn.recvBytes)
+		if conn.firstRequest || conn.receivedRequest {
+			conn.currentRecvBytesQ = append(conn.currentRecvBytesQ, conn.recvBytes)
 			conn.recvBytes = 0
 
-			conn.currentRecvBufQueue = append(conn.currentRecvBufQueue, conn.RecvBuf)
+			conn.currentRecvBufQ = append(conn.currentRecvBufQ, conn.RecvBuf)
 			conn.RecvBuf = []byte{}
 
-			conn.gotRequestDataEvent = false
-			conn.gotResponseDataEvent = true
+			conn.receivedRequest = false
+			conn.receivedResponse = true
 
-			conn.totalRecvBytesQueue = append(conn.totalRecvBytesQueue, uint64(event.ValidateReadBytes))
+			conn.totalRecvBytesQ = append(conn.totalRecvBytesQ, uint64(event.ValidateReadBytes))
 			conn.firstRequest = false
 		}
 
@@ -295,17 +295,17 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		conn.recvBytes += uint64(event.MsgSize)
 
 		//Handling multiple request on same connection to support connection:keep-alive
-		if !conn.firstRequest || conn.gotResponseDataEvent {
-			conn.currentSentBytesQueue = append(conn.currentSentBytesQueue, conn.sentBytes)
+		if !conn.firstRequest || conn.receivedResponse {
+			conn.currentSentBytesQ = append(conn.currentSentBytesQ, conn.sentBytes)
 			conn.sentBytes = 0
 
-			conn.currentSentBufQueue = append(conn.currentSentBufQueue, conn.SentBuf)
+			conn.currentSentBufQ = append(conn.currentSentBufQ, conn.SentBuf)
 			conn.SentBuf = []byte{}
 
-			conn.gotRequestDataEvent = true
-			conn.gotResponseDataEvent = false
+			conn.receivedRequest = true
+			conn.receivedResponse = false
 
-			conn.totalSentBytesQueue = append(conn.totalSentBytesQueue, uint64(event.ValidateWrittenBytes))
+			conn.totalSentBytesQ = append(conn.totalSentBytesQ, uint64(event.ValidateWrittenBytes))
 
 			//Record a test case for the current request/
 			conn.incRecordTestCount()
