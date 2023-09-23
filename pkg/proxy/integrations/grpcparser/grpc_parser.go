@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
+	sentry "github.com/getsentry/sentry-go"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
@@ -58,7 +59,7 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		defer wg.Done()
 		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder)
 		if err != nil {
@@ -77,7 +78,7 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		defer wg.Done()
 		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder)
 		if err != nil {

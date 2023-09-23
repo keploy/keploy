@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/serve/graph/model"
 	"go.uber.org/zap"
+	sentry "github.com/getsentry/sentry-go"
 )
 
 // RunTestSet is the resolver for the runTestSet field.
@@ -62,6 +63,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	}
 
 	go func() {
+		defer sentry.Recover()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
 		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout)
 	}()

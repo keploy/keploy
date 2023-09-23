@@ -6,6 +6,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"time"
+	sentry "github.com/getsentry/sentry-go"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -31,6 +32,7 @@ func setupLogger() *zap.Logger {
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
 	if debugMode {
 		go func() {
+			defer sentry.Recover()
 			log.Println(http.ListenAndServe("localhost:6060", nil))
 		}()
 

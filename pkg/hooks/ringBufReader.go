@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf/perf"
+	sentry "github.com/getsentry/sentry-go"
 	"github.com/cilium/ebpf/ringbuf"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks/connection"
@@ -46,7 +47,7 @@ func (h *Hook) launchSocketOpenEvent(connectionFactory *connection.Factory) {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		socketOpenEventCallback(reader, connectionFactory, h.logger)
 	}()
 }
@@ -66,7 +67,7 @@ func (h *Hook) launchSocketDataEvent(connectionFactory *connection.Factory) {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		socketDataEventCallback(reader, connectionFactory, h.logger)
 	}()
 
@@ -87,7 +88,7 @@ func (h *Hook) launchSocketCloseEvent(connectionFactory *connection.Factory) {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		socketCloseEventCallback(reader, connectionFactory, h.logger)
 	}()
 }

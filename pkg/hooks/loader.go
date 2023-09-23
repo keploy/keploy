@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	sentry "github.com/getsentry/sentry-go"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
@@ -52,7 +53,7 @@ type Hook struct {
 	mutex         sync.RWMutex
 	userAppCmd    *exec.Cmd
 	mainRoutineId int
-  
+
 	// ebpf objects and events
 	stopper  chan os.Signal
 	socket   link.Link
@@ -466,7 +467,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		for {
 			connectionFactory.HandleReadyConnections(h.TestCaseDB)
 			time.Sleep(1 * time.Second)

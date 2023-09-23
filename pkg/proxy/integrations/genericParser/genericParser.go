@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg"
+	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -153,14 +154,14 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 

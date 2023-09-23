@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	sentry "github.com/getsentry/sentry-go"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -98,7 +99,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-
+			defer sentry.Recover()
 			err := h.runApp(appCmd, false)
 			errCh <- err
 		}()
@@ -140,7 +141,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-
+			defer sentry.Recover()
 			err := h.runApp(appCmd, true)
 			appErrCh <- err
 		}()
@@ -164,7 +165,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		// listen for the docker daemon events
 		defer func() {
 			h.logger.Debug("exiting from goroutine of docker daemon event listener")

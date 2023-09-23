@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	sentry "github.com/getsentry/sentry-go"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
@@ -489,7 +490,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					go func() {
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
-
+						defer sentry.Recover()
 						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
 					}()
 				}
@@ -556,7 +557,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-
+			defer sentry.Recover()
 			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
 		}()
 		requestBuffer = []byte("read form client connection")

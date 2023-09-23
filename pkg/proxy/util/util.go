@@ -20,6 +20,7 @@ import (
 	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
+	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg/models"
 )
 
@@ -69,9 +70,9 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer recover(pkg.GenerateRandomID())
-
+		defer sentry.Recover()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
-	}() 
+	}()
 
 	// for {
 

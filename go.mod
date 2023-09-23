@@ -2,7 +2,6 @@ module go.keploy.io/server
 
 go 1.20
 
-
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
@@ -58,7 +57,6 @@ require (
 	github.com/sergi/go-diff v1.3.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/weppos/publicsuffix-go v0.15.1-0.20210511084619-b1f36a2d6c0b // indirect
-	github.com/yudai/pp v2.0.1+incompatible // indirect
 	github.com/zmap/zcrypto v0.0.0-20210511125630-18f1e0152cfc // indirect
 	github.com/zmap/zlint/v3 v3.1.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
@@ -73,6 +71,7 @@ require (
 require (
 	github.com/99designs/gqlgen v0.17.36
 	github.com/agnivade/levenshtein v1.1.1
+	github.com/getsentry/sentry-go v0.11.0
 	github.com/go-git/go-git/v5 v5.8.1
 	github.com/hashicorp/go-version v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
