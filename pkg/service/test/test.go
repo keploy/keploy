@@ -19,6 +19,8 @@ import (
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
 )
 
@@ -50,16 +52,22 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
+	//Initiate the telemetry.
+	store := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, store, t.logger, "", nil)
+
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
+	testsTotal := 0
 
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
+	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, &testsTotal); err != nil {
 		return false
 	}
 
+	mocksTotal := make(map[string]int)
 	// start the proxy
-	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks)
+	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, mocksTotal)
 
 	// proxy update its state in the ProxyPorts map
 	// ps.SetHook(loadedHooks)
@@ -78,8 +86,9 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	result := true
 
+	resultForTele := make([]int, 2)
 	for _, sessionIndex := range sessions {
-		testRes := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
+		testRes := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, &resultForTele)
 		result = result && testRes
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
@@ -87,13 +96,16 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	// stop listening for the eBPF events
 	loadedHooks.Stop(true)
 
+	//Call the telemetry events.
+	tele.Testrun(resultForTele[0], resultForTele[1])
+
 	//stop listening for proxy server
 	ps.StopProxyServer()
 
 	return true
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64) bool {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, resultForTele *[]int) bool {
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -315,6 +327,10 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	testReport.Tests = testResults
 	testReport.Success = success
 	testReport.Failure = failure
+
+	(*resultForTele)[0] += success
+	(*resultForTele)[1] += failure
+
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 	if err != nil {
 		t.logger.Error(err.Error())

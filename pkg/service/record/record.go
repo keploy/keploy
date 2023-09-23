@@ -6,6 +6,8 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
 )
 
@@ -29,6 +31,9 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	if err != nil {
 		return
 	}
+	//Initiate the telemetry.
+	store := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, store, r.logger, "", nil)
 
 	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger)
 
@@ -39,13 +44,15 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
+	testsTotal := 0
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
+	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, &testsTotal); err != nil {
 		return
 	}
 
 	// start the BootProxy
-	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks)
+	mockTotal := make(map[string]int)
+	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks, mockTotal)
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	// ps.SetHook(loadedHooks)
@@ -70,6 +77,9 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	// stop listening for the eBPF events
 	loadedHooks.Stop(false)
+	//Call the telemetry events.
+	tele.RecordedMock(mockTotal)
+	tele.RecordedTest(dirName, testsTotal)
 
 	//stop listening for proxy server
 	ps.StopProxyServer()

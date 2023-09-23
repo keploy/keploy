@@ -80,7 +80,7 @@ func main() {
 		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
 			if ipnet.IP.To4() != nil {
 				ipv4 = ipnet.IP.String()
-				return
+				break
 			}
 		}
 	}

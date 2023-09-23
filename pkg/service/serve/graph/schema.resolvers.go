@@ -8,10 +8,12 @@ import (
 	"context"
 	"fmt"
 
+	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/serve/graph/model"
 	"go.uber.org/zap"
-	sentry "github.com/getsentry/sentry-go"
 )
 
 // RunTestSet is the resolver for the runTestSet field.
@@ -62,10 +64,11 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
+	resultForTele := make([]int, 2)
 	go func() {
 		defer sentry.Recover()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, &resultForTele)
 	}()
 
 	testRunID := <-testRunChan
@@ -100,6 +103,9 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 
 // TestSetStatus is the resolver for the testSetStatus field.
 func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error) {
+	//Initiate the telemetry.
+	var store = fs.NewTeleFS()
+	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err
@@ -114,6 +120,9 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 	if err != nil {
 		r.Logger.Error("failed to fetch testReport", zap.Any("testRunID", testRunID), zap.Error(err))
 		return nil, err
+	}
+	if testReport.Status == "PASSED" || testReport.Status == "FAILED" {
+		tele.Testrun(testReport.Success, testReport.Failure)
 	}
 
 	r.Logger.Debug("", zap.Any("testRunID", testRunID), zap.Any("testSetStatus", testReport.Status))

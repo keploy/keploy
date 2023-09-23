@@ -37,7 +37,7 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
 // func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
-func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
+func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, testsTotal *int) {
 
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
@@ -63,7 +63,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
 				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(db, parsedHttpReq, parsedHttpRes, factory.logger)
+				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, testsTotal)
 			case models.MODE_TEST:
 				factory.logger.Debug("skipping tracker in test mode")
 			default:
@@ -95,7 +95,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
+func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, testsTotal *int) {
 	// meta := map[string]string{
 	// 	"method": req.Method,
 	// }
@@ -152,6 +152,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		},
 		// Mocks: mocks,
 	})
+	*testsTotal++
 	if err != nil {
 		logger.Error("failed to record the ingress requests", zap.Error(err))
 		return

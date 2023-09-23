@@ -33,15 +33,16 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	s.logger.Debug("path of mocks : " + path)
 
 	routineId := pkg.GenerateRandomID()
-
+	testsTotal := 0
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
-	if err := loadedHooks.LoadHooks("", "", pid); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, &testsTotal); err != nil {
 		return
 	}
 
+	mocksTotal := make(map[string]int)
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, mocksTotal)
 
 	// proxy update its state in the ProxyPorts map
 	// ps.SetHook(loadedHooks)

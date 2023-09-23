@@ -299,7 +299,7 @@ func containsJava(input string) bool {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, mockTotal map[string]int) *ProxySet {
 
 	// assign default values if not provided
 	distro, err := getDistroInfo()
@@ -397,7 +397,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
 			defer sentry.Recover()
-			proxySet.startProxy()
+			proxySet.startProxy(mockTotal)
 		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
@@ -579,7 +579,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 }
 
 // startProxy function initiates a proxy on the specified port to handle redirected outgoing network calls.
-func (ps *ProxySet) startProxy() {
+func (ps *ProxySet) startProxy(mockTotal map[string]int) {
 
 	port := ps.Port
 
@@ -626,7 +626,7 @@ func (ps *ProxySet) startProxy() {
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 			defer sentry.Recover()
-			ps.handleConnection(conn, port)
+			ps.handleConnection(conn, port, mockTotal)
 		}()
 	}
 }
@@ -850,7 +850,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
-func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
+func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, mockTotal map[string]int) {
 
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
@@ -998,7 +998,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// }
 		// var deps []*models.Mock = ps.hook.GetDeps()
 		// fmt.Println("before http egress call, deps array: ", deps)
+		mockTotal["http"]++
 		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger)
+
 		// fmt.Println("after http egress call, deps array: ", deps)
 
 		// ps.hook.SetDeps(deps)
@@ -1007,16 +1009,20 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// fmt.Println("before mongo egress call, deps array: ", deps)
 		logger.Debug("into mongo parsing mode")
 		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
+		mockTotal["mongo"]++
 
 	case postgresparser.IsOutgoingPSQL(buffer):
 
 		logger.Debug("into psql desp mode, before passing")
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
+		mockTotal["psql"]++
 	case grpcparser.IsOutgoingGRPC(buffer):
 		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
+		mockTotal["grpc"]++
 	default:
 		logger.Debug("the external dependecy call is not supported")
 		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
+		mockTotal["generic"]++
 	}
 
 	// Closing the user client connection
