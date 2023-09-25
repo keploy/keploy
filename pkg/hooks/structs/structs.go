@@ -35,7 +35,6 @@ const (
 )
 
 // SocketDataEvent is a conversion of the following C-Struct into GO.
-// SocketDataEvent is a conversion of the following C-Struct into GO.
 // struct socket_data_event_t
 // {
 //     u64 timestamp_ns;
