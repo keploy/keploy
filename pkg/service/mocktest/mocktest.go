@@ -1,7 +1,11 @@
 package mocktest
 
 import (
+	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
@@ -62,7 +66,15 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
+	// Listen for the interrupt signal
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
+
+	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
+
+	s.logger.Info("Received signal, initiating graceful shutdown...")
+
 	// Shutdown other resources
-	loadedHooks.Stop(false)
+	loadedHooks.Stop(true)
 	ps.StopProxyServer()
 }
