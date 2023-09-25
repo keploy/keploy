@@ -68,7 +68,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 			case hooks.ErrCommandError:
 				r.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
 			case hooks.ErrUnExpected:
-				r.logger.Error("user application terminated unexpectedly")
+				r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
 			default:
 				r.logger.Error("unknown error recieved from application")
 			}

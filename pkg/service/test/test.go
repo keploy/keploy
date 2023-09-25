@@ -181,7 +181,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				case hooks.ErrCommandError:
 					t.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
 				case hooks.ErrUnExpected:
-					t.logger.Error("user application terminated unexpectedly")
+					t.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
 				default:
 					t.logger.Error("unknown error recieved from application")
 				}
@@ -259,6 +259,10 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			case hooks.ErrCommandError:
 				exitLoop = true
 				status = models.TestRunStatusFaultUserApp
+			case hooks.ErrUnExpected:
+				exitLoop = true
+				status = models.TestRunStatusAppHalted
+				t.logger.Warn("stopping testrun for the test set:", zap.Any("test-set", testSet))
 			default:
 				exitLoop = true
 				status = models.TestRunStatusAppHalted
