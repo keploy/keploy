@@ -65,17 +65,10 @@ Our magical 🧙‍♂️ Keploy proxy captures and replays **ALL**(CRUD operati
 
 Take a journey to **[How Keploy Works?](https://docs.keploy.io/docs/keploy-explained/how-keploy-works)** to discover the tricks behind the curtain!
 
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="80%" alt="Generate Test Case from API call"/>
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="50%" alt="Generate Test Case from API call"/>
 
 ## 📘 Get Schooled!
 Become a Keploy pro with our **[Documentation](https://docs.keploy.io/)**.
-
-## 💖 Let's Build Together!
-Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is golden. Take a peek at our:
-
-📜 [Contribution Guidelines](https://github.com/keploy/keploy/blob/main/CONTRIBUTING.md)
-
-❤️ [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
 
 # Quick Installation
 
@@ -87,15 +80,14 @@ Keploy can be utilized on Linux natively and through WSL on Windows.
 ### Download the Keploy Binary.
 
 
-**AMD Architecture**
-
 ```zsh
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
 sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 
-**ARM Architecture**
+<details>
+ <summary> <strong> ARM Architecture </strong> </summary>
 
 ```zsh
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
@@ -103,11 +95,13 @@ curl --silent --location "https://github.com/keploy/keploy/releases/latest/downl
 sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 ```
 
+</details>
+
 ### Capturing Testcases
 To initiate the recording of API calls, execute this command in your terminal:
 
 ```zsh
-sudo -E keploy record -c "CMD_TO_RUN_APP"
+sudo -E keploy record -c "CMD_TO_RUN_APP" 
 ```
 For instance, if you're using a simple Golang program, the command would resemble:
 
@@ -120,7 +114,6 @@ To run the testcases and generate a test coverage report, use this terminal comm
 
 ```zsh
 sudo -E keploy test -c "CMD_TO_RUN_APP" --delay 10
-
 ```
 
 For example, if you're using a Golang framework, the command would be:
@@ -134,36 +127,28 @@ sudo -E keploy test -c "go run main.go" --delay 10
 
 Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="10" height="10"> Linux</img> & <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"> Windows</img> through [Docker](https://docs.docker.com/engine/install).
 
-> **⚠️Note:** <img src="https://www.pngplay.com/wp-content/uploads/3/Apple-Logo-Transparent-Images.png" width="15" height="15"> MacOS</img> users need to install [Colima](https://github.com/abiosoft/colima#installation). <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"/> Windows users need to install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install#install-wsl-command).
+> **️ Note:** <img src="https://www.pngplay.com/wp-content/uploads/3/Apple-Logo-Transparent-Images.png" width="15" height="15"> MacOS</img> users need to install [Colima](https://github.com/abiosoft/colima#installation). <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"/> Windows users need to install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install#install-wsl-command).
 
 
-### Creating Alias
+### Creating alias
 
-To establish a network for your application using Keploy on Docker, follow these steps.
-
-If you're using a **docker-compose network**, replace `keploy-network` with your app's `docker_compose_network_name` below.
-
-```zsh
-docker network create keploy-network
-```
-
-Then, create an alias for Keploy:
+Let's create an alias for Keploy:
 
 ```shell
-alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 ```
 
 ### Recording Testcases and Data Mocks
 
 Here are few points to consider before recording!
 - If you're running via **docker compose**, ensure to include the `<CONTAINER_NAME>` under your application service in the docker-compose.yaml file [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L14).
-- Change the **network name** (`--network` flag)  from `keploy-network` to your custom network if you changed it above.
+- You must run the containers on a network, if not, ensure all your containers are on same network with external property true - [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L24). Replace the **network name** (`--network` flag) to your custom network if you changed it above, like <backend> network in given example.
 - `Docker_CMD_to_run_user_container` refers to the Docker **command for launching** the application.
 
 Utilize the keploy alias we created to capture testcases. **Execute** the following command within your application's **root directory**.
 
 ```shell
-keploy record -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<containerName>"
+keploy record -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>"
 ```
 Perform API calls using tools like [Hoppscotch](https://hoppscotch.io/), [Postman](https://www.postman.com/), or cURL commands.
 
@@ -177,7 +162,7 @@ When using **docker-compose** to start the application, it's important to ensure
 
 
 ```shell
-keploy test -c "Docker_CMD_to_run_user_container --network keploy-network" --containerName "<containerName>" --delay 20
+keploy test -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>" --delay 20
 ```
 
 Voilà! 🧑🏻‍💻 We have the tests with data mocks running! 🐰🎉
@@ -191,6 +176,13 @@ Reach out to us. We're here to help!
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
+
+## 💖 Let's Build Together!
+Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is golden. Take a peek at our:
+
+📜 [Contribution Guidelines](https://github.com/keploy/keploy/blob/main/CONTRIBUTING.md)
+
+❤️ [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
 
 
 ## 🌟 Features
@@ -226,5 +218,5 @@ Keploy ensures that redundant testcases are not generated.
 
 ## 🌟 Hall of Contributors
 <p>
-  <img src="https://api.vaunt.dev/v1/github/entities/keploy/repositories/keploy/contributors?format=svg&limit=18" width="100%" />
+  <img src="https://api.vaunt.dev/v1/github/entities/keploy/repositories/keploy/contributors?format=svg&limit=18" width="100%"  alt="contributors"/>
 </p>
