@@ -27,6 +27,12 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
+type DockerInfo struct {
+	appContainer string
+	appNetwork string
+	containerID string
+}
+
 const (
 	// TODO : Remove hard-coded container name.
 	KeployContainerName = "keploy-v2"
@@ -180,6 +186,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			case e := <-messages:
 				if e.Type == events.ContainerEventType && e.Action == "create" {
 					// Fetch container details by inspecting using container ID to check if container is created
+					h.dockerDetails.containerID = e.ID
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
 					if err != nil {
 						h.logger.Debug("failed to inspect container by container Id", zap.Error(err))
