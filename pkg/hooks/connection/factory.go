@@ -43,17 +43,20 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
 	for connID, tracker := range factory.connections {
-		if tracker.IsComplete() {
-			trackersToDelete = append(trackersToDelete, connID)
-			if len(tracker.SentBuf) == 0 && len(tracker.RecvBuf) == 0 {
+		ok, requestBuf, responseBuf := tracker.IsComplete()
+		if ok {
+
+			if len(requestBuf) == 0 && len(responseBuf) == 0 {
+				factory.logger.Debug("Empty request or response", zap.Any("RecvBufLength", len(requestBuf)), zap.Any("SentBufLength", len(responseBuf)))
 				continue
 			}
-			parsedHttpReq, err := pkg.ParseHTTPRequest(tracker.RecvBuf)
+
+			parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
 			if err != nil {
 				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err))
 				continue
 			}
-			parsedHttpRes, err := pkg.ParseHTTPResponse(tracker.SentBuf, parsedHttpReq)
+			parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
 			if err != nil {
 				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
 				continue
@@ -71,7 +74,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 					zap.Any("current mode", models.GetMode()))
 			}
 
-		} else if tracker.Malformed() || tracker.IsInactive(factory.inactivityThreshold) {
+		} else if tracker.IsInactive(factory.inactivityThreshold) {
 			trackersToDelete = append(trackersToDelete, connID)
 		}
 	}
