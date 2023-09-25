@@ -158,6 +158,16 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	errChan := make(chan error)
 	t.logger.Debug("", zap.Any("app pid", pid))
+
+	defer func() {
+		if len(appCmd) == 0 && pid != 0 {
+			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
+		} else {
+			// stop the user application
+			loadedHooks.StopUserApplication()
+		}
+	}()
+
 	if len(appCmd) == 0 && pid != 0 {
 		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
@@ -388,13 +398,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	t.logger.Debug("the result before", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
 	t.logger.Debug("the result after", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
-
-	if len(appCmd) == 0 && pid != 0 {
-		t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
-	} else {
-		// stop the user application
-		loadedHooks.StopUserApplication()
-	}
 
 	return status
 }
