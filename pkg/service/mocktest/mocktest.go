@@ -58,7 +58,7 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	configMocks, tcsMocks, err := ys.ReadMocks("")
 
 	if err != nil {
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(true, nil)
 		ps.StopProxyServer()
 		return
 	}
@@ -75,6 +75,6 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 
 	// Shutdown other resources
-	loadedHooks.Stop(true)
+	loadedHooks.Stop(true, nil)
 	ps.StopProxyServer()
 }

@@ -8,30 +8,34 @@ type TestReport struct {
 	Failure int          `json:"failure" yaml:"failure"`
 	Total   int          `json:"total" yaml:"total"`
 	Tests   []TestResult `json:"tests" yaml:"tests,omitempty"`
+	TestSet string       `json:"testSet" yaml:"test_set"`
 }
 
 type TestResult struct {
-	Kind         Kind         `json:"kind" yaml:"kind"`
-	Name         string       `json:"name" yaml:"name"`
-	Status       TestStatus   `json:"status" yaml:"status"`
-	Started      int64        `json:"started" yaml:"started"`
-	Completed    int64        `json:"completed" yaml:"completed"`
-	TestCasePath string       `json:"testCasePath" yaml:"test_case_path"`
-	MockPath     string       `json:"mockPath" yaml:"mock_path"`
-	TestCaseID   string       `json:"testCaseID" yaml:"test_case_id"`
-	Req          HttpReq  `json:"req" yaml:"req,omitempty"`
+	Kind         Kind       `json:"kind" yaml:"kind"`
+	Name         string     `json:"name" yaml:"name"`
+	Status       TestStatus `json:"status" yaml:"status"`
+	Started      int64      `json:"started" yaml:"started"`
+	Completed    int64      `json:"completed" yaml:"completed"`
+	TestCasePath string     `json:"testCasePath" yaml:"test_case_path"`
+	MockPath     string     `json:"mockPath" yaml:"mock_path"`
+	TestCaseID   string     `json:"testCaseID" yaml:"test_case_id"`
+	Req          HttpReq    `json:"req" yaml:"req,omitempty"`
 	// Mocks        []string     `json:"mocks" yaml:"mocks"`
-	Res          HttpResp `json:"resp" yaml:"resp,omitempty"`
-	Noise        []string     `json:"noise" yaml:"noise,omitempty"`
-	Result       Result       `json:"result" yaml:"result"`
+	Res    HttpResp `json:"resp" yaml:"resp,omitempty"`
+	Noise  []string `json:"noise" yaml:"noise,omitempty"`
+	Result Result   `json:"result" yaml:"result"`
 }
 
 type TestRunStatus string
 
 const (
-	TestRunStatusRunning TestRunStatus = "RUNNING"
-	TestRunStatusFailed  TestRunStatus = "FAILED"
-	TestRunStatusPassed  TestRunStatus = "PASSED"
+	TestRunStatusRunning      TestRunStatus = "RUNNING"
+	TestRunStatusFailed       TestRunStatus = "FAILED"
+	TestRunStatusPassed       TestRunStatus = "PASSED"
+	TestRunStatusAppHalted    TestRunStatus = "APP_HALTED"
+	TestRunStatusUserAbort    TestRunStatus = "USER_ABORT"
+	TestRunStatusFaultUserApp TestRunStatus = "APP_FAULT"
 )
 
 type Result struct {
@@ -43,7 +47,7 @@ type Result struct {
 
 type DepResult struct {
 	Name string          `json:"name" bson:"name" yaml:"name"`
-	Type string  `json:"type" bson:"type" yaml:"type"`
+	Type string          `json:"type" bson:"type" yaml:"type"`
 	Meta []DepMetaResult `json:"meta" bson:"meta" yaml:"meta"`
 }
 
