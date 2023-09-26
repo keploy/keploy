@@ -152,17 +152,14 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
 func (ys *Yaml) WriteTestcase(tc *models.TestCase) error {
 
-	var tcsName string
 	if ys.TcsName == "" {
 		// finds the recently generated testcase to derive the sequence number for the current testcase
 		lastIndx, err := findLastIndex(ys.TcsPath, ys.Logger)
 		if err != nil {
 			return err
 		}
-		tcsName = fmt.Sprintf("test-%v", lastIndx)
-	} else {
-		tcsName = ys.TcsName
-	}
+		ys.TcsName = fmt.Sprintf("test-%v", lastIndx)
+	} 
 
 	// encode the testcase and its mocks into yaml docs
 	// yamlTc, yamlMocks, err := EncodeTestcase(*tc, ys.Logger)
@@ -172,8 +169,8 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase) error {
 	}
 
 	// write testcase yaml
-	yamlTc.Name = tcsName
-	err = ys.Write(ys.TcsPath, tcsName, *yamlTc)
+	yamlTc.Name = ys.TcsName
+	err = ys.Write(ys.TcsPath, ys.TcsName, *yamlTc)
 	if err != nil {
 		ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
