@@ -361,6 +361,7 @@ func (h *Hook) Recover(id int) {
 }
 
 func (h *Hook) Stop(forceStop bool) {
+
 	if !forceStop {
 		<-h.stopper
 		h.logger.Info("Received signal, exiting program..")

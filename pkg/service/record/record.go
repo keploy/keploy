@@ -29,11 +29,16 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	dirName, err := yaml.NewSessionIndex(path, r.logger)
 	if err != nil {
+		r.logger.Error("Failed to create the session index file", zap.Error(err))
 		return
 	}
+
+
 	//Initiate the telemetry.
 	store := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, store, r.logger, "", nil)
+
+
 
 	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger)
 

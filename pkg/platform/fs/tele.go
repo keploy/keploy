@@ -17,7 +17,10 @@ type telemetry struct{}
 
 func UserHomeDir(isNewConfigPath bool) string {
 
-	var configFolder = "/.keploy-config"
+	var configFolder = "/.keploy"
+	if !isNewConfigPath {
+		configFolder = "/.keploy-config"
+	}
 
 	if runtime.GOOS == "windows" {
 		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
@@ -56,7 +59,7 @@ func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
 	return id, nil
 }
 
-func (fs *telemetry) Set(id string, ipAddress string) error {
+func (fs *telemetry) Set(id string) error {
 	path := UserHomeDir(true)
 	CreateMockFile(path, "installation-id")
 
@@ -71,20 +74,6 @@ func (fs *telemetry) Set(id string, ipAddress string) error {
 	err = os.WriteFile(filepath.Join(path, "installation-id.yaml"), data, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("failed to write installation id in yaml file. error: %s", err.Error())
-	}
-
-	//Set the IP address in the same folder but different file.
-	CreateMockFile(path, "ip-address")
-
-	data = []byte{}
-	d, err = yaml.Marshal(&ipAddress)
-	if err != nil {
-		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
-	}
-	data = append(data, d...)
-	err = os.WriteFile(filepath.Join(path, "ip-address.yaml"), data, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to write ip address in yaml file. error: %s", err.Error())
 	}
 
 	return nil

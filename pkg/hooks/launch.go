@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"bytes"
 	"strings"
 	"syscall"
 	"time"
@@ -366,6 +367,46 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	h.userAppCmd = cmd
+
+	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
+
+	// Run the app as the user who invoked sudo
+	username := os.Getenv("SUDO_USER")
+	if username != "" {
+		uidCmd := exec.Command("id", "-u", username)
+		gidCmd := exec.Command("id", "-g", username)
+
+		var uidOut, gidOut bytes.Buffer
+		uidCmd.Stdout = &uidOut
+		gidCmd.Stdout = &gidOut
+
+		err := uidCmd.Run()
+		if err != nil {
+			return err
+		}
+
+		err = gidCmd.Run()
+		if err != nil {
+			return err
+		}
+
+		uidStr := strings.TrimSpace(uidOut.String())
+		gidStr := strings.TrimSpace(gidOut.String())
+
+		uid, err := strconv.ParseUint(uidStr, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		gid, err := strconv.ParseUint(gidStr, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		// Switch the user
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+	}
 
 	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
 

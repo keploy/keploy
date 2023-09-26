@@ -1,0 +1,235 @@
+version: api.keploy.io/v1beta1
+name: report-3
+status: FAILED
+success: 0
+failure: 3
+total: 3
+tests:
+    - kind: Http
+      name: report-3
+      status: FAILED
+      started: 1695723784
+      completed: 1695723784
+      test_case_path: /home/pranshu.linux/pranshu/keploy/keploy
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/url
+        header:
+            Accept: '*/*'
+            Content-Length: "35"
+            Content-Type: application/json
+            Host: localhost:8081
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://facebook.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 26 Sep 2023 10:19:18 GMT
+        body: '{"ts":1695723558275253065,"url":"http://localhost:8080/CJBKJd92"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "65"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 26 Sep 2023 10:19:18 GMT
+              actual:
+                key: Date
+                value:
+                    - Tue, 26 Sep 2023 10:23:04 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"ts":1695723558275253065,"url":"http://localhost:8080/CJBKJd92"}'
+              actual: '{"ts":1695723784297729626,"url":"http://localhost:8080/CJBKJd92"}'
+        dep_result: []
+    - kind: Http
+      name: report-3
+      status: FAILED
+      started: 1695723784
+      completed: 1695723784
+      test_case_path: /home/pranshu.linux/pranshu/keploy/keploy
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/url
+        header:
+            Accept: '*/*'
+            Content-Length: "35"
+            Content-Type: application/json
+            Host: localhost:8081
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://facebook.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 26 Sep 2023 10:19:21 GMT
+        body: '{"ts":1695723561165890441,"url":"http://localhost:8080/CJBKJd92"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 26 Sep 2023 10:19:21 GMT
+              actual:
+                key: Date
+                value:
+                    - Tue, 26 Sep 2023 10:23:04 GMT
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "65"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"ts":1695723561165890441,"url":"http://localhost:8080/CJBKJd92"}'
+              actual: '{"ts":1695723784304362569,"url":"http://localhost:8080/CJBKJd92"}'
+        dep_result: []
+    - kind: Http
+      name: report-3
+      status: FAILED
+      started: 1695723784
+      completed: 1695723784
+      test_case_path: /home/pranshu.linux/pranshu/keploy/keploy
+      mock_path: ""
+      test_case_id: test-3
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8081/url
+        header:
+            Accept: '*/*'
+            Content-Length: "35"
+            Content-Type: application/json
+            Host: localhost:8081
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+              "url": "https://facebook.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "65"
+            Content-Type: application/json; charset=utf-8
+            Date: Tue, 26 Sep 2023 10:19:25 GMT
+        body: '{"ts":1695723565183620788,"url":"http://localhost:8080/CJBKJd92"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "65"
+              actual:
+                key: Content-Length
+                value:
+                    - "65"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 26 Sep 2023 10:19:25 GMT
+              actual:
+                key: Date
+                value:
+                    - Tue, 26 Sep 2023 10:23:04 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"ts":1695723565183620788,"url":"http://localhost:8080/CJBKJd92"}'
+              actual: '{"ts":1695723784313661872,"url":"http://localhost:8080/CJBKJd92"}'
+        dep_result: []

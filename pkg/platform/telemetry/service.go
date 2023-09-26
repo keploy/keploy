@@ -6,13 +6,13 @@ import (
 
 type FS interface {
 	Get(bool) (string, error)
-	Set(string, string) error
+	Set(string) error
 }
 
 type Service interface {
 	Ping(bool)
 	Testrun(int, int, context.Context)
 	MockTestRun(int, int, context.Context)
-	RecordedTest(context.Context, int, []string)
-	RecordedMock(context.Context, string)
+	RecordedTest(string, int)
+	RecordedMock(map[string]int)
 }

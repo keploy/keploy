@@ -5,7 +5,6 @@ import (
 	_ "net/http/pprof"
 	"log"
 	"time"
-	"net"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -70,27 +69,13 @@ func main() {
 	if version == "" {
 		version = getKeployVersion()
 	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		log.Fatal(err)
-	}
-	var ipv4 string
-	for _, address := range addrs {
-		// Check for IPv4 address and not loopback
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				ipv4 = ipnet.IP.String()
-				break
-			}
-		}
-	}
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, nil, version, nil)
-	tele.Ping(false, ipv4)
+	tele.Ping(false)
 	fmt.Println(logo, " ")
 	fmt.Printf("%v\n\n", version)
 	//Initialise sentry.
-	err = sentry.Init(sentry.ClientOptions{
+	err := sentry.Init(sentry.ClientOptions{
 		Dsn: "",
 		// Set TracesSampleRate to 1.0 to capture 100%
 		// of transactions for performance monitoring.

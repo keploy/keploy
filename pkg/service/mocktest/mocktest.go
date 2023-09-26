@@ -30,6 +30,7 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	models.SetMode(models.MODE_TEST)
 	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)
 
+
 	s.logger.Debug("path of mocks : " + path)
 
 	routineId := pkg.GenerateRandomID()
@@ -39,7 +40,6 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	if err := loadedHooks.LoadHooks("", "", pid, &testsTotal); err != nil {
 		return
 	}
-
 	mocksTotal := make(map[string]int)
 	// start the proxy
 	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, mocksTotal)
@@ -63,7 +63,13 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
+	val := len(loadedHooks.GetTcsMocks()) + len(loadedHooks.GetConfigMocks())
+
+	s.logger.Debug("mocks set: ", zap.Any("val", val))
+
 	// Shutdown other resources
 	loadedHooks.Stop(false)
+	val1 := loadedHooks.GetTcsMocks()
+	s.logger.Debug("after stopping : ", zap.Any("val", val1))
 	ps.StopProxyServer()
 }

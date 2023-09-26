@@ -8,8 +8,44 @@ import (
 
 	"go.keploy.io/server/pkg/models"
 	sentry "github.com/getsentry/sentry-go"
+	"github.com/go-git/go-git/v5/plumbing"
+	v "github.com/hashicorp/go-version"
+	"github.com/go-git/go-git/v5"
 	"go.uber.org/zap"
 )
+
+func getKeployVersion() string {
+
+	repo, err := git.PlainOpen(".")
+	if err != nil {
+		return "v0.1.0-dev"
+	}
+
+	tagIter, err := repo.Tags()
+	if err != nil {
+		return "v0.1.0-dev"
+	}
+	var latestTag string
+	var latestTagVersion *v.Version
+
+	err = tagIter.ForEach(func(tagRef *plumbing.Reference) error {
+		tagName := tagRef.Name().Short()
+		tagVersion, err := v.NewVersion(tagName)
+		if err == nil {
+			if latestTagVersion == nil || latestTagVersion.LessThan(tagVersion) {
+				latestTagVersion = tagVersion
+				latestTag = tagName
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "v0.1.0-dev"
+	}
+
+	return latestTag + "-dev"
+}
 
 type Telemetry struct {
 	Enabled        bool
@@ -36,7 +72,7 @@ func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, KeployVer
 	return &tele
 }
 
-func (ac *Telemetry) Ping(isTestMode bool, ipAddress string) {
+func (ac *Telemetry) Ping(isTestMode bool) {
 	check := false
 	if !ac.Enabled {
 		return
@@ -49,25 +85,24 @@ func (ac *Telemetry) Ping(isTestMode bool, ipAddress string) {
 		defer sentry.Recover()
 		for {
 			var count int64
-			var err error
 			var id string
 
 			if ac.Enabled && !isTestMode {
 				id, _ = ac.store.Get(true)
 				count = int64(len(id))
 			}
-
-			if err != nil {
-				ac.logger.Debug("failed to countDocuments in analytics collection", zap.Error(err))
-			}
 			event := models.TeleEvent{
 				EventType: "Ping",
 				CreatedAt: time.Now().Unix(),
 				TeleCheck: check,
 			}
+			ac.InstallationID = id
 
 			if count == 0 {
-				if count == 0 {
+				//Check in the old keploy folder.
+				id, _ = ac.store.Get(false)
+					count = int64(len(id))
+				if count == 0{
 					bin, err := marshalEvent(event, ac.logger)
 					if err != nil {
 						break
@@ -82,10 +117,12 @@ func (ac *Telemetry) Ping(isTestMode bool, ipAddress string) {
 						break
 					}
 					id = installation_id
-				}
 				ac.InstallationID = id
-				ac.store.Set(id, ipAddress)
+				ac.store.Set(id)
+				}
+
 			}
+			ac.SendTelemetry("Ping")
 			time.Sleep(5 * time.Minute)
 		}
 	}()
@@ -100,8 +137,8 @@ func (ac *Telemetry) UnitTestRun(success int, failure int) {
 }
 
 // Telemetry event for the Mocking feature test run
-func (ac *Telemetry) MockTestRun(success int, failure int) {
-	ac.SendTelemetry("MockTestRun", map[string]interface{}{"Passed-Mocks": success, "Failed-Mocks": failure})
+func (ac *Telemetry) MockTestRun(usedMocks int) {
+	ac.SendTelemetry("MockTestRun", map[string]interface{}{"Used-Mocks": usedMocks})
 }
 
 // Telemetry event for the tests and mocks that are recorded
@@ -133,10 +170,16 @@ func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interf
 		if ac.InstallationID == "" {
 			id := ""
 			id, _ = ac.store.Get(true)
+			if id == "" {
+				id, _ = ac.store.Get(false)
+			}
 			ac.InstallationID = id
 		}
 		event.InstallationID = ac.InstallationID
 		event.OS = runtime.GOOS
+		if ac.KeployVersion == "" {
+			ac.KeployVersion = getKeployVersion()
+		}
 		event.KeployVersion = ac.KeployVersion
 		bin, err := marshalEvent(event, ac.logger)
 		if err != nil {
