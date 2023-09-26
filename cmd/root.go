@@ -25,9 +25,6 @@ var debugMode bool
 func setupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
 
-	// Customize the encoder config to put the emoji at the beginning.
-	// logCfg.EncoderConfig.EncodeLevel = customLevelEncoder
-	// logCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder // For the sake of the example, using the ISO8601 time format
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
 	if debugMode {
 		go func() {
@@ -54,19 +51,12 @@ func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 	enc.AppendString(emoji + " " + t.Format(time.RFC3339) + " ")
 }
 
-// func customLevelEncoder(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-// 	emoji := "\U0001F430" + " Keploy:"
-// 	enc.AppendString(emoji + " " + level.CapitalString())
-// }
-
 func newRoot() *Root {
 	return &Root{
 		subCommands: []Plugins{},
 	}
 }
 
-// Execute adds all child commands to the root command.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	newRoot().execute()
 }
@@ -121,8 +111,7 @@ func (r *Root) execute() {
 		Example: rootExamples,
 	}
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
-
-	// rootCmd.Flags().IntP("pid", "", 0, "Please enter the process id on which your application is running.")
+	
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
 	// Manually parse flags to determine debug mode early
