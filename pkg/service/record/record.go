@@ -94,20 +94,9 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}()
 
 	loadedHooks.Stop(false, stopHooksAbort)
+	tele.RecordedMock(mockTotal)
+	tele.RecordedTest(dirName, testsTotal)
 	if !stoppedProxy {
 		ps.StopProxyServer()
 	}
-
-	// Enable Pid Filtering
-	// loadedHooks.EnablePidFilter()
-	// ps.FilterPid = true
-
-	// stop listening for the eBPF events
-	loadedHooks.Stop(false)
-	//Call the telemetry events.
-	tele.RecordedMock(mockTotal)
-	tele.RecordedTest(dirName, testsTotal)
-
-	//stop listening for proxy server
-	ps.StopProxyServer()
 }

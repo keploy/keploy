@@ -70,7 +70,7 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 
 	// Shutdown other resources
-	loadedHooks.Stop(false)
+	loadedHooks.Stop(true, nil)
 	//Call the telemetry events.
 	tele.RecordedMock(mocksTotal)
 	tele.RecordedTest(path, testsTotal)
