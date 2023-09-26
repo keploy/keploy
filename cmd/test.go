@@ -29,7 +29,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	var testCmd = &cobra.Command{
 		Use:     "test",
 		Short:   "run the recorded testcases and execute assertions",
-		Example: `sudo -E keploy test -c "/path/to/user/app" --delay 6`,
+		Example: `sudo -E env PATH=$PATH keploy test -c "/path/to/user/app" --delay 6`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 			path, err := cmd.Flags().GetString("path")
