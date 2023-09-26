@@ -27,24 +27,24 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.
 var examples = `
 Golang Application
 	Record:
-	sudo -E keploy record -c "/path/to/user/app/binary"
+	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
 	
 	Test:
-	sudo -E keploy test -c "/path/to/user/app/binary" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
 
 Node Application
 	Record:
-	sudo -E keploy record -c “npm start --prefix /path/to/node/app"
+	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
 	
 	Test:
-	sudo -E keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 2
 
 Java 
 	Record:
-	sudo -E keploy record -c "java -jar /path/to/java-project/target/jar"
+	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
 
 Docker
 	Alias:

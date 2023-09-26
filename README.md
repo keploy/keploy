@@ -98,28 +98,30 @@ sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 </details>
 
 ### Capturing Testcases
-To initiate the recording of API calls, execute this command in your terminal:
+To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you 
+have to set any environment variables do it like you usually do it:
 
 ```zsh
-sudo -E keploy record -c "CMD_TO_RUN_APP" 
+sudo -E env PATH=$PATH keploy record -c "CMD_TO_RUN_APP"
 ```
 For instance, if you're using a simple Golang program, the command would resemble:
 
 ```zsh
-sudo -E keploy record -c "go run main.go"
+sudo -E env PATH=$PATH keploy record -c "go run main.go"
 ```
 
 ### Running Testcases
-To run the testcases and generate a test coverage report, use this terminal command:
+To run the testcases and generate a test coverage report, use this terminal command where you usually run your app, if 
+you have to set any environment variables do it like you usually do it:
 
 ```zsh
-sudo -E keploy test -c "CMD_TO_RUN_APP" --delay 10
+sudo -E env PATH=$PATH keploy test -c "CMD_TO_RUN_APP" --delay 10
 ```
 
 For example, if you're using a Golang framework, the command would be:
 
 ```zsh
-sudo -E keploy test -c "go run main.go" --delay 10
+sudo -E env PATH=$PATH keploy test -c "go run main.go" --delay 10
 ```
 
 <img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Docker Installation </img>
