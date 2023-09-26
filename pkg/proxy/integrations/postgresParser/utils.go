@@ -2,9 +2,6 @@ package postgresparser
 
 import (
 	"encoding/base64"
-
-	// "fmt"
-
 	"encoding/binary"
 	"errors"
 	"unicode"
@@ -44,10 +41,8 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		// fmt.Println(Emoji+"failed to decode the data", err)
 		return nil, err
 	}
-	// println("Decoded data is :", string(data))
 	return data, nil
 }
 
@@ -141,13 +136,11 @@ func Fuzzymatch(configMocks, tcsMocks []*models.Mock, reqBuff []byte, h *hooks.H
 	}
 	// find the closest match
 	if IsAsciiPrintable(string(reqBuff)) {
-		// fmt.Println("Inside String Match")
 		idx := findStringMatch(string(reqBuff), mockString)
 		if idx != -1 {
 			nMatch := tcsMocks[idx].Spec.PostgresResp.Payload
 			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 			h.SetTcsMocks(tcsMocks)
-			// fmt.Println("Returning mock from String Match !!")
 			return true, nMatch
 		}
 	}
@@ -177,14 +170,12 @@ func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 		if mock == nil {
 			continue
 		}
-		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
-					// fmt.Println("matched in first loop")
 					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 					h.SetTcsMocks(tcsMocks)
 					return true, mock.Spec.GenericResponses
@@ -195,9 +186,7 @@ func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 
 	idx := findBinaryStreamMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
-		// fmt.Println("matched in first loop")
 		bestMatch := tcsMocks[idx].Spec.GenericResponses
-		// println("Lenght of tcsMocks", len(tcsMocks), " BestMatch -->", tcsMocks[idx].Spec.GenericRequests[0].Message[0].Data)
 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 		h.SetTcsMocks(tcsMocks)
 		return true, bestMatch
@@ -216,7 +205,6 @@ func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) 
 		shingles1 := CreateShingles(encoded, k)
 		shingles2 := CreateShingles(reqBuff, k)
 		similarity := JaccardSimilarity(shingles1, shingles2)
-		// fmt.Printf("Jaccard Similarity: %f\n", similarity)
 		if mxSim < similarity {
 			mxSim = similarity
 			mxIdx = idx
@@ -231,21 +219,15 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 	mxIdx := -1
 
 	for idx, mock := range tcsMocks {
-		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
-
-				// bufStr := string(reqBuff)
-				// if !IsAsciiPrintable(bufStr) {
 				_ = base64.StdEncoding.EncodeToString(reqBuff)
-				// }
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				k := AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := CreateShingles(encoded, k)
 				shingles2 := CreateShingles(reqBuff, k)
 				similarity := JaccardSimilarity(shingles1, shingles2)
-				// fmt.Printf("Jaccard Similarity: %f\n", similarity)
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx
@@ -294,7 +276,6 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 
 				log.Debug("CHANGING TO MD5 for Response")
 				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
-				// isScram = true
 				continue
 			}
 			//just change it to more robust and after that write decoode encode logic for all
