@@ -1,10 +1,5 @@
 package structs
 
-// TrafficDirectionEnum is a GO-equivalent for the following enum.
-// enum traffic_direction_t {
-//	kEgress,
-//	kIngress,
-// };.
 type TrafficDirectionEnum int32
 
 const (
