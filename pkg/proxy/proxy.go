@@ -123,20 +123,47 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 // 	ps.hook = hook
 // }
 
-func getDistroInfo() string {
-	osRelease, err := ioutil.ReadFile("/etc/os-release")
-	if err != nil {
-		fmt.Println(Emoji+"Error reading /etc/os-release:", err)
-		return ""
+func directoryExists(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
 	}
-	lines := strings.Split(string(osRelease), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "PRETTY_NAME=") {
-			return strings.Split(strings.Trim(line[len("PRETTY_NAME="):], `"`), " ")[0]
+	return info.IsDir()
+}
 
+func getCaPaths() ([]string, error) {
+	var caPaths = []string{}
+	for _, dir := range caStorePath {
+		if directoryExists(dir) {
+			caPaths = append(caPaths, dir)
 		}
 	}
-	return ""
+	if len(caPaths) == 0 {
+		return nil, fmt.Errorf("no valid CA store path found")
+	}
+	return caPaths, nil
+}
+
+func commandExists(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
+}
+
+func updateCaStore() error {
+	commandRun := false
+	for _, cmd := range caStoreUpdateCmd {
+		if commandExists(cmd) {
+			commandRun = true
+			_, err := exec.Command(cmd).CombinedOutput()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if !commandRun {
+		return fmt.Errorf("no valid CA store update command found")
+	}
+	return nil
 }
 
 //go:embed asset/ca.crt
@@ -168,6 +195,17 @@ func ExtractCertToTemp() (string, error) {
 		return "", err
 	}
 
+	// Write to the file
+	_, err = tempFile.Write(caCrt)
+	if err != nil {
+		return "", err
+	}
+
+	// Close the file
+	err = tempFile.Close()
+	if err != nil {
+		return "", err
+	}
 	return tempFile.Name(), nil
 }
 
@@ -293,30 +331,39 @@ func containsJava(input string) bool {
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
 
 	// assign default values if not provided
-	distro := getDistroInfo()
-
-	caPath := filepath.Join(caStorePath[distro], "ca.crt")
-
-	fs, err := os.Create(caPath)
+	caPaths, err := getCaPaths()
 	if err != nil {
-		logger.Error("failed to create custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
-		return nil
+		logger.Error("Failed to find the CA store path", zap.Error(err))
 	}
 
-	_, err = fs.Write(caCrt)
-	if err != nil {
-		logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
-		return nil
+	for _, path := range caPaths {
+		caPath := filepath.Join(path, "ca.crt")
+
+		fs, err := os.Create(caPath)
+		if err != nil {
+			logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
+			return nil
+		}
+
+		_, err = fs.Write(caCrt)
+		if err != nil {
+			logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", path))
+			return nil
+		}
+
+		//check if serve command is used by java application
+		isJavaServe := containsJava(lang)
+
+		// install CA in the java keystore if java is installed
+		InstallJavaCA(logger, caPath, pid, isJavaServe)
+
 	}
-
-	//check if serve command is used by java application
-	isJavaServe := containsJava(lang)
-
-	// install CA in the java keystore if java is installed
-	InstallJavaCA(logger, caPath, pid, isJavaServe)
 
 	// Update the trusted CAs store
-	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
+	err = updateCaStore()
+	if err != nil {
+		logger.Error("Failed to update the CA store", zap.Error(err))
+	}
 
 	tempCertPath, err := ExtractCertToTemp()
 	if err != nil {
@@ -328,10 +375,6 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
 	}
 	// log.Printf("This is the command2: %v", cmd)
-	err = cmd.Run()
-	if err != nil {
-		log.Fatalf(Emoji+"Failed to update system trusted store: %v", err)
-	}
 
 	if opt.Port == 0 {
 		opt.Port = 16789
@@ -470,40 +513,22 @@ func isPortAvailable(port uint32) bool {
 // 	caPrivateKeyPath = "pkg/proxy/ca.key" // Your CA private key file path
 // )
 
-var caStorePath = map[string]string{
-	"Ubuntu":   "/usr/local/share/ca-certificates/",
-	"Pop!_OS":  "/usr/local/share/ca-certificates/",
-	"Debian":   "/usr/local/share/ca-certificates/",
-	"CentOS":   "/etc/pki/ca-trust/source/anchors/",
-	"Red Hat":  "/etc/pki/ca-trust/source/anchors/",
-	"Fedora":   "/etc/pki/ca-trust/source/anchors/",
-	"Arch ":    "/etc/ca-certificates/trust-source/anchors/",
-	"openSUSE": "/etc/pki/trust/anchors/",
-	"SUSE ":    "/etc/pki/trust/anchors/",
-	"Oracle ":  "/etc/pki/ca-trust/source/anchors/",
-	"Alpine ":  "/usr/local/share/ca-certificates/",
-	"Gentoo ":  "/usr/local/share/ca-certificates/",
-	"FreeBSD":  "/usr/local/share/certs/",
-	"OpenBSD":  "/etc/ssl/certs/",
-	"macOS":    "/usr/local/share/ca-certificates/",
+var caStorePath = []string{
+	"/usr/local/share/ca-certificates/",
+	"/etc/pki/ca-trust/source/anchors/",
+	"/etc/ca-certificates/trust-source/anchors/",
+	"/etc/pki/trust/anchors/",
+	"/etc/pki/ca-trust/source/anchors/",
+	"/usr/local/share/certs/",
+	"/etc/ssl/certs/",
 }
 
-var caStoreUpdateCmd = map[string]string{
-	"Ubuntu":   "update-ca-certificates",
-	"Pop!_OS":  "update-ca-certificates",
-	"Debian":   "update-ca-certificates",
-	"CentOS":   "update-ca-trust",
-	"Red Hat":  "update-ca-trust",
-	"Fedora":   "update-ca-trust",
-	"Arch ":    "trust extract-compat",
-	"openSUSE": "update-ca-certificates",
-	"SUSE ":    "update-ca-certificates",
-	"Oracle ":  "update-ca-trust",
-	"Alpine ":  "update-ca-certificates",
-	"Gentoo ":  "update-ca-certificates",
-	"FreeBSD":  "trust extract-compat",
-	"OpenBSD":  "trust extract-compat",
-	"macOS":    "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain",
+var caStoreUpdateCmd = []string{
+	"update-ca-certificates",
+	"update-ca-trust",
+	"trust extract-compat",
+	"update-ca-trust extract",
+	"certctl rehash",
 }
 
 type certKeyPair struct {
@@ -872,7 +897,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
-	
+
 	clientConnId := getNextID()
 	reader := bufio.NewReader(conn)
 	initialData := make([]byte, 5)
