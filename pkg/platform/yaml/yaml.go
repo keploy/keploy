@@ -180,23 +180,9 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase) error {
 	}
 	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", tcsName))
 
-	// write the mock yamls
-	// mockName := fmt.Sprintf("mock-%v", lastIndx)
-	// for i, v := range yamlMocks {
-	// 	v.Name = mockName + fmt.Sprintf("-%v", i)
-	// 	err = ys.write(ys.mockPath, mockName, v)
-	// 	if err != nil {
-	// 		ys.Logger.Error("failed to write the yaml for mock", zap.Any("mockId", v.Name), zap.Error(err))
-	// 		return err
-	// 	}
-	// }
-	// if len(yamlMocks) > 0 {
-	// 	ys.Logger.Info("🟠 Keploy has recorded mocks for the external calls of user's application", zap.String("path", ys.mockPath), zap.String("mock name", mockName))
-	// }
 	return nil
 }
 
-// func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.Mock, error) {
 func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCase, error) {
 
 	if path == "" {
@@ -204,12 +190,10 @@ func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCa
 	}
 
 	tcs := []*models.TestCase{}
-	// tcsPath := filepath.Join(path, "tests")
 
 	_, err := os.Stat(path)
 	if err != nil {
 		dirNames := strings.Split(path, "/")
-		// fmt.Println(dirNames)
 		suitName := ""
 		if len(dirNames) > 1 {
 			suitName = dirNames[len(dirNames)-2]
@@ -241,16 +225,6 @@ func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCa
 			return nil, err
 		}
 
-		// yamlMocks := []*NetworkTrafficDoc{}
-		// mockName := "mock-" + strings.Split(name, "-")[1]
-		// check if mocks exists for the current testcase. read the yaml documents if mock exists.
-		// if _, err := os.Stat(filepath.Join(ys.mockPath, mockName+".yaml")); err == nil {
-		// 	yamlMocks, err = read(ys.mockPath, mockName)
-		// 	if err != nil {
-		// 		ys.Logger.Error("failed to read the mocks from yaml", zap.Error(err), zap.Any("mocks for testcase", yamlTestcase[0].Name))
-		// 		return nil, err
-		// 	}
-		// }
 
 		// Unmarshal the yaml doc into Testcase
 		tc, err := Decode(yamlTestcase[0], ys.Logger)
@@ -265,15 +239,6 @@ func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCa
 		return tcs[i].Created < tcs[j].Created
 	})
 
-	// if _, err := os.Stat(filepath.Join(path, "mocks.yaml")); err == nil {
-	// 	mockYamls, err := read(path, "mocks")
-	// 	if err != nil {
-	// 		ys.Logger.Error("failed to read the mocks from yaml", zap.Error(err))
-	// 		return nil, nil, err
-	// 	}
-	// 	mocks, err := decodeMocks(mockYamls, ys.Logger)
-	// 	return tcs, mocks, nil
-	// }
 	return tcs, nil
 }
 
@@ -294,9 +259,7 @@ func read(path, name string) ([]*NetworkTrafficDoc, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
 		}
-		// if !libMode || doc.Name == name {
 		yamlDocs = append(yamlDocs, &doc)
-		// }
 	}
 	return yamlDocs, nil
 }
@@ -345,12 +308,6 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		// _, err := os.Stat(filepath.Join(path, "config.yaml"))
-		// if err != nil {
-		// 	ys.Logger.Error("failed to find the config yaml", zap.Error(err))
-		// 	return nil, nil, err
-		// }
-
 		yamls, err := read(path, mockName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
