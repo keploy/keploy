@@ -178,7 +178,7 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase) error {
 		ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
 	}
-	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", ys.TcsName))
+	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", tcsName))
 
 	// write the mock yamls
 	// mockName := fmt.Sprintf("mock-%v", lastIndx)
