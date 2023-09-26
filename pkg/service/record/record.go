@@ -66,14 +66,36 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
 	}
-	// time.
+
+	stopHooksAbort := make(chan bool)
+	stoppedProxy := false
 
 	// start user application
-	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
-		r.logger.Error("failed to process user application hence stopping keploy", zap.Error(err))
-		loadedHooks.Stop(true)
+	go func() {
+		if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
+			switch err {
+			case hooks.ErrInterrupted:
+				r.logger.Info("keploy terminated user application")
+				return
+			case hooks.ErrCommandError:
+				r.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
+			case hooks.ErrUnExpected:
+				r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
+			default:
+				r.logger.Error("unknown error recieved from application")
+			}
+		}
+		// stop listening for the eBPF events
+		loadedHooks.Stop(true, nil)
+		//stop listening for proxy server
 		ps.StopProxyServer()
-		return
+		stopHooksAbort <- true
+		stoppedProxy = true
+	}()
+
+	loadedHooks.Stop(false, stopHooksAbort)
+	if !stoppedProxy {
+		ps.StopProxyServer()
 	}
 
 	// Enable Pid Filtering

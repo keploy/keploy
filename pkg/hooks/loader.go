@@ -350,7 +350,7 @@ func (h *Hook) Recover(id int) {
 
 	if r := recover(); r != nil {
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
-		h.Stop(true)
+		h.Stop(true, nil)
 		// stop the user application cmd
 		h.StopUserApplication()
 		if id != h.mainRoutineId {
@@ -360,14 +360,20 @@ func (h *Hook) Recover(id int) {
 	}
 }
 
-func (h *Hook) Stop(forceStop bool) {
+func (h *Hook) Stop(forceStop bool, close chan bool) {
+
+	if close == nil {
+		close = make(chan bool)
+	}
 
 	if !forceStop {
-		<-h.stopper
-		h.logger.Info("Received signal, exiting program..")
-		// stop the user application cmd
-		h.StopUserApplication()
-
+		select {
+		case <-close:
+			return
+		case <-h.stopper:
+			h.logger.Info("Received signal to exit keploy program..")
+			h.StopUserApplication()
+		}
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")
 	}

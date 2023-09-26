@@ -88,7 +88,7 @@ Available Commands:{{range .Commands}}{{if .IsAvailableCommand}}
 Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableLocalFlags}}
 
-Guided Commands:{{range .Commands}}{{if not .IsAvailableCommand}}
+Guided Commands:{{range .Commands}}{{if and (not .IsAvailableCommand) (not .Hidden)}}
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}
 
 Examples:

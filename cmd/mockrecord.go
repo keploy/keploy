@@ -78,5 +78,7 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 	serveCmd.Flags().StringP("mockName", "m", "", "User provided test suite")
 	serveCmd.MarkFlagRequired("mockName")
 
+	serveCmd.Hidden = true
+
 	return serveCmd
 }
