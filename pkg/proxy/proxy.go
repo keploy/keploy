@@ -730,6 +730,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	return tlsConn, nil
 }
 
+// handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	//checking how much time proxy takes to execute the flow.
