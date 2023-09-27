@@ -159,7 +159,11 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase) error {
 		if err != nil {
 			return err
 		}
-		tcsName = fmt.Sprintf("test-%v", lastIndx)
+		if tc.Name == "" {
+			tcsName = fmt.Sprintf("test-%v", lastIndx)
+		} else {
+			tcsName = tc.Name
+		}
 	} else {
 		tcsName = ys.TcsName
 	}
