@@ -117,14 +117,14 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
+	stopHooksAbort <- true
+	stopProxyServerAbort <- true
+
 	// stop listening for the eBPF events
 	loadedHooks.Stop(true, nil)
 
 	//stop listening for proxy server
 	ps.StopProxyServer()
-
-	stopHooksAbort <- true
-	stopProxyServerAbort <- true
 
 	return true
 }

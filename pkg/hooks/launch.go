@@ -388,7 +388,7 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 
 	// Run the command, this handles non-zero exit code get from application.
 	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	err := cmd.Run()
 	if err != nil {
@@ -396,6 +396,13 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 		case <-stopper:
 			return ErrInterrupted
 		default:
+			if exitError, ok := err.(*exec.ExitError); ok {
+				if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
+					if status.Signaled() {
+						return ErrInterrupted
+					}
+				}
+			}
 			return ErrCommandError
 		}
 	} else {
