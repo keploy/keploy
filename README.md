@@ -227,7 +227,7 @@ Keploy ensures that redundant testcases are not generated.
 
 | Name | Icon | Description |
 | ---- | ---- | ----------- |
-| Docs Maker | <img src="https://raw.githubusercontent.com/sonichigo/keploy/main/.vaunt/badge/docs_hero.png" width="50" /> | Awarded for helping in improving Keploy documentation! |
-| Every Bit Counts | <img src="https://raw.githubusercontent.com/sonichigo/keploy/main/.vaunt/badge/commit_hero.png" width="50" /> | No commit is too small! |
-| Pull Request Hero | <img src="https://raw.githubusercontent.com/sonichigo/keploy/main/.vaunt/badge/pull_request_hero.png" width="50" /> | You're a PR hero, rock on! |
+| Docs Maker | <img src="https://raw.githubusercontent.com/sonichigo/keploy/main/.vaunt/badge/docs_hero.png" width="150" /> | Awarded for helping in improving Keploy documentation! |
+| Every Bit Counts | <img src="https://raw.githubusercontent.com/sonichigo/keploy/main/.vaunt/badge/commit_hero.png" width="150" /> | No commit is too small! |
+| Pull Request Hero | <img src="https://raw.githubusercontent.com/sonichigo/keploy/main/.vaunt/badge/pull_request_hero.png" width="150" /> | You're a PR hero, rock on! |
 | Closer| <img src="https://raw.githubusercontent.com/sonichigo/keploy/main/.vaunt/badge/closer.png" width="150" /> | Only closers get coffee! |
