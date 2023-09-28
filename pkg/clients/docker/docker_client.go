@@ -112,14 +112,14 @@ func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
 
 	container, err := dockerClient.ContainerInspect(context.Background(), containerID)
 	if err != nil {
-		idc.logger.Error("Failed to inspect the docker container.", zap.Error(err))
+		err := fmt.Errorf("failed to inspect the docker container: %w", err)
 		return err
 	}
 
 	if container.State.Status == "running" {
 		err = dockerClient.ContainerStop(context.Background(), containerID, dockerContainerPkg.StopOptions{})
 		if err != nil {
-			idc.logger.Error("Failed to stop the docker container.", zap.Error(err))
+			err := fmt.Errorf("failed to stop the docker container: %w", err)
 			return err
 		}
 	}
@@ -131,7 +131,7 @@ func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
 
 	err = dockerClient.ContainerRemove(context.Background(), containerID, removeOptions)
 	if err != nil {
-		idc.logger.Error("Failed to remove the docker container.", zap.Error(err))
+		err := fmt.Errorf("failed to remove the docker container: %w", err)
 		return err
 	}
 

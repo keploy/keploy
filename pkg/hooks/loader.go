@@ -346,7 +346,7 @@ func (h *Hook) StopUserApplication() {
 		if len(h.idc.GetContainerID()) != 0  {
 			err := h.idc.StopAndRemoveDockerContainer()
 			if err != nil {
-				h.logger.Debug("Failed to stop/remove the docker container.")
+				h.logger.Error("Failed to stop/remove the docker container inside StopUserApplication().", zap.Error(err))
 			}
 		}
 
