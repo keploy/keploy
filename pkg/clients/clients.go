@@ -9,4 +9,7 @@ type InternalDockerClient interface {
 	client.APIClient
 	ExtractNetworksForContainer(containerName string) (map[string]*network.EndpointSettings, error)
 	ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error
+	StopAndRemoveDockerContainer() error
+	GetContainerID() string
+	SetContainerID(containerID string)
 }
