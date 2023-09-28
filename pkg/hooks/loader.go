@@ -14,7 +14,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"context"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -25,8 +24,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/clients"
 	"go.keploy.io/server/pkg/clients/docker"
-	"github.com/docker/docker/api/types"
-	dockerContainerPkg "github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
@@ -55,8 +52,7 @@ type Hook struct {
 	mutex         sync.RWMutex
 	userAppCmd    *exec.Cmd
 	mainRoutineId int
-	dockerDetails DockerInfo
-  
+
 	// ebpf objects and events
 	stopper  chan os.Signal
 	socket   link.Link
@@ -148,10 +144,6 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.configMocks = m
 	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
 	defer h.mu.Unlock()
-}
-
-func (h *Hook) SetDockerDetails(dockerDetails DockerInfo) {
-	h.dockerDetails = dockerDetails
 }
 
 func (h *Hook) PopFront() {
@@ -342,37 +334,6 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 	}
 }
 
-// Stop and Remove the docker container
-func (h *Hook) StopAndRemoveDockerContainer() {
-	dockerClient := h.idc
-	containerID := h.dockerDetails.containerID
-
-	container, err := dockerClient.ContainerInspect(context.Background(), containerID)
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
-
-    if container.State.Status == "running" {
-        err = dockerClient.ContainerStop(context.Background(), containerID, dockerContainerPkg.StopOptions{})
-        if err != nil {
-            fmt.Println(err)
-            return
-        }
-    }
-
-	removeOptions := types.ContainerRemoveOptions{
-		RemoveVolumes: true,
-		Force:         true,
-	}
-
-    err = dockerClient.ContainerRemove(context.Background(), containerID, removeOptions)
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
-}
-
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
@@ -380,9 +341,14 @@ func (h *Hook) StopUserApplication() {
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
 			return
 		}
-		
-		// Stop Docker Container and Remove it
-		h.StopAndRemoveDockerContainer()
+
+		// Stop Docker Container and Remove it if Keploy ran using docker
+		if len(h.idc.GetContainerID()) != 0  {
+			err := h.idc.StopAndRemoveDockerContainer()
+			if err != nil {
+				h.logger.Debug("Failed to stop/remove the docker container.")
+			}
+		}
 
 		h.killProcessesAndTheirChildren(h.userAppCmd.Process.Pid)
 	}

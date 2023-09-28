@@ -27,12 +27,6 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
-type DockerInfo struct {
-	appContainer string
-	appNetwork string
-	containerID string
-}
-
 const (
 	// TODO : Remove hard-coded container name.
 	KeployContainerName = "keploy-v2"
@@ -95,12 +89,12 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				appContainer, appNetwork = cont, net
 			}
 
-			err := h.processDockerEnv(appCmd, appContainer, appNetwork)
-			if err != nil {
-				return err
-			}
-		} else { //Supports only linux
-			h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
+		err := h.processDockerEnv(appCmd, appContainer, appNetwork)
+		if err != nil {
+			return err
+		}
+	} else { //Supports only linux
+		h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
 			// to notify the kernel hooks that the user application command is running in native linux.
 			key := 0
@@ -185,8 +179,10 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
 				if e.Type == events.ContainerEventType && e.Action == "create" {
+					// Set Docker Container ID
+					h.idc.SetContainerID(e.ID)
+					
 					// Fetch container details by inspecting using container ID to check if container is created
-					h.dockerDetails.containerID = e.ID
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
 					if err != nil {
 						h.logger.Debug("failed to inspect container by container Id", zap.Error(err))
