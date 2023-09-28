@@ -342,11 +342,12 @@ func (h *Hook) StopUserApplication() {
 			return
 		}
 
-		// Stop Docker Container and Remove it if Keploy ran using docker
-		if len(h.idc.GetContainerID()) != 0  {
+		// Stop Docker Container and Remove it if Keploy ran using docker.
+		containerID := h.idc.GetContainerID()
+		if len(containerID) != 0  {
 			err := h.idc.StopAndRemoveDockerContainer()
 			if err != nil {
-				h.logger.Error("Failed to stop/remove the docker container inside StopUserApplication().", zap.Error(err))
+				h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerID), zap.Error(err))
 			}
 		}
 
