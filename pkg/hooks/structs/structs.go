@@ -30,46 +30,33 @@ type SockAddrIn struct {
 	SinZero   [8]byte
 }
 
-// SocketDataEventAttr is a conversion of the following C-Struct into GO.
-//
-//	struct attr_t {
-//	    uint64_t timestamp_ns;
-//	    struct conn_id_t conn_id;
-//	    enum traffic_direction_t direction;
-//	    uint32_t msg_size;
-//	    uint64_t pos;
-//	};.
-// type SocketDataEventAttr struct {
-// 	TimestampNano uint64
-// 	ConnID        ConnID
-// 	Direction     TrafficDirectionEnum
-// 	MsgSize       uint32
-// 	Pos           uint64
-// }
-
 const (
 	EventBodyMaxSize = 16384 // 16 KB
 )
 
 // SocketDataEvent is a conversion of the following C-Struct into GO.
-//
-//	struct socket_data_event_t {
-//	   struct attr_t attr;
-//	   char msg[16384];
-//	};.
-// type SocketDataEvent struct {
-// 	Attr SocketDataEventAttr
-// 	Msg  [EventBodyMaxSize] byte
-// }
+// struct socket_data_event_t
+// {
+//     u64 timestamp_ns;
+//     struct conn_id_t conn_id;
+//     enum traffic_direction_t direction;
+//     u32 msg_size;
+//     u64 pos;
+//     char msg[MAX_MSG_SIZE];
+//     s64 validate_rd_bytes
+//     s64 validate_wr_bytes
+// };
 
 // Socket Data Event .....
 type SocketDataEvent struct {
-	TimestampNano uint64
-	ConnID        ConnID
-	Direction     TrafficDirectionEnum
-	MsgSize       uint32
-	Pos           uint64
-	Msg           [EventBodyMaxSize]byte
+	TimestampNano        uint64
+	ConnID               ConnID
+	Direction            TrafficDirectionEnum
+	MsgSize              uint32
+	Pos                  uint64
+	Msg                  [EventBodyMaxSize]byte
+	ValidateReadBytes    int64
+	ValidateWrittenBytes int64
 }
 
 // SocketOpenEvent is a conversion of the following C-Struct into GO.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	_ "net/http/pprof"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"

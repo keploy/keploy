@@ -71,6 +71,11 @@ func (s *Serve) GetCmd() *cobra.Command {
 				return
 			}
 
+			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
+			if err != nil {
+				s.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
+			}
+
 			port, err := cmd.Flags().GetUint32("port")
 
 			if err != nil {
@@ -87,7 +92,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
 			if err != nil {
 				s.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return 
+				return
 			}
 			// for _, v := range ports {
 
@@ -95,7 +100,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			s.server.Serve(path, testReportPath, delay, pid, port, language, ports)
+			s.server.Serve(path, testReportPath, delay, pid, port, language, ports, apiTimeout)
 		},
 	}
 
@@ -110,10 +115,14 @@ func (s *Serve) GetCmd() *cobra.Command {
 	serveCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	serveCmd.MarkFlagRequired("delay")
 
+	serveCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
+
 	serveCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	serveCmd.Flags().StringP("language", "l", "", "application programming language")
 	serveCmd.MarkFlagRequired("language")
+
+	serveCmd.Hidden = true
 
 	return serveCmd
 }

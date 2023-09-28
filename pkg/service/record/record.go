@@ -1,6 +1,10 @@
 package record
 
 import (
+	"os"
+	"os/signal"
+	"syscall"
+
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -23,30 +27,46 @@ func NewRecorder(logger *zap.Logger) Recorder {
 
 // func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer, appNetwork string, Delay uint64) {
 func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
+
+	var ps *proxy.ProxySet
+
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+
 	models.SetMode(models.MODE_RECORD)
 
-	ys := yaml.NewYamlStore(r.logger)
-
-	dirName, err := ys.NewSessionIndex(path)
+	dirName, err := yaml.NewSessionIndex(path, r.logger)
 	if err != nil {
-		r.logger.Error("failed to find the directroy name for the session", zap.Error(err))
 		return
 	}
-	path += "/" + dirName
+
+	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger)
+
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(path, ys, routineId, r.logger)
+	loadedHooks := hooks.NewHook(ys, routineId, r.logger)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
-	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
+	select {
+	case <-stopper:
 		return
+	default:
+		// load the ebpf hooks into the kernel
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
+			return
+		}
 	}
 
-	// start the BootProxy
-	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks)
+	select {
+	case <-stopper:
+		loadedHooks.Stop(true, nil)
+		return
+	default:
+		// start the BootProxy
+		ps = proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks)
+	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	// ps.SetHook(loadedHooks)
@@ -55,23 +75,42 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
 	}
-	// time.
 
-	// start user application
-	if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
-		r.logger.Error("failed to process user application hence stopping keploy", zap.Error(err))
-		loadedHooks.Stop(true)
+	stopHooksAbort := make(chan bool)
+	stoppedProxy := false
+
+	select {
+	case <-stopper:
+		loadedHooks.Stop(true, nil)
 		ps.StopProxyServer()
 		return
+	default:
+		// start user application
+		go func() {
+			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
+				switch err {
+				case hooks.ErrInterrupted:
+					r.logger.Info("keploy terminated user application")
+					return
+				case hooks.ErrCommandError:
+					r.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
+				case hooks.ErrUnExpected:
+					r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
+				default:
+					r.logger.Error("unknown error recieved from application")
+				}
+			}
+			// stop listening for the eBPF events
+			loadedHooks.Stop(true, nil)
+			//stop listening for proxy server
+			ps.StopProxyServer()
+			stopHooksAbort <- true
+			stoppedProxy = true
+		}()
 	}
 
-	// Enable Pid Filtering
-	// loadedHooks.EnablePidFilter()
-	// ps.FilterPid = true
-
-	// stop listening for the eBPF events
-	loadedHooks.Stop(false)
-
-	//stop listening for proxy server
-	ps.StopProxyServer()
+	loadedHooks.Stop(false, stopHooksAbort)
+	if !stoppedProxy {
+		ps.StopProxyServer()
+	}
 }

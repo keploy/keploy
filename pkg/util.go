@@ -59,7 +59,7 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, error) {
+func SimulateHttp(tc models.TestCase, logger *zap.Logger, apiTimeout uint64) (*models.HttpResp, error) {
 	resp := &models.HttpResp{}
 
 	logger.Info("making a http request", zap.Any("test case id", tc.Name))
@@ -69,7 +69,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 		return nil, err
 	}
 	req.Header = ToHttpHeader(tc.HttpReq.Header)
-	req.Header.Set("KEPLOY_TEST_ID", tc.Name)
+	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.ProtoMajor = tc.HttpReq.ProtoMajor
 	req.ProtoMinor = tc.HttpReq.ProtoMinor
 	req.Close = true
@@ -78,6 +78,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger) (*models.HttpResp, err
 
 	// Creating the client and disabling redirects
 	client := &http.Client{
+		Timeout: time.Second * time.Duration(apiTimeout),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

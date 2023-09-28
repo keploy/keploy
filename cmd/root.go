@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"time"
 
@@ -28,6 +30,10 @@ func setupLogger() *zap.Logger {
 	// logCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder // For the sake of the example, using the ISO8601 time format
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
 	if debugMode {
+		go func() {
+			log.Println(http.ListenAndServe("localhost:6060", nil))
+		}()
+
 		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 		logCfg.DisableStacktrace = false
 	} else {
@@ -80,7 +86,7 @@ Available Commands:{{range .Commands}}{{if .IsAvailableCommand}}
 Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableLocalFlags}}
 
-Guided Commands:{{range .Commands}}{{if not .IsAvailableCommand}}
+Guided Commands:{{range .Commands}}{{if and (not .IsAvailableCommand) (not .Hidden)}}
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}
 
 Examples:
@@ -124,7 +130,7 @@ func (r *Root) execute() {
 	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
 
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {

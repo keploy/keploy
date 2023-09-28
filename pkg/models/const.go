@@ -7,6 +7,7 @@ const (
 	SqlDB      string = "SQL_DB"
 	GRPC       string = "GRPC"
 	HttpClient string = "HTTP_CLIENT"
+	TestSetPattern string = "test-set-"
 )
 
 

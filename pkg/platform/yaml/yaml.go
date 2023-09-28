@@ -6,8 +6,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,18 +21,21 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type Yaml struct {
-	// tcsPath  string
-	// mockPath string
-	// path string
-	Logger *zap.Logger
+	TcsPath  string
+	MockPath string
+	MockName string
+	TcsName  string
+	Logger   *zap.Logger
 }
 
 // func NewYamlStore(tcsPath, mockPath string, Logger *zap.Logger) platform.TestCaseDB {
-func NewYamlStore(Logger *zap.Logger) platform.TestCaseDB {
+func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger) platform.TestCaseDB {
 	return &Yaml{
-		// tcsPath:  tcsPath,
-		// mockPath: mockPath,
-		Logger: Logger,
+		TcsPath:  tcsPath,
+		MockPath: mockPath,
+		MockName: mockName,
+		TcsName:  tcsName,
+		Logger:   Logger,
 	}
 }
 
@@ -46,32 +49,28 @@ func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
-		// Changes the permission of created "Keploy" folder to 777
-		if strings.Contains(path, "keploy/test-suite-") {
-			err = os.Chmod(filepath.Join(strings.TrimSuffix(path, filepath.Base(path))), fs.ModePerm)
-			if err != nil {
-				Logger.Error("failed to change the ./Keploy directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-				return false, err
-			}
-		}
-		err = os.Chmod(filepath.Join(path), fs.ModePerm)
-		if err != nil {
-			Logger.Error("failed to change the created directory permission", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-			return false, err
-		}
 
 		// create the yaml file
-		yamlFile, err := os.Create(filepath.Join(path, fileName+".yaml"))
+		_, err := os.Create(filepath.Join(path, fileName+".yaml"))
 		if err != nil {
 			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
-		// changes user permission to allow write operation on yaml file
-		err = yamlFile.Chmod(fs.ModePerm)
+
+		// since, keploy requires root access. The permissions for generated files 
+		// should be updated to share it with all users.
+		keployPath := path
+		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
+			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
+		}
+		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
+		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
+		err = cmd.Run()
 		if err != nil {
-			Logger.Error("failed to set the permission of yaml file", zap.Error(err))
+			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 			return false, err
 		}
+
 		return true, nil
 	}
 	return false, nil
@@ -151,15 +150,18 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 }
 
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
-func (ys *Yaml) WriteTestcase(path string, tc *models.TestCase) error {
+func (ys *Yaml) WriteTestcase(tc *models.TestCase) error {
 
-	// testcases are stored in one directory for a session
-	path += "/tests"
-
-	// finds the recently generated testcase to derive the sequence number for the current testcase
-	lastIndx, err := findLastIndex(path, ys.Logger)
-	if err != nil {
-		return err
+	var tcsName string
+	if ys.TcsName == "" {
+		// finds the recently generated testcase to derive the sequence number for the current testcase
+		lastIndx, err := findLastIndex(ys.TcsPath, ys.Logger)
+		if err != nil {
+			return err
+		}
+		tcsName = fmt.Sprintf("test-%v", lastIndx)
+	} else {
+		tcsName = ys.TcsName
 	}
 
 	// encode the testcase and its mocks into yaml docs
@@ -170,14 +172,13 @@ func (ys *Yaml) WriteTestcase(path string, tc *models.TestCase) error {
 	}
 
 	// write testcase yaml
-	tcName := fmt.Sprintf("test-%v", lastIndx)
-	yamlTc.Name = tcName
-	err = ys.Write(path, tcName, *yamlTc)
+	yamlTc.Name = tcsName
+	err = ys.Write(ys.TcsPath, tcsName, *yamlTc)
 	if err != nil {
 		ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
 	}
-	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", path), zap.String("testcase name", tcName))
+	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", tcsName))
 
 	// write the mock yamls
 	// mockName := fmt.Sprintf("mock-%v", lastIndx)
@@ -192,14 +193,17 @@ func (ys *Yaml) WriteTestcase(path string, tc *models.TestCase) error {
 	// if len(yamlMocks) > 0 {
 	// 	ys.Logger.Info("🟠 Keploy has recorded mocks for the external calls of user's application", zap.String("path", ys.mockPath), zap.String("mock name", mockName))
 	// }
-
 	return nil
 }
 
 // func (ys *yaml) Read (options interface{}) ([]models.Mock,  map[string][]models.Mock, error) {
 func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCase, error) {
-	tcs := []*models.TestCase{}
 
+	if path == "" {
+		path = ys.TcsPath
+	}
+
+	tcs := []*models.TestCase{}
 	// tcsPath := filepath.Join(path, "tests")
 
 	_, err := os.Stat(path)
@@ -297,83 +301,27 @@ func read(path, name string) ([]*NetworkTrafficDoc, error) {
 	return yamlDocs, nil
 }
 
-func (ys *Yaml) WriteMock(path string, mock *models.Mock) error {
+func (ys *Yaml) WriteMock(mock *models.Mock) error {
+
+	if ys.MockName != "" {
+		mock.Name = ys.MockName
+	}
+
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
+
 	if mock.Name == "" {
 		mock.Name = "mocks"
 	}
-	err = ys.Write(path, mock.Name, *mockYaml)
+
+	err = ys.Write(ys.MockPath, mock.Name, *mockYaml)
 	if err != nil {
 		return err
 	}
+
 	return nil
-}
-
-func (ys *Yaml) NewSessionIndex(path string) (string, error) {
-	indx := 0
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
-	if err != nil {
-		ys.Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return fmt.Sprintf("test-set-%v", indx), nil
-	}
-
-	files, err := dir.ReadDir(0)
-	if err != nil {
-		return "", err
-	}
-
-	for _, v := range files {
-		// fmt.Println("name for the file", v.Name())
-		fileName := filepath.Base(v.Name())
-		fileNamePackets := strings.Split(fileName, "-")
-		if len(fileNamePackets) == 3 {
-			fileIndx, err := strconv.Atoi(fileNamePackets[2])
-			if err != nil {
-				ys.Logger.Debug("failed to convert the index string to integer", zap.Error(err))
-				continue
-			}
-			if indx < fileIndx+1 {
-				indx = fileIndx + 1
-			}
-		}
-	}
-	return fmt.Sprintf("test-set-%v", indx), nil
-}
-
-func (ys *Yaml) ReadSessionIndices(path string) ([]string, error) {
-	indices := []string{}
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
-	if err != nil {
-		ys.Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
-	}
-
-	files, err := dir.ReadDir(0)
-	if err != nil {
-		return indices, err
-	}
-
-	for _, v := range files {
-		// Define the regular expression pattern
-		pattern := `^test-set-\d{1,}$`
-
-		// Compile the regular expression
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			return indices, err
-		}
-
-		// Check if the string matches the pattern
-		if regex.MatchString(v.Name()) {
-			// fmt.Println("name for the file", v.Name())
-
-			indices = append(indices, v.Name())
-		}
-	}
-	return indices, nil
 }
 
 func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
@@ -382,41 +330,48 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		tcsMocks    = []*models.Mock{}
 	)
 
-	if _, err := os.Stat(filepath.Join(path, "config.yaml")); err == nil {
+	if path == "" {
+		path = ys.MockPath
+	}
+
+	mockName := "mocks"
+	if ys.MockName != "" {
+		mockName = ys.MockName
+	}
+
+	mockPath, err := ValidatePath(path + "/" + mockName + ".yaml")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := os.Stat(mockPath); err == nil {
 		// _, err := os.Stat(filepath.Join(path, "config.yaml"))
 		// if err != nil {
 		// 	ys.Logger.Error("failed to find the config yaml", zap.Error(err))
 		// 	return nil, nil, err
 		// }
-		configYamls, err := read(path, "config")
+
+		yamls, err := read(path, mockName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, nil, err
 		}
-		configMocks, err = decodeMocks(configYamls, ys.Logger)
+		mocks, err := decodeMocks(yamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, nil, err
 		}
+
+
+		for _, mock := range mocks {
+			if mock.Spec.Metadata["type"] == "config" {
+				configMocks = append(configMocks, mock)
+			} else {
+				tcsMocks = append(tcsMocks, mock)
+			}
+		}
 	}
 
-	if _, err := os.Stat(filepath.Join(path, "mocks.yaml")); err == nil {
-		// _, err = os.Stat(filepath.Join(path, "mocks.yaml"))
-		// if err != nil {
-		// 	ys.Logger.Error("failed to find the mock yaml", zap.Error(err))
-		// 	return nil, nil, err
-		// }
-		mockYamls, err := read(path, "mocks")
-		if err != nil {
-			ys.Logger.Error("failed to read the mocks from yaml for testcases", zap.Error(err), zap.Any("session", filepath.Base(path)))
-			return nil, nil, err
-		}
-		tcsMocks, err = decodeMocks(mockYamls, ys.Logger)
-		if err != nil {
-			ys.Logger.Error("failed to decode the testcase mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
-			return nil, nil, err
-		}
-	}
 	return configMocks, tcsMocks, nil
 
 }

@@ -37,23 +37,26 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
 // func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
-func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB) {
+func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
 	for connID, tracker := range factory.connections {
-		if tracker.IsComplete() {
-			trackersToDelete = append(trackersToDelete, connID)
-			if len(tracker.SentBuf) == 0 && len(tracker.RecvBuf) == 0 {
+		ok, requestBuf, responseBuf := tracker.IsComplete()
+		if ok {
+
+			if len(requestBuf) == 0 && len(responseBuf) == 0 {
+				factory.logger.Debug("Empty request or response", zap.Any("RecvBufLength", len(requestBuf)), zap.Any("SentBufLength", len(responseBuf)))
 				continue
 			}
-			parsedHttpReq, err := pkg.ParseHTTPRequest(tracker.RecvBuf)
+
+			parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
 			if err != nil {
 				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err))
 				continue
 			}
-			parsedHttpRes, err := pkg.ParseHTTPResponse(tracker.SentBuf, parsedHttpReq)
+			parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
 			if err != nil {
 				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
 				continue
@@ -63,7 +66,7 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
 				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(path, db, parsedHttpReq, parsedHttpRes, factory.logger)
+				capture(db, parsedHttpReq, parsedHttpRes, factory.logger)
 			case models.MODE_TEST:
 				factory.logger.Debug("skipping tracker in test mode")
 			default:
@@ -71,7 +74,7 @@ func (factory *Factory) HandleReadyConnections(path string, db platform.TestCase
 					zap.Any("current mode", models.GetMode()))
 			}
 
-		} else if tracker.Malformed() || tracker.IsInactive(factory.inactivityThreshold) {
+		} else if tracker.IsInactive(factory.inactivityThreshold) {
 			trackersToDelete = append(trackersToDelete, connID)
 		}
 	}
@@ -95,7 +98,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
+func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
 	// meta := map[string]string{
 	// 	"method": req.Method,
 	// }
@@ -128,7 +131,7 @@ func capture(path string, db platform.TestCaseDB, req *http.Request, resp *http.
 	// }
 
 	// err = db.Insert(httpMock, getDeps())
-	err = db.WriteTestcase(path, &models.TestCase{
+	err = db.WriteTestcase(&models.TestCase{
 		Version: models.V1Beta2,
 		Name:    "",
 		Kind:    models.HTTP,

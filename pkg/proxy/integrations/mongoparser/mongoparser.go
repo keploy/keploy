@@ -3,6 +3,7 @@ package mongoparser
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"reflect"
@@ -32,7 +33,7 @@ func IsOutgoingMongo(buffer []byte) bool {
 	return int(messageLength) == len(buffer)
 }
 
-func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func ProcessOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		logger.Debug("the outgoing mongo in record mode")
@@ -44,7 +45,7 @@ func ProcessOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cl
 	}
 }
 
-func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{requestBuffer}
 	for {
@@ -60,6 +61,10 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 			started := time.Now()
 			requestBuffer, err = util.ReadBytes(clientConn)
 			if err != nil {
+				if err == io.EOF {
+					logger.Debug("recieved request buffer is empty in test mode for mongo calls")
+					return
+				}
 				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.Any("clientConnId", clientConnId))
 				return
 			}
@@ -87,6 +92,10 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				logger.Debug("into the for loop for request stream")
 				requestBuffer1, err := util.ReadBytes(clientConn)
 				if err != nil {
+					if err == io.EOF {
+						logger.Debug("recieved request buffer is empty for streaming mongo request call")
+						return
+					}
 					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 					return
 				}
@@ -163,8 +172,10 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 								continue
 							}
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-								scoreSum += score
+								if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+									score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
+									scoreSum += score
+								}
 							}
 							currentScore := scoreSum / float64(len(mongoRequests))
 							if currentScore > maxMatchScore {
@@ -256,15 +267,17 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 								continue
 							}
-							if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
-								continue
-							}
+							scoreSum := 0.0
 							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-								if score > maxMatchScore {
-									maxMatchScore = score
-									bestMatchIndex = tcsIndx
+								if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+									score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
+									scoreSum += score
 								}
+							}
+							currentScore := scoreSum / float64(len(mongoRequests))
+							if currentScore > maxMatchScore {
+								maxMatchScore = currentScore
+								bestMatchIndex = tcsIndx
 							}
 						default:
 							logger.Error("the OpCode of the mongo wiremessage is invalid.")
@@ -319,7 +332,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 }
 
 // func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) []*models.Mock {
-func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	rand.Seed(time.Now().UnixNano())
 	// clientConnId := rand.Intn(101)
 	for {
@@ -331,9 +344,13 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		if string(requestBuffer) == "read form client connection" {
 			lstr := ""
 			started := time.Now()
-			requestBuffer, lstr, err = util.ReadBytes1(clientConn)
+			requestBuffer, err = util.ReadBytes(clientConn)
 			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
+				if err == io.EOF {
+					logger.Debug("recieved request buffer is empty in record mode for mongo call")
+					return
+				}
 				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 				return
 			}
@@ -373,9 +390,13 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				// fmt.Println("into the more_to_come", logStr)
 				tmpStr := ""
 				started = time.Now()
-				requestBuffer1, tmpStr, err := util.ReadBytes1(clientConn)
+				requestBuffer1, err := util.ReadBytes(clientConn)
 				logStr += tmpStr
 				if err != nil {
+					if err == io.EOF {
+						logger.Debug("recieved request buffer is empty in record mode for mongo request")
+						return
+					}
 					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
@@ -424,10 +445,15 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 		// read reply message from the mongo server
 		tmpStr := ""
 		started = time.Now()
-		responseBuffer, tmpStr, err := util.ReadBytes1(destConn)
+		responseBuffer, err := util.ReadBytes(destConn)
 		logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
 		logStr += tmpStr
 		if err != nil {
+			if err == io.EOF {
+				logger.Debug("recieved response buffer is empty in record mode for mongo call")
+				destConn.Close()
+				return
+			}
 			logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
@@ -473,6 +499,11 @@ func encodeOutgoingMongo(clientConnId, destConnId int, requestBuffer []byte, cli
 				responseBuffer, err = util.ReadBytes(destConn)
 				logStr += tmpStr
 				if err != nil {
+					if err == io.EOF {
+						logger.Debug("recieved response buffer is empty in record mode for mongo call")
+						destConn.Close()
+						return
+					}
 					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
@@ -543,12 +574,15 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 
 	shouldRecordCalls := true
 	name := "mocks"
+	meta1 := map[string]string{
+		"operation": opReq.String(),
+	}
 
 	// Skip heartbeat from capturing in the global set of mocks. Since, the heartbeat packet always contain the "hello" boolean.
 	// See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
 	// if strings.Contains(opReq.String(), "helloOk") || strings.Contains(opReq.String(), "hello") {
 	if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
-		name = "config"
+		meta1["type"] = "config"
 		// isHeartbeatRecorded := false
 		for _, v := range configRequests {
 			// requestHeader.
@@ -579,9 +613,6 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 		}
 	}
 	if shouldRecordCalls {
-		meta1 := map[string]string{
-			"operation": opReq.String(),
-		}
 		mongoMock := &models.Mock{
 			Version: models.V1Beta2,
 			Kind:    models.Mongo,

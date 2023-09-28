@@ -24,4 +24,5 @@ type Resolver struct {
 	Delay            uint64
 	AppPid           uint32
 	firstRequestDone bool
+	ApiTimeout       uint64
 }

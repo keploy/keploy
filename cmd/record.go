@@ -30,7 +30,7 @@ func (r *Record) GetCmd() *cobra.Command {
 	var recordCmd = &cobra.Command{
 		Use:     "record",
 		Short:   "record the keploy testcases from the API calls",
-		Example: `sudo -E keploy record -c "/path/to/user/app"`,
+		Example: `sudo -E env PATH=$PATH keploy record -c "/path/to/user/app"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 

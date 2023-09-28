@@ -43,16 +43,16 @@ type Hook struct {
 	keployServerPort *ebpf.Map
 
 	platform.TestCaseDB
+
 	logger        *zap.Logger
-	proxyPortList []uint32
+	proxyPort     uint32
 	tcsMocks      []*models.Mock
 	configMocks   []*models.Mock
-	path          string
 	mu            *sync.Mutex
 	mutex         sync.RWMutex
 	userAppCmd    *exec.Cmd
 	mainRoutineId int
-
+  
 	// ebpf objects and events
 	stopper  chan os.Signal
 	socket   link.Link
@@ -91,7 +91,7 @@ type Hook struct {
 	idc clients.InternalDockerClient
 }
 
-func NewHook(path string, db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hook {
+func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hook {
 	idc, err := docker.NewInternalDockerClient(logger)
 	if err != nil {
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
@@ -101,11 +101,18 @@ func NewHook(path string, db platform.TestCaseDB, mainRoutineId int, logger *zap
 		// db:          db,
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
-		path:          path,
 		userIpAddress: make(chan string),
 		idc:           idc,
 		mainRoutineId: mainRoutineId,
 	}
+}
+
+func (h *Hook) SetProxyPort(port uint32) {
+	h.proxyPort = port
+}
+
+func (h *Hook) GetProxyPort() uint32 {
+	return h.proxyPort
 }
 
 func (h *Hook) GetDepsSize() int {
@@ -119,7 +126,7 @@ func (h *Hook) AppendMocks(m *models.Mock) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// h.tcsMocks = append(h.tcsMocks, m)
-	err := h.TestCaseDB.WriteMock(h.path, m)
+	err := h.TestCaseDB.WriteMock(m)
 	if err != nil {
 		return err
 	}
@@ -292,9 +299,11 @@ func (h *Hook) killProcessesAndTheirChildren(parentPID int) {
 	h.findAndCollectChildProcesses(fmt.Sprintf("%d", parentPID), &pids)
 
 	for _, childPID := range pids {
-		err := syscall.Kill(childPID, syscall.SIGKILL)
-		if err != nil {
-			h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
+		if h.userAppCmd.ProcessState == nil {
+			err := syscall.Kill(childPID, syscall.SIGKILL)
+			if err != nil {
+				h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
+			}
 		}
 	}
 }
@@ -328,6 +337,7 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
+		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
 			return
 		}
@@ -339,7 +349,9 @@ func (h *Hook) Recover(id int) {
 
 	if r := recover(); r != nil {
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
-		h.Stop(true)
+		h.Stop(true, nil)
+		// stop the user application cmd
+		h.StopUserApplication()
 		if id != h.mainRoutineId {
 			log.Panic(r)
 			os.Exit(1)
@@ -347,13 +359,20 @@ func (h *Hook) Recover(id int) {
 	}
 }
 
-func (h *Hook) Stop(forceStop bool) {
-	if !forceStop {
-		<-h.stopper
-		// stop the user application cmd
-		h.StopUserApplication()
-		h.logger.Info("Received signal, exiting program..")
+func (h *Hook) Stop(forceStop bool, close chan bool) {
 
+	if close == nil {
+		close = make(chan bool)
+	}
+
+	if !forceStop {
+		select {
+		case <-close:
+			return
+		case <-h.stopper:
+			h.logger.Info("Received signal to exit keploy program..")
+			h.StopUserApplication()
+		}
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")
 	}
@@ -456,7 +475,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		defer h.Recover(pkg.GenerateRandomID())
 
 		for {
-			connectionFactory.HandleReadyConnections(h.path, h.TestCaseDB)
+			connectionFactory.HandleReadyConnections(h.TestCaseDB)
 			time.Sleep(1 * time.Second)
 		}
 	}()

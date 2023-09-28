@@ -12,7 +12,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -20,9 +19,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
+	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -37,7 +38,6 @@ import (
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
-	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -46,18 +46,27 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
+// idCounter is used to generate random ID for each request
+var idCounter int64 = -1
+
+func getNextID() int64 {
+	return atomic.AddInt64(&idCounter, 1)
+}
+
 type ProxySet struct {
-	IP4              uint32
-	IP6              [4]uint32
-	Port             uint32
-	hook             *hooks.Hook
-	logger           *zap.Logger
-	FilterPid        bool
-	Listener         net.Listener
-	DnsServer        *dns.Server
-	DnsServerTimeout time.Duration
-	dockerAppCmd     bool
-	PassThroughPorts []uint
+	IP4               uint32
+	IP6               [4]uint32
+	Port              uint32
+	hook              *hooks.Hook
+	logger            *zap.Logger
+	FilterPid         bool
+	clientConnections []net.Conn
+	connMutex         *sync.Mutex
+	Listener          net.Listener
+	DnsServer         *dns.Server
+	DnsServerTimeout  time.Duration
+	dockerAppCmd      bool
+	PassThroughPorts  []uint
 }
 
 type CustomConn struct {
@@ -114,20 +123,47 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 // 	ps.hook = hook
 // }
 
-func getDistroInfo() string {
-	osRelease, err := ioutil.ReadFile("/etc/os-release")
-	if err != nil {
-		fmt.Println(Emoji+"Error reading /etc/os-release:", err)
-		return ""
+func directoryExists(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
 	}
-	lines := strings.Split(string(osRelease), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "PRETTY_NAME=") {
-			return strings.Split(strings.Trim(line[len("PRETTY_NAME="):], `"`), " ")[0]
+	return info.IsDir()
+}
 
+func getCaPaths() ([]string, error) {
+	var caPaths = []string{}
+	for _, dir := range caStorePath {
+		if directoryExists(dir) {
+			caPaths = append(caPaths, dir)
 		}
 	}
-	return ""
+	if len(caPaths) == 0 {
+		return nil, fmt.Errorf("no valid CA store path found")
+	}
+	return caPaths, nil
+}
+
+func commandExists(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
+}
+
+func updateCaStore() error {
+	commandRun := false
+	for _, cmd := range caStoreUpdateCmd {
+		if commandExists(cmd) {
+			commandRun = true
+			_, err := exec.Command(cmd).CombinedOutput()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if !commandRun {
+		return fmt.Errorf("no valid CA store update command found")
+	}
+	return nil
 }
 
 //go:embed asset/ca.crt
@@ -143,6 +179,34 @@ var caFolder embed.FS
 func isJavaInstalled() bool {
 	_, err := exec.LookPath("java")
 	return err == nil
+}
+
+// to extract ca certificate to temp
+func ExtractCertToTemp() (string, error) {
+	tempFile, err := ioutil.TempFile("", "ca.crt")
+	if err != nil {
+		return "", err
+	}
+	defer tempFile.Close()
+
+	// Change the file permissions to allow read access for all users
+	err = os.Chmod(tempFile.Name(), 0666)
+	if err != nil {
+		return "", err
+	}
+
+	// Write to the file
+	_, err = tempFile.Write(caCrt)
+	if err != nil {
+		return "", err
+	}
+
+	// Close the file
+	err = tempFile.Close()
+	if err != nil {
+		return "", err
+	}
+	return tempFile.Name(), nil
 }
 
 // JavaCAExists checks if the CA is already installed in the specified Java keystore
@@ -248,6 +312,8 @@ func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32, isJavaServe bo
 
 		logger.Info("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
 		logger.Info("Successfully imported CA", zap.Any("", cmdOutput))
+	} else {
+		logger.Debug("Java is not installed on the system")
 	}
 }
 
@@ -265,35 +331,50 @@ func containsJava(input string) bool {
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
 
 	// assign default values if not provided
-	distro := getDistroInfo()
-
-	caPath := filepath.Join(caStorePath[distro], "ca.crt")
-
-	fs, err := os.Create(caPath)
+	caPaths, err := getCaPaths()
 	if err != nil {
-		logger.Error("failed to create custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
-		return nil
+		logger.Error("Failed to find the CA store path", zap.Error(err))
 	}
 
-	_, err = fs.Write(caCrt)
-	if err != nil {
-		logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", caStorePath[distro]))
-		return nil
+	for _, path := range caPaths {
+		caPath := filepath.Join(path, "ca.crt")
+
+		fs, err := os.Create(caPath)
+		if err != nil {
+			logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
+			return nil
+		}
+
+		_, err = fs.Write(caCrt)
+		if err != nil {
+			logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", path))
+			return nil
+		}
+
+		//check if serve command is used by java application
+		isJavaServe := containsJava(lang)
+
+		// install CA in the java keystore if java is installed
+		InstallJavaCA(logger, caPath, pid, isJavaServe)
+
 	}
-
-	//check if serve command is used by java application
-	isJavaServe := containsJava(lang)
-
-	// install CA in the java keystore if java is installed
-	InstallJavaCA(logger, caPath, pid, isJavaServe)
 
 	// Update the trusted CAs store
-	cmd := exec.Command("/usr/bin/sudo", caStoreUpdateCmd[distro])
-	// log.Printf("This is the command2: %v", cmd)
-	err = cmd.Run()
+	err = updateCaStore()
 	if err != nil {
-		log.Fatalf(Emoji+"Failed to update system trusted store: %v", err)
+		logger.Error("Failed to update the CA store", zap.Error(err))
 	}
+
+	tempCertPath, err := ExtractCertToTemp()
+	if err != nil {
+		logger.Error(Emoji+"Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
+	}
+
+	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
+	if err != nil {
+		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
+	}
+	// log.Printf("This is the command2: %v", cmd)
 
 	if opt.Port == 0 {
 		opt.Port = 16789
@@ -328,14 +409,19 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	dIDE := (appCmd == "" && len(appContainer) != 0)
 
 	var proxySet = ProxySet{
-		Port:             opt.Port,
-		IP4:              proxyAddr4,
-		IP6:              proxyAddr6,
-		logger:           logger,
-		dockerAppCmd:     (dCmd || dIDE),
-		PassThroughPorts: passThroughPorts,
-		hook:             h,
+		Port:              opt.Port,
+		IP4:               proxyAddr4,
+		IP6:               proxyAddr6,
+		logger:            logger,
+		clientConnections: []net.Conn{},
+		connMutex:         &sync.Mutex{},
+		dockerAppCmd:      (dCmd || dIDE),
+		PassThroughPorts:  passThroughPorts,
+		hook:              h,
 	}
+
+	//setting the proxy port field in hook
+	proxySet.hook.SetProxyPort(opt.Port)
 
 	if isPortAvailable(opt.Port) {
 		go func() {
@@ -427,40 +513,22 @@ func isPortAvailable(port uint32) bool {
 // 	caPrivateKeyPath = "pkg/proxy/ca.key" // Your CA private key file path
 // )
 
-var caStorePath = map[string]string{
-	"Ubuntu":   "/usr/local/share/ca-certificates/",
-	"Pop!_OS":  "/usr/local/share/ca-certificates/",
-	"Debian":   "/usr/local/share/ca-certificates/",
-	"CentOS":   "/etc/pki/ca-trust/source/anchors/",
-	"Red Hat":  "/etc/pki/ca-trust/source/anchors/",
-	"Fedora":   "/etc/pki/ca-trust/source/anchors/",
-	"Arch ":    "/etc/ca-certificates/trust-source/anchors/",
-	"openSUSE": "/etc/pki/trust/anchors/",
-	"SUSE ":    "/etc/pki/trust/anchors/",
-	"Oracle ":  "/etc/pki/ca-trust/source/anchors/",
-	"Alpine ":  "/usr/local/share/ca-certificates/",
-	"Gentoo ":  "/usr/local/share/ca-certificates/",
-	"FreeBSD":  "/usr/local/share/certs/",
-	"OpenBSD":  "/etc/ssl/certs/",
-	"macOS":    "/usr/local/share/ca-certificates/",
+var caStorePath = []string{
+	"/usr/local/share/ca-certificates/",
+	"/etc/pki/ca-trust/source/anchors/",
+	"/etc/ca-certificates/trust-source/anchors/",
+	"/etc/pki/trust/anchors/",
+	"/etc/pki/ca-trust/source/anchors/",
+	"/usr/local/share/certs/",
+	"/etc/ssl/certs/",
 }
 
-var caStoreUpdateCmd = map[string]string{
-	"Ubuntu":   "update-ca-certificates",
-	"Pop!_OS":  "update-ca-certificates",
-	"Debian":   "update-ca-certificates",
-	"CentOS":   "update-ca-trust",
-	"Red Hat":  "update-ca-trust",
-	"Fedora":   "update-ca-trust",
-	"Arch ":    "trust extract-compat",
-	"openSUSE": "update-ca-certificates",
-	"SUSE ":    "update-ca-certificates",
-	"Oracle ":  "update-ca-trust",
-	"Alpine ":  "update-ca-certificates",
-	"Gentoo ":  "update-ca-certificates",
-	"FreeBSD":  "trust extract-compat",
-	"OpenBSD":  "trust extract-compat",
-	"macOS":    "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain",
+var caStoreUpdateCmd = []string{
+	"update-ca-certificates",
+	"update-ca-trust",
+	"trust extract-compat",
+	"update-ca-trust extract",
+	"certctl rehash",
 }
 
 type certKeyPair struct {
@@ -553,6 +621,10 @@ func (ps *ProxySet) startProxy() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				break
+			}
+
 			ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
 			// retry++
 			// if retry < 5 {
@@ -560,7 +632,9 @@ func (ps *ProxySet) startProxy() {
 			// }
 			break
 		}
-
+		ps.connMutex.Lock()
+		ps.clientConnections = append(ps.clientConnections, conn)
+		ps.connMutex.Unlock()
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 
@@ -569,27 +643,25 @@ func (ps *ProxySet) startProxy() {
 	}
 }
 
-func readableProxyAddress(ps *ProxySet) string {
+// func readableProxyAddress(ps *ProxySet) string {
 
-	if ps != nil {
-		port := ps.Port
-		proxyAddress := util.ToIP4AddressStr(ps.IP4)
-		return fmt.Sprintf(proxyAddress+":%v", port)
-	}
-	return ""
-}
+// 	if ps != nil {
+// 		port := ps.Port
+// 		proxyAddress := util.ToIP4AddressStr(ps.IP4)
+// 		return fmt.Sprintf(proxyAddress+":%v", port)
+// 	}
+// 	return ""
+// }
 
 func (ps *ProxySet) startDnsServer() {
 
-	proxyAddress4 := readableProxyAddress(ps)
-	ps.logger.Debug("", zap.Any("ProxyAddress in dns server", proxyAddress4))
-
+	dnsServerAddr := fmt.Sprintf(":%v", ps.Port)
 	//TODO: Need to make it configurable
 	ps.DnsServerTimeout = 1 * time.Second
 
 	handler := ps
 	server := &dns.Server{
-		Addr:      proxyAddress4,
+		Addr:      dnsServerAddr,
 		Net:       "udp",
 		Handler:   handler,
 		UDPSize:   65535,
@@ -599,7 +671,7 @@ func (ps *ProxySet) startDnsServer() {
 
 	ps.DnsServer = server
 
-	ps.logger.Info(fmt.Sprintf("starting DNS server at addr:%v", server.Addr))
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
 		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
@@ -745,12 +817,12 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA private key: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
 		ps.logger.Error(Emoji+"Failed to parse CA certificate: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 
 	// Create a TLS configuration
@@ -771,7 +843,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 	if err != nil {
 		ps.logger.Error(Emoji+"failed to complete TLS handshake with the client with error: ", zap.Error(err))
-		return &dns.Transfer{}, err
+		return nil, err
 	}
 	// fmt.Println("after the parsed req: ", string(req))
 	// Perform the TLS handshake
@@ -826,10 +898,16 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
 
+	clientConnId := getNextID()
 	reader := bufio.NewReader(conn)
 	initialData := make([]byte, 5)
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
+		if err == io.EOF && len(testBuffer) == 0 {
+			ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
+			conn.Close()
+			return
+		}
 		ps.logger.Error("failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 		return
 	}
@@ -848,8 +926,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 	connEstablishedAt := time.Now()
-	rand.Seed(time.Now().UnixNano())
-	clientConnId := rand.Intn(101)
 
 	// attempt to read the conn until buffer is either filled or connection is closed
 	var buffer []byte
@@ -889,9 +965,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	//Dialing for tls connection
-	destConnId := 0
 	// if models.GetMode() != models.MODE_TEST {
-	destConnId = rand.Intn(101)
+	destConnId := getNextID()
 	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 	if isTLS {
 		logger.Debug("", zap.Any("isTLS", isTLS))
@@ -944,33 +1019,16 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		// fmt.Println("before mongo egress call, deps array: ", deps)
 		logger.Debug("into mongo parsing mode")
 		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
-		// fmt.Println("after mongo egress call, deps array: ", deps)
 
-		// ps.hook.SetDeps(deps)
-
-		// deps := mongoparser.CaptureMongoMessage(buffer, conn, dst, logger)
-		// for _, v := range deps {
-		// 	ps.hook.AppendDeps(v)
-		// }
 	case postgresparser.IsOutgoingPSQL(buffer):
 
 		logger.Debug("into psql desp mode, before passing")
-
 		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
 	case grpcparser.IsOutgoingGRPC(buffer):
 		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
 	default:
 		logger.Debug("the external dependecy call is not supported")
 		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
-		// fmt.Println("into default desp mode, before passing")
-		// err = callNext(buffer, conn, dst, logger)
-		// if err != nil {
-		// 	logger.Error("failed to call next", zap.Error(err))
-		// 	conn.Close()
-		// 	return
-		// }
-		// fmt.Println("into default desp mode, after passing")
-
 	}
 
 	// Closing the user client connection
@@ -1045,6 +1103,12 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 }
 
 func (ps *ProxySet) StopProxyServer() {
+	ps.connMutex.Lock()
+	for _, clientConn := range ps.clientConnections {
+		clientConn.Close()
+	}
+	ps.connMutex.Unlock()
+
 	err := ps.Listener.Close()
 	if err != nil {
 		ps.logger.Error("failed to stop proxy server", zap.Error(err))
