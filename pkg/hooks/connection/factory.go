@@ -131,7 +131,11 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 	// }
 
 	// err = db.Insert(httpMock, getDeps())
-	tcName := pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"]
+	tcName := ""
+	headerValue, ok := pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Case"]
+	if ok {
+		tcName = headerValue
+	}
 	err = db.WriteTestcase(&models.TestCase{
 		Version: models.V1Beta2,
 		Name:    tcName,
