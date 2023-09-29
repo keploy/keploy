@@ -90,12 +90,12 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				appContainer, appNetwork = cont, net
 			}
 
-			err := h.processDockerEnv(appCmd, appContainer, appNetwork)
-			if err != nil {
-				return err
-			}
-		} else { //Supports only linux
-			h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
+		err := h.processDockerEnv(appCmd, appContainer, appNetwork)
+		if err != nil {
+			return err
+		}
+	} else { //Supports only linux
+		h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
 			// to notify the kernel hooks that the user application command is running in native linux.
 			key := 0
@@ -181,6 +181,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
 				if e.Type == events.ContainerEventType && e.Action == "create" {
+					// Set Docker Container ID
+					h.idc.SetContainerID(e.ID)
+
 					// Fetch container details by inspecting using container ID to check if container is created
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
 					if err != nil {
@@ -348,8 +351,6 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	cmd.Stderr = os.Stderr
 	h.userAppCmd = cmd
 
-	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
-
 	// Run the app as the user who invoked sudo
 	username := os.Getenv("SUDO_USER")
 	if username != "" {
@@ -390,9 +391,49 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 
 	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
 
+	// Run the app as the user who invoked sudo
+	username = os.Getenv("SUDO_USER")
+	if username != "" {
+		uidCmd := exec.Command("id", "-u", username)
+		gidCmd := exec.Command("id", "-g", username)
+
+		var uidOut, gidOut bytes.Buffer
+		uidCmd.Stdout = &uidOut
+		gidCmd.Stdout = &gidOut
+
+		err := uidCmd.Run()
+		if err != nil {
+			return err
+		}
+
+		err = gidCmd.Run()
+		if err != nil {
+			return err
+		}
+
+		uidStr := strings.TrimSpace(uidOut.String())
+		gidStr := strings.TrimSpace(gidOut.String())
+
+		uid, err := strconv.ParseUint(uidStr, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		gid, err := strconv.ParseUint(gidStr, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		// Switch the user
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+	}
+
+	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
+
 	// Run the command, this handles non-zero exit code get from application.
 	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	err := cmd.Run()
 	if err != nil {
@@ -400,6 +441,13 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 		case <-stopper:
 			return ErrInterrupted
 		default:
+			if exitError, ok := err.(*exec.ExitError); ok {
+				if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
+					if status.Signaled() {
+						return ErrInterrupted
+					}
+				}
+			}
 			return ErrCommandError
 		}
 	} else {

@@ -343,6 +343,16 @@ func (h *Hook) StopUserApplication() {
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
 			return
 		}
+
+		// Stop Docker Container and Remove it if Keploy ran using docker.
+		containerID := h.idc.GetContainerID()
+		if len(containerID) != 0  {
+			err := h.idc.StopAndRemoveDockerContainer()
+			if err != nil {
+				h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerID), zap.Error(err))
+			}
+		}
+
 		h.killProcessesAndTheirChildren(h.userAppCmd.Process.Pid)
 	}
 }

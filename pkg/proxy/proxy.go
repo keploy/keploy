@@ -196,6 +196,17 @@ func ExtractCertToTemp() (string, error) {
 		return "", err
 	}
 
+	// Write to the file
+	_, err = tempFile.Write(caCrt)
+	if err != nil {
+		return "", err
+	}
+
+	// Close the file
+	err = tempFile.Close()
+	if err != nil {
+		return "", err
+	}
 	return tempFile.Name(), nil
 }
 
@@ -327,31 +338,31 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	}
 
 	for _, path := range caPaths {
-	caPath := filepath.Join(path, "ca.crt")
+		caPath := filepath.Join(path, "ca.crt")
 
-	fs, err := os.Create(caPath)
-	if err != nil {
-		logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
-		return nil
-	}
+		fs, err := os.Create(caPath)
+		if err != nil {
+			logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
+			return nil
+		}
 
-	_, err = fs.Write(caCrt)
-	if err != nil {
-		logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", path))
-		return nil
-	}
+		_, err = fs.Write(caCrt)
+		if err != nil {
+			logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", path))
+			return nil
+		}
 
-	//check if serve command is used by java application
-	isJavaServe := containsJava(lang)
+		//check if serve command is used by java application
+		isJavaServe := containsJava(lang)
 
-	// install CA in the java keystore if java is installed
-	InstallJavaCA(logger, caPath, pid, isJavaServe)
+		// install CA in the java keystore if java is installed
+		InstallJavaCA(logger, caPath, pid, isJavaServe)
 
 	}
 
 	// Update the trusted CAs store
 	err = updateCaStore()
-	if err != nil{
+	if err != nil {
 		logger.Error("Failed to update the CA store", zap.Error(err))
 	}
 

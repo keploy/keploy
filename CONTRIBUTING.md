@@ -20,7 +20,6 @@ Sections
 - <a name="contributing-keploy">Keploy Contribution Flow</a>
   - <a name="keploy-server">Keploy Server</a>
   - <a name="keploy-docs">Keploy Documentation</a>
-  - <a name="keploy-sdks">Keploy SDK Integration</a>
 
 # <a name="contributing">General Contribution Flow</a>
 
@@ -116,16 +115,6 @@ The Keploy documentation site uses Docusaurus 2, which is a static website gener
 In the process of shipping features quickly, we may forget to keep our docs up to date. You can help by suggesting improvements to our documentation using the [Documentation Improvement](https://github.com/keploy/docs/issues) template. 
 
 Please refer to [Keploy Docs Contributing Guide](https://github.com/keploy/docs/blob/main/CONTRIBUTING.md#-how-to-set-up-the-docs-website-locally) for setting up your development environment and the follow [Keploy Style Guide](https://github.com/keploy/docs/blob/main/STYLE.md).
-
-###  <a name="keploy-sdks">Keploy SDKs</a>
-
-Keploy provides stable support for ``Go``, ``Java``  and ``Ts`` language based applications. 
-
-- [x] [Go SDK](https://github.com/keploy/go-sdk)
-- [x] [Java SDK](https://github.com/keploy/java-sdk)
-- [x] [TypeScript SDK](https://github.com/keploy/typescript-sdk)
-
-Every SDKs support the popular and common Routers and Databases.
 
 
 # Contact
