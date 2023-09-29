@@ -76,10 +76,7 @@ func main() {
 	fmt.Printf("%v\n\n", version)
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
-		Dsn: "",
-		// Set TracesSampleRate to 1.0 to capture 100%
-		// of transactions for performance monitoring.
-		// We recommend adjusting this value in production,
+		Dsn: "https://fff27a8c908bcd82ac8174e1860d2222@o4505956922556416.ingest.sentry.io/4505956925702144",
 		TracesSampleRate: 1.0,
 	  })
 	  if err != nil {

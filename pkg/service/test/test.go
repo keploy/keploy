@@ -58,16 +58,14 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
-	testsTotal := 0
-
+	ctx := context.Background()
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, &testsTotal); err != nil {
+	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx); err != nil {
 		return false
 	}
 
-	mocksTotal := make(map[string]int)
 	// start the proxy
-	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, mocksTotal)
+	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// ps.SetHook(loadedHooks)

@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"context"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
@@ -42,16 +43,15 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 
 	routineId := pkg.GenerateRandomID()
 
-	testsTotal := 0
+	ctx := context.Background()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
-	if err := loadedHooks.LoadHooks("", "", pid, &testsTotal); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
 		return
 	}
 
-	mocksTotal := make(map[string]int)
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, mocksTotal)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// ps.SetHook(loadedHooks)
@@ -66,13 +66,21 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
+	mocksRecorded := make(map[string]int)
+	tcsMocks, configMocks, err := ys.ReadMocks(path)
+	if err != nil{
+		s.logger.Debug("Failed to read mocks")
+	}
+	tcsMocks = append(tcsMocks, configMocks...)
+	for _, mock := range tcsMocks {
+		mocksRecorded[string(mock.Kind)] ++
+	}
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 
 	// Shutdown other resources
 	loadedHooks.Stop(true, nil)
 	//Call the telemetry events.
-	tele.RecordedMock(mocksTotal)
-	tele.RecordedTest(path, testsTotal)
+	tele.RecordedMock(mocksRecorded)
 	ps.StopProxyServer()
 }

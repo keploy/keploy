@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"context"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
@@ -41,15 +42,15 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	s.logger.Debug("path of mocks : " + path)
 
 	routineId := pkg.GenerateRandomID()
-	testsTotal := 0
+	ctx := context.Background()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
-	if err := loadedHooks.LoadHooks("", "", pid, &testsTotal); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
 		return
 	}
-	mocksTotal := make(map[string]int)
+
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, mocksTotal)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// ps.SetHook(loadedHooks)
@@ -82,7 +83,6 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	usedMocks := mocksBefore - ( len(loadedHooks.GetConfigMocks()) + len(loadedHooks.GetTcsMocks()) )
 	//Call the telemetry events.
 	tele.MockTestRun(usedMocks)
-	s.logger.Info("These are the mocks before and after", zap.Any("before", mocksBefore), zap.Any("after", len(loadedHooks.GetConfigMocks()) + len(loadedHooks.GetTcsMocks())))
 	// Shutdown other resources
 	loadedHooks.Stop(true, nil)
 	ps.StopProxyServer()

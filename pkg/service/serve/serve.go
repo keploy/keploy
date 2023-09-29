@@ -61,9 +61,9 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
-	testsTotal := 0
+	ctx := context.Background()
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks("", "", pid, &testsTotal); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
 		return
 	}
 
@@ -72,9 +72,8 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 		return
 	}
 
-	mocksTotal := make(map[string]int)
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts, loadedHooks, mocksTotal)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// ps.SetHook(loadedHooks)

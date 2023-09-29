@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -15,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	sentry "github.com/getsentry/sentry-go"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	sentry "github.com/getsentry/sentry-go"
 
 	"go.uber.org/zap"
 
@@ -434,7 +435,7 @@ func (h *Hook) Stop(forceStop bool, close chan bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, testsTotal *int) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context) error {
 	// k := keploy.KeployInitializer()
 
 	if err := settings.InitRealTimeOffset(); err != nil {
@@ -476,7 +477,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, testsTotal *in
 		defer h.Recover(pkg.GenerateRandomID())
 		defer sentry.Recover()
 		for {
-			connectionFactory.HandleReadyConnections(h.TestCaseDB, testsTotal)
+			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx)
 			time.Sleep(1 * time.Second)
 		}
 	}()

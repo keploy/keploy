@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 	sentry "github.com/getsentry/sentry-go"
+	"github.com/TheZeroSlave/zapsentry"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -49,6 +50,28 @@ func setupLogger() *zap.Logger {
 		return nil
 	}
 	return logger
+}
+func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
+	cfg := zapsentry.Configuration{
+		Level: zapcore.ErrorLevel, //when to send message to sentry
+		EnableBreadcrumbs: true, // enable sending breadcrumbs to Sentry
+		BreadcrumbLevel: zapcore.InfoLevel, // at what level should we sent breadcrumbs to sentry
+		Tags: map[string]string{
+			"component": "system",
+		},
+	}
+	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(client))
+
+	//in case of err it will return noop core. so we can safely attach it
+	if err != nil {
+		log.Warn("failed to init zap", zap.Error(err))
+	}
+
+	log = zapsentry.AttachCoreToLogger(core, log)
+
+	// to use breadcrumbs feature - create new scope explicitly
+	// and attach after attaching the core
+	return log.With(zapsentry.NewScope())
 }
 
 func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
@@ -131,7 +154,8 @@ func (r *Root) execute() {
 	debugMode = checkForDebugFlag(os.Args[1:])
 	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
-
+	sentryClient := sentry.CurrentHub().Client()
+	r.logger = modifyToSentryLogger(r.logger, sentryClient)
 	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd

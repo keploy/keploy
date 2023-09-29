@@ -73,12 +73,8 @@ func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, KeployVer
 }
 
 func (ac *Telemetry) Ping(isTestMode bool) {
-	check := false
 	if !ac.Enabled {
 		return
-	}
-	if isTestMode {
-		check = true
 	}
 
 	go func() {
@@ -94,7 +90,6 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 			event := models.TeleEvent{
 				EventType: "Ping",
 				CreatedAt: time.Now().Unix(),
-				TeleCheck: check,
 			}
 			ac.InstallationID = id
 
@@ -107,7 +102,7 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 					if err != nil {
 						break
 					}
-					resp, err := http.Post("https://telemetry.keploy.io/analytics", "application/json", bytes.NewBuffer(bin))
+					resp, err := http.Post("http://localhost:3030/analytics", "application/json", bytes.NewBuffer(bin))
 					if err != nil {
 						ac.logger.Debug("failed to send request for analytics", zap.Error(err))
 						break
@@ -137,8 +132,8 @@ func (ac *Telemetry) UnitTestRun(success int, failure int) {
 }
 
 // Telemetry event for the Mocking feature test run
-func (ac *Telemetry) MockTestRun(usedMocks int) {
-	ac.SendTelemetry("MockTestRun", map[string]interface{}{"Used-Mocks": usedMocks})
+func (ac *Telemetry) MockTestRun(utilizedMocks int) {
+	ac.SendTelemetry("MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
 }
 
 // Telemetry event for the tests and mocks that are recorded
@@ -148,7 +143,7 @@ func (ac *Telemetry) RecordedTest(testSet string, testsTotal int) {
 
 // Telemetry event for the mocks that are recorded in the mocking feature
 func (ac *Telemetry) RecordedMock(mockTotal map[string]int) {
-	ac.SendTelemetry("RecordedMock", map[string]interface{}{"mockTotal": mockTotal})
+	ac.SendTelemetry("RecordedMock", map[string]interface{}{"mocks": mockTotal})
 }
 
 func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
@@ -187,7 +182,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interf
 			return
 		}
 
-		req, err := http.NewRequest(http.MethodPost, "https://telemetry.keploy.io/analytics", bytes.NewBuffer(bin))
+		req, err := http.NewRequest(http.MethodPost, "http://localhost:3030/analytics", bytes.NewBuffer(bin))
 		if err != nil {
 			ac.logger.Debug("failed to create request for analytics", zap.Error(err))
 			return
@@ -201,7 +196,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interf
 				ac.logger.Debug("failed to send request for analytics", zap.Error(err))
 				return
 			}
-
+			ac.logger.Debug("Sent the event to the telemetry server.")
 			unmarshalResp(resp, ac.logger)
 			return
 		}

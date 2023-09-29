@@ -1,6 +1,8 @@
 package record
 
 import (
+	"context"
+
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -49,15 +51,17 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
+	mocksTotal := make(map[string]int)
 	testsTotal := 0
+	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
+	ctx = context.WithValue(ctx, "testsTotal", &testsTotal)
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, &testsTotal); err != nil {
+	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx); err != nil {
 		return
 	}
 
 	// start the BootProxy
-	mockTotal := make(map[string]int)
-	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks, mockTotal)
+	ps := proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
 	// ps.SetHook(loadedHooks)
@@ -94,7 +98,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}()
 
 	loadedHooks.Stop(false, stopHooksAbort)
-	tele.RecordedMock(mockTotal)
+	tele.RecordedMock(mocksTotal)
 	tele.RecordedTest(dirName, testsTotal)
 	if !stoppedProxy {
 		ps.StopProxyServer()
