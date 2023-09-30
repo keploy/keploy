@@ -42,7 +42,11 @@ func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName stri
 // createYamlFile is used to create the yaml file along with the path directory (if does not exists)
 func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
 	// checks id the yaml exists
-	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName + ".yaml"))
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(yamlPath); err != nil {
 		// creates the path director if does not exists
 		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
 		if err != nil {
@@ -51,7 +55,7 @@ func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 		}
 
 		// create the yaml file
-		_, err := os.Create(filepath.Join(path, fileName+".yaml"))
+		_, err := os.Create(yamlPath)
 		if err != nil {
 			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
@@ -122,7 +126,13 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 	if err != nil {
 		return err
 	}
-	file, err := os.OpenFile(filepath.Join(path, fileName+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	if err != nil {
+		return err 
+	}
+
+	file, err := os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName))
 		return err
