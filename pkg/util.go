@@ -72,7 +72,6 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, apiTimeout uint64) (*m
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.ProtoMajor = tc.HttpReq.ProtoMajor
 	req.ProtoMinor = tc.HttpReq.ProtoMinor
-	req.Close = true
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
