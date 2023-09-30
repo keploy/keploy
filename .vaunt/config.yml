@@ -18,7 +18,7 @@ achievements:
             actor: author
             action: pull_request
             condition: count(merged = true) >= 5
-    - achievement:
+  - achievement:
       name: Docs Maker
       icon: https://raw.githubusercontent.com/keploy/keploy/main/.vaunt/badge/docs_hero.png
       description: Kudos for improving documentation!
@@ -26,4 +26,4 @@ achievements:
         - trigger:
             actor: author
             action: issue
-            condition: closed & labels in in ['Documentation']
+            condition: closed & labels in ['Documentation']
