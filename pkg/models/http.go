@@ -13,6 +13,7 @@ type HttpReq struct {
 	BodyType   string            `json:"body_type" yaml:"body_type"`
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
+	Curl	   string 			 `json:"curl" yaml:"curl,omitempty"`
 }
 
 type FormData struct {

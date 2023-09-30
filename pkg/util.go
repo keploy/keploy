@@ -132,3 +132,16 @@ func GenerateRandomID() int {
 	id := rand.Intn(1000000000) // Adjust the range as needed
 	return id
 }
+
+func MakeCurlCommand(method string, url string, header map[string]string, body string) string {
+	curl := fmt.Sprintf("curl --request %s \\\n", method)
+	curl = curl + fmt.Sprintf("  --url %s \\\n", url)
+	for k, v := range header {
+		if k == "Content-Length" {
+			continue
+		}
+		curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
+	}
+	curl = curl + fmt.Sprintf("  --data '%s'", body)
+	return curl
+}
