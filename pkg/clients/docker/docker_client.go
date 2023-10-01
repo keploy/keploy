@@ -11,6 +11,9 @@ import (
 	"github.com/docker/docker/api/types/network"
 
 	"go.keploy.io/server/pkg/clients"
+
+	"github.com/docker/docker/api/types"
+	dockerContainerPkg "github.com/docker/docker/api/types/container"
 )
 
 const (
@@ -21,6 +24,7 @@ type internalDockerClient struct {
 	nativeDockerClient.APIClient
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
+	containerID           string
 }
 
 func NewInternalDockerClient(logger *zap.Logger) (clients.InternalDockerClient, error) {
@@ -30,10 +34,20 @@ func NewInternalDockerClient(logger *zap.Logger) (clients.InternalDockerClient, 
 		return nil, err
 	}
 	return &internalDockerClient{
-		dockerClient,
-		kDefaultTimeoutForDockerQuery,
-		logger,
+		APIClient:             dockerClient,
+		timeoutForDockerQuery: kDefaultTimeoutForDockerQuery,
+		logger:                logger,
 	}, nil
+}
+
+// Getter function for containerID
+func (idc *internalDockerClient) GetContainerID() string {
+	return idc.containerID
+}
+
+// Setter function for containerID
+func (idc *internalDockerClient) SetContainerID(containerID string) {
+	idc.containerID = containerID
 }
 
 // ExtractNetworksForContainer returns the list of all the networks that the container is a part of.
@@ -87,6 +101,38 @@ func (idc *internalDockerClient) ConnectContainerToNetworks(containerName string
 			return err
 		}
 	}
+
+	return nil
+}
+
+// Stop and Remove the docker container
+func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
+	dockerClient := idc
+	containerID := idc.containerID
+
+	container, err := dockerClient.ContainerInspect(context.Background(), containerID)
+	if err != nil {
+		return fmt.Errorf("failed to inspect the docker container: %w", err)
+	}
+
+	if container.State.Status == "running" {
+		err = dockerClient.ContainerStop(context.Background(), containerID, dockerContainerPkg.StopOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to stop the docker container: %w", err)
+		}
+	}
+
+	removeOptions := types.ContainerRemoveOptions{
+		RemoveVolumes: true,
+		Force:         true,
+	}
+
+	err = dockerClient.ContainerRemove(context.Background(), containerID, removeOptions)
+	if err != nil {
+		return fmt.Errorf("failed to remove the docker container: %w", err)
+	}
+
+	idc.logger.Debug("Docker Container stopped and removed successfully.")
 
 	return nil
 }
