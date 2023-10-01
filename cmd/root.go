@@ -56,7 +56,8 @@ func newRoot() *Root {
 		subCommands: []Plugins{},
 	}
 }
-
+// Execute adds all child commands to the root command.
+// This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	newRoot().execute()
 }
