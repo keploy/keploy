@@ -217,6 +217,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	ChangeAuthToMD5(tcsMocks, h, logger)
 
 	for {
+		tcsMocks := h.GetTcsMocks()
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
 		err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
@@ -257,7 +258,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		matched, pgResponses := matchingPg(tcsMocks, pgRequests, h)
 
 		if !matched {
-			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
+			logger.Error("failed to match the dependency call from user application", zap.Any("the number of mocks", len(tcsMocks)), zap.Any("request packets", len(pgRequests)), zap.Any("requestBuffer", pgRequests[0]))
 			return errors.New("failed to match the dependency call from user application")
 			// continue
 		}

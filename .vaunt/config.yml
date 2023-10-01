@@ -2,7 +2,7 @@ version: 0.0.1
 achievements:
   - achievement:
       name: Every Bit Counts
-      icon: https://raw.githubusercontent.com/vauntdev/example/main/.vaunt/every_bit_counts.png
+      icon: https://raw.githubusercontent.com/keploy/keploy/main/.vaunt/badge/commit_hero.png
       description: No commit is too small!
       triggers:
         - trigger:
@@ -11,10 +11,19 @@ achievements:
             condition: count() >= 10
   - achievement:
       name: Pull Request Hero
-      icon: https://raw.githubusercontent.com/vauntdev/example/main/.vaunt/pull_request_hero.png
+      icon: https://raw.githubusercontent.com/keploy/keploy/main/.vaunt/badge/pull_request_hero.png
       description: You're a PR hero, rock on!
       triggers:
         - trigger:
             actor: author
             action: pull_request
             condition: count(merged = true) >= 5
+  - achievement:
+      name: Docs Maker
+      icon: https://raw.githubusercontent.com/keploy/keploy/main/.vaunt/badge/docs_hero.png
+      description: Kudos for improving documentation!
+      triggers:
+        - trigger:
+            actor: author
+            action: issue
+            condition: closed & labels in ['Documentation']
