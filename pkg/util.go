@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"regexp"
 	"io"
 	"math/rand"
 	"net/http"
@@ -137,11 +138,12 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 	curl := fmt.Sprintf("curl --request %s \\\n", method)
 	curl = curl + fmt.Sprintf("  --url %s \\\n", url)
 	for k, v := range header {
-		if k == "Content-Length" {
-			continue
-		}
 		curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 	}
-	curl = curl + fmt.Sprintf("  --data '%s'", body)
+	if body != "" {
+		pattern := regexp.MustCompile(`\n\s+`)
+		body := pattern.ReplaceAllString(body, "\n")
+		curl = curl + fmt.Sprintf("  --data '%s'", body)
+	}
 	return curl
 }

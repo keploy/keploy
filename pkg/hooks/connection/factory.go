@@ -108,15 +108,11 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 	// 	Kind:    models.HTTP,
 	// }
 
-	url := fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI())
-
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
 		return
 	}
-
-	curl := pkg.MakeCurlCommand(req.Method, url, pkg.ToYamlHttpHeader(req.Header), string(reqBody))
 
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
@@ -146,12 +142,11 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			ProtoMinor: req.ProtoMinor,
 			// URL:        req.URL.String(),
 			// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
-			URL: url,
+			URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
 			//  URL: string(b),
 			Header:    pkg.ToYamlHttpHeader(req.Header),
 			Body:      string(reqBody),
 			URLParams: pkg.UrlParams(req),
-			Curl : curl,
 		},
 		HttpResp: models.HttpResp{
 			StatusCode: resp.StatusCode,

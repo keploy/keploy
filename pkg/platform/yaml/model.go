@@ -19,14 +19,19 @@ type NetworkTrafficDoc struct {
 	Kind    models.Kind    `json:"kind" yaml:"kind"`
 	Name    string         `json:"name" yaml:"name"`
 	Spec    yamlLib.Node   `json:"spec" yaml:"spec"`
+	Curl    string         `json:"curl" yaml:"curl"`
 }
 
 // func Encode(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc, []NetworkTrafficDoc, error) {
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc, error) {
+
+	header := pkg.ToHttpHeader(tc.HttpReq.Header)
+	curl := pkg.MakeCurlCommand(string(tc.HttpReq.Method), tc.HttpReq.URL, pkg.ToYamlHttpHeader(header), tc.HttpReq.Body)
 	doc := &NetworkTrafficDoc{
 		Version: tc.Version,
 		Kind:    tc.Kind,
 		Name:    tc.Name,
+		Curl:    curl,
 	}
 	// mocks := []NetworkTrafficDoc{}
 	// find noisy fields
