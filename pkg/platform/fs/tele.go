@@ -41,7 +41,6 @@ func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
 		path = UserHomeDir(isNewConfigPath)
 		id   = ""
 	)
-
 	file, err := os.OpenFile(filepath.Join(path, "installation-id.yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return "", err

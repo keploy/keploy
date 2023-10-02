@@ -151,7 +151,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	loadedHooks.Stop(true, nil)
 
 	//Call the telemetry events.
-	tele.Testrun(resultForTele[0], resultForTele[1])
+	tele.Testrun("test", resultForTele[0], resultForTele[1])
 
 	//stop listening for proxy server
 	ps.StopProxyServer()

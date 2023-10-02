@@ -82,7 +82,7 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 	usedMocks := mocksBefore - ( len(loadedHooks.GetConfigMocks()) + len(loadedHooks.GetTcsMocks()) )
 	//Call the telemetry events.
-	tele.MockTestRun(usedMocks)
+	tele.MockTestRun("mocktest", usedMocks)
 	// Shutdown other resources
 	loadedHooks.Stop(true, nil)
 	ps.StopProxyServer()

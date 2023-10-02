@@ -43,7 +43,8 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 
 	routineId := pkg.GenerateRandomID()
 
-	ctx := context.Background()
+	mocksTotal := make(map[string]int)
+	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
 	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
@@ -81,6 +82,6 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	// Shutdown other resources
 	loadedHooks.Stop(true, nil)
 	//Call the telemetry events.
-	tele.RecordedMock(mocksRecorded)
+	tele.RecordedMock("mockrecord", mocksRecorded)
 	ps.StopProxyServer()
 }

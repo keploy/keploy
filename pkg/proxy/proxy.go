@@ -1002,7 +1002,10 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		}
 	}
 
-	mocksTotal := ctx.Value("mocksTotal").(*map[string]int)
+	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
+	if !ok{
+		logger.Debug("failed to get mocksTotal from context")
+	}
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
