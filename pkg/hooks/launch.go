@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,13 +12,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"bytes"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
-	sentry "github.com/getsentry/sentry-go"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -104,7 +103,6 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-			defer sentry.Recover()
 			err := h.runApp(appCmd, false)
 			if err != nil {
 				return err
@@ -132,7 +130,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-			defer sentry.Recover()
+
 			err := h.runApp(appCmd, true)
 			appErrCh <- err
 		}()
@@ -144,7 +142,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+
 		// listen for the docker daemon events
 		defer func() {
 			h.logger.Debug("exiting from goroutine of docker daemon event listener")
@@ -353,46 +351,6 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 
 	// Run the app as the user who invoked sudo
 	username := os.Getenv("SUDO_USER")
-	if username != "" {
-		uidCmd := exec.Command("id", "-u", username)
-		gidCmd := exec.Command("id", "-g", username)
-
-		var uidOut, gidOut bytes.Buffer
-		uidCmd.Stdout = &uidOut
-		gidCmd.Stdout = &gidOut
-
-		err := uidCmd.Run()
-		if err != nil {
-			return err
-		}
-
-		err = gidCmd.Run()
-		if err != nil {
-			return err
-		}
-
-		uidStr := strings.TrimSpace(uidOut.String())
-		gidStr := strings.TrimSpace(gidOut.String())
-
-		uid, err := strconv.ParseUint(uidStr, 10, 32)
-		if err != nil {
-			return err
-		}
-
-		gid, err := strconv.ParseUint(gidStr, 10, 32)
-		if err != nil {
-			return err
-		}
-
-		// Switch the user
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
-	}
-
-	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
-
-	// Run the app as the user who invoked sudo
-	username = os.Getenv("SUDO_USER")
 	if username != "" {
 		uidCmd := exec.Command("id", "-u", username)
 		gidCmd := exec.Command("id", "-g", username)

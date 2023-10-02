@@ -65,10 +65,11 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	}
 
 	resultForTele := make([]int, 2)
+	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
 	go func() {
 		defer sentry.Recover()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, &resultForTele)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx)
 	}()
 
 	testRunID := <-testRunChan

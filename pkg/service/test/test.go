@@ -121,8 +121,9 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	exitLoop := false
 
 	resultForTele := []int{0, 0}
+	ctx := context.WithValue(context.Background(), "resultForTele", &resultForTele)
 	for _, sessionIndex := range sessions {
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, &resultForTele)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -159,7 +160,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	return true
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, resultForTele *[]int) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) models.TestRunStatus {
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -425,6 +426,10 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	testReport.Success = success
 	testReport.Failure = failure
 
+	resultForTele, ok := ctx.Value("resultForTele").(*[]int)
+	if !ok {
+		t.logger.Debug("resultForTele is not of type *[]int")
+	}
 	(*resultForTele)[0] += success
 	(*resultForTele)[1] += failure
 
