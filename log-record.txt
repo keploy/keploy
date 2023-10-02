@@ -1,0 +1,3842 @@
+
+       ▓██▓▄
+    ▓▓▓▓██▓█▓▄
+     ████████▓▒
+          ▀▓▓███▄      ▄▄   ▄               ▌
+         ▄▌▌▓▓████▄    ██ ▓█▀  ▄▌▀▄  ▓▓▌▄   ▓█  ▄▌▓▓▌▄ ▌▌   ▓
+       ▓█████████▌▓▓   ██▓█▄  ▓█▄▓▓ ▐█▌  ██ ▓█  █▌  ██  █▌ █▓
+      ▓▓▓▓▀▀▀▀▓▓▓▓▓▓▌  ██  █▓  ▓▌▄▄ ▐█▓▄▓█▀ █▓█ ▀█▄▄█▀   █▓█
+       ▓▌                           ▐█▌                   █▌
+        ▓
+  
+v2.0.0-alpha9-dev
+
+🐰 Keploy: 2023-10-02T11:09:37Z 	INFO	cmd/record.go:110		{"keploy test and mock path": "/Users/sarthak_1/Documents/Keploy/v2/v2-final/ai-test-gen/keploy/keploy"}
+🐰 Keploy: 2023-10-02T11:09:40Z 	INFO	hooks/loader.go:751	keploy initialized and probes added to the kernel.
+🐰 Keploy: 2023-10-02T11:09:40Z 	INFO	proxy/proxy.go:262	Java detected and CA already exists	{"path": "/usr/lib/jvm/java-17-openjdk-arm64/lib/security/cacerts"}
+🐰 Keploy: 2023-10-02T11:09:41Z 	INFO	proxy/proxy.go:453	Proxy started at port:16789
+🐰 Keploy: 2023-10-02T11:09:41Z 	INFO	hooks/launch.go:121	User application started successfully
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+ :: Spring Boot ::                (v2.7.3)
+
+2023-10-02 11:09:42.467  INFO 19205 --- [           main] o.s.boot.SpringApplication               : Starting application using Java 17.0.8.1 on lima-ubuntu-lts with PID 19205 (started by root in /Users/sarthak_1/Documents/Keploy/v2/v2-final/ai-test-gen/keploy)
+2023-10-02 11:09:42.470  INFO 19205 --- [           main] o.s.boot.SpringApplication               : No active profile set, falling back to 1 default profile: "default"
+2023-10-02 11:09:43.049  INFO 19205 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2023-10-02 11:09:43.085  INFO 19205 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 29 ms. Found 1 JPA repository interfaces.
+2023-10-02 11:09:43.458  INFO 19205 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port(s): 8080 (http)
+2023-10-02 11:09:43.465  INFO 19205 --- [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2023-10-02 11:09:43.465  INFO 19205 --- [           main] org.apache.catalina.core.StandardEngine  : Starting Servlet engine: [Apache Tomcat/9.0.65]
+2023-10-02 11:09:43.511  INFO 19205 --- [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2023-10-02 11:09:43.511  INFO 19205 --- [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 998 ms
+2023-10-02 11:09:43.578  INFO 19205 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md5a4d753c4053a5397de57abcdf102d2b5
+x Password -- md5a4d753c4053a5397de57abcdf102d2b5
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md5a4d753c4053a5397de57abcdf102d2b5
+THis is all we need execute md5a4d753c4053a5397de57abcdf102d2b5
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md5a4d753c4053a5397de57abcdf102d2b5}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  4
+dst.Name --  
+dst.Query --  
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  
+Length of bits 9 Length of msgBody 9
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  n
+pg.BodyLen is  0
+bodylen 0 of msgtype 110
+msgtype 110
+NoData.Decode
+NoData.Encode
+pg is  n
+Inside the if condition
+pg is  I
+pg.BodyLen is  0
+bodylen 0 of msgtype 73
+msgtype 73
+EmptyQueryResponse.Decode
+EmptyQueryResponse.Encode
+pg is  I
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  36
+dst.Name --  
+dst.Query --  SHOW TRANSACTION ISOLATION LEVEL
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SHOW TRANSACTION ISOLATION LEVEL
+Length of bits 41 Length of msgBody 41
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  T
+pg.BodyLen is  42
+bodylen 42 of msgtype 84
+msgtype 84
+RowDescription.Decode
+RowDescription.Encode
+pg is  T
+Inside the if condition
+pg is  D
+pg.BodyLen is  20
+bodylen 20 of msgtype 68
+dataRow {[]}
+msgtype 68
+DataRow.Decode
+v --  read committed
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  C
+pg.BodyLen is  5
+bodylen 5 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+2023-10-02 11:09:43.824  INFO 19205 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2023-10-02 11:09:43.882  INFO 19205 --- [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md54853df6d95c749ecd4e209003c32e235
+x Password -- md54853df6d95c749ecd4e209003c32e235
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md54853df6d95c749ecd4e209003c32e235
+THis is all we need execute md54853df6d95c749ecd4e209003c32e235
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md54853df6d95c749ecd4e209003c32e235}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md51b9ccb78c59a5bd9a34582b4305c469d
+x Password -- md51b9ccb78c59a5bd9a34582b4305c469d
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md51b9ccb78c59a5bd9a34582b4305c469d
+THis is all we need execute md51b9ccb78c59a5bd9a34582b4305c469d
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 2023-10-02 11:09:43.963  INFO 19205 --- [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 5.6.10.Final
+34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md51b9ccb78c59a5bd9a34582b4305c469d}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+msgtype 49
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+pg.BodyLen is  msgtype 82
+40
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+bodylen 40 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md5a920dbb5a34ffc258528a041ffb35c1a
+x Password -- md5a920dbb5a34ffc258528a041ffb35c1a
+pg.BodyLen is  1
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md5a920dbb5a34ffc258528a041ffb35c1a
+THis is all we need execute md5a920dbb5a34ffc258528a041ffb35c1a
+bodylen 1 of msgtype 90
+Inside the if condition
+pg is  msgtype 90
+R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+ReadyForQuery.Decode
+msgtype 82
+ReadyForQuery.Encode
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+pg is  Z
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md5a920dbb5a34ffc258528a041ffb35c1a}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+BindComplete.Decode
+BindComplete.Encode
+msgtype 82
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  THIS IS INSANE ! {}
+4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md591eaa061c9988892254b46652e2672db
+x Password -- md591eaa061c9988892254b46652e2672db
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md591eaa061c9988892254b46652e2672db
+THis is all we need execute md591eaa061c9988892254b46652e2672db
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md591eaa061c9988892254b46652e2672db}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md520529acf459e8e2c567de5b7515204a2
+x Password -- md520529acf459e8e2c567de5b7515204a2
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md520529acf459e8e2c567de5b7515204a2
+THis is all we need execute md520529acf459e8e2c567de5b7515204a2
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md520529acf459e8e2c567de5b7515204a2}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md5148cc1deb4cfb8e9832570aedc1b713d
+x Password -- md5148cc1deb4cfb8e9832570aedc1b713d
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md5148cc1deb4cfb8e9832570aedc1b713d
+THis is all we need execute md5148cc1deb4cfb8e9832570aedc1b713d
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md5148cc1deb4cfb8e9832570aedc1b713d}
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+msgtype 49
+FIRST TIME !!
+ParseComplete.Decode
+StartUP messGW 0
+StartUP messGW Parameters map[]
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md5bc9715d6126e92d8c21865f0e59ccd84
+x Password -- md5bc9715d6126e92d8c21865f0e59ccd84
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md5bc9715d6126e92d8c21865f0e59ccd84
+THis is all we need execute md5bc9715d6126e92d8c21865f0e59ccd84
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+CommandComplete.Decode
+CommandComplete.Encode
+msgtype 82
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md5bc9715d6126e92d8c21865f0e59ccd84}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md50f917b75996f036ca459313ce8328fa9
+x Password -- md50f917b75996f036ca459313ce8328fa9
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md50f917b75996f036ca459313ce8328fa9
+THis is all we need execute md50f917b75996f036ca459313ce8328fa9
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md50f917b75996f036ca459313ce8328fa9}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the encodePostgresOutgoing function
+FIRST TIME !!
+FIRST TIME !!
+StartUP messGW 0
+StartUP messGW Parameters map[]
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+Inside the if condition
+pg is  R
+pg.BodyLen is  8
+bodylen 8 of msgtype 82
+My int32 value is: 5
+AuthTypeMD5Password
+msgtype 82
+AuthenticationMD5Password.Decode
+authType for MD5 auth .. 5
+AuthenticationMD5Password.Encode
+pg is  R
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  p
+pg.BodyLen is  36
+PasswordMessage.Decode
+This is the password:  md5da5e7d001f116e6862532cb8be4581dd
+x Password -- md5da5e7d001f116e6862532cb8be4581dd
+PasswordMessage.Encode
+Length of bits 41 Length of msgBody 41
+pg is password --> md5da5e7d001f116e6862532cb8be4581dd
+THis is all we need execute md5da5e7d001f116e6862532cb8be4581dd
+Inside the if condition
+pg is  R
+pg.BodyLen is  4
+bodylen 4 of msgtype 82
+My int32 value is: 0
+AuthTypeOk
+msgtype 82
+AuthenticationOk.Decode
+authType for OK auth .. 0
+AuthenticationOk.Encode
+pg is  R
+Inside the if condition
+pg is  S
+pg.BodyLen is  18
+bodylen 18 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  19
+bodylen 19 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  23
+bodylen 23 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  16
+bodylen 16 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  21
+bodylen 21 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  45
+bodylen 45 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  34
+bodylen 34 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  31
+bodylen 31 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  S
+pg.BodyLen is  17
+bodylen 17 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  K
+pg.BodyLen is  8
+bodylen 8 of msgtype 75
+msgtype 75
+BackendKeyData.Decode
+BackendKeyData.Encode
+pg is  K
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {md5da5e7d001f116e6862532cb8be4581dd}
+Inside the if condition
+pg is  P
+pg.BodyLen is  30
+dst.Name --  
+dst.Query --  SET extra_float_digits = 3
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET extra_float_digits = 3
+Length of bits 35 Length of msgBody 35
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  51
+dst.Name --  
+dst.Query --  SET application_name = 'PostgreSQL JDBC Driver'
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SET application_name = 'PostgreSQL JDBC Driver'
+Length of bits 56 Length of msgBody 56
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  S
+pg.BodyLen is  40
+bodylen 40 of msgtype 83
+msgtype 83
+ParameterStatus.Decode
+ParameterStatus.Encode
+pg is  S
+Inside the if condition
+pg is  C
+pg.BodyLen is  4
+bodylen 4 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+2023-10-02 11:09:44.245  INFO 19205 --- [           main] o.hibernate.annotations.common.Version   : HCANN000001: Hibernate Commons Annotations {5.1.2.Final}
+2023-10-02 11:09:44.333  INFO 19205 --- [           main] org.hibernate.dialect.Dialect            : HHH000400: Using dialect: org.hibernate.dialect.PostgreSQLDialect
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  27
+dst.Name --  
+dst.Query --  select current_schema()
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  select current_schema()
+Length of bits 32 Length of msgBody 32
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  T
+pg.BodyLen is  35
+bodylen 35 of msgtype 84
+msgtype 84
+RowDescription.Decode
+RowDescription.Encode
+pg is  T
+Inside the if condition
+pg is  D
+pg.BodyLen is  12
+bodylen 12 of msgtype 68
+dataRow {[]}
+msgtype 68
+DataRow.Decode
+v --  public
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  C
+pg.BodyLen is  9
+bodylen 9 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  27
+dst.Name --  
+dst.Query --  select current_schema()
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  select current_schema()
+Length of bits 32 Length of msgBody 32
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  T
+pg.BodyLen is  35
+bodylen 35 of msgtype 84
+msgtype 84
+RowDescription.Decode
+RowDescription.Encode
+pg is  T
+Inside the if condition
+pg is  D
+pg.BodyLen is  12
+bodylen 12 of msgtype 68
+dataRow {[]}
+msgtype 68
+DataRow.Decode
+v --  public
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  C
+pg.BodyLen is  9
+bodylen 9 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  46
+dst.Name --  
+dst.Query --  select * from information_schema.sequences
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  select * from information_schema.sequences
+Length of bits 51 Length of msgBody 51
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  T
+pg.BodyLen is  394
+bodylen 394 of msgtype 84
+msgtype 84
+RowDescription.Decode
+RowDescription.Encode
+pg is  T
+Inside the if condition
+pg is  D
+pg.BodyLen is  117
+bodylen 117 of msgtype 68
+dataRow {[]}
+msgtype 68
+DataRow.Decode
+v --  keploy-test
+v --  public
+v --  employees_id_seq
+v --  bigint
+v --  64
+v --  2
+v --  0
+v --  1
+v --  1
+v --  9223372036854775807
+v --  1
+v --  NO
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  C
+pg.BodyLen is  9
+bodylen 9 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  1672
+dst.Name --  
+dst.Query --  SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM, c.relname AS TABLE_NAME,  CASE n.nspname ~ '^pg_' OR n.nspname = 'information_schema'  WHEN true THEN CASE  WHEN n.nspname = 'pg_catalog' OR n.nspname = 'information_schema' THEN CASE c.relkind   WHEN 'r' THEN 'SYSTEM TABLE'   WHEN 'v' THEN 'SYSTEM VIEW'   WHEN 'i' THEN 'SYSTEM INDEX'   ELSE NULL   END  WHEN n.nspname = 'pg_toast' THEN CASE c.relkind   WHEN 'r' THEN 'SYSTEM TOAST TABLE'   WHEN 'i' THEN 'SYSTEM TOAST INDEX'   ELSE NULL   END  ELSE CASE c.relkind   WHEN 'r' THEN 'TEMPORARY TABLE'   WHEN 'p' THEN 'TEMPORARY TABLE'   WHEN 'i' THEN 'TEMPORARY INDEX'   WHEN 'S' THEN 'TEMPORARY SEQUENCE'   WHEN 'v' THEN 'TEMPORARY VIEW'   ELSE NULL   END  END  WHEN false THEN CASE c.relkind  WHEN 'r' THEN 'TABLE'  WHEN 'p' THEN 'PARTITIONED TABLE'  WHEN 'i' THEN 'INDEX'  WHEN 'P' then 'PARTITIONED INDEX'  WHEN 'S' THEN 'SEQUENCE'  WHEN 'v' THEN 'VIEW'  WHEN 'c' THEN 'TYPE'  WHEN 'f' THEN 'FOREIGN TABLE'  WHEN 'm' THEN 'MATERIALIZED VIEW'  ELSE NULL  END  ELSE NULL  END  AS TABLE_TYPE, d.description AS REMARKS,  '' as TYPE_CAT, '' as TYPE_SCHEM, '' as TYPE_NAME, '' AS SELF_REFERENCING_COL_NAME, '' AS REF_GENERATION  FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c  LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0  and d.classoid = 'pg_class'::regclass)  WHERE c.relnamespace = n.oid  AND n.nspname LIKE 'public' AND c.relname LIKE '%' AND (false  OR ( c.relkind = 'r' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' )  OR ( c.relkind = 'v' AND n.nspname <> 'pg_catalog' AND n.nspname <> 'information_schema' ) )  ORDER BY TABLE_TYPE,TABLE_SCHEM,TABLE_NAME 
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM, c.relname AS TABLE_NAME,  CASE n.nspname ~ '^pg_' OR n.nspname = 'information_schema'  WHEN true THEN CASE  WHEN n.nspname = 'pg_catalog' OR n.nspname = 'information_schema' THEN CASE c.relkind   WHEN 'r' THEN 'SYSTEM TABLE'   WHEN 'v' THEN 'SYSTEM VIEW'   WHEN 'i' THEN 'SYSTEM INDEX'   ELSE NULL   END  WHEN n.nspname = 'pg_toast' THEN CASE c.relkind   WHEN 'r' THEN 'SYSTEM TOAST TABLE'   WHEN 'i' THEN 'SYSTEM TOAST INDEX'   ELSE NULL   END  ELSE CASE c.relkind   WHEN 'r' THEN 'TEMPORARY TABLE'   WHEN 'p' THEN 'TEMPORARY TABLE'   WHEN 'i' THEN 'TEMPORARY INDEX'   WHEN 'S' THEN 'TEMPORARY SEQUENCE'   WHEN 'v' THEN 'TEMPORARY VIEW'   ELSE NULL   END  END  WHEN false THEN CASE c.relkind  WHEN 'r' THEN 'TABLE'  WHEN 'p' THEN 'PARTITIONED TABLE'  WHEN 'i' THEN 'INDEX'  WHEN 'P' then 'PARTITIONED INDEX'  WHEN 'S' THEN 'SEQUENCE'  WHEN 'v' THEN 'VIEW'  WHEN 'c' THEN 'TYPE'  WHEN 'f' THEN 'FOREIGN TABLE'  WHEN 'm' THEN 'MATERIALIZED VIEW'  ELSE NULL  END  ELSE NULL  END  AS TABLE_TYPE, d.description AS REMARKS,  '' as TYPE_CAT, '' as TYPE_SCHEM, '' as TYPE_NAME, '' AS SELF_REFERENCING_COL_NAME, '' AS REF_GENERATION  FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c  LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0  and d.classoid = 'pg_class'::regclass)  WHERE c.relnamespace = n.oid  AND n.nspname LIKE 'public' AND c.relname LIKE '%' AND (false  OR ( c.relkind = 'r' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' )  OR ( c.relkind = 'v' AND n.nspname <> 'pg_catalog' AND n.nspname <> 'information_schema' ) )  ORDER BY TABLE_TYPE,TABLE_SCHEM,TABLE_NAME 
+Length of bits 1677 Length of msgBody 1677
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  T
+pg.BodyLen is  305
+bodylen 305 of msgtype 84
+msgtype 84
+RowDescription.Decode
+RowDescription.Encode
+pg is  T
+Inside the if condition
+pg is  D
+pg.BodyLen is  62
+bodylen 62 of msgtype 68
+dataRow {[]}
+msgtype 68
+DataRow.Decode
+v --  
+v --  public
+v --  employees
+v --  TABLE
+v --  
+v --  
+v --  
+v --  
+v --  
+v --  
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  C
+pg.BodyLen is  9
+bodylen 9 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  1130
+dst.Name --  
+dst.Query --  SELECT * FROM (SELECT n.nspname,c.relname,a.attname,a.atttypid,a.attnotnull OR (t.typtype = 'd' AND t.typnotnull) AS attnotnull,a.atttypmod,a.attlen,t.typtypmod,row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum) AS attnum, nullif(a.attidentity, '') as attidentity,null as attgenerated,pg_catalog.pg_get_expr(def.adbin, def.adrelid) AS adsrc,dsc.description,t.typbasetype,t.typtype  FROM pg_catalog.pg_namespace n  JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid)  JOIN pg_catalog.pg_attribute a ON (a.attrelid=c.oid)  JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid)  LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid=def.adrelid AND a.attnum = def.adnum)  LEFT JOIN pg_catalog.pg_description dsc ON (c.oid=dsc.objoid AND a.attnum = dsc.objsubid)  LEFT JOIN pg_catalog.pg_class dc ON (dc.oid=dsc.classoid AND dc.relname='pg_class')  LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace=dn.oid AND dn.nspname='pg_catalog')  WHERE c.relkind in ('r','p','v','f','m') and a.attnum > 0 AND NOT a.attisdropped  AND n.nspname LIKE 'public') c WHERE true  AND attname LIKE '%' ORDER BY nspname,c.relname,attnum 
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  SELECT * FROM (SELECT n.nspname,c.relname,a.attname,a.atttypid,a.attnotnull OR (t.typtype = 'd' AND t.typnotnull) AS attnotnull,a.atttypmod,a.attlen,t.typtypmod,row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum) AS attnum, nullif(a.attidentity, '') as attidentity,null as attgenerated,pg_catalog.pg_get_expr(def.adbin, def.adrelid) AS adsrc,dsc.description,t.typbasetype,t.typtype  FROM pg_catalog.pg_namespace n  JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid)  JOIN pg_catalog.pg_attribute a ON (a.attrelid=c.oid)  JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid)  LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid=def.adrelid AND a.attnum = def.adnum)  LEFT JOIN pg_catalog.pg_description dsc ON (c.oid=dsc.objoid AND a.attnum = dsc.objsubid)  LEFT JOIN pg_catalog.pg_class dc ON (dc.oid=dsc.classoid AND dc.relname='pg_class')  LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace=dn.oid AND dn.nspname='pg_catalog')  WHERE c.relkind in ('r','p','v','f','m') and a.attnum > 0 AND NOT a.attisdropped  AND n.nspname LIKE 'public') c WHERE true  AND attname LIKE '%' ORDER BY nspname,c.relname,attnum 
+Length of bits 1135 Length of msgBody 1135
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+2023-10-02 11:09:44.772  INFO 19205 --- [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000490: Using JtaPlatform implementation: [org.hibernate.engine.transaction.jta.platform.internal.NoJtaPlatform]
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+2023-10-02 11:09:44.777  INFO 19205 --- [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  T
+pg.BodyLen is  413
+bodylen 413 of msgtype 84
+msgtype 84
+RowDescription.Decode
+RowDescription.Encode
+pg is  T
+Inside the if condition
+pg is  D
+pg.BodyLen is  127
+bodylen 127 of msgtype 68
+dataRow {[]}
+msgtype 68
+DataRow.Decode
+v --  public
+v --  employees
+v --  id
+v --  20
+v --  t
+v --  -1
+v --  8
+v --  -1
+v --  1
+v --  
+v --  
+v --  nextval('employees_id_seq'::regclass)
+v --  
+v --  0
+v --  b
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  D
+pg.BodyLen is  97
+bodylen 97 of msgtype 68
+dataRow {[[112 117 98 108 105 99] [101 109 112 108 111 121 101 101 115] [105 100] [50 48] [116] [45 49] [56] [45 49] [49] [] [] [110 101 120 116 118 97 108 40 39 101 109 112 108 111 121 101 101 115 95 105 100 95 115 101 113 39 58 58 114 101 103 99 108 97 115 115 41] [] [48] [98]]}
+msgtype 68
+DataRow.Decode
+v --  public
+v --  employees
+v --  email
+v --  1043
+v --  f
+v --  259
+v --  -1
+v --  -1
+v --  2
+v --  
+v --  
+v --  
+v --  
+v --  0
+v --  b
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  D
+pg.BodyLen is  102
+bodylen 102 of msgtype 68
+dataRow {[[112 117 98 108 105 99] [101 109 112 108 111 121 101 101 115] [101 109 97 105 108] [49 48 52 51] [102] [50 53 57] [45 49] [45 49] [50] [] [] [] [] [48] [98]]}
+msgtype 68
+DataRow.Decode
+v --  public
+v --  employees
+v --  first_name
+v --  1043
+v --  f
+v --  259
+v --  -1
+v --  -1
+v --  3
+v --  
+v --  
+v --  
+v --  
+v --  0
+v --  b
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  D
+pg.BodyLen is  101
+bodylen 101 of msgtype 68
+dataRow {[[112 117 98 108 105 99] [101 109 112 108 111 121 101 101 115] [102 105 114 115 116 95 110 97 109 101] [49 48 52 51] [102] [50 53 57] [45 49] [45 49] [51] [] [] [] [] [48] [98]]}
+msgtype 68
+DataRow.Decode
+v --  public
+v --  employees
+v --  last_name
+v --  1043
+v --  f
+v --  259
+v --  -1
+v --  -1
+v --  4
+v --  
+v --  
+v --  
+v --  
+v --  0
+v --  b
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  D
+pg.BodyLen is  97
+bodylen 97 of msgtype 68
+dataRow {[[112 117 98 108 105 99] [101 109 112 108 111 121 101 101 115] [108 97 115 116 95 110 97 109 101] [49 48 52 51] [102] [50 53 57] [45 49] [45 49] [52] [] [] [] [] [48] [98]]}
+msgtype 68
+DataRow.Decode
+v --  public
+v --  employees
+v --  timestamp
+v --  20
+v --  f
+v --  -1
+v --  8
+v --  -1
+v --  5
+v --  
+v --  
+v --  
+v --  
+v --  0
+v --  b
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  C
+pg.BodyLen is  9
+bodylen 9 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+2023-10-02 11:09:44.966  WARN 19205 --- [           main] JpaBaseConfiguration$JpaWebConfiguration : spring.jpa.open-in-view is enabled by default. Therefore, database queries may be performed during view rendering. Explicitly configure spring.jpa.open-in-view to disable this warning
+2023-10-02 11:09:45.146  INFO 19205 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port(s): 8080 (http) with context path ''
+2023-10-02 11:09:45.153  INFO 19205 --- [           main] o.s.boot.SpringApplication               : Started application in 3.226 seconds (JVM running for 3.815)
+2023-10-02 11:09:47.597  INFO 19205 --- [nio-8080-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2023-10-02 11:09:47.597  INFO 19205 --- [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2023-10-02 11:09:47.598  INFO 19205 --- [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 0 ms
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  4
+dst.Name --  
+dst.Query --  
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  
+Length of bits 9 Length of msgBody 9
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  n
+pg.BodyLen is  0
+bodylen 0 of msgtype 110
+msgtype 110
+NoData.Decode
+NoData.Encode
+pg is  n
+Inside the if condition
+pg is  I
+pg.BodyLen is  0
+bodylen 0 of msgtype 73
+msgtype 73
+EmptyQueryResponse.Decode
+EmptyQueryResponse.Encode
+pg is  I
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  9
+dst.Name --  
+dst.Query --  BEGIN
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+  --  BEGIN
+Length of bits 14 Length of msgBody 14
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  8
+Bind.Decode
+Length of bits 13 Length of msgBody 13
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  P
+pg.BodyLen is  119
+dst.Name --  
+dst.Query --  insert into employees (email, first_name, last_name, timestamp) values ($1, $2, $3, $4)
+RETURNING *
+parameterOIDCount --  [4/4]0x40031f69c0
+Parse.Encode
+  --  insert into employees (email, first_name, last_name, timestamp) values ($1, $2, $3, $4)
+RETURNING *
+Length of bits 124 Length of msgBody 124
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  73
+Bind.Decode
+Length of bits 78 Length of msgBody 78
+pg is password --> 
+Inside the if condition
+pg is  D
+pg.BodyLen is  2
+Describe.Decode
+Describe.Encode
+Length of bits 7 Length of msgBody 7
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  6
+bodylen 6 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  T
+pg.BodyLen is  132
+bodylen 132 of msgtype 84
+msgtype 84
+RowDescription.Decode
+RowDescription.Encode
+pg is  T
+Inside the if condition
+pg is  D
+pg.BodyLen is  67
+bodylen 67 of msgtype 68
+dataRow {[]}
+msgtype 68
+DataRow.Decode
+v --  40
+v --  gourav.kumar@gmail.com
+v --  Gourav
+v --  Kumar
+v --  1696244987
+DataRow.Encode
+pg is  D
+Inside the if condition
+pg is  C
+pg.BodyLen is  11
+bodylen 11 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+THIS IS INSANE ! {}
+Inside the if condition
+pg is  P
+pg.BodyLen is  13
+dst.Name --  S_1
+dst.Query --  COMMIT
+parameterOIDCount --  [0/0]0x0
+Parse.Encode
+S_1  --  COMMIT
+Length of bits 18 Length of msgBody 18
+pg is password --> 
+Inside the if condition
+pg is  B
+pg.BodyLen is  11
+Bind.Decode
+Length of bits 16 Length of msgBody 16
+pg is password --> 
+Inside the if condition
+pg is  E
+pg.BodyLen is  5
+Execute Decode
+Execute.Encode
+Length of bits 10 Length of msgBody 10
+pg is password --> 
+Inside the if condition
+pg is  S
+pg.BodyLen is  0
+Sync.Decode
+Length of bits 5 Length of msgBody 5
+pg is password --> 
+THis is all we need execute 
+Inside the if condition
+pg is  1
+pg.BodyLen is  0
+bodylen 0 of msgtype 49
+msgtype 49
+ParseComplete.Decode
+ParseComplete.Encode
+pg is  1
+Inside the if condition
+pg is  2
+pg.BodyLen is  0
+bodylen 0 of msgtype 50
+msgtype 50
+BindComplete.Decode
+BindComplete.Encode
+pg is  2
+Inside the if condition
+pg is  C
+pg.BodyLen is  7
+bodylen 7 of msgtype 67
+msgtype 67
+CommandComplete.Decode
+CommandComplete.Encode
+pg is  C
+Inside the if condition
+pg is  Z
+pg.BodyLen is  1
+bodylen 1 of msgtype 90
+msgtype 90
+ReadyForQuery.Decode
+ReadyForQuery.Encode
+pg is  Z
+🐰 Keploy: 2023-10-02T11:09:48Z 	INFO	yaml/yaml.go:181	🟠 Keploy has captured test cases for the user's application.	{"path": "/Users/sarthak_1/Documents/Keploy/v2/v2-final/ai-test-gen/keploy/keploy/test-set-1/tests", "testcase name": ""}
+THIS IS INSANE ! {}
+🐰 Keploy: 2023-10-02T11:10:00Z 	INFO	hooks/loader.go:363	Received signal, exiting program..
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+THIS IS INSANE ! {}
+🐰 Keploy: 2023-10-02T11:10:01Z 	INFO	hooks/loader.go:417	eBPF resources released successfully...
+🐰 Keploy: 2023-10-02T11:10:01Z 	INFO	proxy/proxy.go:1100	proxy stopped...

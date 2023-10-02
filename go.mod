@@ -2,6 +2,7 @@ module go.keploy.io/server
 
 go 1.20
 
+replace github.com/jackc/pgproto3/v2 v2.3.2 => /Users/sarthak_1/Documents/Keploy/v2/pgproto3
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
@@ -43,8 +44,6 @@ require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/certificate-transparency-go v1.1.4 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/jackc/chunkreader/v2 v2.0.0 // indirect
-	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jmoiron/sqlx v1.3.3 // indirect
 	github.com/klauspost/compress v1.15.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
@@ -75,9 +74,11 @@ require (
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/go-git/go-git/v5 v5.8.1
 	github.com/hashicorp/go-version v1.6.0
-	github.com/jackc/pgproto3/v2 v2.3.2
+	// github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/vektah/gqlparser/v2 v2.5.8
 )
+
+require github.com/jackc/pgproto3/v2 v2.3.2
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
@@ -91,6 +92,8 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.3 // indirect
+	github.com/jackc/chunkreader/v2 v2.0.0 // indirect
+	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
