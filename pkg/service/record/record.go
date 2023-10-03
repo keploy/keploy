@@ -61,7 +61,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, nil)
+		loadedHooks.Stop(true)
 		return
 	default:
 		// start the BootProxy
@@ -76,12 +76,12 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 		return
 	}
 
-	stopHooksAbort := make(chan bool)
-	stoppedProxy := false
+	abortStopHooksInterrupt := make(chan bool)
+	abortStopHooksForcefully := false
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, nil)
+		loadedHooks.Stop(true)
 		ps.StopProxyServer()
 		return
 	default:
@@ -95,22 +95,30 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 				case hooks.ErrCommandError:
 					r.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
 				case hooks.ErrUnExpected:
-					r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
+					r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is not expected")
 				default:
 					r.logger.Error("unknown error recieved from application")
 				}
 			}
-			// stop listening for the eBPF events
-			loadedHooks.Stop(true, nil)
-			//stop listening for proxy server
-			ps.StopProxyServer()
-			stopHooksAbort <- true
-			stoppedProxy = true
+			if !abortStopHooksForcefully {
+				abortStopHooksInterrupt <- true
+				// stop listening for the eBPF events
+				loadedHooks.Stop(true)
+				//stop listening for proxy server
+				ps.StopProxyServer()
+			} else {
+				return
+			}
 		}()
 	}
 
-	loadedHooks.Stop(false, stopHooksAbort)
-	if !stoppedProxy {
+	select {
+	case <-stopper:
+		abortStopHooksForcefully = false
+		loadedHooks.Stop(false)
 		ps.StopProxyServer()
+		return
+	case <-abortStopHooksInterrupt:
+		return
 	}
 }

@@ -74,7 +74,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, nil)
+		loadedHooks.Stop(true)
 		return false
 	default:
 		// start the proxy
@@ -98,15 +98,18 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	result := true
 
-	stopHooksAbort := make(chan bool)
-	stopProxyServerAbort := make(chan bool)
+	abortStopHooksInterrupt := make(chan bool)
+	abortStopHooksForcefully := false
 
 	go func() {
-		loadedHooks.Stop(false, stopHooksAbort)
 		select {
-		case <-stopProxyServerAbort:
-		default:
+		case <-stopper:
+			abortStopHooksForcefully = true
+			loadedHooks.Stop(false)
 			ps.StopProxyServer()
+			return
+		case <-abortStopHooksInterrupt:
+			return
 		}
 	}()
 
@@ -137,16 +140,17 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
-	stopHooksAbort <- true
-	stopProxyServerAbort <- true
+	if !abortStopHooksForcefully {
+		abortStopHooksInterrupt <- true
+		// stop listening for the eBPF events
+		loadedHooks.Stop(true)
+		//stop listening for proxy server
+		ps.StopProxyServer()
+		return true
+	} else {
+		return false
+	}
 
-	// stop listening for the eBPF events
-	loadedHooks.Stop(true, nil)
-
-	//stop listening for proxy server
-	ps.StopProxyServer()
-
-	return true
 }
 
 func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64) models.TestRunStatus {
