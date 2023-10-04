@@ -115,9 +115,9 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 			// for _, v := range ports {
-				
+
 			// }
-	
+
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay, ports)

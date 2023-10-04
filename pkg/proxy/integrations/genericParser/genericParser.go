@@ -18,6 +18,18 @@ import (
 	"go.uber.org/zap"
 )
 
+type GenericParser struct{
+	logger *zap.Logger
+	hooks *hooks.Hook
+}
+
+func NewGenericParser(logger *zap.Logger, h *hooks.Hook) *GenericParser{
+	return &GenericParser{
+		logger: logger,
+		hooks: h,
+	}
+}
+
 func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:

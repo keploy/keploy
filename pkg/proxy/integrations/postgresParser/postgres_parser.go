@@ -35,7 +35,19 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
-func IsOutgoingPSQL(buffer []byte) bool {
+type PostgresParser struct {
+	logger *zap.Logger
+	hooks  *hooks.Hook
+}
+
+func NewPostgresParser(logger *zap.Logger, h *hooks.Hook) *PostgresParser {
+	return &PostgresParser{
+		logger: logger,
+		hooks:  h,
+	}
+}
+
+func(p *PostgresParser) OutgoingType(buffer []byte) bool {
 	const ProtocolVersion = 0x00030000 // Protocol version 3.0
 
 	if len(buffer) < 8 {
@@ -54,14 +66,14 @@ func IsOutgoingPSQL(buffer []byte) bool {
 	return version == ProtocolVersion
 }
 
-func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func(p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger)
 	case models.MODE_TEST:
-		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		decodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger)
 	default:
-		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
+		p.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
