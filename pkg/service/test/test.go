@@ -48,8 +48,6 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
-	exitCmd := make(chan bool)
-
 	models.SetMode(models.MODE_TEST)
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
@@ -100,8 +98,10 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	result := true
 
-	abortStopHooksInterrupt := make(chan bool)
-	abortStopHooksForcefully := false
+	// Channels to communicate between different types of closing keploy
+	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
+	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error
+	exitCmd := make(chan bool) // channel to exit this command
 
 	go func() {
 		select {

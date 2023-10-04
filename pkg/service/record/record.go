@@ -76,9 +76,10 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 		return
 	}
 
-	abortStopHooksInterrupt := make(chan bool)
-	exitCmd := make(chan bool)
-	abortStopHooksForcefully := false
+	// Channels to communicate between different types of closing keploy
+	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt 
+	exitCmd := make(chan bool) // channel to exit this command 
+	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error 
 
 	select {
 	case <-stopper:
