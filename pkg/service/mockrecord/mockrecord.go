@@ -60,6 +60,6 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 
 	// Shutdown other resources
-	loadedHooks.Stop(true, nil)
+	loadedHooks.Stop(true)
 	ps.StopProxyServer()
 }
