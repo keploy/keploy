@@ -48,6 +48,8 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
+	exitCmd := make(chan bool)
+
 	models.SetMode(models.MODE_TEST)
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
@@ -107,7 +109,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 			abortStopHooksForcefully = true
 			loadedHooks.Stop(false)
 			ps.StopProxyServer()
-			return
+			exitCmd <- true
 		case <-abortStopHooksInterrupt:
 			return
 		}
@@ -147,9 +149,10 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		//stop listening for proxy server
 		ps.StopProxyServer()
 		return true
-	} else {
-		return false
 	}
+
+	<-exitCmd
+	return false
 
 }
 

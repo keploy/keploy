@@ -77,6 +77,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}
 
 	abortStopHooksInterrupt := make(chan bool)
+	exitCmd := make(chan bool)
 	abortStopHooksForcefully := false
 
 	select {
@@ -106,6 +107,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 				loadedHooks.Stop(true)
 				//stop listening for proxy server
 				ps.StopProxyServer()
+				exitCmd <- true
 			} else {
 				return
 			}
@@ -114,11 +116,11 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	select {
 	case <-stopper:
-		abortStopHooksForcefully = false
+		abortStopHooksForcefully = true
 		loadedHooks.Stop(false)
 		ps.StopProxyServer()
-		return
+		exitCmd <- true
 	case <-abortStopHooksInterrupt:
-		return
 	}
+	<-exitCmd
 }
