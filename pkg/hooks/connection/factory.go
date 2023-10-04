@@ -35,8 +35,7 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 	}
 }
 
-// func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
-// func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
+
 func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 
 	factory.mutex.Lock()
@@ -99,14 +98,6 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 }
 
 func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
-	// meta := map[string]string{
-	// 	"method": req.Method,
-	// }
-	// httpMock := &models.Mock{
-	// 	Version: models.V1Beta2,
-	// 	Name:    "",
-	// 	Kind:    models.HTTP,
-	// }
 
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -121,16 +112,6 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		return
 	}
 
-	// Encode the message into yaml
-	// mocks := getDeps()
-	// mockIds := []string{}
-	// for i, v := range mocks {
-	// 	if v != nil {
-	// 		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
-	// 	}
-	// }
-
-	// err = db.Insert(httpMock, getDeps())
 	err = db.WriteTestcase(&models.TestCase{
 		Version: models.V1Beta2,
 		Name:    "",
@@ -140,10 +121,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Method:     models.Method(req.Method),
 			ProtoMajor: req.ProtoMajor,
 			ProtoMinor: req.ProtoMinor,
-			// URL:        req.URL.String(),
-			// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
 			URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
-			//  URL: string(b),
 			Header:    pkg.ToYamlHttpHeader(req.Header),
 			Body:      string(reqBody),
 			URLParams: pkg.UrlParams(req),
@@ -153,7 +131,6 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Header:     pkg.ToYamlHttpHeader(resp.Header),
 			Body:       string(respBody),
 		},
-		// Mocks: mocks,
 	})
 	if err != nil {
 		logger.Error("failed to record the ingress requests", zap.Error(err))

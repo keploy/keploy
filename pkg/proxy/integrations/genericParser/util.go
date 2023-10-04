@@ -2,7 +2,6 @@ package genericparser
 
 import (
 	"encoding/base64"
-	// "fmt"
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
@@ -16,10 +15,8 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		// fmt.Println(hooks.Emoji+"failed to decode the data", err)
 		return nil, err
 	}
-	// println("Decoded data is :", string(data))
 	return data, nil
 }
 
@@ -29,10 +26,8 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 
-				// bufStr := string(reqBuff)
-				// if !IsAsciiPrintable(bufStr) {
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-				// }
+
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
@@ -44,24 +39,7 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 			}
 		}
 	}
-	// com := PostgresEncoder(reqBuff)
-	// convert all the configmocks to string array
-	// mockString := make([]string, len(tcsMocks))
-	// for i := 0; i < len(tcsMocks); i++ {
-	// 	mockString[i] = string(tcsMocks[i].Spec.PostgresReq.Payload)
-	// }
-	// // find the closest match
-	// if IsAsciiPrintable(string(reqBuff)) {
-	// 	fmt.Println("Inside String Match")
-	// 	idx := findStringMatch(string(reqBuff), mockString)
-	// 	if idx != -1 {
-	// 		nMatch := tcsMocks[idx].Spec.PostgresResp.Payload
-	// 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-	// 		h.SetConfigMocks(tcsMocks)
-	// 		fmt.Println("Returning mock from String Match !!")
-	// 		return true, nMatch
-	// 	}
-	// }
+
 	idx := findBinaryMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
 		log.Debug("matched in first loop")
@@ -81,10 +59,8 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 
-				// bufStr := string(reqBuff)
-				// if !IsAsciiPrintable(bufStr) {
 				_ = base64.StdEncoding.EncodeToString(reqBuff)
-				// }
+
 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				k := AdaptiveK(len(reqBuff), 3, 8, 5)

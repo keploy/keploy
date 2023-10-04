@@ -94,9 +94,6 @@ func (s *Serve) GetCmd() *cobra.Command {
 				s.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return
 			}
-			// for _, v := range ports {
-
-			// }
 
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 

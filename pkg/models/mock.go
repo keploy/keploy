@@ -17,10 +17,6 @@ type MockSpec struct {
 	HttpResp *HttpResp `json:"Res,omitempty"`
 	Created  int64     `json:"Created,omitempty"`
 	// for MongoSpec
-	// MongoRequestHeader  *MongoHeader    `json:"RequestHeader,omitempty"`
-	// MongoResponseHeader *MongoHeader    `json:"ResponseHeader,omitempty"`
-	// MongoRequest        interface{}     `json:"MongoRequest,omitempty"`
-	// MongoResponse       interface{}     `json:"MongoResponse,omitempty"`
 	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
 	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
 

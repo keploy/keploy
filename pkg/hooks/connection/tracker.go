@@ -204,10 +204,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 	}
 
 	return recordTraffic, requestBuf, responseBuf
-	// // Check if other conditions for completeness are met.
-	// return conn.closeTimestamp != 0 &&
-	// 	conn.totalReadBytes == conn.recvBytes &&
-	// 	conn.totalWrittenBytes == conn.sentBytes
+
 }
 
 func (conn *Tracker) resetConnection() {
@@ -227,18 +224,6 @@ func (conn *Tracker) verifyRequestData(expectedRecvBytes, actualRecvBytes uint64
 func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint64) bool {
 	return (expectedSentBytes == actualSentBytes)
 }
-
-// func (conn *Tracker) Malformed() bool {
-// 	conn.mutex.RLock()
-// 	defer conn.mutex.RUnlock()
-// 	// conn.logger.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes received in userspace", conn.recvBytes))
-// 	// conn.logger.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.sentBytes))
-// 	// conn.logger.Debug("", zap.Any("Request buffer", string(conn.RecvBuf)))
-// 	// conn.logger.Debug("", zap.Any("Response buffer", string(conn.SentBuf)))
-// 	return conn.closeTimestamp != 0 &&
-// 		conn.totalReadBytes != conn.recvBytes &&
-// 		conn.totalWrittenBytes != conn.sentBytes
-// }
 
 func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 	conn.mutex.Lock()
