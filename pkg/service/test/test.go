@@ -74,7 +74,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, nil)
+		loadedHooks.Stop(true)
 		return false
 	default:
 		// start the proxy
@@ -98,15 +98,20 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	result := true
 
-	stopHooksAbort := make(chan bool)
-	stopProxyServerAbort := make(chan bool)
+	// Channels to communicate between different types of closing keploy
+	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
+	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error
+	exitCmd := make(chan bool) // channel to exit this command
 
 	go func() {
-		loadedHooks.Stop(false, stopHooksAbort)
 		select {
-		case <-stopProxyServerAbort:
-		default:
+		case <-stopper:
+			abortStopHooksForcefully = true
+			loadedHooks.Stop(false)
 			ps.StopProxyServer()
+			exitCmd <- true
+		case <-abortStopHooksInterrupt:
+			return
 		}
 	}()
 
@@ -137,16 +142,18 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
-	stopHooksAbort <- true
-	stopProxyServerAbort <- true
+	if !abortStopHooksForcefully {
+		abortStopHooksInterrupt <- true
+		// stop listening for the eBPF events
+		loadedHooks.Stop(true)
+		//stop listening for proxy server
+		ps.StopProxyServer()
+		return true
+	}
 
-	// stop listening for the eBPF events
-	loadedHooks.Stop(true, nil)
+	<-exitCmd
+	return false
 
-	//stop listening for proxy server
-	ps.StopProxyServer()
-
-	return true
 }
 
 func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64) models.TestRunStatus {
@@ -366,7 +373,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				},
 				// Mocks:        httpSpec.Mocks,
 				// TestCasePath: tcsPath,
-				TestCasePath: path + testSet,
+				TestCasePath: path + "/" + testSet,
 				// MockPath:     mockPath,
 				// Noise:        httpSpec.Assertions["noise"],
 				Noise:  tc.Noise,
