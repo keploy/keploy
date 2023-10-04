@@ -69,7 +69,7 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, apiTimeout uint64) (*m
 		return nil, err
 	}
 	req.Header = ToHttpHeader(tc.HttpReq.Header)
-	req.Header.Set("KEPLOY_TEST_ID", tc.Name)
+	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.ProtoMajor = tc.HttpReq.ProtoMajor
 	req.ProtoMinor = tc.HttpReq.ProtoMinor
 	req.Close = true
@@ -131,4 +131,18 @@ func GenerateRandomID() int {
 	rand.Seed(time.Now().UnixNano())
 	id := rand.Intn(1000000000) // Adjust the range as needed
 	return id
+}
+
+func MakeCurlCommand(method string, url string, header map[string]string, body string) string {
+	curl := fmt.Sprintf("curl --request %s \\\n", method)
+	curl = curl + fmt.Sprintf("  --url %s \\\n", url)
+	for k, v := range header {
+		if k != "Content-Length" {
+			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
+		}
+	}
+	if body != "" {
+		curl = curl + fmt.Sprintf("  --data '%s'", body)
+	}
+	return curl
 }

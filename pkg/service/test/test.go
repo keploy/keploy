@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"net/url"
@@ -39,6 +42,12 @@ func NewTester(logger *zap.Logger) Tester {
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, pid uint32) bool {
 // func (t *tester) Test(tcsPath, mockPath, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64) bool {
 func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+
+	var ps *proxy.ProxySet
+
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+
 	models.SetMode(models.MODE_TEST)
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
@@ -53,13 +62,24 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
-	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
+	select {
+	case <-stopper:
 		return false
+	default:
+		// load the ebpf hooks into the kernel
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
+			return false
+		}
 	}
 
-	// start the proxy
-	ps := proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks)
+	select {
+	case <-stopper:
+		loadedHooks.Stop(true, nil)
+		return false
+	default:
+		// start the proxy
+		ps = proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks)
+	}
 
 	// proxy update its state in the ProxyPorts map
 	// ps.SetHook(loadedHooks)
@@ -117,14 +137,14 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
+	stopHooksAbort <- true
+	stopProxyServerAbort <- true
+
 	// stop listening for the eBPF events
 	loadedHooks.Stop(true, nil)
 
 	//stop listening for proxy server
 	ps.StopProxyServer()
-
-	stopHooksAbort <- true
-	stopProxyServerAbort <- true
 
 	return true
 }
