@@ -1109,14 +1109,16 @@ func (ps *ProxySet) StopProxyServer() {
 	}
 	ps.connMutex.Unlock()
 
-	err := ps.Listener.Close()
-	if err != nil {
-		ps.logger.Error("failed to stop proxy server", zap.Error(err))
+	if ps.Listener != nil {
+		err := ps.Listener.Close()
+		if err != nil {
+			ps.logger.Error("failed to stop proxy server", zap.Error(err))
+		}
 	}
 
 	// stop dns server only in case of test mode.
 	if ps.DnsServer != nil {
-		err = ps.DnsServer.Shutdown()
+		err := ps.DnsServer.Shutdown()
 		if err != nil {
 			ps.logger.Error("failed to stop dns server", zap.Error(err))
 		}
