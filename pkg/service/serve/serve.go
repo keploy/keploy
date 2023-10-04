@@ -138,7 +138,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	}
 
 	// Shutdown other resources
-	loadedHooks.Stop(true, nil)
+	loadedHooks.Stop(true)
 	ps.StopProxyServer()
 
 	close(shutdown) // If you have other goroutines that should listen for this, you can use this channel to notify them.
