@@ -123,7 +123,7 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 		return nil, err
 	}
 	if testReport.Status == "PASSED" || testReport.Status == "FAILED" {
-		tele.Testrun("serve", testReport.Success, testReport.Failure)
+		tele.Testrun(testReport.Success, testReport.Failure)
 	}
 
 	r.Logger.Debug("", zap.Any("testRunID", testRunID), zap.Any("testSetStatus", testReport.Status))

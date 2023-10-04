@@ -126,8 +126,8 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}
 
 	loadedHooks.Stop(false, stopHooksAbort)
-	tele.RecordedMock("record", mocksTotal)
-	tele.RecordedTest("record", dirName, testsTotal)
+	tele.RecordedMock(mocksTotal)
+	tele.RecordedTestsAndMocks(dirName, testsTotal, mocksTotal)
 	if !stoppedProxy {
 		ps.StopProxyServer()
 	}

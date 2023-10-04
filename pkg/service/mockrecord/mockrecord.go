@@ -82,6 +82,6 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	// Shutdown other resources
 	loadedHooks.Stop(true, nil)
 	//Call the telemetry events.
-	tele.RecordedMock("mockrecord", mocksRecorded)
+	tele.RecordedMock(mocksRecorded)
 	ps.StopProxyServer()
 }

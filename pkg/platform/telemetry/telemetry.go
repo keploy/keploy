@@ -123,27 +123,27 @@ func (ac *Telemetry) Ping(isTestMode bool) {
 	}()
 }
 
-func (ac *Telemetry) Testrun(cmd string,success int, failure int) {
-	ac.SendTelemetry("TestRun", map[string]interface{}{"Cmd": cmd, "Passed-Tests": success, "Failed-Tests": failure})
+func (ac *Telemetry) Testrun(success int, failure int) {
+	ac.SendTelemetry("TestRun", map[string]interface{}{ "Passed-Tests": success, "Failed-Tests": failure})
 }
 
-func (ac *Telemetry) UnitTestRun(cmd string, success int, failure int) {
-	ac.SendTelemetry("UnitTestRun", map[string]interface{}{"Cmd": cmd, "Passed-UnitTests": success, "Failed-UnitTests": failure})
-}
+// func (ac *Telemetry) UnitTestRun(cmd string, success int, failure int) {
+// 	ac.SendTelemetry("UnitTestRun", map[string]interface{}{"Cmd": cmd, "Passed-UnitTests": success, "Failed-UnitTests": failure})
+// }
 
 // Telemetry event for the Mocking feature test run
-func (ac *Telemetry) MockTestRun(cmd string, utilizedMocks int) {
-	ac.SendTelemetry("MockTestRun", map[string]interface{}{"Cmd": cmd, "Utilized-Mocks": utilizedMocks})
+func (ac *Telemetry) MockTestRun(utilizedMocks int) {
+	ac.SendTelemetry("MockTestRun", map[string]interface{}{ "Utilized-Mocks": utilizedMocks})
 }
 
 // Telemetry event for the tests and mocks that are recorded
-func (ac *Telemetry) RecordedTest(cmd string, testSet string, testsTotal int) {
-	ac.SendTelemetry("RecordedTest", map[string]interface{}{"Cmd": cmd, "test-set": testSet, "tests": testsTotal})
+func (ac *Telemetry) RecordedTestsAndMocks(testSet string, testsTotal int, mockTotal map[string]int) {
+	ac.SendTelemetry("RecordedTest", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
 }
 
 // Telemetry event for the mocks that are recorded in the mocking feature
-func (ac *Telemetry) RecordedMock(cmd string, mockTotal map[string]int) {
-	ac.SendTelemetry("RecordedMock", map[string]interface{}{"Cmd": cmd, "mocks": mockTotal})
+func (ac *Telemetry) RecordedMock(mockTotal map[string]int) {
+	ac.SendTelemetry("RecordedMock", map[string]interface{}{"mocks": mockTotal})
 }
 
 func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
