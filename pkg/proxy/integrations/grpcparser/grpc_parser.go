@@ -16,18 +16,32 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
-func IsOutgoingGRPC(buffer []byte) bool {
+type GrpcParser struct {
+	logger *zap.Logger
+	hooks  *hooks.Hook
+}
+
+func NewGrpcParser(logger *zap.Logger, h *hooks.Hook) *GrpcParser {
+	return &GrpcParser{
+		logger: logger,
+		hooks:  h,
+	}
+}
+
+//OutgoingType will be a method of GrpcParser.
+func (g *GrpcParser) OutgoingType(buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("PRI * HTTP/2"))
 }
 
-func ProcessOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+
+func(g *GrpcParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, h, logger)
+		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, g.hooks, g.logger)
 	case models.MODE_TEST:
-		decodeOutgoingGRPC(requestBuffer, clientConn, destConn, h, logger)
+		decodeOutgoingGRPC(requestBuffer, clientConn, destConn, g.hooks, g.logger)
 	default:
-		logger.Fatal("Unsupported mode")
+		g.logger.Fatal("Unsupported mode")
 	}
 
 }

@@ -23,9 +23,21 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 var configRequests = []string{""}
 
+type MongoParser struct {
+	logger *zap.Logger
+	hooks  *hooks.Hook
+}
+
+func NewMongoParser(logger *zap.Logger, h *hooks.Hook) *MongoParser {
+	return &MongoParser{
+		logger: logger,
+		hooks:  h,
+	}
+}
+
 // IsOutgoingMongo function determines if the outgoing network call is Mongo by comparing the
 // message format with that of a mongo wire message.
-func IsOutgoingMongo(buffer []byte) bool {
+func(m *MongoParser) OutgoingType(buffer []byte) bool {
 	if len(buffer) < 4 {
 		return false
 	}

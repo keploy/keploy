@@ -37,7 +37,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
-	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	// "go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -52,6 +52,12 @@ var idCounter int64 = -1
 func getNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
+
+type DepInterface interface {
+	OutgoingType(buffer []byte) bool
+	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn)
+}
+
 
 type ProxySet struct {
 	IP4               uint32
@@ -329,6 +335,12 @@ func containsJava(input string) bool {
 
 // BootProxy starts proxy server on the idle local port, Default:16789
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
+	parsersMap := map[string]DepInterface{}
+	//Register all the parsers in the map.
+	parsersMap["grpc"] = grpcparser.NewGrpcParser(logger, h)
+	parsersMap["http"] = httpparser.NewHttpParser(logger, h)
+	// parsersMap["mongo"] = mongoparser.NewMongoParser(logger, h)
+	parsersMap["postgres"] = postgresparser.NewPostgresParser(logger, h)
 
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
@@ -427,7 +439,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
 
-			proxySet.startProxy()
+			proxySet.startProxy(parsersMap)
 		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
@@ -591,7 +603,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 }
 
 // startProxy function initiates a proxy on the specified port to handle redirected outgoing network calls.
-func (ps *ProxySet) startProxy() {
+func (ps *ProxySet) startProxy(parsersMap map[string]DepInterface) {
 
 	port := ps.Port
 
@@ -638,7 +650,7 @@ func (ps *ProxySet) startProxy() {
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 
-			ps.handleConnection(conn, port)
+			ps.handleConnection(conn, port, parsersMap)
 		}()
 	}
 }
@@ -862,7 +874,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
-func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
+func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, parsersMap map[string]DepInterface) {
 
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
@@ -925,7 +937,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			return
 		}
 	}
-	connEstablishedAt := time.Now()
+	// connEstablishedAt := time.Now()
 
 	// attempt to read the conn until buffer is either filled or connection is closed
 	var buffer []byte
@@ -944,12 +956,12 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	// buffer, err := util.ReadBytes(conn)
 	// // handle if the buffer is empty
 	// if len(buffer) == 0 {
-	// 	ps.logger.Debug("received empty buffer, so retrying reading buffer", zap.Error(err), zap.Any("proxy port", port))
+	// 	ps.Logger.Debug("received empty buffer, so retrying reading buffer", zap.Error(err), zap.Any("proxy port", port))
 	// 	buffer, err = util.ReadBytes(conn)
 	// 	return
 	// }
 	ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
-	readRequestDelay := time.Since(connEstablishedAt)
+	// readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
 		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 		return
@@ -1001,35 +1013,19 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 		}
 	}
 
-	switch {
-	case httpparser.IsOutgoingHTTP(buffer):
-		// capture the otutgoing http text messages]
-		// if models.GetMode() == models.MODE_RECORD {
-		// deps = append(deps, httpparser.CaptureHTTPMessage(buffer, conn, dst, logger))
-		// ps.hook.AppendDeps(httpparser.CaptureHTTPMessage(buffer, conn, dst, logger))
-		// }
-		// var deps []*models.Mock = ps.hook.GetDeps()
-		// fmt.Println("before http egress call, deps array: ", deps)
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger)
-		// fmt.Println("after http egress call, deps array: ", deps)
-
-		// ps.hook.SetDeps(deps)
-	case mongoparser.IsOutgoingMongo(buffer):
-		// var deps []*models.Mock = ps.hook.GetDeps()
-		// fmt.Println("before mongo egress call, deps array: ", deps)
-		logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
-
-	case postgresparser.IsOutgoingPSQL(buffer):
-
-		logger.Debug("into psql desp mode, before passing")
-		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
-	case grpcparser.IsOutgoingGRPC(buffer):
-		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
-	default:
-		logger.Debug("the external dependecy call is not supported")
+	genericCheck := true
+	//Checking for all the parsers.
+	for _, parser := range parsersMap {
+		if parser.OutgoingType(buffer){
+			parser.ProcessOutgoing(buffer, conn, dst)
+			genericCheck = false
+		}
+	}
+	if genericCheck{
+		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
 	}
+
 
 	// Closing the user client connection
 	conn.Close()

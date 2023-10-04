@@ -24,9 +24,21 @@ import (
 	"go.uber.org/zap"
 )
 
+type HttpParser struct {
+	logger *zap.Logger
+	hooks  *hooks.Hook
+}
+
+func NewHttpParser(logger *zap.Logger, h *hooks.Hook) *HttpParser {
+	return &HttpParser{
+		logger: logger,
+		hooks:  h,
+	}
+}
+
 // IsOutgoingHTTP function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
-func IsOutgoingHTTP(buffer []byte) bool {
+func(h *HttpParser) OutgoingType(buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buffer[:], []byte("GET ")) ||
 		bytes.HasPrefix(buffer[:], []byte("POST ")) ||
@@ -36,6 +48,7 @@ func IsOutgoingHTTP(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) ||
 		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 }
+
 
 func isJSON(body []byte) bool {
 	var js interface{}
@@ -62,21 +75,21 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	return true
 }
 
-func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func(http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		// *deps = append(*deps, encodeOutgoingHttp(request,  clientConn,  destConn, logger))
-		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h)
+		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks)
 		if err != nil {
-			logger.Error("failed to encode the http message into the yaml", zap.Error(err))
+			http.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
 
-		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(request, clientConn, destConn, logger))
+		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(request, clientConn, destConn, http.logger))
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
+		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger)
 	default:
-		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
+		http.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
