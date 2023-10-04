@@ -422,6 +422,17 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	testReport.Success = success
 	testReport.Failure = failure
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
+
+	t.logger.Info("test report for current test-run: ", zap.Any("name: ", testReport.Name), zap.Any("path: ", path + "/" + testReport.Name))
+
+	if status == models.TestRunStatusFailed {
+		pp.SetColorScheme(models.FailingColorScheme)
+	} else {
+		pp.SetColorScheme(models.PassingColorScheme)
+	}
+	
+	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure)
+
 	if err != nil {
 		t.logger.Error(err.Error())
 		return models.TestRunStatusFailed
