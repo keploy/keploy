@@ -39,7 +39,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string,appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
 
 	var ps *proxy.ProxySet
 
@@ -114,7 +114,22 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	exitLoop := false
 
+	if len(testsets) == 0 {
+		// by default, run all the recorded test sets
+		testsets = sessions
+	}
+
+	sessionsMap := map[string]string{}
+
 	for _, sessionIndex := range sessions {
+		sessionsMap[sessionIndex] = sessionIndex
+	}
+
+	for _, sessionIndex := range testsets {
+		if _, ok := sessionsMap[sessionIndex]; !ok {
+			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
+			continue;
+		}
 		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
