@@ -61,7 +61,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, nil)
+		loadedHooks.Stop(true)
 		return
 	default:
 		// start the BootProxy
@@ -76,12 +76,14 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 		return
 	}
 
-	stopHooksAbort := make(chan bool)
-	stoppedProxy := false
+	// Channels to communicate between different types of closing keploy
+	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt 
+	exitCmd := make(chan bool) // channel to exit this command 
+	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error 
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, nil)
+		loadedHooks.Stop(true)
 		ps.StopProxyServer()
 		return
 	default:
@@ -95,22 +97,31 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 				case hooks.ErrCommandError:
 					r.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
 				case hooks.ErrUnExpected:
-					r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
+					r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is not expected")
 				default:
 					r.logger.Error("unknown error recieved from application")
 				}
 			}
-			// stop listening for the eBPF events
-			loadedHooks.Stop(true, nil)
-			//stop listening for proxy server
-			ps.StopProxyServer()
-			stopHooksAbort <- true
-			stoppedProxy = true
+			if !abortStopHooksForcefully {
+				abortStopHooksInterrupt <- true
+				// stop listening for the eBPF events
+				loadedHooks.Stop(true)
+				//stop listening for proxy server
+				ps.StopProxyServer()
+				exitCmd <- true
+			} else {
+				return
+			}
 		}()
 	}
 
-	loadedHooks.Stop(false, stopHooksAbort)
-	if !stoppedProxy {
+	select {
+	case <-stopper:
+		abortStopHooksForcefully = true
+		loadedHooks.Stop(false)
 		ps.StopProxyServer()
+		exitCmd <- true
+	case <-abortStopHooksInterrupt:
 	}
+	<-exitCmd
 }
