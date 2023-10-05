@@ -31,9 +31,15 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 
 				// bufStr := string(reqBuff)
 				// if !IsAsciiPrintable(bufStr) {
-				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
+				bufStr := string(reqBuff)
+				if !IsAsciiPrintable(string(reqBuff)) {
+					bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+				}
 				// }
-				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				encoded := []byte(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				if !IsAsciiPrintable(mock.Spec.GenericRequests[requestIndex].Message[0].Data) {
+					encoded, _ = PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				}
 
 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
 					log.Debug("matched in first loop")
@@ -93,7 +99,6 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				similarity := JaccardSimilarity(shingles1, shingles2)
 				log.Debugf(hooks.Emoji, "Jaccard Similarity:%f\n", similarity)
 
-
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx
@@ -144,7 +149,7 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 // checks if s is ascii and printable, aka doesn't include tab, backspace, etc.
 func IsAsciiPrintable(s string) bool {
 	for _, r := range s {
-		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
+		if r > unicode.MaxASCII || (!unicode.IsPrint(r) && r != '\r' && r != '\n') {
 			return false
 		}
 	}
