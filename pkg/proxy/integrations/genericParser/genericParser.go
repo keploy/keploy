@@ -87,7 +87,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		}
 		for _, genericResponse := range genericResponses {
 			encoded := []byte(genericResponse.Message[0].Data)
-			if !IsAsciiPrintable(genericResponse.Message[0].Data) {
+			if genericResponse.Message[0].Type != models.String {
 				encoded, _ = PostgresDecoder(genericResponse.Message[0].Data)
 			}
 			_, err := clientConn.Write([]byte(encoded))
@@ -126,12 +126,11 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	// checkInitialRequest := true
 	genericRequests := []models.GenericPayload{}
 	// isFirstRequest := true
-	// bufStr := string(requestBuffer)
-	// if !IsAsciiPrintable(bufStr) {
 	bufStr := string(requestBuffer)
-	// }
+	dataType := models.String
 	if !IsAsciiPrintable(string(requestBuffer)) {
 		bufStr = base64.StdEncoding.EncodeToString(requestBuffer)
+		dataType = "binary"
 	}
 	if bufStr != "" {
 
@@ -139,7 +138,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			Origin: models.FromClient,
 			Message: []models.OutputBinary{
 				{
-					Type: "binary",
+					Type: dataType,
 					Data: bufStr,
 				},
 			},
@@ -222,9 +221,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			}
 
 			bufStr := string(buffer)
-
+			buffrDataType := models.String
 			if !IsAsciiPrintable(string(buffer)) {
 				bufStr = base64.StdEncoding.EncodeToString(buffer)
+				buffrDataType = "binary"
 			}
 
 			// }
@@ -234,7 +234,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					Origin: models.FromClient,
 					Message: []models.OutputBinary{
 						{
-							Type: "binary",
+							Type: buffrDataType,
 							Data: bufStr,
 						},
 					},
@@ -251,9 +251,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			}
 
 			bufStr := string(buffer)
-
+			buffrDataType := models.String
 			if !IsAsciiPrintable(string(buffer)) {
 				bufStr = base64.StdEncoding.EncodeToString(buffer)
+				buffrDataType = "binary"
 			}
 			// }
 			if bufStr != "" {
@@ -262,7 +263,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					Origin: models.FromServer,
 					Message: []models.OutputBinary{
 						{
-							Type: "binary",
+							Type: buffrDataType,
 							Data: bufStr,
 						},
 					},
