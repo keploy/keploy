@@ -126,6 +126,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 	}
 
 	for _, sessionIndex := range testsets {
+		// checking whether the provided testset match with a recorded testset.
 		if _, ok := sessionsMap[sessionIndex]; !ok {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue;
