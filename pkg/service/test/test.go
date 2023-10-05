@@ -198,8 +198,18 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	if len(appCmd) == 0 && pid != 0 {
 		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
+		pathElements := strings.Split(appCmd, "/")[1: ]
+		appName := ""
+		if len(pathElements) == 1 {
+			// binary is in root directory, set appname to the filename of the binary
+			appName = pathElements[len(pathElements) - 1]
+		} else {
+			// set appName to the project folder containing the binary
+			appName = pathElements[len(pathElements) - 2]
+		}
+		pp.SetColorScheme(models.PassingColorScheme)
+		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", testSet, appName, len(tcs))
 		// start user application
-		t.logger.Info("running user application for test run of test set", zap.Any("test-set", testSet))
 		go func() {
 			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
 				switch err {
@@ -423,7 +433,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	testReport.Failure = failure
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 
-	t.logger.Info("test report for current test-run: ", zap.Any("name: ", testReport.Name), zap.Any("path: ", path + "/" + testReport.Name))
+	t.logger.Info("test report for " + testSet + ": " , zap.Any("name: ", testReport.Name), zap.Any("path: ", path + "/" + testReport.Name))
 
 	if status == models.TestRunStatusFailed {
 		pp.SetColorScheme(models.FailingColorScheme)
