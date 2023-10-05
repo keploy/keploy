@@ -2,23 +2,25 @@ package main
 
 import (
 	"fmt"
-	_ "net/http/pprof"
 	"log"
+	_ "net/http/pprof"
+	"os"
 	"time"
 
+	sentry "github.com/getsentry/sentry-go"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	v "github.com/hashicorp/go-version"
-	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/cmd"
-	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 )
 
 // version is the version of the server and will be injected during build by ldflags
 // see https://goreleaser.com/customization/build/
 
 var version string
+var Dsn string
 
 const logo string = `
        ▓██▓▄
@@ -74,9 +76,13 @@ func main() {
 	tele.Ping(false)
 	fmt.Println(logo, " ")
 	fmt.Printf("%v\n\n", version)
+	isDocker := os.Getenv("IS_DOCKER_CMD")
+	if isDocker != ""{
+		Dsn = os.Getenv("Dsn")
+	}
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
-		Dsn: "https://fff27a8c908bcd82ac8174e1860d2222@o4505956922556416.ingest.sentry.io/4505956925702144",
+		Dsn: Dsn,
 		TracesSampleRate: 1.0,
 	  })
 	  if err != nil {

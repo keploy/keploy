@@ -17,7 +17,8 @@ RUN go build -o keploy .
 # === Runtime Stage ===
 FROM debian:bookworm-slim
 
-ENV IS_DOCKER_CMD=true 
+ENV IS_DOCKER_CMD=true
+ENV Dsn=${SENTRY_DSN_DOCKER}
 
 # Update the package lists and install required packages
 RUN apt-get update && \
