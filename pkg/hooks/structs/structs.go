@@ -1,11 +1,13 @@
 package structs
 
+// ConnID is a conversion of the following C-Struct into GO.
 type ConnID struct {
 	TGID uint32
 	FD   int32
 	TsID uint64
 }
 
+// SockAddrIn is a conversion of the following C-Struct into GO.
 type SockAddrIn struct {
 	SinFamily uint16
 	SinPort   uint16
@@ -18,7 +20,7 @@ const (
 )
 
 
-// Socket Data Event .....
+// SocketDataEvent is a conversion of the following C-Struct into GO.
 type SocketDataEvent struct {
 	TimestampNano        uint64
 	ConnID               ConnID
@@ -30,12 +32,14 @@ type SocketDataEvent struct {
 	ValidateWrittenBytes int64
 }
 
+// SocketOpenEvent is a conversion of the following C-Struct into GO.
 type SocketOpenEvent struct {
 	TimestampNano uint64
 	ConnID        ConnID
 	Addr          SockAddrIn
 }
 
+// SocketCloseEvent is a conversion of the following C-Struct into GO.
 type SocketCloseEvent struct {
 	TimestampNano uint64
 	ConnID        ConnID
