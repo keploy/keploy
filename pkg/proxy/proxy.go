@@ -37,7 +37,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
-	// "go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -73,6 +73,7 @@ type ProxySet struct {
 	DnsServerTimeout  time.Duration
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
+	parsersMap 	  map[string]DepInterface
 }
 
 type CustomConn struct {
@@ -333,15 +334,12 @@ func containsJava(input string) bool {
 	return strings.Contains(inputLower, searchTermLower)
 }
 
+func(ps *ProxySet) Register(parserName string, parser DepInterface) {
+	ps.parsersMap[parserName] = parser
+}
+
 // BootProxy starts proxy server on the idle local port, Default:16789
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
-	parsersMap := map[string]DepInterface{}
-	//Register all the parsers in the map.
-	parsersMap["grpc"] = grpcparser.NewGrpcParser(logger, h)
-	parsersMap["http"] = httpparser.NewHttpParser(logger, h)
-	// parsersMap["mongo"] = mongoparser.NewMongoParser(logger, h)
-	parsersMap["postgres"] = postgresparser.NewPostgresParser(logger, h)
-
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
@@ -430,7 +428,14 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		dockerAppCmd:      (dCmd || dIDE),
 		PassThroughPorts:  passThroughPorts,
 		hook:              h,
+		parsersMap:        make(map[string]DepInterface),
 	}
+
+	//Register all the parsers in the map.
+	proxySet.Register("grpc", grpcparser.NewGrpcParser(logger, h))
+	proxySet.Register("http", httpparser.NewHttpParser(logger, h))
+	proxySet.Register("mongo", mongoparser.NewMongoParser(logger, h))
+	proxySet.Register("postgres", postgresparser.NewPostgresParser(logger, h))
 
 	//setting the proxy port field in hook
 	proxySet.hook.SetProxyPort(opt.Port)
@@ -439,7 +444,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
 
-			proxySet.startProxy(parsersMap)
+			proxySet.startProxy()
 		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
@@ -603,7 +608,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 }
 
 // startProxy function initiates a proxy on the specified port to handle redirected outgoing network calls.
-func (ps *ProxySet) startProxy(parsersMap map[string]DepInterface) {
+func (ps *ProxySet) startProxy() {
 
 	port := ps.Port
 
@@ -650,7 +655,7 @@ func (ps *ProxySet) startProxy(parsersMap map[string]DepInterface) {
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 
-			ps.handleConnection(conn, port, parsersMap)
+			ps.handleConnection(conn, port)
 		}()
 	}
 }
@@ -874,7 +879,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
-func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, parsersMap map[string]DepInterface) {
+func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
@@ -1015,7 +1020,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, parsersMap map[
 
 	genericCheck := true
 	//Checking for all the parsers.
-	for _, parser := range parsersMap {
+	for _, parser := range ps.parsersMap {
 		if parser.OutgoingType(buffer){
 			parser.ProcessOutgoing(buffer, conn, dst)
 			genericCheck = false
