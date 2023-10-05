@@ -3,14 +3,13 @@ package models
 import "github.com/k0kubun/pp/v3"
 
 const (
-	NoSqlDB    string = "NO_SQL_DB"
-	SqlDB      string = "SQL_DB"
-	GRPC       string = "GRPC"
-	HttpClient string = "HTTP_CLIENT"
+	NoSqlDB        string = "NO_SQL_DB"
+	SqlDB          string = "SQL_DB"
+	GRPC           string = "GRPC"
+	HttpClient     string = "HTTP_CLIENT"
 	TestSetPattern string = "test-set-"
+	String         string = "string"
 )
-
-
 
 var PassingColorScheme = pp.ColorScheme{
 	String:          pp.Green,
