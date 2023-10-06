@@ -72,6 +72,7 @@ func main() {
 		version = getKeployVersion()
 	}
 	fmt.Println("This is the value of Dsn." + Dsn)
+	fmt.Println("This is the env variable"+ os.Getenv("SENTRY_DSN_BINARY"))
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, nil, version, nil)
 	tele.Ping(false)
