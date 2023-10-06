@@ -138,7 +138,7 @@ func (ac *Telemetry) MockTestRun(utilizedMocks int) {
 
 // Telemetry event for the tests and mocks that are recorded
 func (ac *Telemetry) RecordedTestsAndMocks(testSet string, testsTotal int, mockTotal map[string]int) {
-	ac.SendTelemetry("RecordedTest", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
+	ac.SendTelemetry("RecordedTestsAndMocks", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
 }
 
 // Telemetry event for the mocks that are recorded in the mocking feature
@@ -176,6 +176,7 @@ func (ac *Telemetry) SendTelemetry(eventType string, output ...map[string]interf
 			ac.KeployVersion = getKeployVersion()
 		}
 		event.KeployVersion = ac.KeployVersion
+		event.Arch = runtime.GOARCH
 		bin, err := marshalEvent(event, ac.logger)
 		if err != nil {
 			ac.logger.Debug("failed to marshal event", zap.Error(err))

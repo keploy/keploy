@@ -1,0 +1,41 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/CJBKJd92
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 303
+        header:
+            Content-Length: "47"
+            Content-Type: text/html; charset=utf-8
+            Date: Thu, 05 Oct 2023 13:26:29 GMT
+            Location: https://facebook.com
+        body: |+
+            <a href="https://facebook.com">See Other</a>.
+
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise:
+            - header.Date
+    created: 1696512394
+curl: |
+    curl --request GET \
+      --url http://localhost:8080/CJBKJd92 \
+      --header 'Host: localhost:8080' \
+      --header 'User-Agent: curl/7.81.0' \
+      --header 'Accept: */*' \
