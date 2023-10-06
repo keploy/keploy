@@ -36,16 +36,6 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	testReportPath := r.Resolver.TestReportPath
 	delay := r.Resolver.Delay
 
-	// since we are not restarting the application again and again,
-	// so we don't want for the test to wait for the delay time everytime a new test runs.
-	if r.firstRequestDone {
-		delay = 1
-	}
-
-	if !r.Resolver.firstRequestDone {
-		r.firstRequestDone = true
-	}
-
 	testReportFS := r.Resolver.TestReportFS
 	if tester == nil {
 		r.Logger.Error("failed to get testReportFS from resolver")

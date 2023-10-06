@@ -122,10 +122,10 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 var rootExamples = `
 Record:
-keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network --rm <applicationImage>" --containerName "<containerName>" --delay 1
+keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1
 
 Test:
-keploy test --c "docker run -p 8080:8080  --name <containerName> --network keploy-network --rm <applicationImage>" --delay 1
+keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1
 `
 
 func checkForDebugFlag(args []string) bool {

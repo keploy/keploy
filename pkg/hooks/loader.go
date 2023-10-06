@@ -351,7 +351,7 @@ func (h *Hook) StopUserApplication() {
 
 		// Stop Docker Container and Remove it if Keploy ran using docker.
 		containerID := h.idc.GetContainerID()
-		if len(containerID) != 0  {
+		if len(containerID) != 0 {
 			err := h.idc.StopAndRemoveDockerContainer()
 			if err != nil {
 				h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerID), zap.Error(err))
@@ -366,7 +366,7 @@ func (h *Hook) Recover(id int) {
 
 	if r := recover(); r != nil {
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
-		h.Stop(true, nil)
+		h.Stop(true)
 		// stop the user application cmd
 		h.StopUserApplication()
 		if id != h.mainRoutineId {
@@ -376,20 +376,11 @@ func (h *Hook) Recover(id int) {
 	}
 }
 
-func (h *Hook) Stop(forceStop bool, close chan bool) {
-
-	if close == nil {
-		close = make(chan bool)
-	}
+func (h *Hook) Stop(forceStop bool) {
 
 	if !forceStop {
-		select {
-		case <-close:
-			return
-		case <-h.stopper:
-			h.logger.Info("Received signal to exit keploy program..")
-			h.StopUserApplication()
-		}
+		h.logger.Info("Received signal to exit keploy program..")
+		h.StopUserApplication()
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")
 	}

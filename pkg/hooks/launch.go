@@ -89,12 +89,12 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				appContainer, appNetwork = cont, net
 			}
 
-		err := h.processDockerEnv(appCmd, appContainer, appNetwork)
-		if err != nil {
-			return err
-		}
-	} else { //Supports only linux
-		h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
+			err := h.processDockerEnv(appCmd, appContainer, appNetwork)
+			if err != nil {
+				return err
+			}
+		} else { //Supports only linux
+			h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
 			// to notify the kernel hooks that the user application command is running in native linux.
 			key := 0
@@ -406,6 +406,7 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 					}
 				}
 			}
+			h.logger.Error("couldn't start user application as command failed with error", zap.Error(err))
 			return ErrCommandError
 		}
 	} else {

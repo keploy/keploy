@@ -3,7 +3,7 @@
 <h1 align="center">Celebrate
 Open Source with Hacktoberfest 2023</h1>
 
-![image](https://user-images.githubusercontent.com/53110238/268253220-5638c3a3-6cad-4a63-9ff4-08c8f28b4baf.png)
+![image](https://github.com/keploy/docs/blob/main/static/img/hacktoberfest-2023.png?raw=true)
 
  <p align="center">𝑶𝒏𝒆 𝒄𝒐𝒏𝒕𝒓𝒊𝒃𝒖𝒕𝒊𝒐𝒏 𝒂𝒕 𝒂 𝒕𝒊𝒎𝒆</p>
 
