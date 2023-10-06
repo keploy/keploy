@@ -50,14 +50,14 @@ func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 		// creates the path director if does not exists
 		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
 		if err != nil {
-			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName)) // lgtm [go/clear-text-logging]
+			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
 
 		// create the yaml file
 		_, err := os.Create(yamlPath)
 		if err != nil {
-			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName)) // lgtm [go/clear-text-logging]
+			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
 
@@ -134,7 +134,7 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 
 	file, err := os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName)) // lgtm [go/clear-text-logging]
+		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName)) 
 		return err
 	}
 
@@ -144,14 +144,14 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 	}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {
-		ys.Logger.Error("failed to marshal the recorded calls into yaml", zap.Error(err), zap.Any("yaml file name", fileName)) // lgtm [go/clear-text-logging]
+		ys.Logger.Error("failed to marshal the recorded calls into yaml", zap.Error(err), zap.Any("yaml file name", fileName)) 
 		return err
 	}
 	data = append(data, d...)
 
 	_, err = file.Write(data)
 	if err != nil {
-		ys.Logger.Error("failed to write the yaml document", zap.Error(err), zap.Any("yaml file name", fileName)) // lgtm [go/clear-text-logging]
+		ys.Logger.Error("failed to write the yaml document", zap.Error(err), zap.Any("yaml file name", fileName)) 
 		return err
 	}
 	defer file.Close()
@@ -192,7 +192,7 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase) error {
 		ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
 	}
-	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", tcsName)) // lgtm [go/clear-text-logging]
+	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", tcsName))
 
 	// write the mock yamls
 	// mockName := fmt.Sprintf("mock-%v", lastIndx)
