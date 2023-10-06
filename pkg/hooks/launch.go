@@ -122,6 +122,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 
 	stopListenContainer := make(chan bool)
 	stopApplicationErrors := false
+	abortStopListenContainerChan := false
 
 	dockerClient := h.idc
 	appErrCh := make(chan error, 1)
@@ -365,6 +366,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 						}
 
 						h.logger.Info("container & network found and processed successfully", zap.Any("time", time.Now().UnixNano()))
+						abortStopListenContainerChan = true
 						if models.GetMode() == models.MODE_TEST {
 							h.userIpAddress <- containerIp
 						}
@@ -383,7 +385,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			return ErrDockerError
 		}
 	case err := <-appErrCh:
-		stopListenContainer <- true
+		if !abortStopListenContainerChan {
+			stopListenContainer <- true
+		}
 		if err != nil {
 			return err
 		}
