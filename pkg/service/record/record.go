@@ -75,7 +75,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
 	}
-
+	
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
 	exitCmd := make(chan bool)                 // channel to exit this command
