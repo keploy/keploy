@@ -124,9 +124,14 @@ func (h *Hook) GetDepsSize() int {
 	return size
 }
 
-func (h *Hook) AppendMocks(m *models.Mock) error {
+func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
+	if !ok{
+		h.logger.Debug("failed to get mocksTotal from context")
+	}
+	(*mocksTotal)[string(m.Kind)]++
 	// h.tcsMocks = append(h.tcsMocks, m)
 	err := h.TestCaseDB.WriteMock(m)
 	if err != nil {

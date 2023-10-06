@@ -1,6 +1,7 @@
 package genericparser
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 
@@ -11,18 +12,18 @@ import (
 	"syscall"
 	"time"
 
-	"go.keploy.io/server/pkg"
 	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
 
-func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	case models.MODE_OFF:
@@ -117,7 +118,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	}
 }
 
-func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	// destinationWriteChannel := make(chan []byte)
 	// clientWriteChannel := make(chan []byte)
 	// errChannel := make(chan error)
@@ -186,7 +187,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -211,7 +212,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}

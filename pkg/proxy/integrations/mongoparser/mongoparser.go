@@ -1,6 +1,7 @@
 package mongoparser
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -11,11 +12,11 @@ import (
 	"strings"
 	"time"
 
+	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
-	sentry "github.com/getsentry/sentry-go"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
@@ -34,11 +35,11 @@ func IsOutgoingMongo(buffer []byte) bool {
 	return int(messageLength) == len(buffer)
 }
 
-func ProcessOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func ProcessOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		logger.Debug("the outgoing mongo in record mode")
-		encodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
+		encodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger, ctx)
 	case models.MODE_TEST:
 		logger.Debug("the outgoing mongo in test mode")
 		decodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
@@ -333,7 +334,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 }
 
 // func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) []*models.Mock {
-func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
 	rand.Seed(time.Now().UnixNano())
 	// clientConnId := rand.Intn(101)
 	for {
@@ -491,7 +492,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
 						defer sentry.Recover()
-						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 					}()
 				}
 				// fmt.Println("into the more_to_come", logStr)
@@ -558,7 +559,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
 			defer sentry.Recover()
-			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 		}()
 		requestBuffer = []byte("read form client connection")
 
@@ -566,7 +567,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 
 }
 
-func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation) {
+func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context) {
 	// fmt.Println(logStr)
 	// fmt.Println("the resquest buffer in the go routine: ", string(requestBuffer))
 	// fmt.Println("the response buffer in the go routine: ", string(responseBuffer))
@@ -625,7 +626,7 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 				Created:        time.Now().Unix(),
 			},
 		}
-		h.AppendMocks(mongoMock)
+		h.AppendMocks(mongoMock, ctx)
 	}
 }
 

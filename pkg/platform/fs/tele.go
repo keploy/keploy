@@ -9,6 +9,9 @@ import (
 	"runtime"
 	"strings"
 
+	kYaml "go.keploy.io/server/pkg/platform/yaml"
+	"go.uber.org/zap"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,7 +63,7 @@ func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
 
 func (fs *telemetry) Set(id string) error {
 	path := UserHomeDir(true)
-	CreateMockFile(path, "installation-id")
+	kYaml.CreateYamlFile(path, "installation-id", &zap.Logger{})
 
 	data := []byte{}
 
@@ -78,23 +81,6 @@ func (fs *telemetry) Set(id string) error {
 	return nil
 }
 
-func CreateMockFile(path string, fileName string) (bool, error) {
-	if !isValidPath(path) {
-		return false, fmt.Errorf("file path should be absolute. got path: %s", path)
-	}
-	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
-		err := os.MkdirAll(filepath.Join(path), os.ModePerm)
-		if err != nil {
-			return false, fmt.Errorf("failed to create a mock dir. error: %v", err.Error())
-		}
-		_, err = os.Create(filepath.Join(path, fileName+".yaml"))
-		if err != nil {
-			return false, fmt.Errorf("failed to create a yaml file. error: %v", err.Error())
-		}
-		return true, nil
-	}
-	return false, nil
-}
 func isValidPath(s string) bool {
 	return !strings.HasPrefix(s, "/etc/passwd") && !strings.Contains(s, "../")
 }

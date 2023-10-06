@@ -1,20 +1,20 @@
 package mockrecord
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
-	"context"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
 )
 
@@ -69,19 +69,19 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
 	mocksRecorded := make(map[string]int)
 	tcsMocks, configMocks, err := ys.ReadMocks(path)
-	if err != nil{
+	if err != nil {
 		s.logger.Debug("Failed to read mocks")
 	}
-	tcsMocks = append(tcsMocks, configMocks...)
-	for _, mock := range tcsMocks {
-		mocksRecorded[string(mock.Kind)] ++
+	mocks := append(tcsMocks, configMocks...)
+	for _, mock := range mocks {
+		mocksRecorded[string(mock.Kind)]++
 	}
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
+	//Call the telemetry events.
+	tele.RecordedMock(mocksRecorded)
 
 	// Shutdown other resources
 	loadedHooks.Stop(true, nil)
-	//Call the telemetry events.
-	tele.RecordedMock(mocksRecorded)
 	ps.StopProxyServer()
 }

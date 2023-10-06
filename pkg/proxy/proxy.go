@@ -1002,10 +1002,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		}
 	}
 
-	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
-	if !ok{
-		logger.Debug("failed to get mocksTotal from context")
-	}
+
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
@@ -1015,8 +1012,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		// }
 		// var deps []*models.Mock = ps.hook.GetDeps()
 		// fmt.Println("before http egress call, deps array: ", deps)
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger)
-		(*mocksTotal)["http"]++
+		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger, ctx)
 		// fmt.Println("after http egress call, deps array: ", deps)
 
 		// ps.hook.SetDeps(deps)
@@ -1024,21 +1020,17 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		// var deps []*models.Mock = ps.hook.GetDeps()
 		// fmt.Println("before mongo egress call, deps array: ", deps)
 		logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
-		(*mocksTotal)["mongo"]++
+		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger, ctx)
 	case postgresparser.IsOutgoingPSQL(buffer):
 
 		logger.Debug("into psql desp mode, before passing")
-		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
-		(*mocksTotal)["psql"]++
+		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger, ctx)
 
 	case grpcparser.IsOutgoingGRPC(buffer):
-		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
-		(*mocksTotal)["grpc"]++
+		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger, ctx)
 	default:
 		logger.Debug("the external dependecy call is not supported")
-		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
-		(*mocksTotal)["generic"]++
+		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger, ctx)
 	}
 
 	// Closing the user client connection

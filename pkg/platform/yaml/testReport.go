@@ -75,11 +75,11 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc *models.TestRe
 		doc.Name = fmt.Sprintf("report-%v", lastIndex)
 	}
 
-	_, err := createYamlFile(path, doc.Name, fe.Logger)
+	_, err := CreateYamlFile(path, doc.Name, fe.Logger)
 	if err != nil {
 		return err
 	}
-	
+
 	data := []byte{}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {

@@ -40,7 +40,7 @@ func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName stri
 }
 
 // createYamlFile is used to create the yaml file along with the path directory (if does not exists)
-func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
+func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
 	// checks id the yaml exists
 	if _, err := os.Stat(filepath.Join(path, fileName+".yaml")); err != nil {
 		// creates the path director if does not exists
@@ -57,7 +57,7 @@ func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			return false, err
 		}
 
-		// since, keploy requires root access. The permissions for generated files 
+		// since, keploy requires root access. The permissions for generated files
 		// should be updated to share it with all users.
 		keployPath := path
 		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
@@ -118,7 +118,7 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
 func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 	//
-	isFileEmpty, err := createYamlFile(path, fileName, ys.Logger)
+	isFileEmpty, err := CreateYamlFile(path, fileName, ys.Logger)
 	if err != nil {
 		return err
 	}

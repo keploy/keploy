@@ -17,6 +17,7 @@ RUN go build -o keploy .
 # === Runtime Stage ===
 FROM debian:bookworm-slim
 
+ARG SENTRY_DSN_DOCKER
 ENV IS_DOCKER_CMD=true
 ENV Dsn=${SENTRY_DSN_DOCKER}
 

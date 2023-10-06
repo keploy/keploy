@@ -1,6 +1,7 @@
 package postgresparser
 
 import (
+	"context"
 	"io"
 	"net"
 	"os"
@@ -21,9 +22,9 @@ import (
 	"encoding/base64"
 	// "fmt"
 	// "github.com/jackc/pgproto3"
+	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/util"
-	sentry "github.com/getsentry/sentry-go"
 
 	// "bytes"
 
@@ -55,10 +56,10 @@ func IsOutgoingPSQL(buffer []byte) bool {
 	return version == ProtocolVersion
 }
 
-func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	default:
@@ -77,7 +78,7 @@ type PSQLMessage struct {
 }
 
 // This is the encoding function for the streaming postgres wiremessage
-func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 
 	pgRequests := []models.GenericPayload{}
 	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
@@ -138,7 +139,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-				})
+				}, ctx)
 				pgRequests = []models.GenericPayload{}
 				pgResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -164,7 +165,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-				})
+				}, ctx)
 				pgRequests = []models.GenericPayload{}
 				pgResponses = []models.GenericPayload{}
 			}
