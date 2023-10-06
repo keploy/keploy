@@ -99,7 +99,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 				case hooks.ErrUnExpected:
 					r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is not expected")
 				default:
-					r.logger.Error("unknown error recieved from application")
+					r.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 			}
 			if !abortStopHooksForcefully {

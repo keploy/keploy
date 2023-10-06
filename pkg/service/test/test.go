@@ -100,8 +100,8 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error
-	exitCmd := make(chan bool) // channel to exit this command
+	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
+	exitCmd := make(chan bool)                 // channel to exit this command
 
 	go func() {
 		select {
@@ -210,7 +210,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				case hooks.ErrUnExpected:
 					t.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
 				default:
-					t.logger.Error("unknown error recieved from application")
+					t.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 				errChan <- err
 			}

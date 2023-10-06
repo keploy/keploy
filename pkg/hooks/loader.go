@@ -369,6 +369,21 @@ func (h *Hook) Recover(id int) {
 	}
 }
 
+func deleteFileIfExists(filename string, logger *zap.Logger) error {
+	// Check if file exists
+	if _, err := os.Stat(filename); !os.IsNotExist(err) {
+		// File exists, delete it
+		err = os.Remove(filename)
+		if err != nil {
+			return fmt.Errorf("failed to delete the file: %v", err)
+		}
+		logger.Debug(fmt.Sprintf("File %s deleted successfully", filename))
+	} else {
+		logger.Debug(fmt.Sprintf("File %s doesn't exist", filename))
+	}
+	return nil
+}
+
 func (h *Hook) Stop(forceStop bool) {
 
 	if !forceStop {
@@ -377,6 +392,9 @@ func (h *Hook) Stop(forceStop bool) {
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")
 	}
+
+	//deleting kdocker-compose.yaml file if made during the process in case of docker-compose env
+	deleteFileIfExists("kdocker-compose.yaml", h.logger)
 
 	// closing all readers.
 	for _, reader := range PerfEventReaders {
