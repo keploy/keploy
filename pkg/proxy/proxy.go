@@ -49,6 +49,7 @@ var Emoji = "\U0001F430" + " Keploy:"
 // idCounter is used to generate random ID for each request
 var idCounter int64 = -1
 
+
 func getNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
@@ -56,6 +57,17 @@ func getNextID() int64 {
 type DepInterface interface {
 	OutgoingType(buffer []byte) bool
 	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn)
+}
+
+
+var ParsersMap map[string]DepInterface
+
+func init(){
+		//Register all the parsers in the map.
+		Register("grpc", grpcparser.NewGrpcParser(logger, h))
+		Register("http", httpparser.NewHttpParser(logger, h))
+		Register("mongo", mongoparser.NewMongoParser(logger, h))
+		Register("postgres", postgresparser.NewPostgresParser(logger, h))
 }
 
 
@@ -73,7 +85,6 @@ type ProxySet struct {
 	DnsServerTimeout  time.Duration
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
-	parsersMap 	  map[string]DepInterface
 }
 
 type CustomConn struct {
@@ -334,8 +345,8 @@ func containsJava(input string) bool {
 	return strings.Contains(inputLower, searchTermLower)
 }
 
-func(ps *ProxySet) Register(parserName string, parser DepInterface) {
-	ps.parsersMap[parserName] = parser
+func Register(parserName string, parser DepInterface) {
+	ParsersMap[parserName] = parser
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
@@ -428,14 +439,8 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		dockerAppCmd:      (dCmd || dIDE),
 		PassThroughPorts:  passThroughPorts,
 		hook:              h,
-		parsersMap:        make(map[string]DepInterface),
 	}
 
-	//Register all the parsers in the map.
-	proxySet.Register("grpc", grpcparser.NewGrpcParser(logger, h))
-	proxySet.Register("http", httpparser.NewHttpParser(logger, h))
-	proxySet.Register("mongo", mongoparser.NewMongoParser(logger, h))
-	proxySet.Register("postgres", postgresparser.NewPostgresParser(logger, h))
 
 	//setting the proxy port field in hook
 	proxySet.hook.SetProxyPort(opt.Port)
@@ -1020,7 +1025,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	genericCheck := true
 	//Checking for all the parsers.
-	for _, parser := range ps.parsersMap {
+	for _, parser := range ParsersMap {
 		if parser.OutgoingType(buffer){
 			parser.ProcessOutgoing(buffer, conn, dst)
 			genericCheck = false
