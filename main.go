@@ -71,6 +71,7 @@ func main() {
 	if version == "" {
 		version = getKeployVersion()
 	}
+	fmt.Println("This is the value of Dsn." + Dsn)
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, nil, version, nil)
 	tele.Ping(false)
