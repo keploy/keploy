@@ -9,6 +9,12 @@ jobs:
   build:
     runs-on: self-hosted
     steps:
+      - run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          
       - uses: actions/checkout@v2
         with:
           fetch-depth: 0
