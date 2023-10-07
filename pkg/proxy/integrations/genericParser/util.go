@@ -24,38 +24,47 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 }
 
 func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
-    for idx, mock := range tcsMocks {
-        if len(mock.Spec.GenericRequests) != len(requestBuffers) {
-            continue  // Skip mocks with different request counts
-        }
+	for idx, mock := range tcsMocks {
+		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+			matched := true // Flag to track if all requests match
 
-        matched := true  // Flag to track if all requests match
-        for requestIndex, reqBuff := range requestBuffers {
-            bufStr := string(reqBuff)
-            if !IsAsciiPrintable(string(reqBuff)) {
-                bufStr = base64.StdEncoding.EncodeToString(reqBuff)
-            }
-            encoded := []byte(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-            if !IsAsciiPrintable(mock.Spec.GenericRequests[requestIndex].Message[0].Data) {
-                encoded, _ = PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-            }
+			for requestIndex, reqBuff := range requestBuffers {
+				bufStr := string(reqBuff)
+				if !IsAsciiPrintable(string(reqBuff)) {
+					bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+				}
 
-            // Compare the encoded data
-            if string(encoded) != string(reqBuff) && mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
-                matched = false
-                break  // Exit the loop if any request doesn't match
-            }
-        }
+				encoded := []byte(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				if !IsAsciiPrintable(mock.Spec.GenericRequests[requestIndex].Message[0].Data) {
+					encoded, _ = PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				}
 
-        if matched {
-            log.Debug("matched in first loop")
-            tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-            h.SetTcsMocks(tcsMocks)
-            return true, mock.Spec.GenericResponses
-        }
-    }
+				// Compare the encoded data
+				if string(encoded) != string(reqBuff) && mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+					matched = false
+					break // Exit the loop if any request doesn't match
+				}
+			}
 
-    return false, nil
+			if matched {
+				log.Debug("matched in first loop")
+				tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+				h.SetTcsMocks(tcsMocks)
+				return true, mock.Spec.GenericResponses
+			}
+		}
+	}
+
+	idx := findBinaryMatch(tcsMocks, requestBuffers, h)
+	if idx != -1 {
+		log.Debug("matched in binary match")
+		bestMatch := tcsMocks[idx].Spec.GenericResponses
+		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+		h.SetTcsMocks(tcsMocks)
+		return true, bestMatch
+	}
+
+	return false, nil
 }
 
 func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
