@@ -89,15 +89,18 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	default:
 		// start user application
 		go func() {
+			stopApplication := false
 			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					r.logger.Info("keploy terminated user application")
 					return
 				case hooks.ErrCommandError:
-					r.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
+					r.logger.Error("failed to run user application hence stopping keploy")
 				case hooks.ErrUnExpected:
 					r.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is not expected")
+				case hooks.ErrDockerError:
+					stopApplication = true
 				default:
 					r.logger.Error("unknown error recieved from application")
 				}
@@ -105,7 +108,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
-				loadedHooks.Stop(true)
+				loadedHooks.Stop(!stopApplication)
 				//stop listening for proxy server
 				ps.StopProxyServer()
 				exitCmd <- true
