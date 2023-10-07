@@ -115,13 +115,13 @@ To run the testcases and generate a test coverage report, use this terminal comm
 you have to set any environment variables do it like you usually do it:
 
 ```zsh
-sudo -E env PATH=$PATH keploy test -c "CMD_TO_RUN_APP" --delay 10
+sudo -E env PATH=$PATH keploy test -c "CMD_TO_RUN_APP" --wait-time 10
 ```
 
 For example, if you're using a Golang framework, the command would be:
 
 ```zsh
-sudo -E env PATH=$PATH keploy test -c "go run main.go" --delay 10
+sudo -E env PATH=$PATH keploy test -c "go run main.go" --wait-time 10
 ```
 
 <img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Docker Installation </img>
@@ -164,7 +164,7 @@ When using **docker-compose** to start the application, it's important to ensure
 
 
 ```shell
-keploy test -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>" --delay 20
+keploy test -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>" --wait-time 20
 ```
 
 Voilà! 🧑🏻‍💻 We have the tests with data mocks running! 🐰🎉
