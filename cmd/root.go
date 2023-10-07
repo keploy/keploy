@@ -97,10 +97,10 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 var rootExamples = `
 Record:
-keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1
+keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --wait-time 1
 
 Test:
-keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1
+keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --wait-time 1
 `
 
 func checkForDebugFlag(args []string) bool {

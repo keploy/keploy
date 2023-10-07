@@ -30,21 +30,21 @@ Golang Application
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
 	
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --wait-time 2
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
 	
 	Test:
-	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --wait-time 2
 
 Java 
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --wait-time 2
 
 Docker
 	Alias:
@@ -55,7 +55,7 @@ Docker
 	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage"
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1
+	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --wait-time 1
 `
 
 type Example struct {

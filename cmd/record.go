@@ -70,7 +70,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --wait-time 6\n`)
 				}
 				fmt.Println("Example usage:\n", cmd.Example, "\n")
 
@@ -91,7 +91,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag")
-					fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
+					fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --wait-time 6`)
 					return errors.New("missing required --containerName flag")
 				}
 			}
@@ -115,9 +115,9 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 			// for _, v := range ports {
-				
+
 			// }
-	
+
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay, ports)

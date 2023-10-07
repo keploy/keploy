@@ -29,7 +29,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	var testCmd = &cobra.Command{
 		Use:     "test",
 		Short:   "run the recorded testcases and execute assertions",
-		Example: `sudo -E env PATH=$PATH keploy test -c "/path/to/user/app" --delay 6`,
+		Example: `sudo -E env PATH=$PATH keploy test -c "/path/to/user/app" --wait-time 6`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 			path, err := cmd.Flags().GetString("path")
@@ -69,7 +69,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --wait-time 6\n`)
 				}
 				fmt.Println("Example usage:\n", cmd.Example, "\n")
 
@@ -90,7 +90,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag")
-					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
+					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --wait-time 6`)
 					return errors.New("missing required --containerName flag")
 				}
 			}
@@ -106,9 +106,9 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			if delay <= 5 {
-				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
+				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --wait-time to set custom delay\n", delay)
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --wait-time 6\n`)
 				} else {
 					fmt.Println("Example usage:\n", cmd.Example, "\n")
 				}
