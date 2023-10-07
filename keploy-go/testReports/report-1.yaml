@@ -1,0 +1,158 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: FAILED
+success: 1
+failure: 1
+total: 2
+tests:
+    - kind: Http
+      name: report-1
+      status: FAILED
+      started: 1696492600
+      completed: 1696492601
+      test_case_path: /Users/sarthak_1/Documents/Keploy/trash/gk_workspace/keploy/keploytest-set-1
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8082/url
+        header:
+            Accept: '*/*'
+            Content-Length: "33"
+            Content-Type: application/json
+            Host: localhost:8082
+            User-Agent: curl/7.88.1
+        body: |-
+            {
+              "url": "https://github.com"
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Length: "66"
+            Content-Type: application/json; charset=UTF-8
+            Date: Thu, 05 Oct 2023 07:55:03 GMT
+        body: |
+            {"ts":1696492503539570463,"url":"http://localhost:8082/4KepjkTT"}
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "66"
+              actual:
+                key: Content-Length
+                value:
+                    - "66"
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json; charset=UTF-8
+              actual:
+                key: Content-Type
+                value:
+                    - application/json; charset=UTF-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 05 Oct 2023 07:55:03 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 05 Oct 2023 07:56:41 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: |
+                {"ts":1696492503539570463,"url":"http://localhost:8082/4KepjkTT"}
+              actual: |
+                {"ts":1696492601055387092,"url":"http://localhost:8082/4KepjkTT"}
+        dep_result: []
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1696492601
+      completed: 1696492601
+      test_case_path: /Users/sarthak_1/Documents/Keploy/trash/gk_workspace/keploy/keploytest-set-1
+      mock_path: ""
+      test_case_id: test-2
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8082/4KepjkTT
+        header:
+            Accept: '*/*'
+            Host: localhost:8082
+            User-Agent: curl/7.88.1
+        body: ""
+        body_type: ""
+      resp:
+        status_code: 308
+        header:
+            Content-Length: "0"
+            Date: Thu, 05 Oct 2023 07:55:29 GMT
+            Location: https://github.com
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 308
+            actual: 308
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Length
+                value:
+                    - "0"
+              actual:
+                key: Content-Length
+                value:
+                    - "0"
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Thu, 05 Oct 2023 07:55:29 GMT
+              actual:
+                key: Date
+                value:
+                    - Thu, 05 Oct 2023 07:56:41 GMT
+            - normal: true
+              expected:
+                key: Location
+                value:
+                    - https://github.com
+              actual:
+                key: Location
+                value:
+                    - https://github.com
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: ""
+              actual: ""
+        dep_result: []
+test_set: test-set-1

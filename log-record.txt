@@ -1,0 +1,137 @@
+
+       ▓██▓▄
+    ▓▓▓▓██▓█▓▄
+     ████████▓▒
+          ▀▓▓███▄      ▄▄   ▄               ▌
+         ▄▌▌▓▓████▄    ██ ▓█▀  ▄▌▀▄  ▓▓▌▄   ▓█  ▄▌▓▓▌▄ ▌▌   ▓
+       ▓█████████▌▓▓   ██▓█▄  ▓█▄▓▓ ▐█▌  ██ ▓█  █▌  ██  █▌ █▓
+      ▓▓▓▓▀▀▀▀▓▓▓▓▓▓▌  ██  █▓  ▓▌▄▄ ▐█▓▄▓█▀ █▓█ ▀█▄▄█▀   █▓█
+       ▓▌                           ▐█▌                   █▌
+        ▓
+  
+v2.0.0-alpha9-dev
+
+🐰 Keploy: 2023-10-07T20:02:56Z 	INFO	cmd/record.go:110		{"keploy test and mock path": "/Users/sarthak_1/Documents/Keploy/trash/gk_workspace/keploy/keploy"}
+🐰 Keploy: 2023-10-07T20:02:58Z 	INFO	hooks/loader.go:770	keploy initialized and probes added to the kernel.
+🐰 Keploy: 2023-10-07T20:02:58Z 	INFO	proxy/proxy.go:300	Java detected and CA already exists	{"path": "/usr/lib/jvm/java-17-openjdk-arm64/lib/security/cacerts"}
+🐰 Keploy: 2023-10-07T20:02:58Z 	INFO	proxy/proxy.go:300	Java detected and CA already exists	{"path": "/usr/lib/jvm/java-17-openjdk-arm64/lib/security/cacerts"}
+🐰 Keploy: 2023-10-07T20:02:59Z 	INFO	proxy/proxy.go:496	Proxy started at port:16789
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+ :: Spring Boot ::                (v2.7.3)
+
+2023-10-07 20:03:00.389  INFO 254312 --- [           main] o.s.boot.SpringApplication               : Starting application using Java 17.0.8 on lima-debian-12 with PID 254312 (started by newsarthak in /Users/sarthak_1/Documents/Keploy/trash/gk_workspace/keploy)
+2023-10-07 20:03:00.393  INFO 254312 --- [           main] o.s.boot.SpringApplication               : No active profile set, falling back to 1 default profile: "default"
+2023-10-07 20:03:00.952  INFO 254312 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2023-10-07 20:03:00.991  INFO 254312 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 29 ms. Found 1 JPA repository interfaces.
+2023-10-07 20:03:01.473  INFO 254312 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port(s): 8080 (http)
+2023-10-07 20:03:01.481  INFO 254312 --- [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2023-10-07 20:03:01.481  INFO 254312 --- [           main] org.apache.catalina.core.StandardEngine  : Starting Servlet engine: [Apache Tomcat/9.0.65]
+2023-10-07 20:03:01.533  INFO 254312 --- [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2023-10-07 20:03:01.533  INFO 254312 --- [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1095 ms
+2023-10-07 20:03:01.598  INFO 254312 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+2023-10-07 20:03:01.791  INFO 254312 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2023-10-07 20:03:01.859  INFO 254312 --- [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+2023-10-07 20:03:01.956  INFO 254312 --- [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 5.6.10.Final
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+pg.FrontendWrapper.Payload is  Tg==
+SSL packet response N
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+2023-10-07 20:03:02.170  INFO 254312 --- [           main] o.hibernate.annotations.common.Version   : HCANN000001: Hibernate Commons Annotations {5.1.2.Final}
+2023-10-07 20:03:02.262  INFO 254312 --- [           main] org.hibernate.dialect.Dialect            : HHH000400: Using dialect: org.hibernate.dialect.PostgreSQLDialect
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+2023-10-07 20:03:02.583  INFO 254312 --- [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000490: Using JtaPlatform implementation: [org.hibernate.engine.transaction.jta.platform.internal.NoJtaPlatform]
+2023-10-07 20:03:02.587  INFO 254312 --- [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2023-10-07 20:03:02.748  WARN 254312 --- [           main] JpaBaseConfiguration$JpaWebConfiguration : spring.jpa.open-in-view is enabled by default. Therefore, database queries may be performed during view rendering. Explicitly configure spring.jpa.open-in-view to disable this warning
+2023-10-07 20:03:02.953  INFO 254312 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port(s): 8080 (http) with context path ''
+2023-10-07 20:03:02.960  INFO 254312 --- [           main] o.s.boot.SpringApplication               : Started application in 3.025 seconds (JVM running for 3.631)
+2023-10-07 20:03:16.008  INFO 254312 --- [nio-8080-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2023-10-07 20:03:16.008  INFO 254312 --- [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2023-10-07 20:03:16.009  INFO 254312 --- [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 1 ms
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: 
+Bind.Decode
+PreparedStatement: S_1
+🐰 Keploy: 2023-10-07T20:03:21Z 	INFO	yaml/yaml.go:181	🟠 Keploy has captured test cases for the user's application.	{"path": "/Users/sarthak_1/Documents/Keploy/trash/gk_workspace/keploy/keploy/test-set-0/tests", "testcase name": "test-1"}
+🐰 Keploy: 2023-10-07T20:03:25Z 	INFO	hooks/loader.go:383	Received signal to exit keploy program..
+🐰 Keploy: 2023-10-07T20:03:25Z 	INFO	record/record.go:93	keploy terminated user application
+🐰 Keploy: 2023-10-07T20:03:26Z 	INFO	hooks/loader.go:436	eBPF resources released successfully...
+🐰 Keploy: 2023-10-07T20:03:26Z 	INFO	proxy/proxy.go:1125	proxy stopped...

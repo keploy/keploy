@@ -1,0 +1,40 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "112"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                "firstName": "Gourav",
+                "lastName": "Kumar",
+                "email": "gourav.kumar@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Mon, 02 Oct 2023 08:39:36 GMT
+        body: '{"id":39,"firstName":"Gourav","lastName":"Kumar","email":"gourav.kumar@gmail.com","timestamp":1696235976}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise:
+            - body.id
+            - header.Date
+    created: 1696235981

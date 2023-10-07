@@ -1,0 +1,7 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: APP_FAULT
+success: 0
+failure: 0
+total: 0
+test_set: test-set-0

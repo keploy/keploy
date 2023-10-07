@@ -24,12 +24,9 @@ type MockSpec struct {
 	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
 	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
 
-	//for postgres
-	PostgresReq  *Backend  `json:"postgresRequest,omitempty"`
-	PostgresResp *Frontend `json:"postgresResponse,omitempty"`
-	// postgres stream support
-	PostgresRequests  []GenericPayload `json:"postgresRequests,omitempty"`
-	PostgresResponses []GenericPayload `json:"postgresResponses,omitempty"`
+
+	PostgresRequests  []Backend `json:"postgresRequests,omitempty"`
+	PostgresResponses []Frontend `json:"postgresResponses,omitempty"`
 
 	//for grpc
 	GRPCReq  *GrpcReq  `json:"gRPCRequest,omitempty"`
