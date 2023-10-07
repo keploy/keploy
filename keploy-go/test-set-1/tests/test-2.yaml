@@ -1,0 +1,32 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-2
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8082/4KepjkTT
+        header:
+            Accept: '*/*'
+            Host: localhost:8082
+            User-Agent: curl/7.88.1
+        body: ""
+        body_type: ""
+    resp:
+        status_code: 308
+        header:
+            Content-Length: "0"
+            Date: Thu, 05 Oct 2023 07:55:29 GMT
+            Location: https://github.com
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+    objects: []
+    assertions:
+        noise:
+            - header.Date
+    created: 1696492534

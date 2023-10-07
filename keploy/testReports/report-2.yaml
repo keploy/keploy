@@ -1,0 +1,78 @@
+version: api.keploy.io/v1beta1
+name: report-2
+status: FAILED
+success: 0
+failure: 1
+total: 1
+tests:
+    - kind: Http
+      name: report-2
+      status: FAILED
+      started: 1696709654
+      completed: 1696709654
+      test_case_path: /Users/sarthak_1/Documents/Keploy/trash/gk_workspace/keploy/keploytest-set-0
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/employees
+        header:
+            Accept: '*/*'
+            Content-Length: "100"
+            Content-Type: application/json
+            Host: localhost:8080
+            User-Agent: curl/7.88.1
+        body: |-
+            {
+                "firstName": "Myke",
+                "lastName": "Tyson",
+                "email": "mt@gmail.com",
+                "timestamp":1
+            }
+        body_type: ""
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+            Date: Sat, 07 Oct 2023 20:07:44 GMT
+        body: '{"id":12,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1696709264}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+      noise:
+        - body.id
+        - header.Date
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - application/json
+              actual:
+                key: Content-Type
+                value:
+                    - application/json
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Sat, 07 Oct 2023 20:07:44 GMT
+              actual:
+                key: Date
+                value:
+                    - Sat, 07 Oct 2023 20:14:14 GMT
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":12,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1696709264}'
+              actual: '{"id":12,"firstName":"Myke","lastName":"Tyson","email":"mt@gmail.com","timestamp":1696709654}'
+        dep_result: []
+test_set: test-set-0
