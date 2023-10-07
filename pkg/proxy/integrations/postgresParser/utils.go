@@ -276,6 +276,7 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 
 				log.Debug("CHANGING TO MD5 for Response")
 				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
+				// isScram = true
 				continue
 			}
 			//just change it to more robust and after that write decoode encode logic for all
