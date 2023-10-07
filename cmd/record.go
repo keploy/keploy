@@ -8,8 +8,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/record"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func NewCmdRecord(logger *zap.Logger) *Record {
@@ -18,6 +20,21 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 		recorder: recorder,
 		logger:   logger,
 	}
+}
+
+func getRecordConfig() (*models.Record, error) {
+	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	decoder := yamlLib.NewDecoder(file)
+	var doc models.Config
+	err = decoder.Decode(&doc)
+	if err != nil {
+		return nil, fmt.Errorf(Emoji, "failed to decode the keploy-config.yaml. error: %v", err.Error())
+	}
+	return &doc.Record, nil
 }
 
 type Record struct {
@@ -34,10 +51,20 @@ func (r *Record) GetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 
+			confRecord, err := getRecordConfig()
+			if err != nil {
+				r.logger.Error("failed to get the record config from config file")
+				return err
+			}
+
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				r.logger.Error("failed to read the testcase path input")
 				return err
+			}
+
+			if path == "" {
+				path = confRecord.Path
 			}
 
 			//if user provides relative path
@@ -67,6 +94,11 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
+
+			if appCmd == "" {
+				appCmd = confRecord.Command
+			}
+			
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
@@ -81,6 +113,11 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
+
+			if appContainer == "" {
+				appContainer = confRecord.ContainerName
+			}
+
 			var hasContainerName bool
 			if isDockerCmd {
 				for _, arg := range os.Args {
@@ -101,10 +138,18 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
+			if networkName == "" {
+				networkName = confRecord.NetworkName
+			}
+
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
 				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
+			}
+
+			if delay == 5 {
+				delay = confRecord.Delay
 			}
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
@@ -113,6 +158,10 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
+			}
+
+			if len(ports) == 0 {
+				ports = confRecord.PassThroughPorts
 			}
 			// for _, v := range ports {
 				
