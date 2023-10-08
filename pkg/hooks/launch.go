@@ -37,6 +37,7 @@ var (
 	ErrInterrupted  = errors.New("exited with interrupt")
 	ErrCommandError = errors.New("exited due to command error")
 	ErrUnExpected   = errors.New("an unexpected error occurred")
+	ErrDockerError  = errors.New("an error occurred while using docker client")
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64) error {
@@ -248,8 +249,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 	value := true
 	h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
 
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	stopListenContainer := make(chan bool)
+	stopApplicationErrors := false
+	abortStopListenContainerChan := false
 
 	dockerClient := h.idc
 	appErrCh := make(chan error, 1)
@@ -261,7 +263,10 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			defer h.Recover(pkg.GenerateRandomID())
 
 			err := h.runApp(appCmd, true)
-			appErrCh <- err
+			h.logger.Debug("Application stopped with the error", zap.Error(err))
+			if !stopApplicationErrors {
+				appErrCh <- err
+			}
 		}()
 	}
 
@@ -291,18 +296,28 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 
 		for {
 			if time.Now().After(endTime) {
-				dockerErrCh <- fmt.Errorf("no container found for :%v", appContainer)
-				return
+				select {
+				case <-stopListenContainer:
+					return
+				default:
+					dockerErrCh <- fmt.Errorf("no container found for :%v", appContainer)
+					return
+				}
 			}
 
 			select {
+			case <-stopListenContainer:
+				return
 			case err := <-errs:
 				if err != nil && err != context.Canceled {
-					h.logger.Error("failed to listen for the docker events", zap.Error(err))
+					if err != nil && err != context.Canceled {
+						select {
+						case <-stopListenContainer:
+						default:
+							dockerErrCh <- fmt.Errorf("failed to listen for the docker events: %v", err)
+						}
+					}
 				}
-				return
-			case <-stopper:
-				dockerErrCh <- fmt.Errorf("found sudden interrupt")
 				return
 			case <-logTicker.C:
 				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
@@ -363,12 +378,17 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 							h.logger.Debug("application inode sent to kernel successfully", zap.Any("user inode", inode), zap.Any("time", time.Now().UnixNano()))
 						}
 
-						//inspecting it again to get the ip of the container used in test mode.
+            //inspecting it again to get the ip of the container used in test mode.
 						containerDetails, err := dockerClient.ContainerInspect(context.Background(), appContainer)
 						if err != nil {
 							h.logger.Error(fmt.Sprintf("failed to get inspect app container:%v to retrive the ip", containerDetails))
-							dockerErrCh <- err
-							return
+							select {
+							case <-stopListenContainer:
+								return
+							default:
+								dockerErrCh <- err
+								return
+							}
 						}
 
 						// find the application container ip in case of test mode
@@ -382,15 +402,26 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 									h.logger.Debug("receiver channel received the ip address", zap.Any("containerIp found", containerIp))
 								}
 							} else {
-								dockerErrCh <- fmt.Errorf("network details for %v network not found", appNetwork)
-								return
+								select {
+								case <-stopListenContainer:
+									return
+								default:
+									dockerErrCh <- fmt.Errorf("network details for %v network not found", appNetwork)
+									return
+								}
 							}
 						} else {
-							dockerErrCh <- fmt.Errorf("network settings or networks not available in inspect data")
-							return
+							select {
+							case <-stopListenContainer:
+								return
+							default:
+								dockerErrCh <- fmt.Errorf("network settings or networks not available in inspect data")
+								return
+							}
 						}
 
 						h.logger.Info("container & network found and processed successfully", zap.Any("time", time.Now().UnixNano()))
+						abortStopListenContainerChan = true
 						if models.GetMode() == models.MODE_TEST {
 							h.userIpAddress <- containerIp
 						}
@@ -403,11 +434,15 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 
 	select {
 	case err := <-dockerErrCh:
+		stopApplicationErrors = true
 		if err != nil {
 			h.logger.Error("failed to process the user application container", zap.Any("err", err.Error()))
-			return err
+			return ErrDockerError
 		}
 	case err := <-appErrCh:
+		if !abortStopListenContainerChan {
+			stopListenContainer <- true
+		}
 		if err != nil {
 			return err
 		}
@@ -472,6 +507,8 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	// Run the command, this handles non-zero exit code get from application.
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+
+	fmt.Println(os.Getwd())
 
 	err := cmd.Run()
 	if err != nil {

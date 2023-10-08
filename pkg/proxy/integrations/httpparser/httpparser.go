@@ -65,14 +65,12 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		// *deps = append(*deps, encodeOutgoingHttp(request,  clientConn,  destConn, logger))
 		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h)
 		if err != nil {
 			logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
 
-		// h.TestCaseDB.WriteMock(encodeOutgoingHttp(request, clientConn, destConn, logger))
 	case models.MODE_TEST:
 		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
 	default:
@@ -385,19 +383,9 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			}
 		}
 		if h.GetDepsSize() == 0 {
-			// logger.Error("failed to mock the output for unrecorded outgoing http call")
 			return
 		}
-
-		// var httpSpec spec.HttpSpec
-		// err := deps[0].Spec.Decode(&httpSpec)
-		// if err != nil {
-		// 	logger.Error("failed to decode the yaml spec for the outgoing http call")
-		// 	return
-		// }
-		// httpSpec := deps[0]
 		stub := h.FetchDep(bestMatchIndex)
-		// fmt.Println("http mock in test: ", stub)
 
 		statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
 
@@ -424,10 +412,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			}
 			logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
 			respBody = compressedBuffer.String()
-			// responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
 		} else {
 			respBody = body
-			// responseString = statusLine + headers + "\r\n" + body
 		}
 		var headers string
 		for key, values := range header {
@@ -447,8 +433,6 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			logger.Error("failed to write the mock output to the user application", zap.Error(err))
 			return
 		}
-		// pop the mocked output from the dependency queue
-		// deps = deps[1:]
 		h.PopIndex(bestMatchIndex)
 
 
@@ -542,7 +526,6 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		finalResp = append(finalResp, resp...)
 		logger.Debug("This is the initial response: " + string(resp))
 		handleChunkedResponses(&finalResp, clientConn, destConn, logger, resp)
-		// logger.Debug("This is the final response: " + string(finalResp))
 		var req *http.Request
 		// converts the request message buffer to http request
 		req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
@@ -569,15 +552,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		//Add the content length to the headers.
 		var respBody []byte
 		//Checking if the body of the response is empty or does not exist.
-		// bufReader := bufio.NewReader(respParsed.Body)
-		// check, err := bufReader.Peek(2)
-		// logger.Debug("This is the check: " + string(check))
-		// canRead := true
-		// if err != nil && err != io.EOF {
-		// 	logger.Debug("The body of the final response is empty", zap.Error(err))
-		// 	// canRead = false
-		// 	respParsed.Body = nil
-		// }
+
 
 		if respParsed.Body != nil { // Read
 			if respParsed.Header.Get("Content-Encoding") == "gzip" {
@@ -609,36 +584,6 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			"type":      models.HttpClient,
 			"operation": req.Method,
 		}
-		// httpMock := &models.Mock{
-		// 	Version: models.V1Beta2,
-		// 	Name:    "",
-		// 	Kind:    models.HTTP,
-		// }
-
-		// // encode the message into yaml
-		// err = httpMock.Spec.Encode(&spec.HttpSpec{
-		// 		Metadata: meta,
-		// 		Request: spec.HttpReqYaml{
-		// 			Method:     spec.Method(req.Method),
-		// 			ProtoMajor: req.ProtoMajor,
-		// 			ProtoMinor: req.ProtoMinor,
-		// 			URL:        req.URL.String(),
-		// 			Header:     pkg.ToYamlHttpHeader(req.Header),
-		// 			Body:       string(reqBody),
-		// 			URLParams: pkg.UrlParams(req),
-		// 		},
-		// 		Response: spec.HttpRespYaml{
-		// 			StatusCode: resp.StatusCode,
-		// 			Header:     pkg.ToYamlHttpHeader(resp.Header),
-		// 			Body: string(respBody),
-		// 		},
-		// })
-		// if err != nil {
-		// 	logger.Error("failed to encode the http messsage into the yaml")
-		// 	return nil
-		// }
-
-		// return httpMock
 
 		h.AppendMocks(&models.Mock{
 			Version: models.V1Beta2,
@@ -682,7 +627,4 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 	}
 	return nil
-
-	// if val, ok := Deps[string(port)]; ok {
-	// keploy.Deps = append(keploy.Deps, httpMock)
 }
