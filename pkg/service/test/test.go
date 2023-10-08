@@ -39,7 +39,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string,appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
 
 	var ps *proxy.ProxySet
 
