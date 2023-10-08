@@ -108,10 +108,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
-		// Ignore go http router default headers
-		// if k == "Date" || k == "Content-Length" || k == "date" || k == "connection" {
-		// 	continue
-		// }
 		_, isNoisy := noise[k]
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h2[k]
@@ -186,10 +182,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		// Ignore go http router default headers
-		// if k == "Date" || k == "Content-Length" || k == "date" || k == "connection" {
-		// 	continue
-		// }
 		_, isNoisy := noise[k]
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h1[k]

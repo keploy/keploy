@@ -58,7 +58,6 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		Opcode:     wiremessage.OpCode(opCode),
 	}
 	logger.Debug(fmt.Sprintf("the mongo msg header: %v", messageHeader))
-	// fmt.Println("\n\n the mongo msg header: ", messageHeader, "\n ")
 	if !ok || int(length) > wmLength {
 		return nil, messageHeader, &models.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
 	}
@@ -71,7 +70,6 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 	// var err error
 	switch opCode {
 	case wiremessage.OpQuery:
-		// fmt.Println("the opcode matche query. msgheader opcode: ", opCode, "the opcode for query: ", wiremessage.OpQuery)
 		op, err = decodeQuery(reqID, wmBody)
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
@@ -79,9 +77,6 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		jsonBytes, err := bson.MarshalExtJSON(op.(*opQuery).query, true, false)
 		if err != nil {
 			return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
-
-			// fmt.Printf("Failed to marshal: %v\n", err)
-			// return
 		}
 		jsonString := string(jsonBytes)
 
@@ -90,12 +85,10 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 			FullCollectionName: op.(*opQuery).fullCollectionName,
 			NumberToSkip:       op.(*opQuery).numberToSkip,
 			NumberToReturn:     op.(*opQuery).numberToReturn,
-			// Query: string(op.(*opQuery).query),
 			Query:                jsonString,
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
-		// fmt.Println("the opcode matche msg. msgheader opcode: ", opCode, "the opcode for msg: ", wiremessage.OpMsg)
 
 		op, err = decodeMsg(reqID, wmBody)
 		if err != nil {
@@ -104,15 +97,6 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		var sections []string
 		for _, section := range op.(*opMsg).sections {
 			sections = append(sections, section.String())
-			// jsonBytes, err := bson.MarshalExtJSON(section, true, false)
-			// if err != nil {
-			// 	return nil, messageHeader, &spec.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
-
-			// 	// fmt.Printf("Failed to marshal: %v\n", err)
-			// 	// return
-			// }
-			// jsonString := string(jsonBytes)
-			// sections = append(sections, jsonString)
 		}
 		mongoMsg = &models.MongoOpMessage{
 			FlagBits: int(op.(*opMsg).flags),
@@ -126,14 +110,9 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		}
 		replyDocs := []string{}
 		for _, v := range op.(*opReply).documents {
-			// replyDocs = append(replyDocs, v.String())
-			// replyDocs = append(replyDocs, string(v))
 			jsonBytes, err := bson.MarshalExtJSON(v, true, false)
 			if err != nil {
 				return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
-
-				// fmt.Printf("Failed to marshal: %v\n", err)
-				// return
 			}
 			jsonString := string(jsonBytes)
 			replyDocs = append(replyDocs, jsonString)
@@ -145,16 +124,6 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 			NumberReturned: op.(*opReply).numReturned,
 			Documents:      replyDocs,
 		}
-	// case wiremessage.OpGetMore:
-	// 	op, err = decodeGetMore(reqID, wmBody)
-	// case wiremessage.OpUpdate:
-	// 	op, err = decodeUpdate(reqID, wmBody)
-	// case wiremessage.OpInsert:
-	// 	op, err = decodeInsert(reqID, wmBody)
-	// case wiremessage.OpDelete:
-	// 	op, err = decodeDelete(reqID, wmBody)
-	// case wiremessage.OpKillCursors:
-	// 	op, err = decodeKillCursors(reqID, wmBody)
 	default:
 		op = &opUnknown{
 			opCode: opCode,
@@ -166,7 +135,6 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		return nil, messageHeader, mongoMsg, err
 	}
 	logger.Debug(fmt.Sprintf("the decoded string for the wiremessage: %v", op.String()))
-	// fmt.Println("the decoded string for the wiremessage: ", op.String())
 	return op, messageHeader, mongoMsg, nil
 }
 
@@ -389,12 +357,8 @@ func (o *opMsgSectionSingle) String() string {
 	if err != nil {
 		fmt.Println(Emoji + "failed to marshsal the bsoncore.Document")
 		return ""
-
-		// fmt.Printf("Failed to marshal: %v\n", err)
-		// return
 	}
 	jsonString := string(jsonBytes)
-	// sections = append(sections, jsonString)
 
 	return fmt.Sprintf("{ SectionSingle msg: %s }", jsonString)
 }
@@ -451,13 +415,9 @@ func (o *opMsgSectionSequence) String() string {
 		if err != nil {
 			fmt.Println(Emoji + "failed to marshsal the bsoncore.Document")
 			return ""
-
-			// fmt.Printf("Failed to marshal: %v\n", err)
-			// return
 		}
 		jsonString := string(jsonBytes)
 		msgs = append(msgs, jsonString)
-		// msgs = append(msgs, msg.String())
 	}
 	return fmt.Sprintf("{ SectionSingle identifier: %s , msgs: [ %s ] }", o.identifier, strings.Join(msgs, ", "))
 }
@@ -510,9 +470,6 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opM
 	for messageIndex, messageValue := range responseOpMsg.Sections {
 		switch {
 		case strings.HasPrefix(messageValue, "{ SectionSingle identifier:"):
-			// var identifier string
-			// var msgsStr string
-			// _, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle identifier: %s, msgs: [%s] }", &identifier, &msgsStr)
 			identifier, msgsStr, err := decodeOpMsgSectionSequence(responseOpMsg.Sections[messageIndex])
 			if err != nil {
 				logger.Error("failed to extract the msg section from recorded message", zap.Error(err))
@@ -522,7 +479,6 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opM
 			docs := []bsoncore.Document{}
 			for _, msg := range msgs {
 				var unmarshaledDoc bsoncore.Document
-				// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
 				err = bson.UnmarshalExtJSON([]byte(msg), true, &unmarshaledDoc)
 				if err != nil {
 					logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
@@ -530,99 +486,29 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opM
 				}
 				docs = append(docs, unmarshaledDoc)
 			}
-			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-			// msg.sections = []opMsgSection{&opMsgSectionSingle{
-			// 	msg: unmarshaledDoc,
-			// }}
 			message.sections = append(message.sections, &opMsgSectionSequence{
-				// msg: unmarshaledDoc,
 				identifier: identifier,
 				msgs:       docs,
 			})
 		case strings.HasPrefix(messageValue, "{ SectionSingle msg:"):
-			// var sectionStr string
-			// _, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle msg: %s }", &sectionStr)
 			sectionStr, err := decodeOpMsgSectionSingle(responseOpMsg.Sections[messageIndex])
 			if err != nil {
 				logger.Error("failed to extract the msg section from recorded message single section", zap.Error(err))
 				return nil, err
 			}
 
-			// logger.Info("the section in the msg response", zap.Any("", sectionStr))
 			var unmarshaledDoc bsoncore.Document
-			// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
 			err = bson.UnmarshalExtJSON([]byte(sectionStr), true, &unmarshaledDoc)
 			if err != nil {
 				logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
 				return nil, err
 			}
-			// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-			// msg.sections = []opMsgSection{&opMsgSectionSingle{
-			// 	msg: unmarshaledDoc,
-			// }}
 			message.sections = append(message.sections, &opMsgSectionSingle{
 				msg: unmarshaledDoc,
 			})
 		default:
 			logger.Error(fmt.Sprintf("failed to encode the OpMsg section into mongo wiremessage because of invalid format"), zap.Any("section", messageValue))
 		}
-		// if strings.Contains(messageValue, "SectionSingle identifier") {
-		// 	// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
-		// 	// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
-		// 	// logger.Info("the section in the msg response", zap.Any("", sectionStr))
-		// 	var identifier string
-		// 	var msgsStr string
-		// 	_, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle identifier: %s, msgs: [%s] }", &identifier, &msgsStr)
-		// 	if err != nil {
-		// 		logger.Error("failed to extract the msg section from recorded message", zap.Error(err))
-		// 		return nil, err
-		// 	}
-		// 	msgs := strings.Split(msgsStr, ", ")
-		// 	docs := []bsoncore.Document{}
-		// 	for _, msg := range msgs {
-		// 		var unmarshaledDoc bsoncore.Document
-		// 		// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
-		// 		err = bson.UnmarshalExtJSON([]byte(msg), true, &unmarshaledDoc)
-		// 		if err != nil {
-		// 			logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
-		// 			return nil, err
-		// 		}
-		// 		docs = append(docs, unmarshaledDoc)
-		// 	}
-		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{
-		// 	// 	msg: unmarshaledDoc,
-		// 	// }}
-		// 	message.sections = append(message.sections, &opMsgSectionSequence{
-		// 		// msg: unmarshaledDoc,
-		// 		identifier: identifier,
-		// 		msgs:       docs,
-		// 	})
-		// } else if strings.HasPrefix(messageValue) {
-		// 	// sectionStr := strings.Trim(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3], " ")
-		// 	// sectionStr := msgSpec.Sections[i][21 : len(msgSpec.Sections[i])-2]
-		// 	var sectionStr string
-		// 	_, err := fmt.Sscanf(responseOpMsg.Sections[messageIndex], "{ SectionSingle msg: %s }", &sectionStr)
-		// 	if err != nil {
-		// 		logger.Error("failed to extract the msg section from recorded message single section", zap.Error(err))
-		// 		return nil, err
-		// 	}
-		// 	// logger.Info("the section in the msg response", zap.Any("", sectionStr))
-		// 	var unmarshaledDoc bsoncore.Document
-		// 	// err = bson.UnmarshalExtJSON([]byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3]), false, &unmarshaledDoc)
-		// 	err = bson.UnmarshalExtJSON([]byte(sectionStr), true, &unmarshaledDoc)
-		// 	if err != nil {
-		// 		logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
-		// 		return nil, err
-		// 	}
-		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{msg: []byte(msgSpec.Sections[0][21 : len(msgSpec.Sections[0])-3])}}
-		// 	// msg.sections = []opMsgSection{&opMsgSectionSingle{
-		// 	// 	msg: unmarshaledDoc,
-		// 	// }}
-		// 	message.sections = append(message.sections, &opMsgSectionSingle{
-		// 		msg: unmarshaledDoc,
-		// 	})
-		// }
 	}
 	return message, nil
 }
@@ -823,12 +709,6 @@ func (r *opReply) TransactionDetails() *TransactionDetails {
 }
 
 func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, error) {
-	// replyMessage := &opReply{
-	// 	flags:        wiremessage.ReplyFlag(reply.ResponseFlags),
-	// 	cursorID:     reply.CursorID,
-	// 	startingFrom: reply.StartingFrom,
-	// 	numReturned:  reply.NumberReturned,
-	// }
 	replyDocs := []bsoncore.Document{}
 	for _, v := range reply.Documents {
 		var unmarshaledDoc bsoncore.Document
@@ -853,30 +733,10 @@ func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, er
 			logger.Error("failed to decode the recorded document of OpReply", zap.Error(err))
 			return nil, err
 		}
-		// unmarshaledDoc.Lookup("localTime")
-		// unmarshaledDoc = bso{}
-		// unmarshaledDoc.
 		elements, _ := unmarshaledDoc.Elements()
-		// updatedBsonDoc := bsoncore.Document{}
-		// unmarshaledDoc.look
-
-		// for _, el := range elements {
-		// 	if el.Key() == "localTime" {
-		// 		logger.Debug( fmt.Sprintf("the values of localtime: %v", el.Value()) )
-		// 		continue
-		// 	}
-		// 	el.
-
-		// 	// updatedBsonDoc = append(updatedBsonDoc, bsoncore.BuildDocumentElement()...)
-		// }
 		logger.Debug(fmt.Sprintf("the elements of the reply docs: %v", elements))
-
-		// docs, rm, ok := bsoncore.ReadDocument([]byte(v))
-		// fmt.Println("the document in healtcheck of test mode: ", docs.String(), " rm bytes: ", rm,  " ok: ", ok)
-		// replyDocs = append(replyDocs, bsoncore.Document(v))
 		replyDocs = append(replyDocs, unmarshaledDoc)
 
-		// fmt.Println("the documents in healtcheck of test mode: ", replyDocs)
 	}
 	return &opReply{
 		flags:        wiremessage.ReplyFlag(reply.ResponseFlags),

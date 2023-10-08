@@ -25,7 +25,6 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-// func (r *recorder) CaptureTraffic(tcsPath, mockPath string, appCmd, appContainer, appNetwork string, Delay uint64) {
 func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
 
 	var ps *proxy.ProxySet
@@ -69,8 +68,6 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
-	// ps.SetHook(loadedHooks)
-
 	//Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
