@@ -98,7 +98,6 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hoo
 	}
 	return &Hook{
 		logger: logger,
-		// db:          db,
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
@@ -125,7 +124,6 @@ func (h *Hook) GetDepsSize() int {
 func (h *Hook) AppendMocks(m *models.Mock) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// h.tcsMocks = append(h.tcsMocks, m)
 	err := h.TestCaseDB.WriteMock(m)
 	if err != nil {
 		return err
@@ -135,14 +133,12 @@ func (h *Hook) AppendMocks(m *models.Mock) error {
 func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.mu.Lock()
 	h.tcsMocks = m
-	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
 	defer h.mu.Unlock()
 }
 
 func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.mu.Lock()
 	h.configMocks = m
-	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
 	defer h.mu.Unlock()
 }
 
@@ -161,9 +157,6 @@ func (h *Hook) PopIndex(index int) {
 func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
 	dep := h.tcsMocks[indx]
-	// fmt.Println("tcsMocks in hooks: ", dep)
-	// h.logger.Error("called FetchDep")
-
 	defer h.mu.Unlock()
 	return dep
 }
@@ -171,8 +164,6 @@ func (h *Hook) FetchDep(indx int) *models.Mock {
 func (h *Hook) GetTcsMocks() []*models.Mock {
 	h.mu.Lock()
 	tcsMocks := h.tcsMocks
-	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
-	// h.logger.Error("called GetDeps")
 	defer h.mu.Unlock()
 	return tcsMocks
 }
@@ -180,8 +171,6 @@ func (h *Hook) GetTcsMocks() []*models.Mock {
 func (h *Hook) GetConfigMocks() []*models.Mock {
 	h.mu.Lock()
 	configMocks := h.configMocks
-	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
-	// h.logger.Error("called GetDeps")
 	defer h.mu.Unlock()
 	return configMocks
 }
@@ -189,8 +178,6 @@ func (h *Hook) GetConfigMocks() []*models.Mock {
 func (h *Hook) ResetDeps() int {
 	h.mu.Lock()
 	h.tcsMocks = []*models.Mock{}
-	// h.logger.Error("called ResetDeps", zap.Any("tcsMocks: ", h.tcsMocks))
-	// fmt.Println("tcsMocks are reset")
 	defer h.mu.Unlock()
 	return 1
 }
@@ -257,7 +244,6 @@ func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	defer h.mutex.Unlock()
 	destInfo := structs.DestInfo{}
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
-		// h.logger.Error("failed to fetch the destination info", zap.Error(err))
 		return nil, err
 	}
 	return &destInfo, nil
@@ -382,13 +368,11 @@ func (h *Hook) Stop(forceStop bool) {
 	for _, reader := range PerfEventReaders {
 		if err := reader.Close(); err != nil {
 			h.logger.Error("failed to close the eBPF perf reader", zap.Error(err))
-			// log.Fatalf("closing perf reader: %s", err)
 		}
 	}
 	for _, reader := range RingEventReaders {
 		if err := reader.Close(); err != nil {
 			h.logger.Error("failed to close the eBPF ringbuf reader", zap.Error(err))
-			// log.Fatalf("closing ringbuf reader: %s", err)
 		}
 	}
 
@@ -435,8 +419,6 @@ func (h *Hook) Stop(forceStop bool) {
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
 func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
-	// k := keploy.KeployInitializer()
-
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err
@@ -539,7 +521,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.connect4 = c4
-	// defer c4.Close()
 
 	gp4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -552,7 +533,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.gp4 = gp4
-	// defer gp4.Close()
 
 	// FOR IPV6
 
@@ -585,7 +565,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.connect6 = c6
-	// defer c6.Close()
 
 	gp6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -598,7 +577,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.gp6 = gp6
-	// defer gp4.Close()
 
 	//Open a kprobe at the entry of sendto syscall
 	snd, err := link.Kprobe("sys_sendto", objs.SyscallProbeEntrySendto, nil)
@@ -607,7 +585,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.sendto = snd
-	// defer snd.Close()
 
 	//Opening a kretprobe at the exit of sendto syscall
 	sndr, err := link.Kretprobe("sys_sendto", objs.SyscallProbeRetSendto, &link.KprobeOptions{RetprobeMaxActive: 1024})
@@ -616,7 +593,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.sendtoRet = sndr
-	// defer sndr.Close()
 
 	// ------------ For Ingress using Kprobes --------------
 
@@ -628,7 +604,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.accept = ac
-	// defer ac.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -638,7 +613,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.acceptRet = ac_
-	// defer ac_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
@@ -648,7 +622,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.accept4 = ac4
-	// defer ac4.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -658,7 +631,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.accept4Ret = ac4_
-	// defer ac4_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
@@ -668,7 +640,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.read = rd
-	// defer rd.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -678,7 +649,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.readRet = rd_
-	// defer rd_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
@@ -688,7 +658,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.write = wt
-	// defer wt.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -698,7 +667,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.writeRet = wt_
-	// defer wt_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program for writev.
@@ -726,7 +694,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.close = cl
-	// defer cl.Close()
 
 	//Attaching a kprobe at the entry of recvfrom syscall
 	rcv, err := link.Kprobe("sys_recvfrom", objs.SyscallProbeEntryRecvfrom, nil)
@@ -735,7 +702,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.recvfrom = rcv
-	// defer rcv.Close()
 
 	//Attaching a kretprobe at the exit of recvfrom syscall
 	rcvr, err := link.Kretprobe("sys_recvfrom", objs.SyscallProbeRetRecvfrom, &link.KprobeOptions{RetprobeMaxActive: 1024})
@@ -744,7 +710,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.recvfromRet = rcvr
-	// defer rcvr.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -754,7 +719,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.closeRet = cl_
-	// defer cl_.Close()
 
 	h.LaunchPerfBufferConsumers(connectionFactory)
 

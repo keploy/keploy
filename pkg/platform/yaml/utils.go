@@ -122,10 +122,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
-		// Ignore go http router default headers
-		// if k == "Date" || k == "Content-Length" || k == "date" || k == "connection" {
-		// 	continue
-		// }
 		_, isNoisy := noise[k]
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h2[k]
@@ -200,10 +196,6 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		// Ignore go http router default headers
-		// if k == "Date" || k == "Content-Length" || k == "date" || k == "connection" {
-		// 	continue
-		// }
 		_, isNoisy := noise[k]
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h1[k]
@@ -307,7 +299,6 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	for _, v := range files {
 		// Define the regular expression pattern
 		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern) 
-		// `^test-set-\d{1,}$`
 
 		// Compile the regular expression
 		regex, err := regexp.Compile(pattern)
@@ -317,8 +308,6 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 
 		// Check if the string matches the pattern
 		if regex.MatchString(v.Name()) {
-			// fmt.Println("name for the file", v.Name())
-
 			indices = append(indices, v.Name())
 		}
 	}
