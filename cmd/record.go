@@ -111,7 +111,6 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
-	
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay, ports)
 			return nil
