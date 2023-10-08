@@ -40,7 +40,6 @@ func (h *Hook) launchSocketOpenEvent(connectionFactory *connection.Factory) {
 		h.logger.Error("failed to create perf event reader of socketOpenEvent", zap.Error(err))
 		return
 	}
-	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
 	go func() {
@@ -60,7 +59,6 @@ func (h *Hook) launchSocketDataEvent(connectionFactory *connection.Factory) {
 		h.logger.Error("failed to create ring buffer of socketDataEvent", zap.Error(err))
 		return
 	}
-	// defer reader.Close()
 	RingEventReaders = append(RingEventReaders, reader)
 
 	go func() {
@@ -81,7 +79,6 @@ func (h *Hook) launchSocketCloseEvent(connectionFactory *connection.Factory) {
 		h.logger.Error("failed to create perf event reader of socketCloseEvent", zap.Error(err))
 		return
 	}
-	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
 	go func() {
