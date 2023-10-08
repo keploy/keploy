@@ -19,7 +19,7 @@ type NetworkTrafficDoc struct {
 	Kind    models.Kind    `json:"kind" yaml:"kind"`
 	Name    string         `json:"name" yaml:"name"`
 	Spec    yamlLib.Node   `json:"spec" yaml:"spec"`
-	Curl    string         `json:"curl" yaml:"curl"`
+	Curl    string         `json:"curl" yaml:"curl,omitempty"`
 }
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc, error) {
