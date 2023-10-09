@@ -57,9 +57,6 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			path += "/keploy"
 
-			// tcsPath := path + "/tests"
-			// mockPath := path + "/mocks"
-
 			testReportPath := path + "/testReports"
 
 			appCmd, err := cmd.Flags().GetString("command")
@@ -126,9 +123,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
-			// for _, v := range ports {
-
-			// }
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
@@ -137,17 +131,12 @@ func (t *Test) GetCmd() *cobra.Command {
 		},
 	}
 
-	// testCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
-	// testCmd.MarkFlagRequired("pid")
-
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
-	// testCmd.MarkFlagRequired("c")
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
-	// recordCmd.MarkFlagRequired("networkName")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")

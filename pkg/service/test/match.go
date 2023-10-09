@@ -41,11 +41,6 @@ func Match(exp, act string, noise []string, log *zap.Logger) (string, string, bo
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
 		return exp, act, false, nil
 	}
-	//tmp := mapClone(noiseMap)
-	////expected = removeNoise(expected, tmp)
-	//
-	//tmp = mapClone(noiseMap)
-	//actual = removeNoise(actual, tmp)
 	match, err := jsonMatch("", expected, actual, noiseMap)
 	if err != nil {
 		return exp, act, false, err
@@ -127,9 +122,6 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string]boo
 				}
 			}
 			isMatched = isMatchedElement && isMatched
-			// if x, err := jsonMatch(expSlice.Index(i).Interface(), actSlice.Index(i).Interface()); err != nil || !x {
-			// 	return false, nil
-			// }
 
 		}
 		return isMatched, nil

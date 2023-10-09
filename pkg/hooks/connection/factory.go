@@ -35,8 +35,6 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 	}
 }
 
-// func (factory *Factory) HandleReadyConnections(k *keploy.Keploy) {
-// func (factory *Factory) HandleReadyConnections(path string, db platform.TestCaseDB, getDeps func() []*models.Mock, resetDeps func() int) {
 func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 
 	factory.mutex.Lock()
@@ -99,15 +97,6 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 }
 
 func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
-	// meta := map[string]string{
-	// 	"method": req.Method,
-	// }
-	// httpMock := &models.Mock{
-	// 	Version: models.V1Beta2,
-	// 	Name:    "",
-	// 	Kind:    models.HTTP,
-	// }
-
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
@@ -120,20 +109,9 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		logger.Error("failed to read the http response body", zap.Error(err))
 		return
 	}
-
-	// Encode the message into yaml
-	// mocks := getDeps()
-	// mockIds := []string{}
-	// for i, v := range mocks {
-	// 	if v != nil {
-	// 		mockIds = append(mockIds, fmt.Sprintf("%v-%v", v.Name, i))
-	// 	}
-	// }
-
-	// err = db.Insert(httpMock, getDeps())
 	err = db.WriteTestcase(&models.TestCase{
 		Version: models.V1Beta2,
-		Name:    "",
+		Name:    pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
 		Created: time.Now().Unix(),
 		HttpReq: models.HttpReq{
