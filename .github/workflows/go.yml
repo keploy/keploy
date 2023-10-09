@@ -1,12 +1,8 @@
 name: Go
 
 on:
-#  push:
-#    branches: [ main ]
   pull_request:
     branches: [ main ]
-#   pull_request_target:
-#     types: [assigned, opened, synchronize, reopened]
 
 jobs:
 
@@ -16,10 +12,6 @@ jobs:
       - uses: actions/checkout@v2
         with:
           fetch-depth: 0
-
-#      - name: Check commit messages
-#        uses: wagoid/commitlint-github-action@v4
-
       - name: Set up Go
         uses: actions/setup-go@v2
         with:
@@ -27,56 +19,6 @@ jobs:
 
       - name: Build
         run: go build -v ./...
-
-      # - name: Test-Export
-      #   run: |
-      #     go test -coverpkg=./... -coverprofile=coverage1.tmp.txt -covermode=atomic ./...
-      #     cat coverage1.tmp.txt | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage1.txt
-      #   env:
-      #     KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-      #     ENABLE_DEDUP: false
-      #     ENABLE_TEST_EXPORT: true
-      #     KEPLOY_APP_NAME: Keploy-Test-App-2
-      #     KEPLOY_REPORT_PATH: ./
-        
-      # - name: Test
-      #   run: |
-      #     export PORT=6790
-      #     curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-      #     sudo mv /tmp/keploy /usr/local/bin && export KEPLOY_MODE=off && keploy &
-      #     export PORT=6789 && export ENABLE_TEST_EXPORT=false && go test -coverpkg=./... -coverprofile=coverage.tmp.txt -covermode=atomic ./...
-      #     cat coverage.tmp.txt | grep -v -e "http/regression/request.go" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage.txt
-      #   env:
-      #     ENABLE_DEDUP: true
-      #     ENABLE_TELEMETRY: false
-
-      # - name: Test-withDeDupEnabled
-      #   run: |
-      #     go test -coverpkg=./... -coverprofile=coverage3.tmp.txt -covermode=atomic ./...
-      #     cat coverage3.tmp.txt | grep -v "mode: atomic" | grep -v -e "generated.go" -e "_gen.go" | grep -v -e "services.pb.go" -e "services_grpc.pb.go" > coverage3.txt
-      #     cat coverage1.txt coverage2.txt coverage3.txt > coverage.txt
-      #   env:
-      #     KEPLOY_API_KEY: 81f83aeeedddf453966347dc136c66
-      #     ENABLE_DEDUP: true
-      #     ENABLE_TEST_EXPORT: false
-
-
-#       - uses: codecov/codecov-action@v2
-#         with:
-#           files: ./coverage.txt
-      # - name: Install goveralls
-      #   run: go install github.com/mattn/goveralls@latest
-      # - name: Send coverage
-      #   env:
-      #     COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      #   run: |
-      #     goveralls -coverprofile=coverage.txt -service=github
-
-
-
-#      - name: Install extra dependencies
-#        run: npm install -g @semantic-release/exec
-
       - uses: codfish/semantic-release-action@v1
         with:
           dry_run: true
@@ -85,3 +27,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  build-arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.21"
+          architecture: arm
+
+      - name: Build
+        run: go build -v ./...
+      - uses: codfish/semantic-release-action@v1
+        with:
+          dry_run: true
+          additional_packages: |
+            ['@semantic-release/exec']
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
