@@ -191,12 +191,6 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			responseTo := mongoRequests[0].Header.RequestID
 			if bestMatchIndex == -1 || maxMatchScore == 0.0 {
 				logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
-				// if bestMatchIndex == -1 {
-				// 	err = util.Passthrough(clientConn, destConn, requestBuffers, logger)
-				// 	if err!=nil {
-				// 		return
-				// 	}
-				// }
 				continue
 			}
 			for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
@@ -216,7 +210,6 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					if err != nil {
 						logger.Error("failed to write the health check reply to mongo client", zap.Error(err))
 						return
-						// log.Printf("failed to write response to the client conn. error: %v \n", err.Error())
 					}
 				case wiremessage.OpMsg:
 					respMessage := mongoResponse.Message.(*models.MongoOpMessage)
@@ -229,7 +222,6 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					if hasSecondSetBit(respMessage.FlagBits) {
 						// the first response wiremessage have
 						for {
-							// fmt.Println("the response cycle. delay: ", resp.ReadDelay, " for clientConnId: ", clientConnId, " responseTo: ", mongoRequests[i].Header.RequestID, " length of mongorequests: ", len(mongoRequests), " the sixteenthBit in request.Msg.Flag: ", hasSixteenthBit(mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits))
 							time.Sleep(time.Duration(mongoResponse.ReadDelay))
 							// generate requestId for the mongo wiremessage
 							requestId := wiremessage.NextRequestID()
@@ -331,10 +323,8 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 	}
 }
 
-// func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) []*models.Mock {
 func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
 	rand.Seed(time.Now().UnixNano())
-	// clientConnId := rand.Intn(101)
 	for {
 
 		var err error
@@ -373,10 +363,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			Message:   mongoRequest,
 			ReadDelay: int64(readRequestDelay),
 		})
-		// logStr += fmt.Sprintf("the req buffer: %v\n", string(requestBuffer))
 		logStr += fmt.Sprintf("after reading request from client: %v\n", time.Since(started))
-		// fmt.Println("the req buffer: ", string(requestBuffer))
-		// write the request message to the mongo server
 		_, err = destConn.Write(requestBuffer)
 		if err != nil {
 			logger.Error("failed to write the request buffer to mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
@@ -387,7 +374,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		logStr += fmt.Sprintln("after writing the request to the destination: ", time.Since(started))
 		if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for {
-				// fmt.Println("into the more_to_come", logStr)
 				tmpStr := ""
 				started = time.Now()
 				requestBuffer1, err := util.ReadBytes(clientConn)
@@ -402,9 +388,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 				}
 				readRequestDelay = time.Since(started)
 
-				// logStr += fmt.Sprintf("the resp buffer: %v\n", string(responseBuffer))
 				logStr += fmt.Sprintf("after reading the response from destination: %v\n", time.Since(started))
-				// fmt.Println("the resp buffer: ", string(responseBuffer))
 
 				// write the reply to mongo client
 				_, err = destConn.Write(requestBuffer1)
@@ -420,8 +404,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					logger.Debug("the response from the server is complete")
 					break
 				}
-				// logStr += fmt.Sprintln("the response from the mongo server: ", string(responseBuffer1))
-				// fmt.Println("the response from the mongo server: ", string(requestBuffer1))
 				_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 				if err != nil {
 					logger.Error("failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
@@ -431,8 +413,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					logger.Debug("the request from the client is complete since the more_to_come flagbit is 0")
 					break
 				}
-				// logStr += fmt.Sprintln("the docoded responseHeader: ", responseHeader, " || and the response: ", mongoResp.(*models.MongoOpMessage))
-				// fmt.Println("the docoded responseHeader: ", reqHeader, " || and the response: ", mongoReq.(*models.MongoOpMessage))
 				mongoRequests = append(mongoRequests, models.MongoRequest{
 					Header:    &reqHeader,
 					Message:   mongoReq,
@@ -458,14 +438,11 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			return
 		}
 		readResponseDelay := time.Since(started)
-		// logStr += fmt.Sprintf("the resp buffer: %v\n", string(responseBuffer))
 		logStr += fmt.Sprintf("after reading the response from destination: %v\n", time.Since(started))
-		// fmt.Println("the resp buffer: ", string(responseBuffer))
 
 		// write the reply to mongo client
 		_, err = clientConn.Write(responseBuffer)
 		if err != nil {
-			// fmt.Println(logStr)
 			logger.Error("failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 			return
 		}
@@ -484,7 +461,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		})
 		if val, ok := mongoResponse.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for i := 0; ; i++ {
-				// fmt.Printf("the more_to_come is a heartbeat?: %v", isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message))
 				if i == 0 && isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 					go func() {
 						// Recover from panic and gracefully shutdown
@@ -493,7 +469,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
 					}()
 				}
-				// fmt.Println("into the more_to_come", logStr)
 				tmpStr := ""
 				started = time.Now()
 				responseBuffer, err = util.ReadBytes(destConn)
@@ -511,9 +486,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 
 				readResponseDelay := time.Since(started)
 
-				// logStr += fmt.Sprintf("the resp buffer: %v\n", string(responseBuffer))
 				logStr += fmt.Sprintf("after reading the response from destination: %v\n", time.Since(started))
-				// fmt.Println("the resp buffer: ", string(responseBuffer))
 
 				// write the reply to mongo client
 				_, err = clientConn.Write(responseBuffer)
@@ -530,8 +503,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					logger.Debug("the response from the server is complete")
 					break
 				}
-				// logStr += fmt.Sprintln("the response from the mongo server: ", string(responseBuffer1))
-				// fmt.Println("the response from the mongo server: ", string(responseBuffer1))
+		
 				_, respHeader, mongoResp, err := Decode(responseBuffer, logger)
 				if err != nil {
 					logger.Error("failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
@@ -541,16 +513,12 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					logger.Debug("the response from the server is complete since the more_to_come flagbit is 0")
 					break
 				}
-				// logStr += fmt.Sprintln("the docoded responseHeader: ", responseHeader, " || and the response: ", mongoResp.(*models.MongoOpMessage))
-				// fmt.Println("the docoded responseHeader: ", respHeader, " || and the response: ", mongoResp.(*models.MongoOpMessage))
 				mongoResponses = append(mongoResponses, models.MongoResponse{
 					Header:    &respHeader,
 					Message:   mongoResp,
 					ReadDelay: int64(readResponseDelay),
 				})
-				// go recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
 			}
-			// fmt.Println("exiting the more_to_come")
 		}
 
 		go func() {
@@ -566,9 +534,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 }
 
 func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation) {
-	// fmt.Println(logStr)
-	// fmt.Println("the resquest buffer in the go routine: ", string(requestBuffer))
-	// fmt.Println("the response buffer in the go routine: ", string(responseBuffer))
 
 	// // capture if the wiremessage is a mongo operation call
 
@@ -580,10 +545,8 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 
 	// Skip heartbeat from capturing in the global set of mocks. Since, the heartbeat packet always contain the "hello" boolean.
 	// See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
-	// if strings.Contains(opReq.String(), "helloOk") || strings.Contains(opReq.String(), "hello") {
 	if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 		meta1["type"] = "config"
-		// isHeartbeatRecorded := false
 		for _, v := range configRequests {
 			// requestHeader.
 			for _, req := range mongoRequests {
@@ -649,10 +612,8 @@ func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest
 			return val.FullCollectionName == "admin.$cmd" && opReq.IsIsMaster() && strings.Contains(opReq.String(), "helloOk")
 		}
 	case wiremessage.OpMsg:
-		// fmt.Printf("check that the opmsg is heartbeat or not. operation: %v\n", opReq.String())
 		_, ok := mongoRequest.(*models.MongoOpMessage)
 		if ok {
-			// fmt.Printf("the request opmg is isMaster? : %v \n", opReq.IsIsAdminDB())
 			return opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")
 		}
 	default:
@@ -662,8 +623,6 @@ func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest
 }
 
 func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logger) float64 {
-	// a := map[string]interface{}{}
-	// b := map[string]interface{}{}
 	// check that the sections are of same type. SectionSingle (section[16] is "m") or SectionSequence (section[16] is "i").
 	if (len(expectedSection) < 16 || len(actualSection) < 16) && expectedSection[16] != actualSection[16] {
 		return 0
@@ -674,22 +633,9 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		var expectedIdentifier string
 		var expectedMsgsStr string
 		// // Define the regular expression pattern
-		// pattern := `\{ SectionSingle identifier: (.+?) , msgs: \[ (.+?) \] \}`
-
 		// // Compile the regular expression
-		// regex := regexp.MustCompile(pattern)
-
 		// // Find submatches using the regular expression
-		// submatches := regex.FindStringSubmatch(expectedSection)
-		// if submatches == nil || len(submatches) != 3 {
-		// 	logger.Debug(fmt.Sprintf("the section in mongo OpMsg wiremessage: %v", expectedSection))
-		// 	logger.Error("failed to fetch the identifier/msgs from the section sequence of recorded OpMsg", zap.Any("identifier", expectedIdentifier))
-		// 	return 0
-		// }
-		// expectedIdentifier = submatches[1]
-		// expectedMsgsStr = submatches[2]
 
-		// _, err := fmt.Sscanf(expectedSection, "{ SectionSingle identifier: %s , msgs: [ %s ] }", &expectedIdentifier, &expectedMsgsStr)
 		expectedIdentifier, expectedMsgsStr, err := decodeOpMsgSectionSequence(expectedSection)
 		if err != nil {
 			logger.Debug(fmt.Sprintf("the section in mongo OpMsg wiremessage: %v", expectedSection))
@@ -707,18 +653,8 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		}
 
 		// // Compile the regular expression
-		// regex = regexp.MustCompile(pattern)
-
 		// // Find submatches using the regular expression
-		// submatches = regex.FindStringSubmatch(actualSection)
-		// if submatches == nil || len(submatches) != 3 {
-		// 	logger.Debug(fmt.Sprintf("the section in mongo OpMsg wiremessage: %v", expectedSection))
-		// 	logger.Error("failed to fetch the identifier/msgs from the section sequence of incoming OpMsg", zap.Any("identifier", actualIdentifier))
-		// 	return 0
-		// }
-		// actualIdentifier = submatches[1]
-		// actualMsgsStr = submatches[2]
-
+		
 		logger.Debug("the expected section", zap.Any("identifier", expectedIdentifier), zap.Any("docs", expectedMsgsStr))
 		logger.Debug("the actual section", zap.Any("identifier", actualIdentifier), zap.Any("docs", actualMsgsStr))
 
@@ -732,7 +668,6 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 			expected := map[string]interface{}{}
 			actual := map[string]interface{}{}
 			err := bson.UnmarshalExtJSON([]byte(expectedMsgs[i]), true, &expected)
-			// err := json.Unmarshal([]byte(string1), &a)
 			if err != nil {
 				logger.Error(fmt.Sprintf("failed to unmarshal the section of recorded request to bson document"), zap.Error(err))
 				return 0
@@ -743,14 +678,6 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 				return 0
 			}
 			score += calculateMatchingScore(expected, actual)
-			// if diff := deep.Equal(expected, actual); diff != nil {
-			// 	for _, v := range diff {
-			// 		// lsid is used for keeping track of the session sent by the mongo client in operation calls
-			// 		if !strings.Contains(v, "map[lsid].map[id]: {") {
-			// 			return false
-			// 		}
-			// 	}
-			// }
 		}
 		logger.Debug("the matching score for sectionSequence", zap.Any("", score))
 		return score
@@ -762,27 +689,9 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 			return 0
 		}
 		// // Define the regular expression pattern
-		// pattern := `\{ SectionSingle msg: (.+?) \}`
-
 		// // Compile the regular expression
-		// regex := regexp.MustCompile(pattern)
-
 		// // Find submatches using the regular expression
-		// submatches := regex.FindStringSubmatch(expectedSection)
-		// if submatches == nil || len(submatches) != 2 {
-		// 	logger.Debug(fmt.Sprintf("the section in mongo OpMsg wiremessage: %v", expectedSection))
-		// 	logger.Error("failed to fetch the identifier/msgs from the section sequence of recorded OpMsg")
-		// 	return 0
-		// }
-		// // expectedIdentifier = submatches[1]
-		// expectedMsgsStr = submatches[1]
-
-		// _, err := fmt.Sscanf(expectedSection, "{ SectionSingle msg: %s }", &expectedMsgsStr)
-		// if err != nil {
-		// 	logger.Error("failed to fetch the msgs from the single section of recorded OpMsg", zap.Error(err))
-		// 	return 0
-		// }
-
+	
 		var actualMsgsStr string
 		actualMsgsStr, err = decodeOpMsgSectionSingle(actualSection)
 		if err != nil {
@@ -790,28 +699,12 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 			return 0
 		}
 		// // Compile the regular expression
-		// regex = regexp.MustCompile(pattern)
-
 		// // Find submatches using the regular expression
-		// submatches = regex.FindStringSubmatch(actualSection)
-		// if submatches == nil || len(submatches) != 2 {
-		// 	logger.Debug(fmt.Sprintf("the section in mongo OpMsg wiremessage: %v", expectedSection))
-		// 	logger.Error("failed to fetch the identifier/msgs from the section sequence of recorded OpMsg")
-		// 	return 0
-		// }
-		// // expectedIdentifier = submatches[1]
-		// actualMsgsStr = submatches[1]
-		// _, err = fmt.Sscanf(actualSection, "{ SectionSingle msg: %s }", &actualMsgsStr)
-		// if err != nil {
-		// 	logger.Error("failed to fetch the msgs from the single section of incoming OpMsg", zap.Error(err))
-		// 	return 0
-		// }
-
+		
 		expected := map[string]interface{}{}
 		actual := map[string]interface{}{}
 
 		err = bson.UnmarshalExtJSON([]byte(expectedMsgsStr), true, &expected)
-		// err := json.Unmarshal([]byte(string1), &expected)
 		if err != nil {
 			logger.Error(fmt.Sprintf("failed to unmarshal the section of recorded request to bson document"), zap.Error(err))
 			return 0
@@ -823,16 +716,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		}
 		logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
 		return calculateMatchingScore(expected, actual)
-		// if diff := deep.Equal(expected, actual); diff != nil {
-		// 	logger.Debug(fmt.Sprintf("the diff is: %v, len(diff): %v. bool: %v", diff, len(diff), !strings.Contains(diff[0], "map[lsid].map[id]: {")))
-		// 	for _, v := range diff {
-		// 		// lsid is used for keeping track of the session sent by the mongo client in operation calls
-		// 		if !strings.Contains(v, "map[lsid].map[id]: {") {
-		// 			logger.Debug("the difference is not lsid ", zap.Any("", diff))
-		// 			return false
-		// 		}
-		// 	}
-		// }
+		
 	default:
 		logger.Error(fmt.Sprintf("failed to detect the OpMsg section into mongo request wiremessage due to invalid format"))
 		return 0

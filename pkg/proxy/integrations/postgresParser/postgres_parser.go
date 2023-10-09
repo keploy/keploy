@@ -9,25 +9,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	// "time"
-
-	// "time"
-	// "sync"
-	// "strings"
-
 	"encoding/binary"
-	// "encoding/json"
 	"encoding/base64"
-	// "fmt"
-	// "github.com/jackc/pgproto3"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/util"
-
-	// "bytes"
-
 	"errors"
-
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
@@ -122,11 +108,9 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	logger.Debug("the iteration for the pg request starts", zap.Any("pgReqs", len(pgRequests)), zap.Any("pgResps", len(pgResponses)))
 	for {
 
-		// start := time.NewTicker(1*time.Second)
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		select {
-		// case <-start.C:
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
@@ -169,7 +153,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			}
 
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
-			// }
 			if bufStr != "" {
 
 				pgRequests = append(pgRequests, models.GenericPayload{
@@ -193,7 +176,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			}
 
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
-			// }
 			if bufStr != "" {
 
 				pgResponses = append(pgResponses, models.GenericPayload{
@@ -259,7 +241,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 			continue
 		}
-		// bestMatchedIndx := 0
 		// fuzzy match gives the index for the best matched pg mock
 
 		matched, pgResponses := matchingPg(tcsMocks, pgRequests, h)
@@ -279,7 +260,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				return err
 			}
 		}
-		// }
 
 		// update for the next dependency call
 

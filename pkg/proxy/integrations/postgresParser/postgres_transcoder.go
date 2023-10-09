@@ -24,7 +24,6 @@ func checkScram(packet string, log *zap.Logger) bool {
 	}
 	// Print the message payload (for simplicity, the payload is printed as a string)
 	payload := string(encoded[5:])
-	// fmt.Printf("Payload: %s\n", payload)
 	if messageType == 'R' {
 		// send this payload to get decode the auth type
 		err := findAuthenticationMessageType(encoded[5:], log)
@@ -52,7 +51,6 @@ func isRegularPacket(packet []byte) bool {
 }
 
 func printStartupPacketDetails(packet []byte) {
-	// fmt.Printf("Protocol Version: %d\n", binary.BigEndian.Uint32(packet[4:8]))
 
 	// Print key-value pairs (for simplicity, only one key-value pair is shown)
 	keyStart := 8
@@ -175,7 +173,6 @@ func DecodeSASL(src []byte, log *zap.Logger) error {
 	}
 
 	authType := binary.BigEndian.Uint32(src)
-	// log.Debug("authType: ", authType)
 	if authType != AuthTypeSASL {
 		return errors.New("bad auth type")
 	}
@@ -188,7 +185,6 @@ func DecodeSASL(src []byte, log *zap.Logger) error {
 			authMechanisms = authMechanisms[idx+1:]
 		}
 	}
-	// println("AuthMechanisms: ", AuthMechanisms[0], AuthMechanisms[1])
 
 	return nil
 }
