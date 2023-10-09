@@ -80,7 +80,7 @@ func main() {
 	fmt.Println(logo, " ")
 	fmt.Printf("%v\n\n", version)
 	isDocker := os.Getenv("IS_DOCKER_CMD")
-	Dsn = os.Getenv("SENTRY_DSN_BINARY")
+	fmt.Println("This is the value of Dsn:", Dsn)
 	if isDocker != ""{
 		Dsn = os.Getenv("SENTRY_DSN_DOCKER")
 	}
