@@ -11,8 +11,6 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
 )
 
@@ -44,13 +42,6 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 		return
 	}
 
-
-	//Initiate the telemetry.
-	store := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, store, r.logger, "", nil)
-
-
-
 	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger)
 
 	routineId := pkg.GenerateRandomID()
@@ -65,7 +56,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
 	ctx = context.WithValue(ctx, "testsTotal", &testsTotal)
 
-	select{
+	select {
 	case <-stopper:
 		return
 	default:
@@ -135,11 +126,14 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	case <-stopper:
 		abortStopHooksForcefully = true
 		loadedHooks.Stop(false)
+		//Calling the telemetry events
+		// util.Tele.RecordedTestsAndMocks(path, testsTotal, mocksTotal)
+		r.logger.Info("Sent the tele events.")
 		ps.StopProxyServer()
 		return
 	case <-abortStopHooksInterrupt:
+
 	}
-	//Calling the telemetry events
-	tele.RecordedTestsAndMocks(path, testsTotal, mocksTotal)
+
 	<-exitCmd
 }

@@ -94,4 +94,3 @@ jobs:
           # APPLE_ACCOUNT_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
-          SENTRY_DSN_DOCKER: ${{ secrets.SENTRY_DSN_DOCKER }}

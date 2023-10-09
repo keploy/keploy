@@ -20,10 +20,10 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
 )
 
@@ -106,8 +106,8 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error
-	exitCmd := make(chan bool) // channel to exit this command
+	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
+	exitCmd := make(chan bool)                 // channel to exit this command
 
 	go func() {
 		select {
@@ -149,7 +149,8 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		}
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
-
+	//Call the telemetry events.
+	tele.Testrun(resultForTele[0], resultForTele[1])
 	if !abortStopHooksForcefully {
 		abortStopHooksInterrupt <- true
 		// stop listening for the eBPF events
@@ -161,9 +162,6 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	<-exitCmd
 	return false
-
-	//Call the telemetry events.
-	tele.Testrun(resultForTele[0], resultForTele[1])
 
 	//stop listening for proxy server
 	ps.StopProxyServer()

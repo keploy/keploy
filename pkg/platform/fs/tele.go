@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	kYaml "go.keploy.io/server/pkg/platform/yaml"
 	"go.uber.org/zap"
@@ -15,8 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// telemetry provides interface for create-read installationID for self-hosted keploy
-type telemetry struct{}
+// Telemetry provides interface for create-read installationID for self-hosted keploy
+type Telemetry struct{}
 
 func UserHomeDir(isNewConfigPath bool) string {
 
@@ -35,11 +34,11 @@ func UserHomeDir(isNewConfigPath bool) string {
 	return os.Getenv("HOME") + configFolder
 }
 
-func NewTeleFS() *telemetry {
-	return &telemetry{}
+func NewTeleFS() *Telemetry {
+	return &Telemetry{}
 }
 
-func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
+func (fs *Telemetry) Get(isNewConfigPath bool) (string, error) {
 	var (
 		path = UserHomeDir(isNewConfigPath)
 		id   = ""
@@ -61,7 +60,7 @@ func (fs *telemetry) Get(isNewConfigPath bool) (string, error) {
 	return id, nil
 }
 
-func (fs *telemetry) Set(id string) error {
+func (fs *Telemetry) Set(id string) error {
 	path := UserHomeDir(true)
 	kYaml.CreateYamlFile(path, "installation-id", &zap.Logger{})
 
@@ -79,8 +78,4 @@ func (fs *telemetry) Set(id string) error {
 	}
 
 	return nil
-}
-
-func isValidPath(s string) bool {
-	return !strings.HasPrefix(s, "/etc/passwd") && !strings.Contains(s, "../")
 }

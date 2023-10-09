@@ -6,12 +6,13 @@ import (
 	"runtime"
 	"time"
 
-	"go.keploy.io/server/pkg/models"
 	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
 
 var teleUrl = "https://telemetry.keploy.io/analytics"
+
 type Telemetry struct {
 	Enabled        bool
 	OffMode        bool
@@ -61,8 +62,8 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 			if count == 0 {
 				//Check in the old keploy folder.
 				id, _ = tel.store.Get(false)
-					count = int64(len(id))
-				if count == 0{
+				count = int64(len(id))
+				if count == 0 {
 					bin, err := marshalEvent(event, tel.logger)
 					if err != nil {
 						break
@@ -77,10 +78,11 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 						break
 					}
 					id = installation_id
-				tel.InstallationID = id
-				tel.store.Set(id)
+					tel.InstallationID = id
+					tel.store.Set(id)
 				}
 				tel.InstallationID = id
+				tel.store.Set(id)
 			}
 			tel.SendTelemetry("Ping")
 			time.Sleep(5 * time.Minute)
@@ -89,7 +91,7 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 }
 
 func (tel *Telemetry) Testrun(success int, failure int) {
-	tel.SendTelemetry("TestRun", map[string]interface{}{ "Passed-Tests": success, "Failed-Tests": failure})
+	tel.SendTelemetry("TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
 }
 
 // func (tel *Telemetry) UnitTestRun(cmd string, success int, failure int) {
@@ -98,7 +100,7 @@ func (tel *Telemetry) Testrun(success int, failure int) {
 
 // Telemetry event for the Mocking feature test run
 func (tel *Telemetry) MockTestRun(utilizedMocks int) {
-	tel.SendTelemetry("MockTestRun", map[string]interface{}{ "Utilized-Mocks": utilizedMocks})
+	tel.SendTelemetry("MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
 }
 
 // Telemetry event for the tests and mocks that are recorded
@@ -137,7 +139,7 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 		}
 		event.InstallationID = tel.InstallationID
 		event.OS = runtime.GOOS
-		tel.KeployVersion = "v2-hardcoded"
+		tel.KeployVersion = "v2-alpha"
 		event.KeployVersion = tel.KeployVersion
 		event.Arch = runtime.GOARCH
 		bin, err := marshalEvent(event, tel.logger)

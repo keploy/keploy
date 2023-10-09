@@ -8,6 +8,8 @@ import (
 	"time"
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/TheZeroSlave/zapsentry"
+	// "go.keploy.io/server/pkg/platform/fs"
+	// "go.keploy.io/server/pkg/platform/telemetry"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -138,7 +140,8 @@ func checkForDebugFlag(args []string) bool {
 }
 
 func (r *Root) execute() {
-
+	// fs := fs.NewTeleFS()
+	// tele := telemetry.NewTelemetry(true, false, fs, r.logger, "", nil)
 	// Root command
 	var rootCmd = &cobra.Command{
 		Use:     "keploy",
