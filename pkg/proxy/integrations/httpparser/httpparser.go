@@ -172,17 +172,28 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 			//Set deadline of 5 seconds
 			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			resp, err := util.ReadBytes(destConn)
-			if err != nil && err != io.EOF {
+
+			if err != nil {
 				//Check if the connection closed.
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					//Check if the deadline is reached.
 					logger.Info("Stopped getting buffer from the destination server")
 					break
+				} else if err == io.EOF {
+					if len(resp) == 0 {
+						logger.Debug("complete response came in the first chunk")
+						return
+					}
+					logger.Debug("successfully read complete chunk from the destination server")
 				} else {
-					logger.Error("failed to read the response message from the destination server", zap.Error(err))
-					return
+					logger.Warn("failed to read the response message from the destination server", zap.Error(err))
+					if len(resp) == 0 {
+						logger.Debug("didn't get any response chunk from destination server")
+						return
+					}
 				}
 			}
+
 			*finalResp = append(*finalResp, resp...)
 			// write the response message to the user client
 			_, err = clientConn.Write(resp)
@@ -190,7 +201,8 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 				logger.Error("failed to write response message to the user client", zap.Error(err))
 				return
 			}
-			if string(resp) == "0\r\n\r\n" {
+
+			if strings.HasSuffix(string(resp), "0\r\n\r\n") {
 				break
 			}
 		}
@@ -427,7 +439,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		}
 		responseString = statusLine + headers + "\r\n" + "" + respBody
 
-		logger.Debug("the content-length header" + headers)
+		logger.Debug(fmt.Sprintf("The response headers are:\n%v", headers))
+
 		_, err = clienConn.Write([]byte(responseString))
 		if err != nil {
 			logger.Error("failed to write the mock output to the user application", zap.Error(err))
@@ -435,12 +448,10 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		}
 		h.PopIndex(bestMatchIndex)
 
-
-
 		requestBuffer, err = util.ReadBytes(clienConn)
 		if err != nil {
-				logger.Debug("failed to read the request buffer from the client", zap.Error(err))
-				logger.Debug("This was the last response from the server: " + string(responseString))
+			logger.Debug("failed to read the request buffer from the client", zap.Error(err))
+			logger.Debug("This was the last response from the server: " + string(responseString))
 			break
 		}
 
@@ -526,6 +537,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		finalResp = append(finalResp, resp...)
 		logger.Debug("This is the initial response: " + string(resp))
 		handleChunkedResponses(&finalResp, clientConn, destConn, logger, resp)
+		logger.Debug("This is the final response: " + string(finalResp))
+
 		var req *http.Request
 		// converts the request message buffer to http request
 		req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
