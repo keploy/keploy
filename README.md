@@ -43,7 +43,7 @@ Ready for the magic? Here are Keploy's core features:
 - 🎭 **Multi-Purpose Mocks:** Use 'em in existing tests, as server tests, or just to impress your friends!
 
 
-- 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time! 
+- 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time!
 
 
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/how-keploy-works.gif" width="70%" alt="Generate Test Case from API call"/>
@@ -98,7 +98,7 @@ sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 </details>
 
 ### Capturing Testcases
-To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you 
+To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you
 have to set any environment variables do it like you usually do it:
 
 ```zsh
@@ -111,7 +111,7 @@ sudo -E env PATH=$PATH keploy record -c "go run main.go"
 ```
 
 ### Running Testcases
-To run the testcases and generate a test coverage report, use this terminal command where you usually run your app, if 
+To run the testcases and generate a test coverage report, use this terminal command where you usually run your app, if
 you have to set any environment variables do it like you usually do it:
 
 ```zsh
@@ -131,7 +131,22 @@ Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c0001445
 
 > **️ Note:** <img src="https://www.pngplay.com/wp-content/uploads/3/Apple-Logo-Transparent-Images.png" width="15" height="15"> MacOS</img> users need to install [Colima](https://github.com/abiosoft/colima#installation). <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"/> Windows users need to install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install#install-wsl-command).
 
+### Add the required commands to your DockerFile
+```Dockerfile
+...
+# Download the ca.crt file
+RUN curl -o ca.crt https://raw.githubusercontent.com/keploy/keploy/main/pkg/proxy/asset/ca.crt
 
+RUN curl -o setup_ca.sh https://raw.githubusercontent.com/keploy/keploy/main/pkg/proxy/asset/setup_ca.sh
+
+# Give execute permission to the setup_ca.sh script
+RUN chmod +x setup_ca.sh
+...
+
+# Run the CA setup script and then run the application server
+CMD ["/bin/bash", "-c", "source ./setup_ca.sh && <your app running command>"]
+```
+Note: Also add **curl** installation command if **curl** is not installed on your image
 ### Creating alias
 
 Let's create an alias for Keploy:
