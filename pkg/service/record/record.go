@@ -99,7 +99,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 				case hooks.ErrDockerError:
 					stopApplication = true
 				default:
-					r.logger.Error("unknown error recieved from application")
+					r.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 			}
 			if !abortStopHooksForcefully {
