@@ -30,11 +30,18 @@ install_keploy_amd() {
     keploy
 }
 
-install_docker() {
+install_colima_docker() {
     if ! docker network ls | grep -q 'keploy-network'; then
         docker network create keploy-network
     fi
     alias keploy='docker run --name keploy-v2 -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+}
+
+install_docker() {
+    if ! docker network ls | grep -q 'keploy-network'; then
+        docker network create keploy-network
+    fi
+    alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 }
 
 ARCH=$(uname -m)
@@ -52,7 +59,7 @@ if [ "$IS_CI" = false ]; then
             else
                 colima start
             fi
-            install_docker
+            install_colima_docker
         else
             echo "brew is not installed, install brew for easy installation"
         fi
@@ -79,14 +86,12 @@ if [ "$IS_CI" = false ]; then
         echo "Unknown OS, install Linux to run Keploy"
     fi
 else
-    if [ "$user_input" = "linux" ]; then
-        if [ "$ARCH" = "x86_64" ]; then
-            install_keploy_amd
-        elif [ "$ARCH" = "aarch64" ]; then
-            install_keploy_arm
-        else
-            echo "Unsupported architecture: $ARCH"
-            exit 1
-        fi
+    if [ "$ARCH" = "x86_64" ]; then
+        install_keploy_amd
+    elif [ "$ARCH" = "aarch64" ]; then
+        install_keploy_arm
+    else
+        echo "Unsupported architecture: $ARCH"
+        exit 1
     fi
 fi
