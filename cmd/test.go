@@ -97,6 +97,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
+			testSets, err := cmd.Flags().GetStringSlice("testsets")
+
+			if err != nil {
+				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
+			}
+
 			delay, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
 				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
@@ -126,7 +132,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay, ports, apiTimeout)
+			t.tester.Test(path, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout)
 			return nil
 		},
 	}
@@ -134,6 +140,9 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
+
+	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run")
+	
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
