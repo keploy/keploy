@@ -137,11 +137,16 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if networkName == "" {
 				networkName = confTest.NetworkName
+			}
         
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
 
 			if err != nil {
 				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
+			}
+
+			if len(testSets) == 0 {
+				testSets = confTest.TestSets
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")

@@ -19,6 +19,7 @@ type Test struct {
 	Command string `json:"command" yaml:"command"`
 	ContainerName string `json:"containerName" yaml:"containerName"`
 	NetworkName string `json:"networkName" yaml:"networkName"`
+	TestSets []string `json:"testSets" yaml:"testSets"`
 	Delay uint64 `json:"delay" yaml:"delay"`
 	ApiTimeout uint64 `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts []uint `json:"passThroughPorts" yaml:"passThroughPorts"`

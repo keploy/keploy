@@ -11,6 +11,7 @@ test:
   command: ""
   containerName: ""
   networkName: ""
+  testSets: ["test-set-0"]
   delay: 5
   apiTimeout: 5
   passThroughPorts: []
