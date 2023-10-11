@@ -33,24 +33,17 @@ jobs:
       - uses: actions/checkout@v2
         with:
           fetch-depth: 0
-      - uses: uraimo/run-on-arch-action@v2
-        with: 
-          arch: armv7
-          distro: ubuntu18.04
-          shell: /bin/bash
-
-          # Not required, but speeds up builds by storing container images in
-          # a GitHub package registry.
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-
-          install: |
+      - uses: pguyot/arm-runner-action@v2
+        id: build_image
+        with:
+          base_image: raspios_lite_arm64:2023-05-03
+          commands: |
             curl -O https://storage.googleapis.com/golang/go1.13.5.linux-arm64.tar.gz
             tar -xvf go1.13.5.linux-amd64.tar.gz
             mv go /usr/local
             echo "export GOPATH=$HOME/work" >> ~/.profile 
             echo "export PATH=$PATH:/usr/local/go/bin:$GOPATH/bin" >> ~/.profile
             source ~/.profile
-          run: | 
             go version
             ls 
             go build -v ./...
