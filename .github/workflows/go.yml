@@ -21,7 +21,8 @@ jobs:
         run: go build -v ./...
       - name: Build arm 
         run: |
-          GOOS=linux GOARCH=arm64 go build -v ./... -o server
+          GOOS=linux GOARCH=arm64 go build -v ./...
+          ls
           file server
       - uses: codfish/semantic-release-action@v1
         with:
