@@ -52,17 +52,20 @@ if [ "$IS_CI" = false ]; then
     OS_NAME="$(uname -s)"
     if [ "$OS_NAME" = "Darwin" ]; then
         echo "Keploy isn't supported on Docker Desktop"
-        echo "Would you like to use Colima(lightweight and performant alternative to Docker Desktop)"
+        echo "Alternate is to use Colima(lightweight and performant alternative to Docker Desktop)"
         echo
         echo -n "Install Colima[lightweight and performant alternative to Docker Desktop] (yes/no):"
         read user_input
         if [ "$user_input" = "yes" ]; then 
             if ! which colima &> /dev/null; then
+                echo "Installing colima via brew"
                 if command -v brew &> /dev/null; then
                     brew install colima
                 else
                     echo "brew is not installed, install brew for easy installation"
                 fi
+            else
+                echo "colima already installed"
             fi
             if colima status | grep -q "Running"; then
                 echo "colima is already running."
