@@ -50,17 +50,18 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 
 	models.SetMode(models.MODE_TEST)
 
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
+	tele.Ping(false)
+
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
-	ys := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger)
+	ys := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
-	//Initiate the telemetry.
-	store := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, store, t.logger, "", nil)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
@@ -137,7 +138,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 		// checking whether the provided testset match with a recorded testset.
 		if _, ok := sessionsMap[sessionIndex]; !ok {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
-			continue;
+			continue
 		}
 		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx)
 		switch testRunStatus {

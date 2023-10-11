@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
+	"go.keploy.io/server/utils"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -90,7 +91,6 @@ type Conn struct {
 func (c *Conn) Read(b []byte) (n int, err error) {
 	return c.r.Read(b)
 }
-
 
 func directoryExists(path string) bool {
 	info, err := os.Stat(path)
@@ -385,7 +385,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if isPortAvailable(opt.Port) {
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
-			defer util.HandlePanic()
+			defer utils.HandlePanic()
 			proxySet.startProxy(ctx)
 		}()
 		// Resolve DNS queries only in case of test mode.
@@ -394,7 +394,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
 			go func() {
 				defer h.Recover(pkg.GenerateRandomID())
-				defer util.HandlePanic()
+				defer utils.HandlePanic()
 				proxySet.startDnsServer()
 			}()
 		}
@@ -419,7 +419,6 @@ func isPortAvailable(port uint32) bool {
 	defer ln.Close()
 	return true
 }
-
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -539,12 +538,11 @@ func (ps *ProxySet) startProxy(ctx context.Context) {
 		ps.connMutex.Unlock()
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer util.HandlePanic()
+			defer utils.HandlePanic()
 			ps.handleConnection(conn, port, ctx)
 		}()
 	}
 }
-
 
 func (ps *ProxySet) startDnsServer() {
 
@@ -742,7 +740,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-
 	ps.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
 	//TODO:  fix this bug, getting source port same as proxy port.
@@ -906,7 +903,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from client
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer util.HandlePanic()
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
@@ -918,7 +915,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from destination
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer util.HandlePanic()
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
 				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))

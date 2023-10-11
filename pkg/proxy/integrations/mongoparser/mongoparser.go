@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
@@ -324,7 +325,6 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 	}
 }
 
-
 func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
 	rand.Seed(time.Now().UnixNano())
 	for {
@@ -467,7 +467,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					go func() {
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
-						defer util.HandlePanic()
+						defer utils.HandlePanic()
 						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 					}()
 				}
@@ -526,7 +526,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-			defer util.HandlePanic()
+			defer utils.HandlePanic()
 			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 		}()
 		requestBuffer = []byte("read form client connection")

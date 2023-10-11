@@ -24,13 +24,13 @@ import (
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/clients"
-	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg/clients/docker"
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -99,7 +99,7 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hoo
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
 	}
 	return &Hook{
-		logger: logger,
+		logger:        logger,
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
@@ -476,7 +476,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+		defer utils.HandlePanic()
 		for {
 			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx)
 			time.Sleep(1 * time.Second)

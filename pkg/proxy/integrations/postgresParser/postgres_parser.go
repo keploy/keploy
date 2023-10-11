@@ -2,6 +2,9 @@ package postgresparser
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -10,13 +13,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"encoding/binary"
-	"encoding/base64"
+
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/proxy/util"
-	"errors"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -94,14 +96,14 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer util.HandlePanic()
+		defer utils.HandlePanic()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer util.HandlePanic()
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 

@@ -35,11 +35,10 @@ func NewMockRecorder(logger *zap.Logger) MockRecorder {
 func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_RECORD)
-	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)
-
-	//Initiate the telemetry.
-	store := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, store, s.logger, "", nil)
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	tele.Ping(false)
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 
@@ -67,19 +66,10 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
-	mocksRecorded := make(map[string]int)
-	tcsMocks, configMocks, err := ys.ReadMocks(path)
-	if err != nil {
-		s.logger.Debug("Failed to read mocks")
-	}
-	mocks := append(tcsMocks, configMocks...)
-	for _, mock := range mocks {
-		mocksRecorded[string(mock.Kind)]++
-	}
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 	//Call the telemetry events.
-	tele.RecordedMock(mocksRecorded)
+	tele.RecordedMocks(mocksTotal)
 
 	// Shutdown other resources
 	loadedHooks.Stop(true)

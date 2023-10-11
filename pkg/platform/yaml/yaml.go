@@ -14,7 +14,6 @@ import (
 
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	Fs "go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
@@ -29,15 +28,17 @@ type Yaml struct {
 	MockName string
 	TcsName  string
 	Logger   *zap.Logger
+	tele     *telemetry.Telemetry
 }
 
-func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger) platform.TestCaseDB {
+func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) platform.TestCaseDB {
 	return &Yaml{
 		TcsPath:  tcsPath,
 		MockPath: mockPath,
 		MockName: mockName,
 		TcsName:  tcsName,
 		Logger:   Logger,
+		tele:     tele,
 	}
 }
 
@@ -122,14 +123,7 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
 func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context) error {
-	//Initiate the telemetry
-	teleFs := Fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, teleFs, ys.Logger, "", nil)
-	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
-	if !ok {
-		ys.Logger.Debug("failed to get mocksTotal from context")
-	}
-	tele.RecordedTestAndMocks(*mocksTotal)
+	ys.tele.RecordedTestAndMocks()
 	var tcsName string
 	if ys.TcsName == "" {
 		// finds the recently generated testcase to derive the sequence number for the current testcase
@@ -242,11 +236,14 @@ func read(path, name string) ([]*NetworkTrafficDoc, error) {
 }
 
 func (ys *Yaml) WriteMock(mock *models.Mock, ctx context.Context) error {
-
-	//Initiate the telemetry
-	teleFs := Fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, teleFs, nil, "", nil)
-
+	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
+	if !ok {
+		ys.Logger.Debug("failed to get mocksTotal from context")
+	}
+	(*mocksTotal)[string(mock.Kind)]++
+	if ctx.Value("cmd") == "mockrecord" {
+		ys.tele.RecordedMock(string(mock.Kind))
+	}
 	if ys.MockName != "" {
 		mock.Name = ys.MockName
 	}
@@ -263,15 +260,6 @@ func (ys *Yaml) WriteMock(mock *models.Mock, ctx context.Context) error {
 	err = ys.Write(ys.MockPath, mock.Name, *mockYaml)
 	if err != nil {
 		return err
-	}
-	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
-	if !ok {
-		ys.Logger.Debug("failed to get mocksTotal from context")
-	}
-	if ctx.Value("cmd") == "mockrecord" {
-		tele.RecordedMock(*mocksTotal)
-	}else{
-		(*mocksTotal)[string(mock.Kind)]++
 	}
 
 	return nil

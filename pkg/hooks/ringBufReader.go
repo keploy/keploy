@@ -16,7 +16,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
-	"github.com/getsentry/sentry-go"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	_ "golang.org/x/sys/unix"
 )
@@ -46,7 +46,7 @@ func (h *Hook) launchSocketOpenEvent(connectionFactory *connection.Factory) {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+		defer utils.HandlePanic()
 		socketOpenEventCallback(reader, connectionFactory, h.logger)
 	}()
 }
@@ -65,7 +65,7 @@ func (h *Hook) launchSocketDataEvent(connectionFactory *connection.Factory) {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+		defer utils.HandlePanic()
 		socketDataEventCallback(reader, connectionFactory, h.logger)
 	}()
 
@@ -85,7 +85,7 @@ func (h *Hook) launchSocketCloseEvent(connectionFactory *connection.Factory) {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+		defer utils.HandlePanic()
 		socketCloseEventCallback(reader, connectionFactory, h.logger)
 	}()
 }

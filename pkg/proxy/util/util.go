@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"time"
@@ -24,10 +23,11 @@ import (
 
 	"github.com/agnivade/levenshtein"
 	"github.com/cloudflare/cfssl/log"
-	sentry "github.com/getsentry/sentry-go"
+
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/hooks"
+	"go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -100,37 +100,6 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 	return false, nil
 }
 
-func attachLogFileToSentry(logFilePath string) {
-	file, err := os.Open(logFilePath)
-	if err != nil {
-		fmt.Println("Failed to open log file:", err)
-		return
-	}
-	defer file.Close()
-
-	// Assuming you want to read the entire log file and attach its content as extra data
-	content, _ := ioutil.ReadAll(file)
-
-	sentry.CaptureMessage("Panic occurred!")
-
-	hub := sentry.CurrentHub().Clone()
-	hub.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetExtra("logfile", string(content))
-	})
-
-	sentry.Flush(time.Second * 5)
-}
-
-func HandlePanic() {
-	if r := recover(); r != nil {
-		if sendLogs {
-			attachLogFileToSentry("/tmp/keploy-logs.txt")
-		}
-		sentry.CaptureException(errors.New(fmt.Sprint(r)))
-		sentry.Flush(time.Second * 2)
-	}
-}
-
 func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int), logger *zap.Logger) ([]byte, error) {
 
 	if destConn == nil {
@@ -153,7 +122,7 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer recover(pkg.GenerateRandomID())
-		defer HandlePanic()
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 

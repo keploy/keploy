@@ -19,9 +19,11 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/serve/graph"
 	"go.keploy.io/server/pkg/service/test"
-	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -52,7 +54,10 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
-	ys := yaml.NewYamlStore("", "", "", "", s.logger)
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	tele.Ping(false)
+	ys := yaml.NewYamlStore("", "", "", "", s.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
@@ -112,7 +117,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer loadedHooks.Recover(pkg.GenerateRandomID())
-		defer util.HandlePanic()
+		defer utils.HandlePanic()
 		log.Printf(Emoji+"connect to http://localhost:%d/ for GraphQL playground", port)
 		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf(Emoji+"listen: %s\n", err)

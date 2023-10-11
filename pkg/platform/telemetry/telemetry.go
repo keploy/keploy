@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -44,7 +44,7 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 	}
 
 	go func() {
-		defer util.HandlePanic()
+		defer utils.HandlePanic()
 		for {
 			var count int64
 			var id string
@@ -108,13 +108,17 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 	tel.SendTelemetry("RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
 }
 
-func (tel *Telemetry) RecordedTestAndMocks(mocksTotal map[string]int) {
-	tel.SendTelemetry("RecordedTestAndMocks", map[string]interface{}{"mocks": mocksTotal})
+func (tel *Telemetry) RecordedTestAndMocks() {
+	tel.SendTelemetry("RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
 }
 
 // Telemetry event for the mocks that are recorded in the mocking feature
-func (tel *Telemetry) RecordedMock(mockTotal map[string]int) {
-	tel.SendTelemetry("RecordedMock", map[string]interface{}{"mocks": mockTotal})
+func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
+	tel.SendTelemetry("RecordedMocks", map[string]interface{}{"mocks": mockTotal})
+}
+
+func (tel *Telemetry) RecordedMock(mockType string) {
+	tel.SendTelemetry("RecordedMock", map[string]interface{}{"mock": mockType})
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
@@ -166,12 +170,12 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 				tel.logger.Debug("failed to send request for analytics", zap.Error(err))
 				return
 			}
-			tel.logger.Debug("Sent the event to the telemetry server.")
+			// tel.logger.Debug("Sent the event to the telemetry server.")
 			unmarshalResp(resp, tel.logger)
 			return
 		}
 		go func() {
-			defer util.HandlePanic()
+			defer utils.HandlePanic()
 			resp, err := tel.client.Do(req)
 			if err != nil {
 				tel.logger.Debug("failed to send request for analytics", zap.Error(err))

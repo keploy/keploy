@@ -1,19 +1,19 @@
 package mocktest
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
-	"context"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -35,10 +35,11 @@ func NewMockTester(logger *zap.Logger) MockTester {
 func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_TEST)
-	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)
-
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	tele.Ping(false)
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
+
 	s.logger.Debug("path of mocks : " + path)
 
 	routineId := pkg.GenerateRandomID()
@@ -78,7 +79,7 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
-	usedMocks := mocksBefore - ( len(loadedHooks.GetConfigMocks()) + len(loadedHooks.GetTcsMocks()) )
+	usedMocks := mocksBefore - (len(loadedHooks.GetConfigMocks()) + len(loadedHooks.GetTcsMocks()))
 	//Call the telemetry events.
 	tele.MockTestRun(usedMocks)
 	// Shutdown other resources

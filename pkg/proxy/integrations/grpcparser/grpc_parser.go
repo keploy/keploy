@@ -11,11 +11,11 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
-	"go.keploy.io/server/pkg/proxy/util"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 )
 
 func IsOutgoingGRPC(buffer []byte) bool {
@@ -60,7 +60,7 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer util.HandlePanic()
+		defer utils.HandlePanic()
 		defer wg.Done()
 		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder, ctx)
 		if err != nil {
@@ -79,7 +79,7 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer util.HandlePanic()
+		defer utils.HandlePanic()
 		defer wg.Done()
 		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder, ctx)
 		if err != nil {

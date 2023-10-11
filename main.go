@@ -12,8 +12,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	v "github.com/hashicorp/go-version"
 	"go.keploy.io/server/cmd"
-	"go.keploy.io/server/pkg/platform/fs"
-	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/utils"
 )
 
 // version is the version of the server and will be injected during build by ldflags
@@ -66,32 +65,27 @@ func getKeployVersion() string {
 
 	return latestTag + "-dev"
 }
-func makingPing() {
-	teleFS := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, teleFS, nil, version, nil)
-	tele.Ping(false)
-}
+
 
 func main() {
 	if version == "" {
 		version = getKeployVersion()
 	}
-	makingPing()
 	fmt.Println(logo, " ")
 	fmt.Printf("%v\n\n", version)
 	isDocker := os.Getenv("IS_DOCKER_CMD")
 	if isDocker != "" {
-		Dsn = os.Getenv("SENTRY_DSN_DOCKER")
+		Dsn = os.Getenv("Dsn")
 	}
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              Dsn,
+		Dsn:              "",
 		TracesSampleRate: 1.0,
 	})
 	if err != nil {
 		log.Fatalf("sentry.Init: %s", err)
 	}
-	sentry.Recover()
+	defer utils.HandlePanic()
 	defer sentry.Flush(2 * time.Second)
 	cmd.Execute()
 }

@@ -70,6 +70,7 @@ require (
 
 require (
 	github.com/99designs/gqlgen v0.17.36
+	github.com/TheZeroSlave/zapsentry v1.18.0
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/getsentry/sentry-go v0.17.0
 	github.com/go-git/go-git/v5 v5.8.1

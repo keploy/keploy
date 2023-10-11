@@ -9,10 +9,10 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/fs"
-	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.uber.org/zap"
 )
 
@@ -37,14 +37,17 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 
 	models.SetMode(models.MODE_RECORD)
 
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, r.logger, "", nil)
+	tele.Ping(false)
+
 	dirName, err := yaml.NewSessionIndex(path, r.logger)
 	if err != nil {
 		r.logger.Error("Failed to create the session index file", zap.Error(err))
 		return
 	}
 
-	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger)
-
+	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks := hooks.NewHook(ys, routineId, r.logger)
@@ -124,14 +127,11 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 		}()
 	}
 
-	//Initiate the telemetry
-	teleFs := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, teleFs, nil, "", nil)
 	select {
 	case <-stopper:
 		abortStopHooksForcefully = true
 		loadedHooks.Stop(false)
-		tele.RecordedTestSuite(path, testsTotal, mocksTotal)
+		tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
 		ps.StopProxyServer()
 		return
 	case <-abortStopHooksInterrupt:
