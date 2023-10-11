@@ -44,8 +44,7 @@ jobs:
             tar -C /usr/local -xzf go1.21.3.linux-arm64.tar.gz
             export PATH=$PATH:/usr/local/go/bin
             go version
-            ls 
-            go build -v ./...
+            go build -v 
   
       - name: Set up Go
         uses: actions/setup-go@v4
