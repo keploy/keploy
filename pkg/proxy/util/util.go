@@ -147,13 +147,8 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover 
 	// defer destConn.Close()
 
 	// channels for writing messages from proxy to destination or client
-	// clientBufferChannel := make(chan []byte)
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error)
-	// read requests from client
-	// go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
-	// read response from destination
-	// destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 
 	go func() {
 		// Recover from panic and gracefully shutdown
@@ -162,18 +157,7 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover 
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 
-	// for {
-
 	select {
-	// case buffer := <-clientBufferChannel:
-	// 	// Write the request message to the destination
-	// 	_, err := destConn.Write(buffer)
-	// 	if err != nil {
-	// 		logger.Error("failed to write request message to the destination server", zap.Error(err))
-	// 		return nil, err
-	// 	}
-	// 	logger.Debug("the iteration for the generic request ends with requests:" + strconv.Itoa(len(buffer)))
-	// 	return buffer, nil
 	case buffer := <-destBufferChannel:
 		// Write the response message to the client
 		_, err := clientConn.Write(buffer)
@@ -199,7 +183,6 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover 
 func ToIP4AddressStr(ip uint32) string {
 	// convert the IP address to a 32-bit binary number
 	ipBinary := fmt.Sprintf("%032b", ip)
-	// fmt.Printf("This is the value of the ipBinary:%v and this is the value of the ip:%v", ipBinary, ip)
 
 	// divide the binary number into four 8-bit segments
 	firstByte, _ := strconv.ParseUint(ipBinary[0:8], 2, 64)
@@ -229,26 +212,17 @@ func ToIPv6AddressStr(ip [4]uint32) string {
 func PeekBytes(reader *bufio.Reader) ([]byte, error) {
 	var buffer []byte
 
-	// for {
-	// Create a temporary buffer to hold the incoming bytes
 	buf := make([]byte, 1024)
 
 	// Read bytes from the Reader
 	reader.Peek(1)
 	buf, err := reader.Peek(reader.Buffered())
-	// fmt.Println("read bytes: ", n, ", err: ", err)
 	if err != nil && err != io.EOF && err != bufio.ErrBufferFull {
 		return nil, err
 	}
 
 	// Append the bytes to the buffer
 	buffer = append(buffer, buf[:]...)
-
-	// If we've reached the end of the input stream, break out of the loop
-	// if err == bufio.ErrBufferFull || len(buf) != 1024 {
-	// 	break
-	// }
-	// }
 
 	return buffer, nil
 }

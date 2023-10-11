@@ -76,8 +76,6 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
-	// ps.SetHook(loadedHooks)
-
 	// Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
@@ -124,7 +122,6 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
-	// signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	// Block until we receive one

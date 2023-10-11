@@ -161,7 +161,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 		// // decrease the recTestCounter
 		conn.decRecordTestCount()
 		conn.logger.Debug("verified recording", zap.Any("recordTraffic", recordTraffic))
-	} else if conn.receivedResponse && elapsedTime >= uint64(time.Second*4) { // Check if 4 second has passed since the last activity.
+	} else if conn.receivedResponse && elapsedTime >= uint64(time.Second*2) { // Check if 2 seconds has passed since the last activity.
 		conn.logger.Debug("might be last request on the connection")
 
 		if len(conn.currentRecvBytesQ) > 0 && len(conn.totalRecvBytesQ) > 0 {
@@ -197,7 +197,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 		}
 
 		conn.logger.Debug(fmt.Sprintf("recording traffic after verifying the request data (but not response data):%v", recordTraffic))
-		//treat immediate next request as first request (4 seconds after last activity)
+		//treat immediate next request as first request (2 seconds after last activity)
 		conn.resetConnection()
 
 		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))

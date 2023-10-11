@@ -53,8 +53,6 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
-	// ps.SetHook(loadedHooks)
-
 	// Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
