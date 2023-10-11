@@ -41,7 +41,7 @@ func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName stri
 // createYamlFile is used to create the yaml file along with the path directory (if does not exists)
 func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
 	// checks id the yaml exists
-	yamlPath, err := ValidatePath(filepath.Join(path, fileName + ".yaml"))
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
 		return false, err
 	}
@@ -60,7 +60,7 @@ func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			return false, err
 		}
 
-		// since, keploy requires root access. The permissions for generated files 
+		// since, keploy requires root access. The permissions for generated files
 		// should be updated to share it with all users.
 		keployPath := path
 		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
@@ -128,12 +128,12 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
-		return err 
+		return err
 	}
 
 	file, err := os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName)) 
+		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName))
 		return err
 	}
 
@@ -143,14 +143,14 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 	}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {
-		ys.Logger.Error("failed to marshal the recorded calls into yaml", zap.Error(err), zap.Any("yaml file name", fileName)) 
+		ys.Logger.Error("failed to marshal the recorded calls into yaml", zap.Error(err), zap.Any("yaml file name", fileName))
 		return err
 	}
 	data = append(data, d...)
 
 	_, err = file.Write(data)
 	if err != nil {
-		ys.Logger.Error("failed to write the yaml document", zap.Error(err), zap.Any("yaml file name", fileName)) 
+		ys.Logger.Error("failed to write the yaml document", zap.Error(err), zap.Any("yaml file name", fileName))
 		return err
 	}
 	defer file.Close()
@@ -326,7 +326,6 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, nil, err
 		}
-
 
 		for _, mock := range mocks {
 			if mock.Spec.Metadata["type"] == "config" {

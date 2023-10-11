@@ -34,6 +34,10 @@ type MockSpec struct {
 	//for grpc
 	GRPCReq  *GrpcReq  `json:"gRPCRequest,omitempty"`
 	GRPCResp *GrpcResp `json:"grpcResponse,omitempty"`
+
+	//for MySql
+	MySqlRequests  []MySQLRequest  `json:"MySqlRequests,omitempty"`
+	MySqlResponses []MySQLResponse `json:"MySqlResponses,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
