@@ -19,41 +19,8 @@ jobs:
 
       - name: Build
         run: go build -v ./...
-      - uses: codfish/semantic-release-action@v1
-        with:
-          dry_run: true
-          additional_packages: |
-            ['@semantic-release/exec']
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-arm:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
-      - uses: pguyot/arm-runner-action@v2
-        id: build_image
-        with:
-          base_image: raspios_lite_arm64:latest
-          image_additional_mb: 1000
-          commands: |
-            apt-get clean
-            curl -O https://storage.googleapis.com/golang/go1.21.3.linux-arm64.tar.gz
-            tar -C /usr/local -xzf go1.21.3.linux-arm64.tar.gz
-            export PATH=$PATH:/usr/local/go/bin
-            go version
-            go build -v 
-  
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: "1.21"
-          architecture: arm64
-
-      - name: Build
-        run: go build -v ./...
+      - name: Build arm 
+        run: GOOS=linux GOARCH=arm64 go build -v ./...    
       - uses: codfish/semantic-release-action@v1
         with:
           dry_run: true
