@@ -19,10 +19,10 @@ jobs:
 
       - name: Build
         run: go build -v ./...
+
       - name: Build arm 
-        run: |
-          GOOS=linux GOARCH=arm64 go build -v ./...
-          file ./../server
+        run: GOOS=linux GOARCH=arm64 go build -v ./...
+      
       - uses: codfish/semantic-release-action@v1
         with:
           dry_run: true
