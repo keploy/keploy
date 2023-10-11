@@ -4,5 +4,5 @@ services:
   mattermost:
     ports:
       - ${APP_PORT}:8065
-      - ${CALLS_PORT}:8443/udp
-      - ${CALLS_PORT}:8443/tcp
+      - ${CALLS_PORT}:${CALLS_PORT}/udp
+      - ${CALLS_PORT}:${CALLS_PORT}/tcp

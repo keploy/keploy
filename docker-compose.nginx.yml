@@ -29,7 +29,8 @@ services:
       - ${HTTP_PORT}:80
   mattermost:
     ports:
-      - ${CALLS_PORT}:8443/udp
+      - ${CALLS_PORT}:${CALLS_PORT}/udp
+      - ${CALLS_PORT}:${CALLS_PORT}/tcp
 
 # Shared volume for Let's Encrypt certificate renewal with a webroot
 volumes:
