@@ -54,9 +54,9 @@ if [ "$IS_CI" = false ]; then
         echo "Keploy isn't supported on Docker Desktop"
         echo "Alternate is to use Colima(lightweight and performant alternative to Docker Desktop)"
         echo
-        echo -n "Install Colima[lightweight and performant alternative to Docker Desktop] (yes/no):"
+        echo -n "Install Colima[lightweight and performant alternative to Docker Desktop] (y/n):"
         read user_input
-        if [ "$user_input" = "yes" ]; then 
+        if [ "$user_input" = "y" ]; then 
             if ! which colima &> /dev/null; then
                 echo "Installing colima via brew"
                 if command -v brew &> /dev/null; then
