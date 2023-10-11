@@ -35,6 +35,7 @@ install_colima_docker() {
         docker network create keploy-network
     fi
     alias keploy='docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+    keploy
 }
 
 install_docker() {
@@ -42,6 +43,7 @@ install_docker() {
         docker network create keploy-network
     fi
     alias keploy='sudo docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+    keploy
 }
 
 ARCH=$(uname -m)
@@ -49,23 +51,25 @@ ARCH=$(uname -m)
 if [ "$IS_CI" = false ]; then
     OS_NAME="$(uname -s)"
     if [ "$OS_NAME" = "Darwin" ]; then
+        echo "Keploy isn't supported on Docker Desktop"
+        echo "Would you like to use Colima(lightweight and performant alternative to Docker Desktop)"
+        echo
         echo -n "Install Colima[lightweight and performant alternative to Docker Desktop] (yes/no):"
         read user_input
         if [ "$user_input" = "yes" ]; then 
-            if command -v brew &> /dev/null
-            then
-                if ! brew list colima &> /dev/null; then
+            if ! which colima &> /dev/null; then
+                if command -v brew &> /dev/null; then
                     brew install colima
-                fi
-                if colima status | grep -q "Running"; then
-                    echo "colima is already running."
                 else
-                    colima start
+                    echo "brew is not installed, install brew for easy installation"
                 fi
-                install_colima_docker
-            else
-                echo "brew is not installed, install brew for easy installation"
             fi
+            if colima status | grep -q "Running"; then
+                echo "colima is already running."
+            else
+                colima start
+            fi
+            install_colima_docker
         else
             echo "Please install Colima to install Keploy."
         fi
