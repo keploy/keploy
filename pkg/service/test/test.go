@@ -39,7 +39,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
 
 	var ps *proxy.ProxySet
 
@@ -95,8 +95,8 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error
-	exitCmd := make(chan bool) // channel to exit this command
+	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
+	exitCmd := make(chan bool)                 // channel to exit this command
 
 	go func() {
 		select {
@@ -114,7 +114,23 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	exitLoop := false
 
+	if len(testsets) == 0 {
+		// by default, run all the recorded test sets
+		testsets = sessions
+	}
+
+	sessionsMap := map[string]string{}
+
 	for _, sessionIndex := range sessions {
+		sessionsMap[sessionIndex] = sessionIndex
+	}
+
+	for _, sessionIndex := range testsets {
+		// checking whether the provided testset match with a recorded testset.
+		if _, ok := sessionsMap[sessionIndex]; !ok {
+			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
+			continue;
+		}
 		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -205,7 +221,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				case hooks.ErrUnExpected:
 					t.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
 				default:
-					t.logger.Error("unknown error recieved from application")
+					t.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 				errChan <- err
 			}
