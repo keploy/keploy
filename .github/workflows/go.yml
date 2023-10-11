@@ -40,7 +40,7 @@ jobs:
           image_additional_mb: 1000
           commands: |
             apt-get clean
-            curl -O https://storage.googleapis.com/golang/go1.13.5.linux-arm64.tar.gz
+            curl -O https://storage.googleapis.com/golang/go1.21.3.linux-arm64.tar.gz
             tar -C /usr/local -xzf go1.21.3.linux-arm64.tar.gz
             export PATH=$PATH:/usr/local/go/bin
             go version
