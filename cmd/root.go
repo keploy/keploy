@@ -27,6 +27,8 @@ func setupLogger() *zap.Logger {
 
 	// Customize the encoder config to put the emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
+	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+
 	if debugMode {
 		go func() {
 			log.Println(http.ListenAndServe("localhost:6060", nil))
