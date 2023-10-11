@@ -63,6 +63,7 @@ if [ "$IS_CI" = false ]; then
                     brew install colima
                 else
                     echo "brew is not installed, install brew for easy installation"
+                    exit 1
                 fi
             else
                 echo "colima already installed"
@@ -75,6 +76,7 @@ if [ "$IS_CI" = false ]; then
             install_colima_docker
         else
             echo "Please install Colima to install Keploy."
+            exit 1
         fi
     elif [ "$OS_NAME" = "Linux" ]; then
         echo -n "Do you want to install keploy with Linux or Docker? (linux/docker): "
