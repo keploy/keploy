@@ -75,7 +75,6 @@ if [ "$IS_CI" = false ]; then
         if ! mountpoint -q /sys/kernel/debug; then
             sudo mount -t debugfs debugfs /sys/kernel/debug
         fi
-        sudo -E "$@"
         if [ "$user_input" = "linux" ]; then
             if [ "$ARCH" = "x86_64" ]; then
                 install_keploy_amd
