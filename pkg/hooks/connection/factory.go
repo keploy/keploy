@@ -155,7 +155,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Body:       string(respBody),
 		},
 		// Mocks: mocks,
-	})
+	}, ctx)
 	testTotal := ctx.Value("testsTotal").(*int)
 	*testTotal++
 	if err != nil {

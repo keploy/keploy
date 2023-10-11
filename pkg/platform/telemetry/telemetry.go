@@ -6,8 +6,8 @@ import (
 	"runtime"
 	"time"
 
-	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
 
@@ -44,7 +44,7 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 	}
 
 	go func() {
-		defer sentry.Recover()
+		defer util.HandlePanic()
 		for {
 			var count int64
 			var id string
@@ -104,8 +104,12 @@ func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 }
 
 // Telemetry event for the tests and mocks that are recorded
-func (tel *Telemetry) RecordedTestsAndMocks(testSet string, testsTotal int, mockTotal map[string]int) {
-	tel.SendTelemetry("RecordedTestsAndMocks", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
+func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int) {
+	tel.SendTelemetry("RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
+}
+
+func (tel *Telemetry) RecordedTestAndMocks(mocksTotal map[string]int) {
+	tel.SendTelemetry("RecordedTestAndMocks", map[string]interface{}{"mocks": mocksTotal})
 }
 
 // Telemetry event for the mocks that are recorded in the mocking feature
@@ -167,7 +171,7 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 			return
 		}
 		go func() {
-			defer sentry.Recover()
+			defer util.HandlePanic()
 			resp, err := tel.client.Do(req)
 			if err != nil {
 				tel.logger.Debug("failed to send request for analytics", zap.Error(err))

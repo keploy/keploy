@@ -45,6 +45,8 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 
 	mocksTotal := make(map[string]int)
 	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
+	//Add the name of the cmd to context.
+	ctx = context.WithValue(ctx, "cmd", "mockrecord")
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
 	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {

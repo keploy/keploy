@@ -21,8 +21,8 @@ import (
 	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/service/serve/graph"
 	"go.keploy.io/server/pkg/service/test"
+	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
-	sentry "github.com/getsentry/sentry-go"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -114,7 +114,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer loadedHooks.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+		defer util.HandlePanic()
 		log.Printf(Emoji+"connect to http://localhost:%d/ for GraphQL playground", port)
 		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf(Emoji+"listen: %s\n", err)

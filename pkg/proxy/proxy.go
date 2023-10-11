@@ -24,7 +24,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
-	sentry "github.com/getsentry/sentry-go"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -427,7 +426,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if isPortAvailable(opt.Port) {
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
-			defer sentry.Recover()
+			defer util.HandlePanic()
 			proxySet.startProxy(ctx)
 		}()
 		// Resolve DNS queries only in case of test mode.
@@ -436,7 +435,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
 			go func() {
 				defer h.Recover(pkg.GenerateRandomID())
-				defer sentry.Recover()
+				defer util.HandlePanic()
 				proxySet.startDnsServer()
 			}()
 		}
@@ -638,7 +637,7 @@ func (ps *ProxySet) startProxy(ctx context.Context) {
 		ps.connMutex.Unlock()
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer sentry.Recover()
+			defer util.HandlePanic()
 			ps.handleConnection(conn, port, ctx)
 		}()
 	}
@@ -1002,7 +1001,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		}
 	}
 
-
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages]
@@ -1062,7 +1060,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from client
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer sentry.Recover()
+			defer util.HandlePanic()
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
@@ -1074,7 +1072,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from destination
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer sentry.Recover()
+			defer util.HandlePanic()
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
 				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))

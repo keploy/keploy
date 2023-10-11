@@ -22,7 +22,7 @@ import (
 	"encoding/base64"
 	// "fmt"
 	// "github.com/jackc/pgproto3"
-	sentry "github.com/getsentry/sentry-go"
+
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/util"
 
@@ -109,14 +109,14 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+		defer util.HandlePanic()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-		defer sentry.Recover()
+		defer util.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 

@@ -19,12 +19,12 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-	sentry "github.com/getsentry/sentry-go"
 
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/clients"
+	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg/clients/docker"
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
@@ -127,13 +127,8 @@ func (h *Hook) GetDepsSize() int {
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
-	if !ok{
-		h.logger.Debug("failed to get mocksTotal from context")
-	}
-	(*mocksTotal)[string(m.Kind)]++
 	// h.tcsMocks = append(h.tcsMocks, m)
-	err := h.TestCaseDB.WriteMock(m)
+	err := h.TestCaseDB.WriteMock(m, ctx)
 	if err != nil {
 		return err
 	}

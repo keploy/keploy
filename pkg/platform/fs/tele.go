@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	kYaml "go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
 	"gopkg.in/yaml.v3"
@@ -62,7 +62,7 @@ func (fs *Telemetry) Get(isNewConfigPath bool) (string, error) {
 
 func (fs *Telemetry) Set(id string) error {
 	path := UserHomeDir(true)
-	kYaml.CreateYamlFile(path, "installation-id", &zap.Logger{})
+	util.CreateYamlFile(path, "installation-id", &zap.Logger{})
 
 	data := []byte{}
 

@@ -2,7 +2,6 @@ package yaml
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -306,7 +305,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 
 	for _, v := range files {
 		// Define the regular expression pattern
-		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern) 
+		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
 		// `^test-set-\d{1,}$`
 
 		// Compile the regular expression
@@ -325,10 +324,4 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	return indices, nil
 }
 
-func ValidatePath(path string) (string, error) {
-	// Validate the input to prevent directory traversal attack
-	if strings.Contains(path, "..") {
-		return "", errors.New("invalid path: contains '..' indicating directory traversal")
-	}
-	return path, nil
-}
+

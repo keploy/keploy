@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -491,7 +490,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					go func() {
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
-						defer sentry.Recover()
+						defer util.HandlePanic()
 						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 					}()
 				}
@@ -558,7 +557,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-			defer sentry.Recover()
+			defer util.HandlePanic()
 			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 		}()
 		requestBuffer = []byte("read form client connection")

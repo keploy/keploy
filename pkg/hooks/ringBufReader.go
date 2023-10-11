@@ -11,12 +11,12 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf/perf"
-	sentry "github.com/getsentry/sentry-go"
 	"github.com/cilium/ebpf/ringbuf"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
+	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
 	_ "golang.org/x/sys/unix"
 )

@@ -66,7 +66,7 @@ func getKeployVersion() string {
 
 	return latestTag + "-dev"
 }
-func makingPing(){
+func makingPing() {
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, nil, version, nil)
 	tele.Ping(false)
@@ -80,19 +80,18 @@ func main() {
 	fmt.Println(logo, " ")
 	fmt.Printf("%v\n\n", version)
 	isDocker := os.Getenv("IS_DOCKER_CMD")
-	fmt.Println("This is the value of Dsn:", Dsn)
-	if isDocker != ""{
+	if isDocker != "" {
 		Dsn = os.Getenv("SENTRY_DSN_DOCKER")
 	}
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
-		Dsn: Dsn,
+		Dsn:              Dsn,
 		TracesSampleRate: 1.0,
-	  })
-	  if err != nil {
+	})
+	if err != nil {
 		log.Fatalf("sentry.Init: %s", err)
-	  }
-	defer sentry.Recover()
-	  defer sentry.Flush(2 * time.Second)
+	}
+	sentry.Recover()
+	defer sentry.Flush(2 * time.Second)
 	cmd.Execute()
 }
