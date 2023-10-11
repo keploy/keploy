@@ -41,11 +41,8 @@ jobs:
           commands: |
             apt-get clean
             curl -O https://storage.googleapis.com/golang/go1.13.5.linux-arm64.tar.gz
-            tar -xvf go1.13.5.linux-arm64.tar.gz
-            mv go /usr/local
-            echo "export GOPATH=$HOME/work" >> ~/.profile 
-            echo "export PATH=$PATH:/usr/local/go/bin:$GOPATH/bin" >> ~/.profile
-            source ~/.profile
+            tar -C /usr/local -xzf go1.21.3.linux-arm64.tar.gz
+            export PATH=$PATH:/usr/local/go/bin
             go version
             ls 
             go build -v ./...
