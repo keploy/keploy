@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -75,11 +76,11 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc *models.TestRe
 		doc.Name = fmt.Sprintf("report-%v", lastIndex)
 	}
 
-	_, err := createYamlFile(path, doc.Name, fe.Logger)
+	_, err := util.CreateYamlFile(path, doc.Name, fe.Logger)
 	if err != nil {
 		return err
 	}
-	
+
 	data := []byte{}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {

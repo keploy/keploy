@@ -6,7 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"os/exec"
 	"time"
+
+	"path/filepath"
 
 	"go.uber.org/zap"
 
@@ -18,12 +23,16 @@ import (
 
 	"github.com/agnivade/levenshtein"
 	"github.com/cloudflare/cfssl/log"
+
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/hooks"
+	"go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+var sendLogs = true
 
 func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger) error {
 	for {
@@ -42,7 +51,56 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	return nil
 }
 
-func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int),  logger *zap.Logger) ([]byte, error) {
+func ValidatePath(path string) (string, error) {
+	// Validate the input to prevent directory traversal attack
+	if strings.Contains(path, "..") {
+		return "", errors.New("invalid path: contains '..' indicating directory traversal")
+	}
+	return path, nil
+}
+
+// createYamlFile is used to create the yaml file along with the path directory (if does not exists)
+func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
+	// checks id the yaml exists
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(yamlPath); err != nil {
+		// creates the path director if does not exists
+		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
+		if err != nil {
+			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+			return false, err
+		}
+
+		// create the yaml file
+		_, err := os.Create(yamlPath)
+		if err != nil {
+			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+			return false, err
+		}
+
+		// since, keploy requires root access. The permissions for generated files
+		// should be updated to share it with all users.
+		keployPath := path
+		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
+			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
+		}
+		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
+		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
+		err = cmd.Run()
+		if err != nil {
+			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
+			return false, err
+		}
+
+		return true, nil
+	}
+	return false, nil
+}
+
+func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int), logger *zap.Logger) ([]byte, error) {
 
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination connection")
@@ -58,33 +116,17 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover 
 	// defer destConn.Close()
 
 	// channels for writing messages from proxy to destination or client
-	// clientBufferChannel := make(chan []byte)
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error)
-	// read requests from client
-	// go ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
-	// read response from destination
-	// destConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
-	}() 
-
-	// for {
+	}()
 
 	select {
-	// case buffer := <-clientBufferChannel:
-	// 	// Write the request message to the destination
-	// 	_, err := destConn.Write(buffer)
-	// 	if err != nil {
-	// 		logger.Error("failed to write request message to the destination server", zap.Error(err))
-	// 		return nil, err
-	// 	}
-	// 	logger.Debug("the iteration for the generic request ends with requests:" + strconv.Itoa(len(buffer)))
-	// 	return buffer, nil
 	case buffer := <-destBufferChannel:
 		// Write the response message to the client
 		_, err := clientConn.Write(buffer)
@@ -110,7 +152,6 @@ func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover 
 func ToIP4AddressStr(ip uint32) string {
 	// convert the IP address to a 32-bit binary number
 	ipBinary := fmt.Sprintf("%032b", ip)
-	// fmt.Printf("This is the value of the ipBinary:%v and this is the value of the ip:%v", ipBinary, ip)
 
 	// divide the binary number into four 8-bit segments
 	firstByte, _ := strconv.ParseUint(ipBinary[0:8], 2, 64)
@@ -140,26 +181,17 @@ func ToIPv6AddressStr(ip [4]uint32) string {
 func PeekBytes(reader *bufio.Reader) ([]byte, error) {
 	var buffer []byte
 
-	// for {
-	// Create a temporary buffer to hold the incoming bytes
 	buf := make([]byte, 1024)
 
 	// Read bytes from the Reader
 	reader.Peek(1)
 	buf, err := reader.Peek(reader.Buffered())
-	// fmt.Println("read bytes: ", n, ", err: ", err)
 	if err != nil && err != io.EOF && err != bufio.ErrBufferFull {
 		return nil, err
 	}
 
 	// Append the bytes to the buffer
 	buffer = append(buffer, buf[:]...)
-
-	// If we've reached the end of the input stream, break out of the loop
-	// if err == bufio.ErrBufferFull || len(buf) != 1024 {
-	// 	break
-	// }
-	// }
 
 	return buffer, nil
 }
