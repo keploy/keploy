@@ -1,6 +1,10 @@
 package postgresparser
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -9,13 +13,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"encoding/binary"
-	"encoding/base64"
+
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/proxy/util"
-	"errors"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -40,10 +43,10 @@ func IsOutgoingPSQL(buffer []byte) bool {
 	return version == ProtocolVersion
 }
 
-func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	default:
@@ -62,7 +65,7 @@ type PSQLMessage struct {
 }
 
 // This is the encoding function for the streaming postgres wiremessage
-func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 
 	pgRequests := []models.GenericPayload{}
 	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
@@ -93,14 +96,14 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 
@@ -121,7 +124,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-				})
+				}, ctx)
 				pgRequests = []models.GenericPayload{}
 				pgResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -147,7 +150,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-				})
+				}, ctx)
 				pgRequests = []models.GenericPayload{}
 				pgResponses = []models.GenericPayload{}
 			}
