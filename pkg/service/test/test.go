@@ -198,17 +198,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	if len(appCmd) == 0 && pid != 0 {
 		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
-		pathElements := strings.Split(appCmd, "/")[1: ]
-		appName := ""
-		if len(pathElements) == 1 {
-			// binary is in root directory, set appname to the filename of the binary
-			appName = pathElements[len(pathElements) - 1]
-		} else {
-			// set appName to the project folder containing the binary
-			appName = pathElements[len(pathElements) - 2]
-		}
-		pp.SetColorScheme(models.PassingColorScheme)
-		pp.Printf("\n <=========================================> \n  TESTRUN STARTED with id: %s\n"+"\tFor App: %s\n"+"\tTotal tests: %s\n <=========================================> \n\n", testSet, appName, len(tcs))
+		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(testSet)))
 		// start user application
 		go func() {
 			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
@@ -336,16 +326,22 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 			t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
 			// time.Sleep(10 * time.Second)
-			resp, err := pkg.SimulateHttp(*tc, t.logger, apiTimeout)
+			resp, err := pkg.SimulateHttp(*tc, testSet, t.logger, apiTimeout)
 			t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 			t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
 
 			if err != nil {
-				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
+				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString("false")))
 				continue
 			}
 			testPass, testResult := t.testHttp(*tc, resp)
-			t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", testPass))
+			
+			if !testPass {
+				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
+			} else {
+				t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(tc.Name)), zap.Any("testset id", models.HighlightPassingString(testSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
+			}
+			
 			testStatus := models.TestStatusPending
 			if testPass {
 				testStatus = models.TestStatusPassed

@@ -6,10 +6,12 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"time"
+	"bytes"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/buffer"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -22,8 +24,40 @@ type Root struct {
 
 var debugMode bool
 
+type colorConsoleEncoder struct {
+	*zapcore.EncoderConfig
+	zapcore.Encoder
+}
+  
+func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
+	return colorConsoleEncoder{
+		EncoderConfig: &cfg,
+		Encoder: zapcore.NewConsoleEncoder(cfg),
+	}
+}
+  
+func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (buff *buffer.Buffer, err error) {
+	buff2, err := c.Encoder.EncodeEntry(ent, fields)
+	if err != nil {
+		return nil, err	
+	}
+
+	buff = buffer.NewPool().Get()
+	bytesArr := bytes.Replace(buff2.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
+	buff.AppendString(string(bytesArr))
+	return buff, err
+}
+
+func init() {
+	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
+	  	return NewColorConsole(config), nil
+	}) 
+}
+
 func setupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
+	
+	logCfg.Encoding = "colorConsole"
 
 	// Customize the encoder config to put the emoji at the beginning.
 	// logCfg.EncoderConfig.EncodeLevel = customLevelEncoder

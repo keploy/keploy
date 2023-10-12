@@ -59,10 +59,10 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-func SimulateHttp(tc models.TestCase, logger *zap.Logger, apiTimeout uint64) (*models.HttpResp, error) {
+func SimulateHttp(tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HttpResp, error) {
 	resp := &models.HttpResp{}
 
-	logger.Info("making a http request", zap.Any("test case id", tc.Name))
+	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
 		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
