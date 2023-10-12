@@ -126,9 +126,10 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context) error {
 	ys.tele.RecordedTestAndMocks()
 	testsTotal, ok := ctx.Value("testsTotal").(*int)
 	if !ok{
-		ys.Logger.Debug("failed to get testTsotal from context")
+		ys.Logger.Debug("failed to get testsTotal from context")
+	}else{
+		*testsTotal++
 	}
-	*testsTotal++
 	var tcsName string
 	if ys.TcsName == "" {
 		// finds the recently generated testcase to derive the sequence number for the current testcase
