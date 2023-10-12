@@ -19,7 +19,7 @@ install_keploy_arm() {
 
     sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin
 
-    keploy
+    keploy example
 }
 
 install_keploy_amd() {
@@ -27,7 +27,7 @@ install_keploy_amd() {
 
     sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin
 
-    keploy
+    keploy example
 }
 
 install_colima_docker() {
