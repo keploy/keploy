@@ -49,15 +49,13 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 			var count int64
 			var id string
 
-			if tel.Enabled {
-				id, _ = tel.store.Get(true)
-				count = int64(len(id))
-			}
+			id, _ = tel.store.Get(true)
+			count = int64(len(id))
+
 			event := models.TeleEvent{
 				EventType: "Ping",
 				CreatedAt: time.Now().Unix(),
 			}
-			tel.InstallationID = id
 
 			if count == 0 {
 				//Check in the old keploy folder.
@@ -78,12 +76,10 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 						break
 					}
 					id = installation_id
-					tel.InstallationID = id
-					tel.store.Set(id)
 				}
-				tel.InstallationID = id
 				tel.store.Set(id)
 			}
+			tel.InstallationID = id
 			tel.SendTelemetry("Ping")
 			time.Sleep(5 * time.Minute)
 		}

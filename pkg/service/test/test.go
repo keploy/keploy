@@ -62,7 +62,6 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
-
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
@@ -104,15 +103,25 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
 	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
 	exitCmd := make(chan bool)                 // channel to exit this command
+	resultForTele := []int{0, 0}
+	ctx := context.WithValue(context.Background(), "resultForTele", &resultForTele)
 
 	go func() {
 		select {
 		case <-stopper:
 			abortStopHooksForcefully = true
 			loadedHooks.Stop(false)
+			//Call the telemetry events.
+			if resultForTele[0] != 0 || resultForTele[1] != 0{
+			tele.Testrun(resultForTele[0], resultForTele[1])
+			}
 			ps.StopProxyServer()
 			exitCmd <- true
 		case <-abortStopHooksInterrupt:
+			//Call the telemetry events.
+			if resultForTele[0] != 0 || resultForTele[1] != 0{
+			tele.Testrun(resultForTele[0], resultForTele[1])
+			}
 			return
 		}
 	}()
@@ -121,8 +130,6 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 
 	exitLoop := false
 
-	resultForTele := []int{0, 0}
-	ctx := context.WithValue(context.Background(), "resultForTele", &resultForTele)
 	if len(testsets) == 0 {
 		// by default, run all the recorded test sets
 		testsets = sessions
@@ -161,8 +168,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 		}
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
-	//Call the telemetry events.
-	tele.Testrun(resultForTele[0], resultForTele[1])
+
 	if !abortStopHooksForcefully {
 		abortStopHooksInterrupt <- true
 		// stop listening for the eBPF events

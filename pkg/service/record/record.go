@@ -9,10 +9,10 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/yaml"
-	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
 
@@ -131,11 +131,15 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 	case <-stopper:
 		abortStopHooksForcefully = true
 		loadedHooks.Stop(false)
-		tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
+		if testsTotal != 0 {
+			tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
+		}
 		ps.StopProxyServer()
 		return
 	case <-abortStopHooksInterrupt:
-		tele.RecordedTestSuite(path, testsTotal, mocksTotal)
+		if testsTotal != 0 {
+			tele.RecordedTestSuite(path, testsTotal, mocksTotal)
+		}
 
 	}
 

@@ -134,8 +134,6 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		},
 		// Mocks: mocks,
 	}, ctx)
-	testTotal := ctx.Value("testsTotal").(*int)
-	*testTotal++
 	if err != nil {
 		logger.Error("failed to record the ingress requests", zap.Error(err))
 		return

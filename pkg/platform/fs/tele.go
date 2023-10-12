@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 
-	// "go.keploy.io/server/pkg/proxy/util"
-	// "go.uber.org/zap"
+	"go.keploy.io/server/pkg/proxy/util"
+	"go.uber.org/zap"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,8 +19,8 @@ type Telemetry struct{}
 
 func UserHomeDir(isNewConfigPath bool) string {
 
-	var configFolder = "/.keploy"
-	if !isNewConfigPath {
+	var configFolder = "/keploy-config"
+	if isNewConfigPath {
 		configFolder = "/.keploy-config"
 	}
 
@@ -62,7 +62,7 @@ func (fs *Telemetry) Get(isNewConfigPath bool) (string, error) {
 
 func (fs *Telemetry) Set(id string) error {
 	path := UserHomeDir(true)
-	// util.CreateYamlFile(path, "installation-id", &zap.Logger{})
+	util.CreateYamlFile(path, "installation-id", &zap.Logger{})
 
 	data := []byte{}
 

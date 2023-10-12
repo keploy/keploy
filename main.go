@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	_ "net/http/pprof"
 	"os"
 	"time"
@@ -10,6 +9,7 @@ import (
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/cloudflare/cfssl/log"
 	v "github.com/hashicorp/go-version"
 	"go.keploy.io/server/cmd"
 	"go.keploy.io/server/utils"
@@ -79,11 +79,12 @@ func main() {
 	}
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              "",
+		Dsn:              Dsn,
 		TracesSampleRate: 1.0,
 	})
+	log.Level = 0
 	if err != nil {
-		log.Fatalf("sentry.Init: %s", err)
+		log.Debug("Could not initialise sentry.", err)
 	}
 	defer utils.HandlePanic()
 	defer sentry.Flush(2 * time.Second)

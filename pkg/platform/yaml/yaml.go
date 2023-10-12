@@ -124,6 +124,11 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
 func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context) error {
 	ys.tele.RecordedTestAndMocks()
+	testsTotal, ok := ctx.Value("testsTotal").(*int)
+	if !ok{
+		ys.Logger.Debug("failed to get testTsotal from context")
+	}
+	*testsTotal++
 	var tcsName string
 	if ys.TcsName == "" {
 		// finds the recently generated testcase to derive the sequence number for the current testcase
