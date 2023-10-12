@@ -72,30 +72,13 @@ Become a Keploy pro with our **[Documentation](https://docs.keploy.io/)**.
 
 # Quick Installation
 
-Using **Binary** (<img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="20" height="20"> Linux</img> / <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="20" height="20"> WSL</img>)
--
-
 Keploy can be utilized on Linux natively and through WSL on Windows.
 
-### Download the Keploy Binary.
-
-
-```zsh
-curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
+### One touch install Keploy.
+ 
 ```
-
-<details>
- <summary> <strong> ARM Architecture </strong> </summary>
-
-```zsh
-curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
-
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
+  source keploy.sh
 ```
-
-</details>
 
 ### Capturing Testcases
 To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you
