@@ -18,12 +18,15 @@ installKeploy (){
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin
+        alias keploy='sudo -E env PATH=$PATH keploy'
     }
 
     install_keploy_amd() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin
+
+        alias keploy='sudo -E env PATH=$PATH keploy'
     }
 
     install_colima_docker() {
@@ -101,8 +104,11 @@ installKeploy (){
                     echo "Unsupported architecture: $ARCH"
                     return
                 fi
-            else
+            elif [ "$user_input" = "docker" ]; then 
                 install_docker
+            else
+                echo "Please enter a valid command"
+                return
             fi
         elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
             echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
