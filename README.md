@@ -43,7 +43,7 @@ Ready for the magic? Here are Keploy's core features:
 - 🎭 **Multi-Purpose Mocks:** Use 'em in existing tests, as server tests, or just to impress your friends!
 
 
-- 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time! 
+- 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time!
 
 
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/how-keploy-works.gif" width="70%" alt="Generate Test Case from API call"/>
@@ -98,7 +98,7 @@ sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
 </details>
 
 ### Capturing Testcases
-To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you 
+To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you
 have to set any environment variables do it like you usually do it:
 
 ```zsh
@@ -111,7 +111,7 @@ sudo -E env PATH=$PATH keploy record -c "go run main.go"
 ```
 
 ### Running Testcases
-To run the testcases and generate a test coverage report, use this terminal command where you usually run your app, if 
+To run the testcases and generate a test coverage report, use this terminal command where you usually run your app, if
 you have to set any environment variables do it like you usually do it:
 
 ```zsh
@@ -137,7 +137,7 @@ Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c0001445
 Let's create an alias for Keploy:
 
 ```shell
-alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/keploy-config:/root/keploy-config --rm ghcr.io/keploy/keploy'
 ```
 
 ### Recording Testcases and Data Mocks

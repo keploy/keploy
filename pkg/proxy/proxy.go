@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
+	"go.keploy.io/server/utils"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -90,7 +91,6 @@ type Conn struct {
 func (c *Conn) Read(b []byte) (n int, err error) {
 	return c.r.Read(b)
 }
-
 
 func directoryExists(path string) bool {
 	info, err := os.Stat(path)
@@ -297,7 +297,7 @@ func containsJava(input string) bool {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
 
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
@@ -385,8 +385,8 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if isPortAvailable(opt.Port) {
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
-
-			proxySet.startProxy()
+			defer utils.HandlePanic()
+			proxySet.startProxy(ctx)
 		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
@@ -394,7 +394,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
 			go func() {
 				defer h.Recover(pkg.GenerateRandomID())
-
+				defer utils.HandlePanic()
 				proxySet.startDnsServer()
 			}()
 		}
@@ -419,7 +419,6 @@ func isPortAvailable(port uint32) bool {
 	defer ln.Close()
 	return true
 }
-
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -497,7 +496,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 }
 
 // startProxy function initiates a proxy on the specified port to handle redirected outgoing network calls.
-func (ps *ProxySet) startProxy() {
+func (ps *ProxySet) startProxy(ctx context.Context) {
 
 	port := ps.Port
 
@@ -539,12 +538,11 @@ func (ps *ProxySet) startProxy() {
 		ps.connMutex.Unlock()
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
-			ps.handleConnection(conn, port)
+			defer utils.HandlePanic()
+			ps.handleConnection(conn, port, ctx)
 		}()
 	}
 }
-
 
 func (ps *ProxySet) startDnsServer() {
 
@@ -731,7 +729,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
-func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
+func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Context) {
 
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
@@ -741,7 +739,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
-
 
 	ps.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
@@ -862,20 +859,20 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	switch {
 	case httpparser.IsOutgoingHTTP(buffer):
 		// capture the otutgoing http text messages
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger)
+		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger, ctx)
 	case mongoparser.IsOutgoingMongo(buffer):
 		logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
-
+		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger, ctx)
 	case postgresparser.IsOutgoingPSQL(buffer):
 
 		logger.Debug("into psql desp mode, before passing")
-		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
+		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger, ctx)
+
 	case grpcparser.IsOutgoingGRPC(buffer):
-		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
+		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger, ctx)
 	default:
 		logger.Debug("the external dependecy call is not supported")
-		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
+		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger, ctx)
 	}
 
 	// Closing the user client connection
@@ -906,7 +903,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from client
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
@@ -918,7 +915,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from destination
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
 				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
