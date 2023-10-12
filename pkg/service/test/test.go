@@ -324,7 +324,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				t.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
 			}
 			t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
-			// time.Sleep(10 * time.Second)
 			resp, err := pkg.SimulateHttp(*tc, testSet, t.logger, apiTimeout)
 			t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 			t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
