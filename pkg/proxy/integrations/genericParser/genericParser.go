@@ -1,6 +1,7 @@
 package genericparser
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 
@@ -15,13 +16,14 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
-func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	case models.MODE_OFF:
@@ -119,7 +121,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	}
 }
 
-func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	// destinationWriteChannel := make(chan []byte)
 	// clientWriteChannel := make(chan []byte)
 	// errChannel := make(chan error)
@@ -158,14 +160,14 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 
@@ -190,7 +192,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -215,7 +217,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}
