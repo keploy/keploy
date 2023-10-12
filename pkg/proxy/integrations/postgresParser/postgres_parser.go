@@ -1,6 +1,10 @@
 package postgresparser
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -10,26 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	// "time"
-
-	// "time"
-	// "sync"
-	// "strings"
-
-	"encoding/binary"
-	// "encoding/json"
-	"encoding/base64"
-	// "fmt"
-	// "github.com/jackc/pgproto3"
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/proxy/util"
-
-	// "bytes"
-
-	"errors"
-
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -54,10 +43,10 @@ func IsOutgoingPSQL(buffer []byte) bool {
 	return version == ProtocolVersion
 }
 
-func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	default:
@@ -76,7 +65,7 @@ type PSQLMessage struct {
 }
 
 // This is the encoding function for the streaming postgres wiremessage
-func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 
 	pgRequests := []models.GenericPayload{}
 	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
@@ -107,14 +96,14 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 
@@ -122,11 +111,9 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	logger.Debug("the iteration for the pg request starts", zap.Any("pgReqs", len(pgRequests)), zap.Any("pgResps", len(pgResponses)))
 	for {
 
-		// start := time.NewTicker(1*time.Second)
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		select {
-		// case <-start.C:
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
@@ -137,7 +124,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-				})
+				}, ctx)
 				pgRequests = []models.GenericPayload{}
 				pgResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -163,13 +150,12 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-				})
+				}, ctx)
 				pgRequests = []models.GenericPayload{}
 				pgResponses = []models.GenericPayload{}
 			}
 
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
-			// }
 			if bufStr != "" {
 
 				pgRequests = append(pgRequests, models.GenericPayload{
@@ -193,7 +179,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			}
 
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
-			// }
 			if bufStr != "" {
 
 				pgResponses = append(pgResponses, models.GenericPayload{
@@ -259,7 +244,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 			continue
 		}
-		// bestMatchedIndx := 0
 		// fuzzy match gives the index for the best matched pg mock
 
 		matched, pgResponses := matchingPg(tcsMocks, pgRequests, h)
@@ -279,7 +263,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				return err
 			}
 		}
-		// }
 
 		// update for the next dependency call
 

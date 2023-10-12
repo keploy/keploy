@@ -8,4 +8,5 @@ type TeleEvent struct {
 	TeleCheck      bool                   `json:"tele_check"`
 	OS             string                 `json:"os"`
 	KeployVersion  string                 `json:"keploy_version"`
+	Arch           string                 `json:"arch"`
 }
