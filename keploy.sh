@@ -17,16 +17,16 @@ installKeploy (){
     install_keploy_arm() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin
-        alias keploy='sudo -E env PATH=$PATH keploy'
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
+        alias keploy='sudo -E env PATH=$PATH keploybin'
     }
 
     install_keploy_amd() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
-        alias keploy='sudo -E env PATH=$PATH keploy'
+        alias keploy='sudo -E env PATH=$PATH keploybin'
     }
 
     install_colima_docker() {
