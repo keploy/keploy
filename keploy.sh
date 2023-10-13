@@ -18,17 +18,32 @@ installKeploy (){
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-        alias keploy='sudo -E env PATH=$PATH keploybin'
+        
+        set_alias
     }
 
     install_keploy_amd() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-
-        alias keploy='sudo -E env PATH=$PATH keploybin'
+        
+        set_alias
     }
 
+    set_alias() {
+        if [ -f ~/.zshrc ]; then
+            echo "alias keploy='sudo -E env PATH=\$PATH keploybin'" >> ~/.zshrc
+            source ~/.zshrc
+        else
+            if [ -f ~/.bashrc ]; then
+                echo "alias keploy='sudo -E env PATH=\$PATH keploybin'" >> ~/.bashrc
+                source ~/.bashrc
+            else
+                alias keploy='sudo -E env PATH=$PATH keploybin'
+            fi
+        fi
+    }
+    
     install_colima_docker() {
         if ! docker network ls | grep -q 'keploy-network'; then
             docker network create keploy-network
