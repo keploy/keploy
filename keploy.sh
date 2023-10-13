@@ -31,18 +31,27 @@ installKeploy (){
     }
 
     set_alias() {
+        ALIAS_CMD="alias keploy='sudo -E env PATH=\$PATH keploybin'"
+
         if [ -f ~/.zshrc ]; then
-            echo "alias keploy='sudo -E env PATH=\$PATH keploybin'" >> ~/.zshrc
-            source ~/.zshrc
-        else
-            if [ -f ~/.bashrc ]; then
-                echo "alias keploy='sudo -E env PATH=\$PATH keploybin'" >> ~/.bashrc
-                source ~/.bashrc
+            if grep -q "alias keploy=" ~/.zshrc; then
+                sed -i '' "s/alias keploy=.*/$ALIAS_CMD/" ~/.zshrc
             else
-                alias keploy='sudo -E env PATH=$PATH keploybin'
+                echo "$ALIAS_CMD" >> ~/.zshrc
             fi
+            source ~/.zshrc
+        elif [ -f ~/.bashrc ]; then
+            if grep -q "alias keploy=" ~/.bashrc; then
+                sed -i "s/alias keploy=.*/$ALIAS_CMD/" ~/.bashrc
+            else
+                echo "$ALIAS_CMD" >> ~/.bashrc
+            fi
+            source ~/.bashrc
+        else
+            alias keploy='sudo -E env PATH=$PATH keploybin'
         fi
     }
+
 
     install_colima_docker() {
         if ! docker network ls | grep -q 'keploy-network'; then
