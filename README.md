@@ -76,14 +76,8 @@ Keploy can be utilized on Linux natively and through WSL on Windows.
 
 ### One touch install Keploy.
  
-### For MacOS and Linux
-```
+ ```
   curl -o https://github.com/keploy/keploy/blob/main/keploy.sh && source keploy.sh
-```
-
-### For WSL2
-```
-  curl -o https://github.com/keploy/keploy/blob/main/keploy.sh && sudo sh keploy.sh
 ```
 
 ### Capturing Testcases
