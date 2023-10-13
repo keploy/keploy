@@ -118,7 +118,7 @@ installKeploy (){
         elif [ "$OS_NAME" = "Linux" ]; then
             echo -n "Do you want to install keploy with Linux or Docker? (linux/docker): "
             read user_input
-            if ! mountpoint -q /sys/kernel/debug; then
+            if ! sudo mountpoint -q /sys/kernel/debug; then
                 sudo mount -t debugfs debugfs /sys/kernel/debug
             fi
             if [ "$user_input" = "linux" ]; then
