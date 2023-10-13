@@ -64,7 +64,7 @@ installKeploy (){
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
         #!/bin/bash
-            echo -e "Keploy isn't supported on Docker Desktop\e]8;;https://github.com/docker/for-mac/issues/6800\aknow why?\e]8;;\a"
+            echo -e "Keploy isn't supported on Docker Desktop, \e]8;;https://github.com/docker/for-mac/issues/6800\aknow why?\e]8;;\a"
             if ! which colima &> /dev/null; then
                 echo
                 echo -e "\e]8;;https://kumojin.com/en/colima-alternative-docker-desktop\aAlternate is to use colima(lightweight and performant alternative to Docker Desktop)\e]8;;\a"
