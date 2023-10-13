@@ -35,15 +35,13 @@ installKeploy (){
 
         if [ -f ~/.zshrc ]; then
             if grep -q "alias keploy=" ~/.zshrc; then
-                sed -i '' "s/alias keploy=.*/$ALIAS_CMD/" ~/.zshrc
-            else
+                sed -i '/keploy/d' ~/.zshrc
                 echo "$ALIAS_CMD" >> ~/.zshrc
             fi
             source ~/.zshrc
         elif [ -f ~/.bashrc ]; then
             if grep -q "alias keploy=" ~/.bashrc; then
-                sed -i "s/alias keploy=.*/$ALIAS_CMD/" ~/.bashrc
-            else
+               sed -i '/keploy/d' ~/.bashrc
                 echo "$ALIAS_CMD" >> ~/.bashrc
             fi
             source ~/.bashrc
