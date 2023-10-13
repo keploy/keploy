@@ -31,26 +31,30 @@ installKeploy (){
     }
 
     set_alias() {
-        ALIAS_CMD="alias keploy='sudo -E env PATH=\$PATH keploybin'"
+        ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploybin'"
         current_shell=$(ps -p $$ -ocomm=)
         if [ "$current_shell" = "zsh" ]; then
             if [ -f ~/.zshrc ]; then
                 if grep -q "alias keploy=" ~/.zshrc; then
-                    sed -i '/keploy/d' ~/.zshrc
+                    sed -i '/alias keploy/d' ~/.zshrc
                 fi
                 echo "$ALIAS_CMD" >> ~/.zshrc
                 source ~/.zshrc
+            else
+                alias keploy='sudo -E env PATH="$PATH" keploybin'
             fi
         elif [ "$current_shell" = "bash" ]; then
             if [ -f ~/.bashrc ]; then
                 if grep -q "alias keploy=" ~/.bashrc; then
-                    sed -i '/keploy/d' ~/.bashrc
+                    sed -i '/alias keploy/d' ~/.bashrc
                 fi
                 echo "$ALIAS_CMD" >> ~/.bashrc
                 source ~/.bashrc
+            else
+                alias keploy='sudo -E env PATH="$PATH" keploybin'
             fi
         else
-            alias keploy='sudo -E env PATH=$PATH keploybin'
+            alias keploy='sudo -E env PATH="$PATH" keploybin'
         fi
     }
 
