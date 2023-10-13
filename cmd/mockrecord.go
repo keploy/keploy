@@ -65,7 +65,13 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 				return
 			}
 
-			mr.mockRecorder.MockRecord(path, pid, dir)
+			proxyPort, err := cmd.Flags().GetInt("proxyPort")
+			if err != nil {
+				mr.logger.Error(Emoji + "failed to read the proxy port")
+				return
+			}
+
+			mr.mockRecorder.MockRecord(path,proxyPort, pid, dir)
 		},
 	}
 
@@ -74,6 +80,8 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 	serveCmd.MarkFlagRequired("path")
+
+	serveCmd.Flags().Uint32("port", 0, "Port number of your application.")
 
 	serveCmd.Flags().StringP("mockName", "m", "", "User provided test suite")
 	serveCmd.MarkFlagRequired("mockName")

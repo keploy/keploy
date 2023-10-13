@@ -32,7 +32,7 @@ func NewMockRecorder(logger *zap.Logger) MockRecorder {
 	}
 }
 
-func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
+func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_RECORD)
 	teleFS := fs.NewTeleFS()
@@ -53,7 +53,7 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxyPort, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program

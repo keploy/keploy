@@ -297,7 +297,7 @@ func containsJava(input string) bool {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
+func BootProxy(logger *zap.Logger,proxyPort uint32, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
 
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
@@ -344,8 +344,10 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
 	}
 
-	if opt.Port == 0 {
+	if(proxyPort == 0){
 		opt.Port = 16789
+	}else{
+		opt.Port = proxyPort
 	}
 
 	//IPv4
