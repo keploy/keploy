@@ -79,6 +79,25 @@ installKeploy (){
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
         #!/bin/bash
+            
+            if ! which docker &> /dev/null; then
+                echo echo -e "\e]8;;https://www.docker.com\Docker not found on device, install docker? (y/n)\e]8;;\a"
+                read user_input
+                if [ "$user_input" = "y" ]; then
+                    echo "Installing docker via brew"
+                    if command -v brew &> /dev/null; then
+                       brew install docker
+                    else
+                        echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy docker installation\e]8;;\a"
+                        return
+                    fi
+                elif [ "$user_input" != "n" ]; then 
+                    echo "Please enter a valid command"
+                    return
+                else
+                    echo "Please install docker to install keploy"
+                    return
+                fi
             echo -e "Keploy isn't supported on Docker Desktop, \e]8;;https://github.com/docker/for-mac/issues/6800\aknow why?\e]8;;\a"
             if ! which colima &> /dev/null; then
                 echo
