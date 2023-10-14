@@ -79,7 +79,6 @@ installKeploy (){
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
         #!/bin/bash
-            
             if ! which docker &> /dev/null; then
                 echo echo -e "\e]8;;https://www.docker.com\Docker not found on device, install docker? (y/n)\e]8;;\a"
                 read user_input
@@ -98,6 +97,7 @@ installKeploy (){
                     echo "Please install docker to install keploy"
                     return
                 fi
+            fi
             echo -e "Keploy isn't supported on Docker Desktop, \e]8;;https://github.com/docker/for-mac/issues/6800\aknow why?\e]8;;\a"
             if ! which colima &> /dev/null; then
                 echo
