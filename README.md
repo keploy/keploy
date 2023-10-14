@@ -121,7 +121,7 @@ Here are few points to consider before recording!
 - You must run the containers on a network, if not, ensure all your containers are on same network with external property true - [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L24). Replace the **network name** (`--network` flag) to your custom network if you changed it above, like <backend> network in given example.
 - `Docker_CMD_to_run_user_container` refers to the Docker **command for launching** the application.
 
-Utilize the keploy alias we created to capture testcases. **Execute** the following command within your application's **root directory**.
+To capture testcases, **Execute** the following command within your application's **root directory**.
 
 ```shell
 keploy record -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>"
@@ -132,7 +132,7 @@ Keploy will capture the API calls you've conducted, generating test suites compr
 
 ### Running Testcases
 
-Now, use the keployV2 Alias we created to execute the testcases. Follow these steps in the **root directory** of your application.
+To execute the testcases, follow these steps in the **root directory** of your application.
 
 When using **docker-compose** to start the application, it's important to ensure that the `--containerName` parameter matches the container name in your `docker-compose.yaml` file.
 
