@@ -80,7 +80,7 @@ installKeploy (){
         if [ "$OS_NAME" = "Darwin" ]; then
         #!/bin/bash
             if ! which docker &> /dev/null; then
-                echo echo -e "\e]8;;https://www.docker.com\Docker not found on device, install docker? (y/n)\e]8;;\a"
+                echo -n "Docker not found on device, install docker? (y/n):"
                 read user_input
                 if [ "$user_input" = "y" ]; then
                     echo "Installing docker via brew"
