@@ -118,8 +118,8 @@ Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c0001445
 
 Here are few points to consider before recording!
 - If you're running via **docker compose**, ensure to include the `<CONTAINER_NAME>` under your application service in the docker-compose.yaml file [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L14).
-- You must run the all of the containers on same network when you're using **docker run command**(you can add your custom **network name** using `--network` flag in **docker run command**).
-- In your **Docker Compose** file, every container should run on same network.
+- You must run all of the containers on the same network when you're using **docker run command** (you can add your custom **network name** using `--network` flag in **docker run command**).
+- In your **Docker Compose** file, every container should run on the same network.
 - `Docker_CMD_to_run_user_container` refers to the Docker **command for launching** the application.
 
 To capture testcases, **Execute** the following command within your application's **root directory**.
