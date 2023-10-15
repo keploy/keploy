@@ -32,7 +32,7 @@ func NewMockTester(logger *zap.Logger) MockTester {
 	}
 }
 
-func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
+func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_TEST)
 	teleFS := fs.NewTeleFS()
@@ -51,7 +51,7 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxyPort, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
