@@ -41,14 +41,14 @@ func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
 }
   
 // EncodeEntry overrides ConsoleEncoder's EncodeEntry
-func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (buff *buffer.Buffer, err error) {
-	buff2, err := c.Encoder.EncodeEntry(ent, fields) // Utilize the existing implementation of zap
+func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (buf *buffer.Buffer, err error) {
+	buff, err := c.Encoder.EncodeEntry(ent, fields) // Utilize the existing implementation of zap
 	if err != nil {
 		return nil, err	
 	}
 
-	buff = buffer.NewPool().Get()
-	bytesArr := bytes.Replace(buff2.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
+	bytesArr := bytes.Replace(buff.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
+	buff.Reset()
 	buff.AppendString(string(bytesArr))
 	return buff, err
 }
@@ -169,7 +169,7 @@ Record:
 keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1
 
 Test:
-keploy test -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1
+keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1
 `
 
 func checkForDebugFlag(args []string) bool {
