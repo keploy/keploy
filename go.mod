@@ -29,7 +29,10 @@ require (
 	google.golang.org/protobuf v1.30.0 // indirect
 )
 
-require github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
+require (
+	github.com/xdg-go/stringprep v1.0.4 // indirect
+	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
+)
 
 require (
 	gopkg.in/yaml.v3 v3.0.1
@@ -77,6 +80,7 @@ require (
 	github.com/hashicorp/go-version v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/vektah/gqlparser/v2 v2.5.8
+	github.com/xdg-go/pbkdf2 v1.0.0
 )
 
 require (
@@ -100,6 +104,7 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/urfave/cli/v2 v2.25.5 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
+	github.com/xdg-go/scram v1.1.2
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
