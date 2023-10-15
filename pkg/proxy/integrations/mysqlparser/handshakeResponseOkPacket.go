@@ -20,6 +20,12 @@ func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {
 		message         string
 		remainingBytes  []byte
 	)
+	if isPluginData {
+		publicKeyData := string(data[1:])
+		authType = "PublicKeyAuthentication"
+		message = "Public key for authentication"
+		remainingBytes = []byte(publicKeyData)
+	}
 
 	switch data[0] {
 	case models.OK:
