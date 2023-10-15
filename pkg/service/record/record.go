@@ -28,7 +28,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
 
 	var ps *proxy.ProxySet
 
@@ -76,7 +76,7 @@ func (r *recorder) CaptureTraffic(path string, appCmd, appContainer, appNetwork 
 		return
 	default:
 		// start the BootProxy
-		ps = proxy.BootProxy(r.logger, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
+		ps = proxy.BootProxy(r.logger, proxyPort, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
 	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
