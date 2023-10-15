@@ -51,6 +51,14 @@ func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fie
 	return buff, err
 }
 
+func (c colorConsoleEncoder) Clone() zapcore.Encoder {
+	clone := c.Encoder.Clone()
+	return colorConsoleEncoder{
+		EncoderConfig: c.EncoderConfig,
+		Encoder: clone,
+	}
+}
+
 func init() {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 	  	return NewColorConsole(config), nil
