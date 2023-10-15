@@ -35,12 +35,14 @@ type colorConsoleEncoder struct {
 func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
 	return colorConsoleEncoder{
 		EncoderConfig: &cfg,
+		// Using the default ConsoleEncoder can avoid rewriting interfaces such as ObjectEncoder
 		Encoder: zapcore.NewConsoleEncoder(cfg),
 	}
 }
   
+// EncodeEntry overrides ConsoleEncoder's EncodeEntry
 func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (buff *buffer.Buffer, err error) {
-	buff2, err := c.Encoder.EncodeEntry(ent, fields)
+	buff2, err := c.Encoder.EncodeEntry(ent, fields) // Utilize the existing implementation of zap
 	if err != nil {
 		return nil, err	
 	}
@@ -51,6 +53,7 @@ func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fie
 	return buff, err
 }
 
+// Clone overrides ConsoleEncoder's Clone
 func (c colorConsoleEncoder) Clone() zapcore.Encoder {
 	clone := c.Encoder.Clone()
 	return colorConsoleEncoder{
