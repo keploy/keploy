@@ -41,7 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
 
 	var ps *proxy.ProxySet
 
@@ -62,6 +62,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
+
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
@@ -81,7 +82,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 		return false
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
+		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
