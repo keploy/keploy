@@ -30,10 +30,10 @@ func setupLogger() *zap.Logger {
 
 	// Customize the encoder config to put the emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
-	// logCfg.OutputPaths = []string{
-	// 	"stdout",
-	// 	"/tmp/keploy-logs.txt",
-	// }
+	logCfg.OutputPaths = []string{
+		"stdout",
+		"/tmp/keploy-logs.txt",
+	}
 	if debugMode {
 		go func() {
 			defer utils.HandlePanic()
@@ -73,7 +73,6 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 	}
 
 	log = zapsentry.AttachCoreToLogger(core, log)
-
 
 	return log.With(zapsentry.NewScope())
 }
