@@ -1,6 +1,7 @@
 package mocktest
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,6 +11,8 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
@@ -32,20 +35,23 @@ func NewMockTester(logger *zap.Logger) MockTester {
 func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_TEST)
-	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	tele.Ping(false)
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
 
 	s.logger.Debug("path of mocks : " + path)
 
 	routineId := pkg.GenerateRandomID()
-
+	ctx := context.Background()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
-	if err := loadedHooks.LoadHooks("", "", pid); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
 		return
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
@@ -64,6 +70,8 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
+	mocksBefore := len(configMocks) + len(tcsMocks)
+
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
@@ -71,7 +79,11 @@ func (s *mockTester) MockTest(path string, pid uint32, mockName string) {
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
-
+	usedMocks := mocksBefore - (len(loadedHooks.GetConfigMocks()) + len(loadedHooks.GetTcsMocks()))
+	//Call the telemetry events.
+	if usedMocks != 0 {
+		tele.MockTestRun(usedMocks)
+	}
 	// Shutdown other resources
 	loadedHooks.Stop(true)
 	ps.StopProxyServer()

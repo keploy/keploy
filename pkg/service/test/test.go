@@ -20,6 +20,8 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
@@ -39,7 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
 
 	var ps *proxy.ProxySet
 
@@ -48,9 +50,13 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	models.SetMode(models.MODE_TEST)
 
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
+	tele.Ping(false)
+
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
-	ys := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger)
+	ys := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
@@ -64,7 +70,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		return false
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background()); err != nil {
 			return false
 		}
 	}
@@ -75,7 +81,7 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 		return false
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks)
+		ps = proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -95,17 +101,27 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	abortStopHooksForcefully := false // boolen to stop closing of keploy via user app error
-	exitCmd := make(chan bool) // channel to exit this command
+	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
+	exitCmd := make(chan bool)                 // channel to exit this command
+	resultForTele := []int{0, 0}
+	ctx := context.WithValue(context.Background(), "resultForTele", &resultForTele)
 
 	go func() {
 		select {
 		case <-stopper:
 			abortStopHooksForcefully = true
 			loadedHooks.Stop(false)
+			//Call the telemetry events.
+			if resultForTele[0] != 0 || resultForTele[1] != 0{
+			tele.Testrun(resultForTele[0], resultForTele[1])
+			}
 			ps.StopProxyServer()
 			exitCmd <- true
 		case <-abortStopHooksInterrupt:
+			//Call the telemetry events.
+			if resultForTele[0] != 0 || resultForTele[1] != 0{
+			tele.Testrun(resultForTele[0], resultForTele[1])
+			}
 			return
 		}
 	}()
@@ -114,8 +130,24 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	exitLoop := false
 
+	if len(testsets) == 0 {
+		// by default, run all the recorded test sets
+		testsets = sessions
+	}
+
+	sessionsMap := map[string]string{}
+
 	for _, sessionIndex := range sessions {
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout)
+		sessionsMap[sessionIndex] = sessionIndex
+	}
+
+	for _, sessionIndex := range testsets {
+		// checking whether the provided testset match with a recorded testset.
+		if _, ok := sessionsMap[sessionIndex]; !ok {
+			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
+			continue
+		}
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -148,10 +180,9 @@ func (t *tester) Test(path, testReportPath string, appCmd, appContainer, appNetw
 
 	<-exitCmd
 	return false
-
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) models.TestRunStatus {
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -205,7 +236,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				case hooks.ErrUnExpected:
 					t.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
 				default:
-					t.logger.Error("unknown error recieved from application")
+					t.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 				errChan <- err
 			}
@@ -364,6 +395,14 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	testReport.Tests = testResults
 	testReport.Success = success
 	testReport.Failure = failure
+
+	resultForTele, ok := ctx.Value("resultForTele").(*[]int)
+	if !ok {
+		t.logger.Debug("resultForTele is not of type *[]int")
+	}
+	(*resultForTele)[0] += success
+	(*resultForTele)[1] += failure
+
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 	if err != nil {
 		t.logger.Error(err.Error())

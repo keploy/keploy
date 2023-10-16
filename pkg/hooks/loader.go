@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -97,7 +99,7 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hoo
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
 	}
 	return &Hook{
-		logger: logger,
+		logger:        logger,
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
@@ -121,10 +123,10 @@ func (h *Hook) GetDepsSize() int {
 	return size
 }
 
-func (h *Hook) AppendMocks(m *models.Mock) error {
+func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	err := h.TestCaseDB.WriteMock(m)
+	err := h.TestCaseDB.WriteMock(m, ctx)
 	if err != nil {
 		return err
 	}
@@ -355,6 +357,21 @@ func (h *Hook) Recover(id int) {
 	}
 }
 
+func deleteFileIfExists(filename string, logger *zap.Logger) error {
+	// Check if file exists
+	if _, err := os.Stat(filename); !os.IsNotExist(err) {
+		// File exists, delete it
+		err = os.Remove(filename)
+		if err != nil {
+			return fmt.Errorf("failed to delete the file: %v", err)
+		}
+		logger.Debug(fmt.Sprintf("File %s deleted successfully", filename))
+	} else {
+		logger.Debug(fmt.Sprintf("File %s doesn't exist", filename))
+	}
+	return nil
+}
+
 func (h *Hook) Stop(forceStop bool) {
 
 	if !forceStop {
@@ -363,6 +380,9 @@ func (h *Hook) Stop(forceStop bool) {
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")
 	}
+
+	//deleting kdocker-compose.yaml file if made during the process in case of docker-compose env
+	deleteFileIfExists("kdocker-compose.yaml", h.logger)
 
 	// closing all readers.
 	for _, reader := range PerfEventReaders {
@@ -418,7 +438,7 @@ func (h *Hook) Stop(forceStop bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context) error {
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err
@@ -456,9 +476,9 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		for {
-			connectionFactory.HandleReadyConnections(h.TestCaseDB)
+			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx)
 			time.Sleep(1 * time.Second)
 		}
 	}()
