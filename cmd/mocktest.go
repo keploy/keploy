@@ -78,6 +78,8 @@ func (s *MockTest) GetCmd() *cobra.Command {
 	serveCmd.Flags().Uint32("pid", 0, "Process id of your application.")
 	serveCmd.MarkFlagRequired("pid")
 
+    serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+	serveCmd.MarkFlagRequired("path")
 	serveCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
 
