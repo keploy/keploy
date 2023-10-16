@@ -346,6 +346,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 	if(opt.Port == 0){
 		opt.Port = 16789
+	}
 	
 	//IPv4
 	localIp4, err := util.GetLocalIPv4()
