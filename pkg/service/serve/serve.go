@@ -76,7 +76,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	if err := loadedHooks.SendKeployServerPort(port); err != nil {
 		return
 	}
-	proxyPortNumber proxy.Option
+	var proxyPortNumber proxy.Option
 	proxyPortNumber.Port = proxyPort
 
 	// start the proxy
