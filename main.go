@@ -78,7 +78,6 @@ func main() {
 	if isDocker != "" {
 		Dsn = os.Getenv("Dsn")
 	}
-	Dsn = os.Getenv("SENTRY_DSN_BINARY")
 	fmt.Println("This is the value of Dsn:", Dsn)
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
