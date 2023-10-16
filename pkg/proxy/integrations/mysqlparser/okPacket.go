@@ -55,19 +55,19 @@ func decodeMySQLOK(data []byte) (*OKPacket, error) {
 
 func encodeMySQLOK(packet *models.MySQLOKPacket) ([]byte, error) {
 	buf := new(bytes.Buffer)
-	// Prepare the payload (without the header)
+	// payload (without the header)
 	payload := new(bytes.Buffer)
-	// Write header (0x00)
+	// header (0x00)
 	payload.WriteByte(0x00)
-	// Write affected rows
+	//  affected rows
 	payload.Write(encodeLengthEncodedInteger(packet.AffectedRows))
-	// Write last insert ID
+	//last insert ID
 	payload.Write(encodeLengthEncodedInteger(packet.LastInsertID))
-	// Write status flags
+	// status flags
 	binary.Write(payload, binary.LittleEndian, packet.StatusFlags)
-	// Write warnings
+	// warnings
 	binary.Write(payload, binary.LittleEndian, packet.Warnings)
-	// Write info
+	// info
 	if len(packet.Info) > 0 {
 		payload.Write([]byte{0})
 		payload.WriteString(packet.Info)
@@ -76,8 +76,8 @@ func encodeMySQLOK(packet *models.MySQLOKPacket) ([]byte, error) {
 		payload.Truncate(payload.Len() - 1)
 	}
 
-	// Write header bytes
-	// Write packet length (3 bytes)
+	// header bytes
+	//  packet length (3 bytes)
 	packetLength := uint32(payload.Len())
 	buf.WriteByte(byte(packetLength))
 	buf.WriteByte(byte(packetLength >> 8))
@@ -86,6 +86,43 @@ func encodeMySQLOK(packet *models.MySQLOKPacket) ([]byte, error) {
 	buf.WriteByte(1)
 
 	// Write payload
+	buf.Write(payload.Bytes())
+
+	return buf.Bytes(), nil
+}
+func encodeMySQLOKConnectionPhase(packet interface{}, operation string, sequence int) ([]byte, error) {
+	innerPacket, ok := packet.(*interface{})
+	if ok {
+		packet = *innerPacket
+	}
+	p, ok := packet.(*models.MySQLOKPacket)
+	if !ok {
+		return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+	}
+	buf := new(bytes.Buffer)
+	payload := new(bytes.Buffer)
+	// header (0x00)
+	payload.WriteByte(0x00)
+	// affected rows
+	payload.Write(encodeLengthEncodedInteger(p.AffectedRows))
+	//last insert ID
+	payload.Write(encodeLengthEncodedInteger(p.LastInsertID))
+	//status flags
+	binary.Write(payload, binary.LittleEndian, p.StatusFlags)
+	// warnings
+	binary.Write(payload, binary.LittleEndian, p.Warnings)
+	// info
+	if len(p.Info) > 0 {
+		payload.Write([]byte{0})
+		payload.WriteString(p.Info)
+	}
+	// header bytes
+	// packet length (3 bytes)
+	packetLength := uint32(payload.Len())
+	buf.WriteByte(byte(packetLength))
+	buf.WriteByte(byte(packetLength >> 8))
+	buf.WriteByte(byte(packetLength >> 16))
+	buf.WriteByte(byte(sequence))
 	buf.Write(payload.Bytes())
 
 	return buf.Bytes(), nil

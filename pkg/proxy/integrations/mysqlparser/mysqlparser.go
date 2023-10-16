@@ -2,7 +2,6 @@ package mysqlparser
 
 import (
 	"encoding/binary"
-	"fmt"
 	"log"
 	"net"
 	"time"
@@ -274,20 +273,19 @@ func decodeOutgoingMySQL(clientConnId int, destConnId int64, requestBuffer []byt
 				doHandshakeAgain = false
 			} else {
 				configResponseRead++
+				//Private Key
 				requestBuffer, err = util.ReadBytes(clientConn)
-				// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
 				handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
 				opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-				handshakeResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, opr2, 1)
-				_, err = clientConn.Write(handshakeResponseBinary)
+				encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, opr2, 1)
+				_, err = clientConn.Write(encodedResponseBinary)
 				configResponseRead++
+				//Encrypted Password
 				requestBuffer, err = util.ReadBytes(clientConn)
-				// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
-				handshakeResponseFromConfigNext := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
+				ResponseFromConfigNext := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
 				opr3 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-				handshakeResponseBinary2, _ := encodeToBinary(&handshakeResponseFromConfigNext, opr3, 6)
-				fmt.Printf(string(handshakeResponseBinary2))
-				_, err = clientConn.Write([]byte("\a\x00\x00\x06\x00\x00\x00\x02\x00\x00\x00"))
+				encodedResponseBinary, _ = encodeMySQLOKConnectionPhase(&ResponseFromConfigNext, opr3, 6)
+				_, err = clientConn.Write(encodedResponseBinary)
 			}
 			if err != nil {
 				logger.Error("failed to write query response to mysql client", zap.Error(err))
