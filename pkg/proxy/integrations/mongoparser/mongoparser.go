@@ -1,6 +1,7 @@
 package mongoparser
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
@@ -33,11 +35,11 @@ func IsOutgoingMongo(buffer []byte) bool {
 	return int(messageLength) == len(buffer)
 }
 
-func ProcessOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func ProcessOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		logger.Debug("the outgoing mongo in record mode")
-		encodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
+		encodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger, ctx)
 	case models.MODE_TEST:
 		logger.Debug("the outgoing mongo in test mode")
 		decodeOutgoingMongo(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger)
@@ -323,7 +325,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 	}
 }
 
-func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger) {
+func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
 	rand.Seed(time.Now().UnixNano())
 	for {
 
@@ -465,8 +467,8 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					go func() {
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
-
-						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+						defer utils.HandlePanic()
+						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 					}()
 				}
 				tmpStr := ""
@@ -503,7 +505,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					logger.Debug("the response from the server is complete")
 					break
 				}
-		
+
 				_, respHeader, mongoResp, err := Decode(responseBuffer, logger)
 				if err != nil {
 					logger.Error("failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
@@ -524,8 +526,8 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 		go func() {
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
-
-			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq)
+			defer utils.HandlePanic()
+			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
 		}()
 		requestBuffer = []byte("read form client connection")
 
@@ -533,8 +535,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 
 }
 
-func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation) {
-
+func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context) {
 	// // capture if the wiremessage is a mongo operation call
 
 	shouldRecordCalls := true
@@ -587,7 +588,7 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 				Created:        time.Now().Unix(),
 			},
 		}
-		h.AppendMocks(mongoMock)
+		h.AppendMocks(mongoMock, ctx)
 	}
 }
 
@@ -654,7 +655,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 
 		// // Compile the regular expression
 		// // Find submatches using the regular expression
-		
+
 		logger.Debug("the expected section", zap.Any("identifier", expectedIdentifier), zap.Any("docs", expectedMsgsStr))
 		logger.Debug("the actual section", zap.Any("identifier", actualIdentifier), zap.Any("docs", actualMsgsStr))
 
@@ -691,7 +692,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		// // Define the regular expression pattern
 		// // Compile the regular expression
 		// // Find submatches using the regular expression
-	
+
 		var actualMsgsStr string
 		actualMsgsStr, err = decodeOpMsgSectionSingle(actualSection)
 		if err != nil {
@@ -700,7 +701,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		}
 		// // Compile the regular expression
 		// // Find submatches using the regular expression
-		
+
 		expected := map[string]interface{}{}
 		actual := map[string]interface{}{}
 
@@ -716,7 +717,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		}
 		logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
 		return calculateMatchingScore(expected, actual)
-		
+
 	default:
 		logger.Error(fmt.Sprintf("failed to detect the OpMsg section into mongo request wiremessage due to invalid format"))
 		return 0

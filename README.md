@@ -43,7 +43,7 @@ Ready for the magic? Here are Keploy's core features:
 - 🎭 **Multi-Purpose Mocks:** Use 'em in existing tests, as server tests, or just to impress your friends!
 
 
-- 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time! 
+- 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time!
 
 
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/how-keploy-works.gif" width="70%" alt="Generate Test Case from API call"/>
@@ -72,82 +72,57 @@ Become a Keploy pro with our **[Documentation](https://docs.keploy.io/)**.
 
 # Quick Installation
 
-Using **Binary** (<img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="20" height="20"> Linux</img> / <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="20" height="20"> WSL</img>)
--
-
 Keploy can be utilized on Linux natively and through WSL on Windows.
 
-### Download the Keploy Binary.
-
-
-```zsh
-curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
+### One touch install Keploy.
+ 
+ ```
+  curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
-
-<details>
- <summary> <strong> ARM Architecture </strong> </summary>
-
-```zsh
-curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
-
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin && keploy
-```
-
-</details>
 
 ### Capturing Testcases
-To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you 
+To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you
 have to set any environment variables do it like you usually do it:
 
 ```zsh
-sudo -E env PATH=$PATH keploy record -c "CMD_TO_RUN_APP"
+keploy record -c "CMD_TO_RUN_APP"
 ```
 For instance, if you're using a simple Golang program, the command would resemble:
 
 ```zsh
-sudo -E env PATH=$PATH keploy record -c "go run main.go"
+keploy record -c "go run main.go"
 ```
 
 ### Running Testcases
-To run the testcases and generate a test coverage report, use this terminal command where you usually run your app, if 
+To run the testcases and generate a test coverage report, use this terminal command where you usually run your app, if
 you have to set any environment variables do it like you usually do it:
 
 ```zsh
-sudo -E env PATH=$PATH keploy test -c "CMD_TO_RUN_APP" --delay 10
+keploy test -c "CMD_TO_RUN_APP" --delay 10
 ```
 
 For example, if you're using a Golang framework, the command would be:
 
 ```zsh
-sudo -E env PATH=$PATH keploy test -c "go run main.go" --delay 10
+keploy test -c "go run main.go" --delay 10
 ```
 
-<img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Docker Installation </img>
+<img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20">Docker setup </img>
 -
 
 Keploy can be used on <img src="https://th.bing.com/th/id/R.7802b52b7916c00014450891496fe04a?rik=r8GZM4o2Ch1tHQ&riu=http%3a%2f%2f1000logos.net%2fwp-content%2fuploads%2f2017%2f03%2fLINUX-LOGO.png&ehk=5m0lBvAd%2bzhvGg%2fu4i3%2f4EEHhF4N0PuzR%2fBmC1lFzfw%3d&risl=&pid=ImgRaw&r=0" width="10" height="10"> Linux</img> & <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"> Windows</img> through [Docker](https://docs.docker.com/engine/install).
 
 > **️ Note:** <img src="https://www.pngplay.com/wp-content/uploads/3/Apple-Logo-Transparent-Images.png" width="15" height="15"> MacOS</img> users need to install [Colima](https://github.com/abiosoft/colima#installation). <img src="https://cdn.freebiesupply.com/logos/large/2x/microsoft-windows-22-logo-png-transparent.png" width="10" height="10"/> Windows users need to install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install#install-wsl-command).
 
-
-### Creating alias
-
-Let's create an alias for Keploy:
-
-```shell
-alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
-```
-
 ### Recording Testcases and Data Mocks
 
 Here are few points to consider before recording!
 - If you're running via **docker compose**, ensure to include the `<CONTAINER_NAME>` under your application service in the docker-compose.yaml file [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L14).
-- You must run the containers on a network, if not, ensure all your containers are on same network with external property true - [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L24). Replace the **network name** (`--network` flag) to your custom network if you changed it above, like <backend> network in given example.
+- You must run all of the containers on the same network when you're using **docker run command** (you can add your custom **network name** using `--network` flag in **docker run command**).
+- In your **Docker Compose** file, every container should run on the same network.
 - `Docker_CMD_to_run_user_container` refers to the Docker **command for launching** the application.
 
-Utilize the keploy alias we created to capture testcases. **Execute** the following command within your application's **root directory**.
+To capture testcases, **Execute** the following command within your application's **root directory**.
 
 ```shell
 keploy record -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>"
@@ -158,7 +133,7 @@ Keploy will capture the API calls you've conducted, generating test suites compr
 
 ### Running Testcases
 
-Now, use the keployV2 Alias we created to execute the testcases. Follow these steps in the **root directory** of your application.
+To execute the testcases, follow these steps in the **root directory** of your application.
 
 When using **docker-compose** to start the application, it's important to ensure that the `--containerName` parameter matches the container name in your `docker-compose.yaml` file.
 
