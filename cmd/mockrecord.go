@@ -84,9 +84,6 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 	serveCmd.MarkFlagRequired("path")
-
-	serveCmd.Flags().Uint32("port", 0, "Port number of your application.")
-
 	serveCmd.Flags().StringP("mockName", "m", "", "User provided test suite")
 	serveCmd.MarkFlagRequired("mockName")
 
