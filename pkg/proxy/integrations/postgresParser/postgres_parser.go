@@ -97,12 +97,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			MsgType:             pg.BackendWrapper.MsgType,
 			AuthType:            pg.BackendWrapper.AuthType,
 		})
-		// if isStartupPacket(requestBuffer)  {
-		// 	pg_mock := &models.Backend{
-		// 		Payload: bufStr,
-		// 	}
-		// 	pgRequests = append(pgRequests, *pg_mock)
-		// }
+
 		logger.Debug("Before for loop pg request starts", zap.Any("pgReqs", len(pgRequests)))
 	}
 
@@ -120,14 +115,12 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 
@@ -184,27 +177,49 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			if bufStr != "" {
 
 				pg := NewBackend()
+				var msg pgproto3.FrontendMessage
+
 				if !isStartupPacket(buffer) && len(buffer) > 5 {
 					bufferCopy := buffer
-
 					for i := 0; i < len(bufferCopy); {
 						logger.Debug("Inside the if condition")
 						pg.BackendWrapper.MsgType = buffer[i]
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
-						msg, _ := pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)]) // arre yeh index leta hai length nhi
+						msg, err = pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
+						if err != nil && buffer[i] != 112 {
+							logger.Error("failed to translate the request message to readable", zap.Error(err))
+						}
 						if pg.BackendWrapper.MsgType == 'p' {
 							pg.BackendWrapper.PasswordMessage = *msg.(*pgproto3.PasswordMessage)
 						}
+
+						if pg.BackendWrapper.MsgType == 'P' {
+							pg.BackendWrapper.Parse = *msg.(*pgproto3.Parse)
+							pg.BackendWrapper.Parses = append(pg.BackendWrapper.Parses, pg.BackendWrapper.Parse)
+						}
+
+						if pg.BackendWrapper.MsgType == 'B' {
+							pg.BackendWrapper.Bind = *msg.(*pgproto3.Bind)
+							pg.BackendWrapper.Binds = append(pg.BackendWrapper.Binds, pg.BackendWrapper.Bind)
+						}
+
+						if pg.BackendWrapper.MsgType == 'E' {
+							pg.BackendWrapper.Execute = *msg.(*pgproto3.Execute)
+							pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
+						}
+
 						pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
+
 						i += (5 + pg.BackendWrapper.BodyLen)
 					}
 
 					pg_mock := &models.Backend{
-						PacketTypes:         pg.BackendWrapper.PacketTypes,
-						Identfier:           "ClientRequest",
-						Length:              uint32(len(requestBuffer)),
-						Payload:             bufStr,
+						PacketTypes: pg.BackendWrapper.PacketTypes,
+						Identfier:   "ClientRequest",
+						Length:      uint32(len(requestBuffer)),
+						// Payload:             bufStr,
 						Bind:                pg.BackendWrapper.Bind,
+						Binds:               pg.BackendWrapper.Binds,
 						PasswordMessage:     pg.BackendWrapper.PasswordMessage,
 						CancelRequest:       pg.BackendWrapper.CancelRequest,
 						Close:               pg.BackendWrapper.Close,
@@ -213,10 +228,12 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						CopyFail:            pg.BackendWrapper.CopyFail,
 						Describe:            pg.BackendWrapper.Describe,
 						Execute:             pg.BackendWrapper.Execute,
+						Executes:            pg.BackendWrapper.Executes,
 						Flush:               pg.BackendWrapper.Flush,
 						FunctionCall:        pg.BackendWrapper.FunctionCall,
 						GssEncRequest:       pg.BackendWrapper.GssEncRequest,
 						Parse:               pg.BackendWrapper.Parse,
+						Parses:              pg.BackendWrapper.Parses,
 						Query:               pg.BackendWrapper.Query,
 						SSlRequest:          pg.BackendWrapper.SSlRequest,
 						StartupMessage:      pg.BackendWrapper.StartupMessage,
@@ -227,13 +244,27 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						MsgType:             pg.BackendWrapper.MsgType,
 						AuthType:            pg.BackendWrapper.AuthType,
 					}
-					
+
 					pgRequests = append(pgRequests, *pg_mock)
+					// after_encoded, _ := PostgresDecoderBackend(*pg_mock)
+					// fmt.Println("AFTER NAME ...", pg.BackendWrapper.Parse.Name)
+					// fmt.Println("AFTER QUERY ... ", pg.BackendWrapper.Parse.Query)
+					// fmt.Println("AFTER ParameterOIDs... ", pg.BackendWrapper.Parse.ParameterOIDs)
+					// if len(after_encoded) != len(buffer) {
+					// 	s := findDuplicates(pg.BackendWrapper.PacketTypes)
+					// 	for _, v := range s {
+					// 		fmt.Printf("This is the repeated Header%s\t", v)
+					// 	}
+					// 	fmt.Println("Lengths are not same after encoding response for ", bufStr)
+					// 	fmt.Println("-----------------")
+
+					// }
 				}
-				if isStartupPacket(buffer){
+
+				if isStartupPacket(buffer) {
 					pg_mock := &models.Backend{
 						Identfier: "StartupRequest",
-						Payload: bufStr,
+						Payload:   bufStr,
 					}
 					pgRequests = append(pgRequests, *pg_mock)
 				}
@@ -251,35 +282,55 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 			if bufStr != "" {
 				pg := NewFrontend()
-				if !isStartupPacket(buffer) && len(buffer) > 5 {
+				if !isStartupPacket(buffer) && len(buffer) > 5 && bufStr != "Tg==" {
 					bufferCopy := buffer
 					// fmt.Println("bufferCopy is ", bufferCopy)
 					ps := make([]pgproto3.ParameterStatus, 0)
+					dataRows := []pgproto3.DataRow{}
 
 					for i := 0; i < len(bufferCopy); {
 						pg.FrontendWrapper.MsgType = buffer[i]
 						pg.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
-						_, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger) // arre yeh index leta hai length nhi
+						msg, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger) // arre yeh index leta hai length nhi
 						if err != nil {
 							logger.Error("failed to translate the response message to readable", zap.Error(err))
 						}
 
 						pg.FrontendWrapper.PacketTypes = append(pg.FrontendWrapper.PacketTypes, string(pg.FrontendWrapper.MsgType))
 						i += (5 + pg.FrontendWrapper.BodyLen)
-						ps = append(ps, pg.FrontendWrapper.ParameterStatus)
+						if pg.FrontendWrapper.ParameterStatus.Name != "" {
+							ps = append(ps, pg.FrontendWrapper.ParameterStatus)
+						}
+						if pg.FrontendWrapper.MsgType == 'C' {
+							pg.FrontendWrapper.CommandComplete = *msg.(*pgproto3.CommandComplete)
+							pg.FrontendWrapper.CommandCompletes = append(pg.FrontendWrapper.CommandCompletes, pg.FrontendWrapper.CommandComplete)
+						}
+						if pg.FrontendWrapper.DataRow.Values != nil {
+							// Create a new slice for each DataRow
+							valuesCopy := make([][]byte, len(pg.FrontendWrapper.DataRow.Values))
+							copy(valuesCopy, pg.FrontendWrapper.DataRow.Values)
+
+							row := pgproto3.DataRow{
+								Values: valuesCopy, // Use the copy of the values
+							}
+							// fmt.Println("row is ", row)
+							dataRows = append(dataRows, row)
+						}
 					}
 
-					if len(ps) != 0 {
-						ps = ps[1:]
+					if len(ps) > 0 {
 						pg.FrontendWrapper.ParameterStatusCombined = ps
+					}
+					if len(dataRows) > 0 {
+						pg.FrontendWrapper.DataRows = dataRows
 					}
 
 					// from here take the msg and append its readabable form to the pgResponses
 					pg_mock := &models.Frontend{
-						PacketTypes:                     pg.FrontendWrapper.PacketTypes,
-						Identfier:                       "ServerResponse",
-						Length:                          uint32(len(requestBuffer)),
-						Payload:                         bufStr,
+						PacketTypes: pg.FrontendWrapper.PacketTypes,
+						Identfier:   "ServerResponse",
+						Length:      uint32(len(requestBuffer)),
+						// Payload:                         bufStr,
 						AuthenticationOk:                pg.FrontendWrapper.AuthenticationOk,
 						AuthenticationCleartextPassword: pg.FrontendWrapper.AuthenticationCleartextPassword,
 						AuthenticationMD5Password:       pg.FrontendWrapper.AuthenticationMD5Password,
@@ -292,11 +343,13 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						BindComplete:                    pg.FrontendWrapper.BindComplete,
 						CloseComplete:                   pg.FrontendWrapper.CloseComplete,
 						CommandComplete:                 pg.FrontendWrapper.CommandComplete,
+						CommandCompletes:                pg.FrontendWrapper.CommandCompletes,
 						CopyData:                        pg.FrontendWrapper.CopyData,
 						CopyDone:                        pg.FrontendWrapper.CopyDone,
 						CopyInResponse:                  pg.FrontendWrapper.CopyInResponse,
 						CopyOutResponse:                 pg.FrontendWrapper.CopyOutResponse,
 						DataRow:                         pg.FrontendWrapper.DataRow,
+						DataRows:                        pg.FrontendWrapper.DataRows,
 						EmptyQueryResponse:              pg.FrontendWrapper.EmptyQueryResponse,
 						ErrorResponse:                   pg.FrontendWrapper.ErrorResponse,
 						FunctionCallResponse:            pg.FrontendWrapper.FunctionCallResponse,
@@ -311,14 +364,12 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						RowDescription:                  pg.FrontendWrapper.RowDescription,
 						MsgType:                         pg.FrontendWrapper.MsgType,
 						AuthType:                        pg.FrontendWrapper.AuthType,
-						// AuthMechanism: pg.AuthMechanism,
 					}
 					pgResponses = append(pgResponses, *pg_mock)
 				}
 
 				if bufStr == "Tg==" || len(buffer) <= 5 {
-					println("pg.FrontendWrapper.Payload is ", bufStr)
-					println("SSL packet response", string(buffer))
+
 					pg_mock := &models.Frontend{
 						Payload: bufStr,
 					}
@@ -359,7 +410,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	tcsMocks := h.GetTcsMocks()
 	// change auth to md5 instead of scram
 	// CheckValidEncode(tcsMocks, h, logger)
-
+	ChangeAuthToMD5(tcsMocks, h, logger)
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
@@ -399,15 +450,16 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		}
 
 		for _, pgResponse := range pgResponses {
-				encoded,err := PostgresDecoder(pgResponse.Payload)
-				// if len(pgResponse.PacketTypes) > 0 {
-				// 	println("pgResponse.Payload is ", pgResponse.Payload)
-				// 	encoded,err = PostgresDecoderFrontend(pgResponse)
-				// }
+			encoded, err := PostgresDecoder(pgResponse.Payload)
+			if len(pgResponse.PacketTypes) > 0 {
+				encoded, err = PostgresDecoderFrontend(pgResponse)
+			}
+
 			if err != nil {
 				logger.Error("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 				return err
 			}
+
 			_, err = clientConn.Write([]byte(encoded))
 			if err != nil {
 				logger.Error("failed to write request message to the client application", zap.Error(err))

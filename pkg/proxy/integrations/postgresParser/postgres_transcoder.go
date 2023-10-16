@@ -28,12 +28,9 @@ func NewFrontend() *FrontendWrapper {
 	return &FrontendWrapper{}
 }
 
-func checkScram(packet string, log *zap.Logger) bool {
-	encoded, err := PostgresDecoder(packet)
-	if err != nil {
-		log.Error("error in decoding packet", zap.Error(err))
-		return false
-	}
+func checkScram(encoded []byte, log *zap.Logger) bool {
+	// encoded, err := PostgresDecoder(packet)
+
 	// check if payload contains SCRAM-SHA-256
 	messageType := encoded[0]
 	log.Debug("Message Type: %c\n", zap.String("messageType", string(messageType)))
@@ -165,16 +162,15 @@ func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.Fr
 	}
 	// fmt.Println("msg--", msgBody)
 	err := msg.Decode(msgBody[5:])
-
-	if err != nil {
-		fmt.Println("Error from decoding request message ..", err)
+	if b.BackendWrapper.MsgType == 'P' {
+		*msg.(*pgproto3.Parse) = b.BackendWrapper.Parse
 	}
-
-	bits := msg.Encode([]byte{})
-	// println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
-	if len(bits) != len(msgBody) {
-		fmt.Println("Encoded Data doesn't match the original data ..")
-	}
+	
+	// bits := msg.Encode([]byte{})
+	// // println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
+	// if len(bits) != len(msgBody) {
+	// 	fmt.Println("Encoded Data doesn't match the original data ..")
+	// }
 
 	return msg, err
 }
@@ -246,7 +242,7 @@ func (f *FrontendWrapper) TranslateToReadableResponse(msgBody []byte, logger *za
 	if err != nil {
 		logger.Error("Error from decoding request message ..", zap.Error(err))
 	}
-	
+
 	bits := msg.Encode([]byte{})
 	// println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
 	if len(bits) != len(msgBody) {
