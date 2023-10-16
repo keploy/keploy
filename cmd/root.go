@@ -74,7 +74,6 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 
 	log = zapsentry.AttachCoreToLogger(core, log)
 
-
 	return log.With(zapsentry.NewScope())
 }
 
