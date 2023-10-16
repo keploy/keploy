@@ -112,15 +112,15 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 			abortStopHooksForcefully = true
 			loadedHooks.Stop(false)
 			//Call the telemetry events.
-			if resultForTele[0] != 0 || resultForTele[1] != 0{
-			tele.Testrun(resultForTele[0], resultForTele[1])
+			if resultForTele[0] != 0 || resultForTele[1] != 0 {
+				tele.Testrun(resultForTele[0], resultForTele[1])
 			}
 			ps.StopProxyServer()
 			exitCmd <- true
 		case <-abortStopHooksInterrupt:
 			//Call the telemetry events.
-			if resultForTele[0] != 0 || resultForTele[1] != 0{
-			tele.Testrun(resultForTele[0], resultForTele[1])
+			if resultForTele[0] != 0 || resultForTele[1] != 0 {
+				tele.Testrun(resultForTele[0], resultForTele[1])
 			}
 			return
 		}
@@ -209,15 +209,19 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", pid))
+
+	isApplicationStopped := false
 
 	defer func() {
 		if len(appCmd) == 0 && pid != 0 {
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
-			loadedHooks.StopUserApplication()
+			if !isApplicationStopped {
+				loadedHooks.StopUserApplication()
+			}
 		}
 	}()
 
@@ -232,9 +236,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				case hooks.ErrInterrupted:
 					t.logger.Info("keploy terminated user application")
 				case hooks.ErrCommandError:
-					t.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
 				case hooks.ErrUnExpected:
-					t.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
+					t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
 				default:
 					t.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
@@ -291,6 +294,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	for _, tc := range tcs {
 		select {
 		case err = <-errChan:
+			isApplicationStopped = true
 			switch err {
 			case hooks.ErrInterrupted:
 				exitLoop = true
