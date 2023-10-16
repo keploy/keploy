@@ -23,7 +23,6 @@ func attachLogFileToSentry(logFilePath string) {
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetExtra("logfile", string(content))
 	})
-	fmt.Println("Sent the event to sentry.")
 	sentry.Flush(time.Second * 5)
 }
 

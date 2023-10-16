@@ -50,6 +50,7 @@ func getKeployVersion() string {
 	err = tagIter.ForEach(func(tagRef *plumbing.Reference) error {
 		tagName := tagRef.Name().Short()
 		tagVersion, err := v.NewVersion(tagName)
+		fmt.Printf("This is the name%s and this is the tag version %s\n", tagName, tagVersion)
 		if err == nil {
 			if latestTagVersion == nil || latestTagVersion.LessThan(tagVersion) {
 				latestTagVersion = tagVersion
