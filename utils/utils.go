@@ -28,7 +28,7 @@ func attachLogFileToSentry(logFilePath string) {
 
 func HandlePanic() {
 	if r := recover(); r != nil {
-		attachLogFileToSentry("/tmp/keploy-logs.txt")
+		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 		sentry.Flush(time.Second * 2)
 	}
