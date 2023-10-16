@@ -45,11 +45,6 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	var ps *proxy.ProxySet
 
-	var proxyPortNumber proxy.Option;
-	proxyPortNumber.Port = proxyPort;
-
-
-
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
@@ -87,7 +82,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxyPortNumber, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
+		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map

@@ -50,11 +50,10 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		return
 	}
 
-	var proxyPortNumber proxy.Option
-	proxyPortNumber.Port = proxyPort
+
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxyPortNumber, "", "", pid, "", []uint{}, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
