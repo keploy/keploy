@@ -198,8 +198,8 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetData, err = decodeMYSQLEOF(data)
 		lastCommand = 0xFE
 	case data[0] == 0x02: // New packet type
-		packetType = "NewPacketType2"
-		packetData, err = decodePacketType2(data)
+		packetType = "AUTH_MORE_DATA"
+		packetData, err = decodeAuthMoreData(data)
 		lastCommand = 0x02
 	case data[0] == 0x18: // SEND_LONG_DATA Packet
 		packetType = "COM_STMT_SEND_LONG_DATA"

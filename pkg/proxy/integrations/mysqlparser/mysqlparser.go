@@ -2,6 +2,7 @@ package mysqlparser
 
 import (
 	"encoding/binary"
+	"fmt"
 	"log"
 	"net"
 	"time"
@@ -109,6 +110,14 @@ func encodeOutgoingMySql(clientConnId int, destConnId int64, requestBuffer []byt
 				logger.Error("failed to decode MySQL packet from OK packet", zap.Error(err))
 				return
 			}
+			mysqlResponses = append(mysqlResponses, models.MySQLResponse{
+				Header: &models.MySQLPacketHeader{
+					PacketLength: responseHeader2.PayloadLength,
+					PacketNumber: responseHeader2.SequenceID,
+					PacketType:   oprResponse2,
+				},
+				Message: mysqlResp2,
+			})
 			var pluginType string
 
 			if handshakeResp, ok := mysqlResp2.(*HandshakeResponseOk); ok {
@@ -215,14 +224,6 @@ func encodeOutgoingMySql(clientConnId int, destConnId int64, requestBuffer []byt
 					},
 				})
 			}
-			mysqlResponses = append(mysqlResponses, models.MySQLResponse{
-				Header: &models.MySQLPacketHeader{
-					PacketLength: responseHeader2.PayloadLength,
-					PacketNumber: responseHeader2.SequenceID,
-					PacketType:   oprResponse2,
-				},
-				Message: mysqlResp2,
-			})
 			recordMySQLMessage(h, mysqlRequests, mysqlResponses, oprRequest, oprResponse2, "config")
 			mysqlRequests = []models.MySQLRequest{}
 			mysqlResponses = []models.MySQLResponse{}
@@ -251,25 +252,42 @@ func decodeOutgoingMySQL(clientConnId int, destConnId int64, requestBuffer []byt
 		)
 		logger.Debug("MySQL requests", zap.Any("mysqlRequests", mysqlRequests))
 		if firstLoop || doHandshakeAgain {
-			packet := configMocks[configResponseRead].Spec.MySqlResponses[0].Message
-			opr := configMocks[configResponseRead].Spec.MySqlResponses[0].Header.PacketType
+			packet := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
+			opr := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
 			binaryPacket, err := encodeToBinary(&packet, opr, 0)
 			if err != nil {
 				logger.Error("Failed to encode to binary", zap.Error(err))
 				return
 			}
 			_, err = clientConn.Write(binaryPacket)
+			configResponseRead++
 			requestBuffer, err = util.ReadBytes(clientConn)
 			// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
-			handshakeResponseFromConfig := configMocks[configResponseRead].Spec.MySqlResponses[1].Message
-			opr2 := configMocks[configResponseRead].Spec.MySqlResponses[1].Header.PacketType
+			handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
+			opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
 			handshakeResponseBinary, err := encodeToBinary(&handshakeResponseFromConfig, opr2, 1)
 			// _, err = destConn.Write(requestBuffer)
 			//fmt.Println(oprRequest, requestHeader, mysqlRequest, handshakeResponseFromConfig, err1)
 			_, err = clientConn.Write(handshakeResponseBinary)
 
-			if doHandshakeAgain {
+			if doHandshakeAgain && (configResponseRead == len(configMocks[0].Spec.MySqlResponses)) {
 				doHandshakeAgain = false
+			} else {
+				configResponseRead++
+				requestBuffer, err = util.ReadBytes(clientConn)
+				// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
+				handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
+				opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
+				handshakeResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, opr2, 1)
+				_, err = clientConn.Write(handshakeResponseBinary)
+				configResponseRead++
+				requestBuffer, err = util.ReadBytes(clientConn)
+				// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
+				handshakeResponseFromConfigNext := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
+				opr3 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
+				handshakeResponseBinary2, _ := encodeToBinary(&handshakeResponseFromConfigNext, opr3, 6)
+				fmt.Printf(string(handshakeResponseBinary2))
+				_, err = clientConn.Write([]byte("\a\x00\x00\x06\x00\x00\x00\x02\x00\x00\x00"))
 			}
 			if err != nil {
 				logger.Error("failed to write query response to mysql client", zap.Error(err))
