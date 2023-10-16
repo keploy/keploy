@@ -52,8 +52,11 @@ func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mock
 		return
 	}
 
+	var proxyPortNumber proxy.Option;
+	proxyPortNumber.Port = proxyPort;
+
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxyPort, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
