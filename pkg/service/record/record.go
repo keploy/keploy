@@ -52,6 +52,9 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks := hooks.NewHook(ys, routineId, r.logger)
 
+	var proxyPortNumber proxy.Option;
+	proxyPortNumber.Port = proxyPort;
+
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
@@ -76,7 +79,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// start the BootProxy
-		ps = proxy.BootProxy(r.logger, proxyPort, proxy.Option{}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
+		ps = proxy.BootProxy(r.logger, proxyPortNumber, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
 	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map

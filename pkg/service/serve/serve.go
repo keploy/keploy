@@ -76,9 +76,11 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	if err := loadedHooks.SendKeployServerPort(port); err != nil {
 		return
 	}
+	proxyPortNumber proxy.Option
+	proxyPortNumber.Port = proxyPort
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxyPort, proxy.Option{}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
