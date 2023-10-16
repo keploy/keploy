@@ -46,14 +46,15 @@ type Hook struct {
 
 	platform.TestCaseDB
 
-	logger        *zap.Logger
-	proxyPort     uint32
-	tcsMocks      []*models.Mock
-	configMocks   []*models.Mock
-	mu            *sync.Mutex
-	mutex         sync.RWMutex
-	userAppCmd    *exec.Cmd
-	mainRoutineId int
+	logger                   *zap.Logger
+	proxyPort                uint32
+	tcsMocks                 []*models.Mock
+	configMocks              []*models.Mock
+	mu                       *sync.Mutex
+	mutex                    sync.RWMutex
+	userAppCmd               *exec.Cmd
+	userAppShutdownInitiated bool
+	mainRoutineId            int
 
 	// ebpf objects and events
 	stopper  chan os.Signal
@@ -324,6 +325,8 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
+	h.logger.Info("keploy has initiated the shutdown of the user application.")
+	h.userAppShutdownInitiated = true
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
