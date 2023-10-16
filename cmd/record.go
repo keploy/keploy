@@ -16,13 +16,13 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 	recorder := record.NewRecorder(logger)
 	return &Record{
 		recorder: recorder,
-		logger:   logger,
+		Logger:   logger,
 	}
 }
 
 type Record struct {
 	recorder record.Recorder
-	logger   *zap.Logger
+	Logger   *zap.Logger
 }
 
 func (r *Record) GetCmd() *cobra.Command {
@@ -36,7 +36,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				r.logger.Error("failed to read the testcase path input")
+				r.Logger.Error("failed to read the testcase path input")
 				return err
 			}
 
@@ -44,13 +44,13 @@ func (r *Record) GetCmd() *cobra.Command {
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
 				if err != nil {
-					r.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
+					r.Logger.Error("failed to get the absolute path from relative path", zap.Error(err))
 				}
 				path = absPath
 			} else if len(path) == 0 { // if user doesn't provide any path
 				cdirPath, err := os.Getwd()
 				if err != nil {
-					r.logger.Error("failed to get the path of current directory", zap.Error(err))
+					r.Logger.Error("failed to get the path of current directory", zap.Error(err))
 				}
 				path = cdirPath
 			} else {
@@ -65,7 +65,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appCmd, err := cmd.Flags().GetString("command")
 
 			if err != nil {
-				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				r.Logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -79,7 +79,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appContainer, err := cmd.Flags().GetString("containerName")
 
 			if err != nil {
-				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				r.Logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 			var hasContainerName bool
 			if isDockerCmd {
@@ -98,31 +98,31 @@ func (r *Record) GetCmd() *cobra.Command {
 			networkName, err := cmd.Flags().GetString("networkName")
 
 			if err != nil {
-				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				r.Logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
-				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				r.Logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
 
-			r.logger.Info("", zap.Any("keploy test and mock path", path))
+			r.Logger.Info("", zap.Any("keploy test and mock path", path))
 
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
 			if err != nil {
-				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				r.Logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
 			// for _, v := range ports {
 
 			// }
 
-			r.logger.Debug("the ports are", zap.Any("ports", ports))
+			r.Logger.Debug("the ports are", zap.Any("ports", ports))
 			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
 			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay, ports)
 			return nil
-			// server.Server(version, kServices, conf, logger)
+			// server.Server(version, kServices, conf, Logger)
 			// server.Server(version)
 		},
 	}
