@@ -67,8 +67,6 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
-	proxyPortNumber proxy.Option;
-	proxyPortNumber.Port = proxyPort;
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
