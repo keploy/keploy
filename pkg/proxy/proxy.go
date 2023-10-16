@@ -36,7 +36,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
-	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
+	// "go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
@@ -49,7 +49,6 @@ var Emoji = "\U0001F430" + " Keploy:"
 // idCounter is used to generate random ID for each request
 var idCounter int64 = -1
 
-
 func getNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
@@ -59,17 +58,7 @@ type DepInterface interface {
 	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn)
 }
 
-
 var ParsersMap map[string]DepInterface
-
-func init(){
-		//Register all the parsers in the map.
-		Register("grpc", grpcparser.NewGrpcParser(logger, h))
-		Register("http", httpparser.NewHttpParser(logger, h))
-		Register("mongo", mongoparser.NewMongoParser(logger, h))
-		Register("postgres", postgresparser.NewPostgresParser(logger, h))
-}
-
 
 type ProxySet struct {
 	IP4               uint32
@@ -351,6 +340,10 @@ func Register(parserName string, parser DepInterface) {
 
 // BootProxy starts proxy server on the idle local port, Default:16789
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
+	//Register all the parsers in the map.
+	Register("grpc", grpcparser.NewGrpcParser(logger, h))
+	Register("mongo", mongoparser.NewMongoParser(logger, h))
+	Register("postgres", postgresparser.NewPostgresParser(logger, h))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
@@ -440,7 +433,6 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		PassThroughPorts:  passThroughPorts,
 		hook:              h,
 	}
-
 
 	//setting the proxy port field in hook
 	proxySet.hook.SetProxyPort(opt.Port)
@@ -1026,16 +1018,15 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	genericCheck := true
 	//Checking for all the parsers.
 	for _, parser := range ParsersMap {
-		if parser.OutgoingType(buffer){
+		if parser.OutgoingType(buffer) {
 			parser.ProcessOutgoing(buffer, conn, dst)
 			genericCheck = false
 		}
 	}
-	if genericCheck{
+	if genericCheck {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
 	}
-
 
 	// Closing the user client connection
 	conn.Close()
