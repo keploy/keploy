@@ -28,7 +28,7 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 	var resbuffer []byte
 	// list of packets available in the buffer
 	packets := response.PacketTypes
-	ps := 0
+	var cc, dtr, ps int = 0, 0, 0
 	for _, packet := range packets {
 		var msg pgproto3.BackendMessage
 
@@ -49,16 +49,18 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 			msg = &pgproto3.CopyDone{}
 		case string('C'):
 			msg = &pgproto3.CommandComplete{
-				CommandTag: response.CommandComplete.CommandTag,
+				CommandTag: response.CommandCompletes[cc].CommandTag,
 			}
+			cc++
 		case string('d'):
 			msg = &pgproto3.CopyData{
 				Data: response.CopyData.Data,
 			}
 		case string('D'):
 			msg = &pgproto3.DataRow{
-				Values: response.DataRow.Values,
+				Values: response.DataRows[dtr].Values,
 			}
+			dtr++
 		case string('E'):
 			msg = &pgproto3.ErrorResponse{
 				Severity:         response.ErrorResponse.Severity,
@@ -80,7 +82,6 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 				Routine:          response.ErrorResponse.Routine,
 			}
 		case string('G'):
-
 			msg = &pgproto3.CopyInResponse{
 				OverallFormat:     response.CopyInResponse.OverallFormat,
 				ColumnFormatCodes: response.CopyInResponse.ColumnFormatCodes,
@@ -121,7 +122,6 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 			}
 
 		case string('R'):
-
 			switch response.AuthType {
 			case AuthTypeOk:
 				msg = &pgproto3.AuthenticationOk{}
@@ -182,6 +182,7 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 		}
 
 		encoded := msg.Encode([]byte{})
+		// fmt.Println("Encoded packet ", packet, " is ", i, "-----", encoded)
 		resbuffer = append(resbuffer, encoded...)
 	}
 	return resbuffer, nil
@@ -193,6 +194,9 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 
 	var reqbuffer []byte
 	// list of packets available in the buffer
+	b := 0
+	p := 0
+	e := 0
 	packets := request.PacketTypes
 	for _, packet := range packets {
 		// isme se encode ek ek
@@ -200,31 +204,29 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 		switch packet {
 		case string('B'):
 			msg = &pgproto3.Bind{
-				DestinationPortal:    request.Bind.DestinationPortal,
-				PreparedStatement:    request.Bind.PreparedStatement,
-				ParameterFormatCodes: request.Bind.ParameterFormatCodes,
-				Parameters:           request.Bind.Parameters,
-				ResultFormatCodes:    request.Bind.ResultFormatCodes,
+				DestinationPortal:    request.Binds[b].DestinationPortal,
+				PreparedStatement:    request.Binds[b].PreparedStatement,
+				ParameterFormatCodes: request.Binds[b].ParameterFormatCodes,
+				Parameters:           request.Binds[b].Parameters,
+				ResultFormatCodes:    request.Binds[b].ResultFormatCodes,
 			}
-			// *msg.(*pgproto3.Bind) = request.Bind
+			b++
 		case string('C'):
-			// *msg.(*pgproto3.Close) = request.Close
 			msg = &pgproto3.Close{
 				Object_Type: request.Close.Object_Type,
 				Name:        request.Close.Name,
 			}
 		case string('D'):
-			// *msg.(*pgproto3.Describe) = request.Describe
 			msg = &pgproto3.Describe{
 				ObjectType: request.Describe.ObjectType,
 				Name:       request.Describe.Name,
 			}
 		case string('E'):
-			// *msg.(*pgproto3.Execute) = request.Execute
 			msg = &pgproto3.Execute{
-				Portal:  request.Execute.Portal,
-				MaxRows: request.Execute.MaxRows,
+				Portal:  request.Executes[e].Portal,
+				MaxRows: request.Executes[e].MaxRows,
 			}
+			e++
 		case string('F'):
 			// *msg.(*pgproto3.Flush) = request.Flush
 			msg = &pgproto3.Flush{}
@@ -237,25 +239,22 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 				ResultFormatCode: request.FunctionCall.ResultFormatCode,
 			}
 		case string('d'):
-			// *msg.(*pgproto3.CopyData) = request.CopyData
 			msg = &pgproto3.CopyData{
 				Data: request.CopyData.Data,
 			}
 		case string('c'):
-			// *msg.(*pgproto3.CopyDone) = request.CopyDone
 			msg = &pgproto3.CopyDone{}
 		case string('H'):
-			// *msg.(*pgproto3.CopyFail) = request.CopyFail
 			msg = &pgproto3.CopyFail{
 				Message: request.CopyFail.Message,
 			}
 		case string('P'):
-			// *msg.(*pgproto3.Parse) = request.Parse
 			msg = &pgproto3.Parse{
-				Name:          request.Parse.Name,
-				Query:         request.Parse.Query,
-				ParameterOIDs: request.Parse.ParameterOIDs,
+				Name:          request.Parses[p].Name,
+				Query:         request.Parses[p].Query,
+				ParameterOIDs: request.Parses[p].ParameterOIDs,
 			}
+			p++
 		case string('p'):
 			switch request.AuthType {
 			case pgproto3.AuthTypeSASL:
@@ -286,9 +285,7 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 			msg = &pgproto3.Query{
 				String: request.Query.String,
 			}
-
 		case string('S'):
-			// *msg.(*pgproto3.Sync) = request.Sync
 			msg = &pgproto3.Sync{}
 		case string('X'):
 			// *msg.(*pgproto3.Terminate) = request.Terminate
@@ -322,41 +319,6 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 	}
 	return k
 }
-
-// func matchingPg(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
-
-// 	for idx, mock := range tcsMocks {
-// 		if mock == nil {
-// 			continue
-// 		}
-// 		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
-// 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
-// 			for requestIndex, reqBuff := range requestBuffers {
-// 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-// 				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-
-// 				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
-// 					// fmt.Println("matched in first loop")
-// 					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-// 					h.SetTcsMocks(tcsMocks)
-// 					return true, mock.Spec.GenericResponses
-// 				}
-// 			}
-// 		}
-// 	}
-
-// 	idx := findBinaryStreamMatch(tcsMocks, requestBuffers, h)
-
-// 	if idx != -1 {
-// 		// fmt.Println("matched in first loop")
-// 		bestMatch := tcsMocks[idx].Spec.GenericResponses
-// 		// println("Lenght of tcsMocks", len(tcsMocks), " BestMatch -->", tcsMocks[idx].Spec.GenericRequests[0].Message[0].Data)
-// 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-// 		h.SetTcsMocks(tcsMocks)
-// 		return true, bestMatch
-// 	}
-// 	return false, nil
-// }
 
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
@@ -421,31 +383,89 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	// isScram := false
 	for _, mock := range tcsMocks {
 		// if len(mock.Spec.GenericRequests) == len(requestBuffers) {
-		for requestIndex, reqBuff := range mock.Spec.GenericRequests {
-			encode, _ := PostgresDecoder(reqBuff.Message[0].Data)
+		for requestIndex, reqBuff := range mock.Spec.PostgresRequests {
+			encode, _ := PostgresDecoderBackend(reqBuff)
 
-			if isStartupPacket(encode) || checkScram(mock.Spec.GenericResponses[requestIndex].Message[0].Data, log) {
+			if reqBuff.Identfier == "StartupRequest" {
 				log.Debug("CHANGING TO MD5 for Response")
-				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
+				// mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
 				// isScram = true
+				// reqBuff.AuthType = 5
+				mock.Spec.PostgresResponses[requestIndex].AuthType = 5
 				continue
 			}
 			//just change it to more robust and after that write decoode encode logic for all
 			if encode[0] == 'p' {
 				log.Debug("CHANGING TO MD5 for Request and Response")
-				mock.Spec.GenericRequests[requestIndex].Message[0].Data = "cAAAAChtZDUzNTc3MWY3N2YxMDA4YmEzMDRkYjlkMmJmODM3YmZlOQA="
-				mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADJzZXJ2ZXJfdmVyc2lvbgAxMy41IChEZWJpYW4gMTMuNS0xLnBnZGcxMTArMSkAUwAAACNzZXNzaW9uX2F1dGhvcml6YXRpb24AcG9zdGdyZXMAUwAAACNzdGFuZGFyZF9jb25mb3JtaW5nX3N0cmluZ3MAb24AUwAAABVUaW1lWm9uZQBFdGMvVVRDAEsAAAAMAAAAX09sZl9aAAAABUk="
+				// mock.Spec.GenericRequests[requestIndex].Message[0].Data = "cAAAAChtZDUzNTc3MWY3N2YxMDA4YmEzMDRkYjlkMmJmODM3YmZlOQA="
+				// mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAgAAAAAUwAAABZhcHBsaWNhdGlvbl9uYW1lAABTAAAAGWNsaWVudF9lbmNvZGluZwBVVEY4AFMAAAAXRGF0ZVN0eWxlAElTTywgTURZAFMAAAAZaW50ZWdlcl9kYXRldGltZXMAb24AUwAAABtJbnRlcnZhbFN0eWxlAHBvc3RncmVzAFMAAAAUaXNfc3VwZXJ1c2VyAG9uAFMAAAAZc2VydmVyX2VuY29kaW5nAFVURjgAUwAAADJzZXJ2ZXJfdmVyc2lvbgAxMy41IChEZWJpYW4gMTMuNS0xLnBnZGcxMTArMSkAUwAAACNzZXNzaW9uX2F1dGhvcml6YXRpb24AcG9zdGdyZXMAUwAAACNzdGFuZGFyZF9jb25mb3JtaW5nX3N0cmluZ3MAb24AUwAAABVUaW1lWm9uZQBFdGMvVVRDAEsAAAAMAAAAX09sZl9aAAAABUk="
+				mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
+
+				mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
+				mock.Spec.PostgresResponses[requestIndex].AuthType = 0
+				mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
+					ProcessID: 2613,
+					SecretKey: 824670820,
+				}
+				mock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
+				mock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
+					{
+						Name:  "application_name",
+						Value: "",
+					},
+					{
+						Name:  "client_encoding",
+						Value: "UTF8",
+					},
+					{
+						Name:  "DateStyle",
+						Value: "ISO, MDY",
+					},
+					{
+						Name:  "integer_datetimes",
+						Value: "on",
+					},
+					{
+						Name:  "IntervalStyle",
+						Value: "postgres",
+					},
+					{
+						Name:  "is_superuser",
+						Value: "UTF8",
+					},
+					{
+						Name:  "server_version",
+						Value: "10.5 (Debian 10.5-2.pgdg90+1)",
+					},
+					{
+						Name:  "session_authorization",
+						Value: "keploy-user",
+					},
+					{
+						Name:  "standard_conforming_strings",
+						Value: "on",
+					},
+					{
+						Name:  "TimeZone",
+						Value: "Etc/UTC",
+					},
+					{
+						Name:  "TimeZone",
+						Value: "Etc/UTC",
+					},
+				}
 				continue
 			}
 		}
 	}
+
 	h.SetTcsMocks(tcsMocks)
 }
 
 func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	for _, mock := range tcsMocks {
 		for _, reqBuff := range mock.Spec.PostgresRequests {
-			encode, err:= PostgresDecoderBackend(reqBuff)
+			encode, err := PostgresDecoderBackend(reqBuff)
 			if err != nil {
 				fmt.Println("Error in decoding")
 			}
@@ -494,11 +514,20 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 		if mock == nil {
 			continue
 		}
+
 		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
 				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+				if bufStr == "AAAACATSFi8=" {
+					ssl := models.Frontend{
+						Payload: "Tg==",
+					}
+					println("Matched SSL")
+					return true, []models.Frontend{ssl}
+				}
+
 				if string(encoded) == string(reqBuff) || bufStr == mock.Spec.PostgresRequests[requestIndex].Payload {
 					// fmt.Println("matched in first loop")
 					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
