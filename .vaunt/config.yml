@@ -26,4 +26,13 @@ achievements:
         - trigger:
             actor: author
             action: issue
-            condition: closed & labels in ['Documentation']
+            condition: closed = true & labels in ['Documentation']
+  - achievement:
+      name: Closer
+      icon: https://raw.githubusercontent.com/keploy/keploy/main/.vaunt/badge/closer.png
+      description: Only closers get coffee!!
+      triggers:
+        - trigger:
+            actor: assignees
+            action: issue
+            condition: closed = true

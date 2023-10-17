@@ -39,7 +39,6 @@ func checkScram(encoded []byte, log *zap.Logger) bool {
 	}
 	// Print the message payload (for simplicity, the payload is printed as a string)
 	payload := string(encoded[5:])
-	// fmt.Printf("Payload: %s\n", payload)
 	if messageType == 'R' {
 		if strings.Contains(payload, "SCRAM-SHA") {
 			log.Debug("scram packet")
@@ -260,6 +259,7 @@ func (f *FrontendWrapper) findAuthenticationMessageType(src []byte) (pgproto3.Ba
 	authType, err := parseAuthType(src)
 	if err != nil {
 		return nil, err
+
 	}
 
 	f.FrontendWrapper.AuthType = authType
@@ -291,6 +291,7 @@ func (f *FrontendWrapper) findAuthenticationMessageType(src []byte) (pgproto3.Ba
 	default:
 		return nil, fmt.Errorf("unknown authentication type: %d", f.FrontendWrapper.AuthType)
 	}
+
 }
 
 // GetAuthType returns the authType used in the current state of the frontend.
