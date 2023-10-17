@@ -112,6 +112,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			Requests:  requests,
 			Response:  responses,
 			CreatedAt: mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 
 		err := yamlDoc.Spec.Encode(mongoSpec)
@@ -299,6 +301,8 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 	mockSpec := models.MockSpec{
 		Metadata: yamlSpec.Metadata,
 		Created:  yamlSpec.CreatedAt,
+		ReqTimestampMock: yamlSpec.ReqTimestampMock,
+		ResTimestampMock: yamlSpec.ResTimestampMock,
 	}
 
 	// mongo request

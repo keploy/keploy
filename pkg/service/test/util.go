@@ -237,3 +237,17 @@ func Contains(elems []string, v string) bool {
 	}
 	return false
 }
+
+// Filter the mocks based on req and res timestamp of test
+func filterTcsMocks(tc *models.TestCase, m []*models.Mock) []*models.Mock {
+	filteredMocks := make([]*models.Mock, 0)
+
+	for _, mock := range m {
+		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
+		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
+			filteredMocks = append(filteredMocks, mock)
+		}
+	}
+
+	return filteredMocks
+}
