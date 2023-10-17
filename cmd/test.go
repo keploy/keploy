@@ -57,9 +57,6 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			path += "/keploy"
 
-			// tcsPath := path + "/tests"
-			// mockPath := path + "/mocks"
-
 			testReportPath := path + "/testReports"
 
 			appCmd, err := cmd.Flags().GetString("command")
@@ -69,7 +66,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				}
 				fmt.Println("Example usage:\n", cmd.Example, "\n")
 
@@ -90,7 +87,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag")
-					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6`)
+					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag")
 				}
 			}
@@ -98,6 +95,12 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if err != nil {
 				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+			}
+
+			testSets, err := cmd.Flags().GetStringSlice("testsets")
+
+			if err != nil {
+				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
@@ -108,7 +111,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			if delay <= 5 {
 				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName --rm myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				} else {
 					fmt.Println("Example usage:\n", cmd.Example, "\n")
 				}
@@ -126,28 +129,31 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
-			// for _, v := range ports {
 
-			// }
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				t.logger.Error("failed to read the proxyport")
+				return err
+			}
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, testReportPath, appCmd, appContainer, networkName, delay, ports, apiTimeout)
+			t.tester.Test(path, proxyPort, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout)
 			return nil
 		},
 	}
 
-	// testCmd.Flags().Uint32("pid", 0, "Process id on which your application is running.")
-	// testCmd.MarkFlagRequired("pid")
-
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 
+	testCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
+
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
-	// testCmd.MarkFlagRequired("c")
+
+	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run")
+	
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
-	// recordCmd.MarkFlagRequired("networkName")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")

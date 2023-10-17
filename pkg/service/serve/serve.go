@@ -19,8 +19,11 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/serve/graph"
 	"go.keploy.io/server/pkg/service/test"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -41,7 +44,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64) {
+func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64) {
 
 	if port == 0 {
 		port = defaultPort
@@ -51,7 +54,10 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
-	ys := yaml.NewYamlStore("", "", "", "", s.logger)
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	tele.Ping(false)
+	ys := yaml.NewYamlStore("", "", "", "", s.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
@@ -60,8 +66,9 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
+	ctx := context.Background()
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks("", "", pid); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
 		return
 	}
 
@@ -71,11 +78,9 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, lang, passThorughPorts, loadedHooks)
+	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
-	// ps.SetHook(loadedHooks)
-
 	// Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
@@ -112,7 +117,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer loadedHooks.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		log.Printf(Emoji+"connect to http://localhost:%d/ for GraphQL playground", port)
 		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf(Emoji+"listen: %s\n", err)
@@ -122,7 +127,6 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
-	// signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	// Block until we receive one
@@ -138,7 +142,7 @@ func (s *server) Serve(path, testReportPath string, Delay uint64, pid, port uint
 	}
 
 	// Shutdown other resources
-	loadedHooks.Stop(true, nil)
+	loadedHooks.Stop(true)
 	ps.StopProxyServer()
 
 	close(shutdown) // If you have other goroutines that should listen for this, you can use this channel to notify them.

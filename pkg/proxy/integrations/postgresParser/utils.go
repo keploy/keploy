@@ -2,6 +2,7 @@ package postgresparser
 
 import (
 	"encoding/base64"
+
 	"errors"
 	"fmt"
 
@@ -16,10 +17,8 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		// fmt.Println(Emoji+"failed to decode the data", err)
 		return nil, err
 	}
-	// println("Decoded data is :", string(data))
 	return data, nil
 }
 
@@ -304,6 +303,7 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 	return reqbuffer, nil
 }
 
+
 func PostgresEncoder(buffer []byte) string {
 	// encode the buffer to base 64 string ..
 	encoded := base64.StdEncoding.EncodeToString(buffer)
@@ -320,6 +320,7 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 	return k
 }
 
+
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
 	mxSim := -1.0
@@ -327,15 +328,16 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 	sameHeader := -1
 	// add condition for header match that if mxIdx = -1 then return just matched header
 	for idx, mock := range tcsMocks {
+
 		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+
 				k := AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := CreateShingles(encoded, k)
 				shingles2 := CreateShingles(reqBuff, k)
 				similarity := JaccardSimilarity(shingles1, shingles2)
-				// fmt.Printf("Jaccard Similarity: %f\n", similarity)
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx

@@ -1,6 +1,7 @@
 package genericparser
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 
@@ -15,13 +16,14 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
-func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	case models.MODE_OFF:
@@ -86,7 +88,10 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			// continue
 		}
 		for _, genericResponse := range genericResponses {
-			encoded, _ := PostgresDecoder(genericResponse.Message[0].Data)
+			encoded := []byte(genericResponse.Message[0].Data)
+			if genericResponse.Message[0].Type != models.String {
+				encoded, _ = PostgresDecoder(genericResponse.Message[0].Data)
+			}
 			_, err := clientConn.Write([]byte(encoded))
 			if err != nil {
 				logger.Error("failed to write request message to the client application", zap.Error(err))
@@ -116,24 +121,26 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	}
 }
 
-func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	// destinationWriteChannel := make(chan []byte)
 	// clientWriteChannel := make(chan []byte)
 	// errChannel := make(chan error)
 	// checkInitialRequest := true
 	genericRequests := []models.GenericPayload{}
 	// isFirstRequest := true
-	// bufStr := string(requestBuffer)
-	// if !IsAsciiPrintable(bufStr) {
-	bufStr := base64.StdEncoding.EncodeToString(requestBuffer)
-	// }
+	bufStr := string(requestBuffer)
+	dataType := models.String
+	if !IsAsciiPrintable(string(requestBuffer)) {
+		bufStr = base64.StdEncoding.EncodeToString(requestBuffer)
+		dataType = "binary"
+	}
 	if bufStr != "" {
 
 		genericRequests = append(genericRequests, models.GenericPayload{
 			Origin: models.FromClient,
 			Message: []models.OutputBinary{
 				{
-					Type: "binary",
+					Type: dataType,
 					Data: bufStr,
 				},
 			},
@@ -153,14 +160,14 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 
@@ -185,7 +192,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -210,12 +217,18 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}
 
-			bufStr := base64.StdEncoding.EncodeToString(buffer)
+			bufStr := string(buffer)
+			buffrDataType := models.String
+			if !IsAsciiPrintable(string(buffer)) {
+				bufStr = base64.StdEncoding.EncodeToString(buffer)
+				buffrDataType = "binary"
+			}
+
 			// }
 			if bufStr != "" {
 
@@ -223,7 +236,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					Origin: models.FromClient,
 					Message: []models.OutputBinary{
 						{
-							Type: "binary",
+							Type: buffrDataType,
 							Data: bufStr,
 						},
 					},
@@ -239,7 +252,12 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				return err
 			}
 
-			bufStr := base64.StdEncoding.EncodeToString(buffer)
+			bufStr := string(buffer)
+			buffrDataType := models.String
+			if !IsAsciiPrintable(string(buffer)) {
+				bufStr = base64.StdEncoding.EncodeToString(buffer)
+				buffrDataType = "binary"
+			}
 			// }
 			if bufStr != "" {
 
@@ -247,7 +265,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					Origin: models.FromServer,
 					Message: []models.OutputBinary{
 						{
-							Type: "binary",
+							Type: buffrDataType,
 							Data: bufStr,
 						},
 					},

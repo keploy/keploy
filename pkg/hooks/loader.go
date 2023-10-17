@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -44,14 +46,15 @@ type Hook struct {
 
 	platform.TestCaseDB
 
-	logger        *zap.Logger
-	proxyPort     uint32
-	tcsMocks      []*models.Mock
-	configMocks   []*models.Mock
-	mu            *sync.Mutex
-	mutex         sync.RWMutex
-	userAppCmd    *exec.Cmd
-	mainRoutineId int
+	logger                   *zap.Logger
+	proxyPort                uint32
+	tcsMocks                 []*models.Mock
+	configMocks              []*models.Mock
+	mu                       *sync.Mutex
+	mutex                    sync.RWMutex
+	userAppCmd               *exec.Cmd
+	userAppShutdownInitiated bool
+	mainRoutineId            int
 
 	// ebpf objects and events
 	stopper  chan os.Signal
@@ -97,8 +100,7 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hoo
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
 	}
 	return &Hook{
-		logger: logger,
-		// db:          db,
+		logger:        logger,
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
@@ -122,11 +124,10 @@ func (h *Hook) GetDepsSize() int {
 	return size
 }
 
-func (h *Hook) AppendMocks(m *models.Mock) error {
+func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// h.tcsMocks = append(h.tcsMocks, m)
-	err := h.TestCaseDB.WriteMock(m)
+	err := h.TestCaseDB.WriteMock(m, ctx)
 	if err != nil {
 		return err
 	}
@@ -135,14 +136,12 @@ func (h *Hook) AppendMocks(m *models.Mock) error {
 func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.mu.Lock()
 	h.tcsMocks = m
-	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
 	defer h.mu.Unlock()
 }
 
 func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.mu.Lock()
 	h.configMocks = m
-	// fmt.Println("tcsMocks are set after aq ", h.tcsMocks)
 	defer h.mu.Unlock()
 }
 
@@ -161,9 +160,6 @@ func (h *Hook) PopIndex(index int) {
 func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
 	dep := h.tcsMocks[indx]
-	// fmt.Println("tcsMocks in hooks: ", dep)
-	// h.logger.Error("called FetchDep")
-
 	defer h.mu.Unlock()
 	return dep
 }
@@ -171,8 +167,6 @@ func (h *Hook) FetchDep(indx int) *models.Mock {
 func (h *Hook) GetTcsMocks() []*models.Mock {
 	h.mu.Lock()
 	tcsMocks := h.tcsMocks
-	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
-	// h.logger.Error("called GetDeps")
 	defer h.mu.Unlock()
 	return tcsMocks
 }
@@ -180,8 +174,6 @@ func (h *Hook) GetTcsMocks() []*models.Mock {
 func (h *Hook) GetConfigMocks() []*models.Mock {
 	h.mu.Lock()
 	configMocks := h.configMocks
-	// fmt.Println("tcsMocks in hooks: ", tcsMocks)
-	// h.logger.Error("called GetDeps")
 	defer h.mu.Unlock()
 	return configMocks
 }
@@ -189,8 +181,6 @@ func (h *Hook) GetConfigMocks() []*models.Mock {
 func (h *Hook) ResetDeps() int {
 	h.mu.Lock()
 	h.tcsMocks = []*models.Mock{}
-	// h.logger.Error("called ResetDeps", zap.Any("tcsMocks: ", h.tcsMocks))
-	// fmt.Println("tcsMocks are reset")
 	defer h.mu.Unlock()
 	return 1
 }
@@ -257,7 +247,6 @@ func (h *Hook) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	defer h.mutex.Unlock()
 	destInfo := structs.DestInfo{}
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
-		// h.logger.Error("failed to fetch the destination info", zap.Error(err))
 		return nil, err
 	}
 	return &destInfo, nil
@@ -336,6 +325,8 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
+	h.logger.Info("keploy has initiated the shutdown of the user application.")
+	h.userAppShutdownInitiated = true
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
@@ -344,7 +335,7 @@ func (h *Hook) StopUserApplication() {
 
 		// Stop Docker Container and Remove it if Keploy ran using docker.
 		containerID := h.idc.GetContainerID()
-		if len(containerID) != 0  {
+		if len(containerID) != 0 {
 			err := h.idc.StopAndRemoveDockerContainer()
 			if err != nil {
 				h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerID), zap.Error(err))
@@ -359,7 +350,7 @@ func (h *Hook) Recover(id int) {
 
 	if r := recover(); r != nil {
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
-		h.Stop(true, nil)
+		h.Stop(true)
 		// stop the user application cmd
 		h.StopUserApplication()
 		if id != h.mainRoutineId {
@@ -369,35 +360,42 @@ func (h *Hook) Recover(id int) {
 	}
 }
 
-func (h *Hook) Stop(forceStop bool, close chan bool) {
-
-	if close == nil {
-		close = make(chan bool)
+func deleteFileIfExists(filename string, logger *zap.Logger) error {
+	// Check if file exists
+	if _, err := os.Stat(filename); !os.IsNotExist(err) {
+		// File exists, delete it
+		err = os.Remove(filename)
+		if err != nil {
+			return fmt.Errorf("failed to delete the file: %v", err)
+		}
+		logger.Debug(fmt.Sprintf("File %s deleted successfully", filename))
+	} else {
+		logger.Debug(fmt.Sprintf("File %s doesn't exist", filename))
 	}
+	return nil
+}
+
+func (h *Hook) Stop(forceStop bool) {
 
 	if !forceStop {
-		select {
-		case <-close:
-			return
-		case <-h.stopper:
-			h.logger.Info("Received signal to exit keploy program..")
-			h.StopUserApplication()
-		}
+		h.logger.Info("Received signal to exit keploy program..")
+		h.StopUserApplication()
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")
 	}
+
+	//deleting kdocker-compose.yaml file if made during the process in case of docker-compose env
+	deleteFileIfExists("kdocker-compose.yaml", h.logger)
 
 	// closing all readers.
 	for _, reader := range PerfEventReaders {
 		if err := reader.Close(); err != nil {
 			h.logger.Error("failed to close the eBPF perf reader", zap.Error(err))
-			// log.Fatalf("closing perf reader: %s", err)
 		}
 	}
 	for _, reader := range RingEventReaders {
 		if err := reader.Close(); err != nil {
 			h.logger.Error("failed to close the eBPF ringbuf reader", zap.Error(err))
-			// log.Fatalf("closing ringbuf reader: %s", err)
 		}
 	}
 
@@ -443,9 +441,7 @@ func (h *Hook) Stop(forceStop bool, close chan bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
-	// k := keploy.KeployInitializer()
-
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context) error {
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err
@@ -483,9 +479,9 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		for {
-			connectionFactory.HandleReadyConnections(h.TestCaseDB)
+			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx)
 			time.Sleep(1 * time.Second)
 		}
 	}()
@@ -548,7 +544,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.connect4 = c4
-	// defer c4.Close()
 
 	gp4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -561,7 +556,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.gp4 = gp4
-	// defer gp4.Close()
 
 	// FOR IPV6
 
@@ -594,7 +588,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.connect6 = c6
-	// defer c6.Close()
 
 	gp6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
@@ -607,7 +600,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.gp6 = gp6
-	// defer gp4.Close()
 
 	//Open a kprobe at the entry of sendto syscall
 	snd, err := link.Kprobe("sys_sendto", objs.SyscallProbeEntrySendto, nil)
@@ -616,7 +608,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.sendto = snd
-	// defer snd.Close()
 
 	//Opening a kretprobe at the exit of sendto syscall
 	sndr, err := link.Kretprobe("sys_sendto", objs.SyscallProbeRetSendto, &link.KprobeOptions{RetprobeMaxActive: 1024})
@@ -625,7 +616,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.sendtoRet = sndr
-	// defer sndr.Close()
 
 	// ------------ For Ingress using Kprobes --------------
 
@@ -637,7 +627,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.accept = ac
-	// defer ac.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -647,7 +636,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.acceptRet = ac_
-	// defer ac_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
@@ -657,7 +645,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.accept4 = ac4
-	// defer ac4.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -667,7 +654,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.accept4Ret = ac4_
-	// defer ac4_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
@@ -677,7 +663,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.read = rd
-	// defer rd.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -687,7 +672,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.readRet = rd_
-	// defer rd_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
@@ -697,7 +681,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.write = wt
-	// defer wt.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -707,7 +690,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.writeRet = wt_
-	// defer wt_.Close()
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program for writev.
@@ -735,7 +717,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.close = cl
-	// defer cl.Close()
 
 	//Attaching a kprobe at the entry of recvfrom syscall
 	rcv, err := link.Kprobe("sys_recvfrom", objs.SyscallProbeEntryRecvfrom, nil)
@@ -744,7 +725,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.recvfrom = rcv
-	// defer rcv.Close()
 
 	//Attaching a kretprobe at the exit of recvfrom syscall
 	rcvr, err := link.Kretprobe("sys_recvfrom", objs.SyscallProbeRetRecvfrom, &link.KprobeOptions{RetprobeMaxActive: 1024})
@@ -753,7 +733,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.recvfromRet = rcvr
-	// defer rcvr.Close()
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
@@ -763,7 +742,6 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 		return err
 	}
 	h.closeRet = cl_
-	// defer cl_.Close()
 
 	h.LaunchPerfBufferConsumers(connectionFactory)
 

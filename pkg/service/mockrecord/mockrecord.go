@@ -1,6 +1,7 @@
 package mockrecord
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,6 +11,8 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
@@ -29,25 +32,29 @@ func NewMockRecorder(logger *zap.Logger) MockRecorder {
 	}
 }
 
-func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
+func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_RECORD)
-	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger)
+	teleFS := fs.NewTeleFS()
+	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	tele.Ping(false)
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 
+	mocksTotal := make(map[string]int)
+	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
+	//Add the name of the cmd to context.
+	ctx = context.WithValue(ctx, "cmd", "mockrecord")
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
-	if err := loadedHooks.LoadHooks("", "", pid); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
 		return
 	}
-
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{}, "", "", pid, "", []uint{}, loadedHooks)
+	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
-	// ps.SetHook(loadedHooks)
-
 	// Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
@@ -60,8 +67,12 @@ func (s *mockRecorder) MockRecord(path string, pid uint32, mockName string) {
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
+	//Call the telemetry events.
+	if len(mocksTotal) != 0 {
+		tele.RecordedMocks(mocksTotal)
+	}
 
 	// Shutdown other resources
-	loadedHooks.Stop(true, nil)
+	loadedHooks.Stop(true)
 	ps.StopProxyServer()
 }
