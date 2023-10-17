@@ -521,7 +521,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 
 		if !unmatched {
 			for i, j := range expectedHeader {
-				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), headerNoise)
+				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
 			}
 		}
 
