@@ -14,18 +14,14 @@ import (
 	"syscall"
 	"time"
 
-	"encoding/base64"
-	"encoding/binary"
-	"errors"
 
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/util"
 
-
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/proxy/util"
+
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -56,7 +52,7 @@ func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	case models.MODE_RECORD:
 		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
-		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger,ctx)
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -65,7 +61,7 @@ func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 
 // This is the encoding function for the streaming postgres wiremessage
 
-func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	logger.Debug("Inside the encodePostgresOutgoing function")
 	pgRequests := []models.Backend{}
 
@@ -156,8 +152,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-
-				})
+				},ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
 
@@ -184,11 +179,11 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
 					},
-				})
+				},ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
 			}
-    
+
 			bufStr := base64.StdEncoding.EncodeToString(buffer)
 			if bufStr != "" {
 
@@ -421,7 +416,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 }
 
 // This is the decoding function for the postgres wiremessage
-func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger,ctx context.Context) error {
 	pgRequests := [][]byte{requestBuffer}
 	tcsMocks := h.GetTcsMocks()
 	// change auth to md5 instead of scram
@@ -458,7 +453,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 		}
 
-
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
 
 		if !matched {
@@ -476,8 +470,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				logger.Error("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 				return err
 			}
-
-
 
 			_, err = clientConn.Write([]byte(encoded))
 			if err != nil {
