@@ -12,6 +12,11 @@ test:
   containerName: ""
   networkName: ""
   testSets: ["test-set-0"]
+  noise: |
+    {
+      "body": {},
+      "header": {}
+    }
   delay: 5
   apiTimeout: 5
   passThroughPorts: []

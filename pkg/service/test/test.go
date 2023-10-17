@@ -41,7 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, noiseConfig map[string]interface{}) bool {
 
 	var ps *proxy.ProxySet
 
@@ -147,7 +147,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -182,7 +182,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}) models.TestRunStatus {
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -332,7 +332,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", "false"))
 				continue
 			}
-			testPass, testResult := t.testHttp(*tc, resp)
+			testPass, testResult := t.testHttp(*tc, resp, noiseConfig)
 			t.logger.Info("result", zap.Any("testcase id", tc.Name), zap.Any("passed", testPass))
 			testStatus := models.TestStatusPending
 			if testPass {
@@ -415,7 +415,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig map[string]interface{}) (bool, *models.Result) {
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
@@ -439,17 +439,39 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	noise := tc.Noise
 
 	var (
-		bodyNoise   []string
-		headerNoise = map[string]string{}
+		bodyNoise   map[string][]string
+		headerNoise map[string][]string
 	)
+
+	bodyNoise = map[string][]string{}
+	headerNoise = map[string][]string{}
 
 	for _, n := range noise {
 		a := strings.Split(n, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			bodyNoise = append(bodyNoise, x)
+			bodyNoise[x] = []string{}
 		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = a[len(a)-1]
+			headerNoise[a[len(a)-1]] = []string{}
+		}
+	}
+
+	for k, v := range noiseConfig {
+		if k == "body" {
+			for k1, v1 := range v.(map[string]interface{}) {
+				bodyNoise[k1] = []string{}
+				for _, v2 := range v1.([]interface{}) {
+					bodyNoise[k1] = append(bodyNoise[k1], v2.(string))
+				}
+			}
+		}
+		if k == "header" {
+			for k1, v1 := range v.(map[string]interface{}) {
+				headerNoise[k1] = []string{}
+				for _, v2 := range v1.([]interface{}) {
+					headerNoise[k1] = append(headerNoise[k1], v2.(string))
+				}
+			}
 		}
 	}
 

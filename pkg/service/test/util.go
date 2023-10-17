@@ -101,7 +101,7 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 }
 
 
-func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
+func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string][]string) bool {
 	if res == nil {
 		return false
 	}

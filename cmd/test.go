@@ -149,6 +149,17 @@ func (t *Test) GetCmd() *cobra.Command {
 				testSets = confTest.TestSets
 			}
 
+			noise := confTest.Noise
+
+			noiseJSON, err := test.UnmarshallJson(noise, t.logger)
+
+			if err != nil {
+				t.logger.Error("Failed to unmarshall the noise flag", zap.Error((err)))
+			}
+
+			noiseConfig := map[string]interface{}{}
+			fmt.Println(noiseJSON)
+
 			delay, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
 				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
@@ -190,7 +201,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout)
+			t.tester.Test(path, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout, noiseConfig)
 			return nil
 		},
 	}
