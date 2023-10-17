@@ -41,7 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
 
 	var ps *proxy.ProxySet
 
@@ -62,6 +62,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
+
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
@@ -81,7 +82,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 		return false
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxy.Option{}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
+		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -112,15 +113,15 @@ func (t *tester) Test(path, testReportPath string, appCmd string, testsets []str
 			abortStopHooksForcefully = true
 			loadedHooks.Stop(false)
 			//Call the telemetry events.
-			if resultForTele[0] != 0 || resultForTele[1] != 0{
-			tele.Testrun(resultForTele[0], resultForTele[1])
+			if resultForTele[0] != 0 || resultForTele[1] != 0 {
+				tele.Testrun(resultForTele[0], resultForTele[1])
 			}
 			ps.StopProxyServer()
 			exitCmd <- true
 		case <-abortStopHooksInterrupt:
 			//Call the telemetry events.
-			if resultForTele[0] != 0 || resultForTele[1] != 0{
-			tele.Testrun(resultForTele[0], resultForTele[1])
+			if resultForTele[0] != 0 || resultForTele[1] != 0 {
+				tele.Testrun(resultForTele[0], resultForTele[1])
 			}
 			return
 		}
@@ -209,15 +210,19 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", pid))
+
+	isApplicationStopped := false
 
 	defer func() {
 		if len(appCmd) == 0 && pid != 0 {
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
-			loadedHooks.StopUserApplication()
+			if !isApplicationStopped {
+				loadedHooks.StopUserApplication()
+			}
 		}
 	}()
 
@@ -232,9 +237,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				case hooks.ErrInterrupted:
 					t.logger.Info("keploy terminated user application")
 				case hooks.ErrCommandError:
-					t.logger.Error("failed to run user application hence stopping keploy", zap.Error(err))
 				case hooks.ErrUnExpected:
-					t.logger.Warn("user application terminated unexpectedly, please check application logs if this behaviour is expected")
+					t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
 				default:
 					t.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
@@ -291,6 +295,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	for _, tc := range tcs {
 		select {
 		case err = <-errChan:
+			isApplicationStopped = true
 			switch err {
 			case hooks.ErrInterrupted:
 				exitLoop = true
@@ -533,7 +538,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 
 		if !unmatched {
 			for i, j := range expectedHeader {
-				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), headerNoise)
+				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
 			}
 		}
 
