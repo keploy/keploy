@@ -40,7 +40,7 @@ func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook)
 				}
 
 				// Compare the encoded data
-				if string(encoded) != string(reqBuff) && mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+				if string(encoded) != string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
 					matched = false
 					break // Exit the loop if any request doesn't match
 				}
