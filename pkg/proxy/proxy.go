@@ -58,7 +58,7 @@ type DepInterface interface {
 	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn)
 }
 
-var ParsersMap map[string]DepInterface
+var ParsersMap = make(map[string]DepInterface)
 
 type ProxySet struct {
 	IP4               uint32

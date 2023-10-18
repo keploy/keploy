@@ -306,7 +306,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 
 	for _, v := range files {
 		// Define the regular expression pattern
-		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern) 
+		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
 		// `^test-set-\d{1,}$`
 
 		// Compile the regular expression

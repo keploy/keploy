@@ -57,7 +57,7 @@ func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			return false, err
 		}
 
-		// since, keploy requires root access. The permissions for generated files 
+		// since, keploy requires root access. The permissions for generated files
 		// should be updated to share it with all users.
 		keployPath := path
 		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
