@@ -78,6 +78,7 @@ func main() {
 		Dsn = os.Getenv("Dsn")
 	}
 	//Initialise sentry.
+	if cmd.EnableSentry{
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              Dsn,
 		TracesSampleRate: 1.0,
@@ -86,6 +87,7 @@ func main() {
 	if err != nil {
 		log.Debug("Could not initialise sentry.", err)
 	}
+}
 	defer utils.HandlePanic()
 	defer sentry.Flush(2 * time.Second)
 	cmd.Execute()

@@ -26,6 +26,7 @@ type Root struct {
 }
 
 var debugMode bool
+var EnableSentry bool
 
 type colorConsoleEncoder struct {
 	*zapcore.EncoderConfig
@@ -190,6 +191,7 @@ func (r *Root) execute() {
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
+	rootCmd.PersistentFlags().BoolVar(&EnableSentry, "sentry", false, "Enable sentry logging")
 
 	// Manually parse flags to determine debug mode early
 	debugMode = checkForDebugFlag(os.Args[1:])
