@@ -144,6 +144,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			return nil, err
 		}
 	case models.Postgres:
+
 		postgresSpec := spec.PostgresSpec{
 			Metadata: mock.Spec.Metadata,
 			PostgresRequests:  mock.Spec.PostgresRequests,
@@ -269,16 +270,20 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			}
 
 		case models.Postgres:
-			genericSpec := spec.PostgresSpec{}
-			err := m.Spec.Decode(&genericSpec)
+
+			PostSpec := spec.PostgresSpec{}
+			err := m.Spec.Decode(&PostSpec)
+
 			if err != nil {
 				logger.Error("failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata: genericSpec.Metadata,
-				GenericRequests:  genericSpec.PostgresRequests,
-				GenericResponses: genericSpec.PostgresResponses,
+				Metadata: PostSpec.Metadata,
+				// OutputBinary: genericSpec.Objects,
+				PostgresRequests:  PostSpec.PostgresRequests,
+				PostgresResponses: PostSpec.PostgresResponses,
+
 			}
 		default:
 			logger.Error("failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
