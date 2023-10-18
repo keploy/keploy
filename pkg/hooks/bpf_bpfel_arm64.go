@@ -117,12 +117,12 @@ type bpfMapSpecs struct {
 // bpfObjects contains all objects after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
-type bpfObjects struct {
+type BpfObjects struct {
 	bpfPrograms
 	bpfMaps
 }
 
-func (o *bpfObjects) Close() error {
+func (o *BpfObjects) Close() error {
 	return _BpfClose(
 		&o.bpfPrograms,
 		&o.bpfMaps,

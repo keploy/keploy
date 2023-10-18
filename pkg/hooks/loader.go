@@ -83,7 +83,7 @@ type Hook struct {
 	sendtoRet     link.Link
 	recvfrom      link.Link
 	recvfromRet   link.Link
-	objects       bpfObjects
+	objects       BpfObjects
 	userIpAddress chan string
 	writev        link.Link
 	writevRet     link.Link
@@ -452,7 +452,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	}
 
 	// Load pre-compiled programs and maps into the kernel.
-	objs := bpfObjects{}
+	objs := BpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
 		h.logger.Error("failed to load eBPF objects", zap.Error(err))
 		return err
