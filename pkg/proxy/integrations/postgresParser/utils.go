@@ -293,7 +293,7 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 			return nil, fmt.Errorf("unknown message type: %q", packet)
 		}
 		if msg == nil {
-			fmt.Println("msg is nil")
+			// fmt.Println("msg is nil")
 			return nil, errors.New("msg is nil")
 		}
 		encoded := msg.Encode([]byte{})
@@ -302,7 +302,6 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 	}
 	return reqbuffer, nil
 }
-
 
 func PostgresEncoder(buffer []byte) string {
 	// encode the buffer to base 64 string ..
@@ -319,7 +318,6 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 	}
 	return k
 }
-
 
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
@@ -383,6 +381,33 @@ func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
 
 func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	// isScram := false
+	// add auth packets at end for python based clients
+	mock1 := &models.Mock{
+		Spec: models.MockSpec{	
+			PostgresRequests: []models.Backend{
+				{
+					Identfier: "StartupRequest",
+					Payload: "AAAAKgADAAB1c2VyAHBvc3RncmVzAGRhdGFiYXNlAHN0dWRlbnRkYgAA",
+					AuthType: 0,
+				},
+			},
+			PostgresResponses: []models.Frontend{
+				{
+					PacketTypes: []string{"R"},
+					AuthType: 10,
+					Identfier: "ServerResponse",
+					AuthenticationMD5Password: pgproto3.AuthenticationMD5Password{
+						Salt: [4]byte{0,0,0,0},
+					},
+					MsgType: 82,
+				},
+			},
+		},
+	}
+					
+	tcsMocks = append(tcsMocks, mock1)
+	h.SetTcsMocks(tcsMocks)
+
 	for _, mock := range tcsMocks {
 		// if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 		for requestIndex, reqBuff := range mock.Spec.PostgresRequests {
@@ -390,9 +415,6 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 
 			if reqBuff.Identfier == "StartupRequest" {
 				log.Debug("CHANGING TO MD5 for Response")
-				// mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
-				// isScram = true
-				// reqBuff.AuthType = 5
 				mock.Spec.PostgresResponses[requestIndex].AuthType = 5
 				continue
 			}
@@ -437,7 +459,7 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 					},
 					{
 						Name:  "server_version",
-						Value: "10.5 (Debian 10.5-2.pgdg90+1)",
+						Value: "13.12 (Debian 13.12-1.pgdg120+1)",
 					},
 					{
 						Name:  "session_authorization",
@@ -532,7 +554,10 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 
 				if string(encoded) == string(reqBuff) || bufStr == mock.Spec.PostgresRequests[requestIndex].Payload {
 					// fmt.Println("matched in first loop")
-					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+					// if reqBuff[0] != 112 || mock.Spec.PostgresRequests[requestIndex].Identfier != "StartupRequest" || mock.Spec.PostgresResponses[0].PacketTypes[0] != "R" {
+						tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+					// }
+
 					h.SetTcsMocks(tcsMocks)
 					return true, mock.Spec.PostgresResponses
 				}
@@ -545,7 +570,10 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 		// fmt.Println("matched in first loop")
 		bestMatch := tcsMocks[idx].Spec.PostgresResponses
 		// println("Lenght of tcsMocks", len(tcsMocks), " BestMatch -->", tcsMocks[idx].Spec.GenericRequests[0].Message[0].Data)
-		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+		// if bestMatch[0].PacketTypes[0] != "R" {
+			tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+		// }
+
 		h.SetTcsMocks(tcsMocks)
 		return true, bestMatch
 	}
