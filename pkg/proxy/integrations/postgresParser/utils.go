@@ -526,7 +526,7 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 					ssl := models.Frontend{
 						Payload: "Tg==",
 					}
-					println("Matched SSL")
+					// println("Matched SSL")
 					return true, []models.Frontend{ssl}
 				}
 
