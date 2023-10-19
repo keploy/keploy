@@ -72,7 +72,8 @@ func main() {
 		version = getKeployVersion()
 	}
 	fmt.Println(logo, " ")
-	fmt.Printf("%v\n\n", version)
+	fmt.Printf("version: %v\n\n", version)
+	fmt.Printf("dsn: %v\n\n", Dsn)
 	isDocker := os.Getenv("IS_DOCKER_CMD")
 	if isDocker != "" {
 		Dsn = os.Getenv("Dsn")
