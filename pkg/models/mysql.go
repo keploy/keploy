@@ -161,3 +161,11 @@ type MySQLComChangeUserPacket struct {
 type MySQLComStmtClosePacket struct {
 	StatementID uint32
 }
+type AuthSwitchResponsePacket struct {
+	AuthResponseData string `yaml:"auth_response_data"`
+}
+type AuthSwitchRequestPacket struct {
+	StatusTag      byte   `yaml:"status_tag"`
+	PluginName     string `yaml:"plugin_name"`
+	PluginAuthData string `yaml:"plugin_authdata"`
+}
