@@ -139,6 +139,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			Metadata: mock.Spec.Metadata,
 			GenericRequests:  mock.Spec.GenericRequests,
 			GenericResponses: mock.Spec.GenericResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		err := yamlDoc.Spec.Encode(genericSpec)
 		if err != nil {
@@ -269,6 +271,8 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				Metadata: genericSpec.Metadata,
 				GenericRequests:  genericSpec.GenericRequests,
 				GenericResponses: genericSpec.GenericResponses,
+				ReqTimestampMock: genericSpec.ReqTimestampMock,
+				ResTimestampMock: genericSpec.ResTimestampMock,
 			}
 
 		case models.Postgres:
