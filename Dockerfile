@@ -4,6 +4,10 @@ FROM golang:1.21 AS build
 # Set the working directory
 WORKDIR /app
 
+# Define build arguments for ldflags
+ARG SENTRY_DSN_DOCKER
+ARG VERSION
+
 # Copy the Go module files and download dependencies
 COPY go.mod go.sum /app/
 RUN go mod download
@@ -12,14 +16,10 @@ RUN go mod download
 COPY . /app
 
 # Build the keploy binary
-RUN go build -o keploy .
+RUN go build -ldflags="-X main.Dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
-
-ARG SENTRY_DSN_DOCKER
-ENV IS_DOCKER_CMD=true
-ENV Dsn=$SENTRY_DSN_DOCKER
 
 # Update the package lists and install required packages
 RUN apt-get update && \
