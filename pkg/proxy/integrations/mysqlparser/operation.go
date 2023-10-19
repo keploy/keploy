@@ -80,6 +80,19 @@ func encodeToBinary(packet interface{}, operation string, sequence int) ([]byte,
 			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
 		}
 		data, err = encodeHandshakeResponseOk(p)
+	case "AUTH_SWITCH_REQUEST":
+		p, ok := packet.(*models.AuthSwitchRequestPacket)
+		if !ok {
+			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+		}
+		data, err = encodeAuthSwitchRequest(p)
+	case "AUTH_SWITCH_RESPONSE":
+		p, ok := packet.(*models.AuthSwitchResponsePacket)
+		if !ok {
+			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+		}
+		data, err = encodeAuthSwitchResponse(p)
+
 	case "MySQLOK":
 		p, ok := packet.(*models.MySQLOKPacket)
 		if !ok {
@@ -190,9 +203,13 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetData, err = decodeMySQLErr(data)
 		lastCommand = 0xFF
 	case data[0] == 0xFE && len(data) > 1: // Auth Switch Packet
-		packetType = "AuthSwitchRequest"
+		packetType = "AUTH_SWITCH_REQUEST"
 		packetData, err = decodeAuthSwitchRequest(data)
 		lastCommand = 0xFE
+	case data[0] == 0xFE && expectingAuthSwitchResponse:
+		packetType = "AUTH_SWITCH_RESPONSE"
+		packetData, err = decodeAuthSwitchResponse(data)
+		expectingAuthSwitchResponse = false
 	case data[0] == 0xFE: // EOF packet
 		packetType = "MySQLEOF"
 		packetData, err = decodeMYSQLEOF(data)

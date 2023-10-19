@@ -36,6 +36,9 @@ var (
 var (
 	isPluginData = false
 )
+var (
+	expectingAuthSwitchResponse = false
+)
 
 func encodeOutgoingMySql(clientConnId int64, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
 	var (
@@ -118,12 +121,94 @@ func encodeOutgoingMySql(clientConnId int64, destConnId int64, requestBuffer []b
 				},
 				Message: mysqlResp2,
 			})
+			if oprResponse2 == "AUTH_SWITCH_REQUEST" {
+				expectingAuthSwitchResponse = true
+				// Read the AuthSwitchResponse from the client
+				authSwitchResponse, err := util.ReadBytes(clientConn)
+				if err != nil {
+					logger.Error("failed to read AuthSwitchResponse from client", zap.Error(err))
+					return
+				}
+				// Forward the AuthSwitchResponse to the server (destination)
+				_, err = destConn.Write(authSwitchResponse)
+				if err != nil {
+					logger.Error("failed to write AuthSwitchResponse to server", zap.Error(err))
+					return
+				}
+
+				// Reset the flag
+				expectingAuthSwitchResponse = false
+				ServerResponse, err := util.ReadBytes(destConn)
+				if err != nil {
+					logger.Error("failed to read final response from server", zap.Error(err))
+					return
+				}
+				_, err = clientConn.Write(ServerResponse)
+				if err != nil {
+					logger.Error("failed to write final response to client", zap.Error(err))
+					return
+				}
+				oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(authSwitchResponse), logger, destConn)
+				if err != nil {
+					logger.Error("failed to decode MySQL packet from client after full authentication", zap.Error(err))
+					return
+				}
+				mysqlRequests = append(mysqlRequests, models.MySQLRequest{
+					Header: &models.MySQLPacketHeader{
+						PacketLength: requestHeaderFinal.PayloadLength,
+						PacketNumber: requestHeaderFinal.SequenceID,
+						PacketType:   oprRequestFinal,
+					},
+					Message: mysqlRequestFinal,
+				})
+				isPluginData = true
+				oprResponse, responseHeader, mysqlResp, err := DecodeMySQLPacket(bytesToMySQLPacket(ServerResponse), logger, destConn)
+				isPluginData = false
+				if err != nil {
+					logger.Error("failed to decode MySQL packet from destination after full authentication", zap.Error(err))
+					return
+				}
+				mysqlResponses = append(mysqlResponses, models.MySQLResponse{
+					Header: &models.MySQLPacketHeader{
+						PacketLength: responseHeader.PayloadLength,
+						PacketNumber: responseHeader.SequenceID,
+						PacketType:   oprResponse,
+					},
+					Message: mysqlResp,
+				})
+				// time.Sleep(10 * time.Millisecond)
+				finalServerResponse, err := util.ReadBytes(destConn)
+				if err != nil {
+					logger.Error("failed to read final response from server", zap.Error(err))
+					return
+				}
+				_, err = clientConn.Write(finalServerResponse)
+				if err != nil {
+					logger.Error("failed to write final response to client", zap.Error(err))
+					return
+				}
+				oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(finalServerResponse), logger, destConn)
+				isPluginData = false
+				if err != nil {
+					logger.Error("failed to decode MySQL packet from destination after full authentication", zap.Error(err))
+					return
+				}
+				mysqlResponses = append(mysqlResponses, models.MySQLResponse{
+					Header: &models.MySQLPacketHeader{
+						PacketLength: responseHeaderFinal.PayloadLength,
+						PacketNumber: responseHeaderFinal.SequenceID,
+						PacketType:   oprResponseFinal,
+					},
+					Message: mysqlRespFinal,
+				})
+			}
 			var pluginType string
 
 			if handshakeResp, ok := mysqlResp2.(*HandshakeResponseOk); ok {
 				pluginType = handshakeResp.PluginDetails.Type
 			}
 			if pluginType == "cachingSha2PasswordPerformFullAuthentication" {
+
 				clientResponse, err := util.ReadBytes(clientConn)
 				if err != nil {
 					logger.Error("failed to read response from client", zap.Error(err))
@@ -401,6 +486,17 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 			continue
 		}
 		if len(queryResponse) == 0 || responseOperation == "COM_STMT_CLOSE" {
+			break
+		}
+		if responseOperation == "MySQLErr" {
+			mysqlResponses = append([]models.MySQLResponse{}, models.MySQLResponse{
+				Header: &models.MySQLPacketHeader{
+					PacketLength: responseHeader.PayloadLength,
+					PacketNumber: responseHeader.SequenceID,
+					PacketType:   responseOperation,
+				},
+				Message: mysqlResp,
+			})
 			break
 		}
 		mysqlResponses = append([]models.MySQLResponse{}, models.MySQLResponse{
