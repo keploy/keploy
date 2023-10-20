@@ -168,6 +168,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 		gRPCSpec := spec.GrpcSpec{
 			GrpcReq:  *mock.Spec.GRPCReq,
 			GrpcResp: *mock.Spec.GRPCResp,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		err := yamlDoc.Spec.Encode(gRPCSpec)
 		if err != nil {
@@ -263,8 +265,11 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				logger.Error(Emoji+"failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
-			mock.Spec = models.MockSpec{GRPCResp: &grpcSpec.GrpcResp,
+			mock.Spec = models.MockSpec{
+				GRPCResp: &grpcSpec.GrpcResp,
 				GRPCReq: &grpcSpec.GrpcReq,
+				ReqTimestampMock: grpcSpec.ReqTimestampMock,
+				ResTimestampMock: grpcSpec.ResTimestampMock,
 			}
 		case models.GENERIC:
 			genericSpec := spec.GenericSpec{}
