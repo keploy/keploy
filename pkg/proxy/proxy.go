@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
+	"go.keploy.io/server/utils"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -37,7 +38,6 @@ import (
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	// "go.keploy.io/server/pkg/proxy/integrations/httpparser"
-	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -55,7 +55,7 @@ func getNextID() int64 {
 
 type DepInterface interface {
 	OutgoingType(buffer []byte) bool
-	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn)
+	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context)
 }
 
 var ParsersMap = make(map[string]DepInterface)
@@ -92,43 +92,11 @@ func (c *CustomConn) Read(p []byte) (int, error) {
 type Conn struct {
 	net.Conn
 	r bufio.Reader
-	// buffer       []byte
-	// ReadComplete bool
-	// pointer      int
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
 	return c.r.Read(b)
-
-	// buffer, err := readBytes(c.conn)
-	// if err != nil {
-	// 	return 0, err
-	// }
-	// b = buffer
-	// if len(buffer) == 0 && len(c.buffer) != 0 {
-	// 	b = c.buffer
-	// } else {
-	// 	c.buffer = buffer
-	// }
-	// if c.ReadComplete {
-	// 	b = c.buffer[c.pointer:(c.pointer + len(b))]
-
-	// 	return 257, nil
-	// }
-	// n, err = c.Conn.Read(b)
-	// if n > 0 {
-	// 	c.buffer = append(c.buffer, b...)
-	// }
-	// if err != nil {
-	// 	return n, err
-	// }
-
-	// return n, nil
 }
-
-// func (ps *ProxySet) SetHook(hook *hooks.Hook) {
-// 	ps.hook = hook
-// }
 
 func directoryExists(path string) bool {
 	info, err := os.Stat(path)
@@ -339,10 +307,9 @@ func Register(parserName string, parser DepInterface) {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
 	//Register all the parsers in the map.
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
-	Register("mongo", mongoparser.NewMongoParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
@@ -388,9 +355,8 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if err != nil {
 		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
 	}
-	// log.Printf("This is the command2: %v", cmd)
 
-	if opt.Port == 0 {
+	if(opt.Port == 0){
 		opt.Port = 16789
 	}
 
@@ -406,15 +372,6 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	}
 
 	//IPv6
-	// localIp6, err := util.GetLocalIPv6()
-	// if err != nil {
-	// 	log.Fatalln(Emoji+"Failed to get the local Ip6 address", err)
-	// }
-
-	// proxyAddr6, err := util.ConvertIPv6ToUint32Array(localIp6)
-	// if err != nil {
-	// 	log.Fatalf(Emoji + "Failed to convert local Ip to IPV6")
-	// }
 	proxyAddr6 := [4]uint32{0000, 0000, 0000, 0001}
 
 	//check if the user application is running inside docker container
@@ -440,8 +397,8 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if isPortAvailable(opt.Port) {
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
-
-			proxySet.startProxy()
+			defer utils.HandlePanic()
+			proxySet.startProxy(ctx)
 		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
@@ -449,7 +406,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
 			go func() {
 				defer h.Recover(pkg.GenerateRandomID())
-
+				defer utils.HandlePanic()
 				proxySet.startDnsServer()
 			}()
 		}
@@ -457,53 +414,6 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		// TODO: Release eBPF resources if failed abruptly
 		log.Fatalf(Emoji+"Failed to start Proxy at [Port:%v]: %v", opt.Port, err)
 	}
-
-	// randomID := generateRandomID()
-	// go func() {
-
-	// 	pcapFileName := fmt.Sprintf("capture_%s.pcap", randomID)
-
-	// 	// Create a new PCAP file
-	// 	pcapFile, err := os.Create(pcapFileName)
-	// 	if err != nil {
-	// 		log.Fatal("Error creating PCAP file:", err)
-	// 	}
-	// 	defer pcapFile.Close()
-
-	// 	// Create a new PCAP writer
-	// 	pcapWriter := pcapgo.NewWriter(pcapFile)
-	// 	pcapWriter.WriteFileHeader(65536, layers.LinkTypeEthernet) // Adjust parameters as needed
-
-	// 	// Create a packet source to capture packets from an interface
-	// 	iface := "any" // Replace with your network interface name
-	// 	handle, err := pcap.OpenLive(iface, 1600, true, pcap.BlockForever)
-	// 	if err != nil {
-	// 		log.Fatal("Error opening interface:", err)
-	// 	}
-	// 	defer handle.Close()
-
-	// 	// Set up a packet filter for port 16789
-	// 	filter := "port 16789"
-	// 	err = handle.SetBPFFilter(filter)
-	// 	if err != nil {
-	// 		log.Fatal("Error setting BPF filter:", err)
-	// 	}
-
-	// 	// Start capturing packets
-	// 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	// 	for packet := range packetSource.Packets() {
-	// 		// Convert packet data to bytes
-	// 		packetData := packet.Data()
-
-	// 		// Write packet data to the PCAP file
-	// 		err = pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packetData)
-	// 		if err != nil {
-	// 			log.Println("Error writing packet data:", err)
-	// 		}
-	// 	}
-
-	// 	log.Println("Packet capture complete")
-	// }()
 
 	proxySet.logger.Debug(fmt.Sprintf("Proxy IPv4:Port %v:%v", proxySet.IP4, proxySet.Port))
 	proxySet.logger.Debug(fmt.Sprintf("Proxy IPV6:Port Addr %v:%v", proxySet.IP6, proxySet.Port))
@@ -521,11 +431,6 @@ func isPortAvailable(port uint32) bool {
 	defer ln.Close()
 	return true
 }
-
-// const (
-// 	caCertPath       = "pkg/proxy/ca.crt" // Your CA certificate file path
-// 	caPrivateKeyPath = "pkg/proxy/ca.key" // Your CA private key file path
-// )
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -558,7 +463,6 @@ var (
 
 func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
-	// log.Printf("This is the server name: %s", clientHello.ServerName)
 	destinationUrl = clientHello.ServerName
 
 	cfsslLog.Level = cfsslLog.LevelError
@@ -600,12 +504,11 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return nil, fmt.Errorf(Emoji+"failed to load server certificate and key: %v", err)
 	}
 
-	// fmt.Printf("[TLS]The certificate for the client is:\n%v\n",serverTlsCert)
 	return &serverTlsCert, nil
 }
 
 // startProxy function initiates a proxy on the specified port to handle redirected outgoing network calls.
-func (ps *ProxySet) startProxy() {
+func (ps *ProxySet) startProxy(ctx context.Context) {
 
 	port := ps.Port
 
@@ -640,10 +543,6 @@ func (ps *ProxySet) startProxy() {
 			}
 
 			ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
-			// retry++
-			// if retry < 5 {
-			// 	continue
-			// }
 			break
 		}
 		ps.connMutex.Lock()
@@ -651,21 +550,11 @@ func (ps *ProxySet) startProxy() {
 		ps.connMutex.Unlock()
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
-			ps.handleConnection(conn, port)
+			defer utils.HandlePanic()
+			ps.handleConnection(conn, port, ctx)
 		}()
 	}
 }
-
-// func readableProxyAddress(ps *ProxySet) string {
-
-// 	if ps != nil {
-// 		port := ps.Port
-// 		proxyAddress := util.ToIP4AddressStr(ps.IP4)
-// 		return fmt.Sprintf(proxyAddress+":%v", port)
-// 	}
-// 	return ""
-// }
 
 func (ps *ProxySet) startDnsServer() {
 
@@ -733,10 +622,6 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					ps.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", util.ToIP4AddressStr(ps.IP4)))
 				} else if question.Qtype == dns.TypeAAAA {
 					if ps.dockerAppCmd {
-						// answers = []dns.RR{&dns.AAAA{
-						// 	Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-						// 	AAAA: net.ParseIP(""),
-						// }}
 						ps.logger.Debug("failed to resolve dns query (in docker case) hence sending empty record")
 					} else {
 						answers = []dns.RR{&dns.AAAA{
@@ -809,10 +694,6 @@ func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) [
 		logger.Debug("net.LookupIP resolved the ip address...")
 	}
 
-	// for i, ans := range answers {
-	// 	println("Answer-", i, ":", ans)
-	// }
-
 	return answers
 }
 
@@ -824,7 +705,6 @@ func isTLSHandshake(data []byte) bool {
 }
 
 func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
-	// fmt.Println(Emoji, "Handling TLS connection from", conn.RemoteAddr().String())
 	//Load the CA certificate and private key
 
 	var err error
@@ -846,12 +726,6 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 	// Wrap the TCP connection with TLS
 	tlsConn := tls.Server(conn, config)
-
-	// req := make([]byte, 1024)
-	// fmt.Println("before the parsed req: ", string(req))
-
-	// _, err = tlsConn.Read(req)
-
 	// Perform the handshake
 	err = tlsConn.Handshake()
 
@@ -859,24 +733,15 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 		ps.logger.Error(Emoji+"failed to complete TLS handshake with the client with error: ", zap.Error(err))
 		return nil, err
 	}
-	// fmt.Println("after the parsed req: ", string(req))
-	// Perform the TLS handshake
-	// err = tlsConn.Handshake()
-	// if err != nil {
-	// 	log.Println("Error performing TLS handshake:", err)
-	// 	return
-	// }
-
 	// Use the tlsConn for further communication
 	// For example, you can read and write data using tlsConn.Read() and tlsConn.Write()
 
 	// Here, we simply close the connection
-	// tlsConn.Close()
 	return tlsConn, nil
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
-func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
+func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Context) {
 
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
@@ -886,8 +751,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
-
-	// ps.hook.PrintRedirectProxyMap()
 
 	ps.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
@@ -955,13 +818,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
-	// buffer, err := util.ReadBytes(conn)
-	// // handle if the buffer is empty
-	// if len(buffer) == 0 {
-	// 	ps.Logger.Debug("received empty buffer, so retrying reading buffer", zap.Error(err), zap.Any("proxy port", port))
-	// 	buffer, err = util.ReadBytes(conn)
-	// 	return
-	// }
 	ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
 	// readRequestDelay := time.Since(connEstablishedAt)
 	if err != nil {
@@ -979,7 +835,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	}
 
 	//Dialing for tls connection
-	// if models.GetMode() != models.MODE_TEST {
 	destConnId := getNextID()
 	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 	if isTLS {
@@ -1000,10 +855,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 			logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 			conn.Close()
 			return
-			// }
 		}
 	}
-	// }
 
 	for _, port := range ps.PassThroughPorts {
 		if port == uint(destInfo.DestPort) {
@@ -1019,13 +872,13 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 	//Checking for all the parsers.
 	for _, parser := range ParsersMap {
 		if parser.OutgoingType(buffer) {
-			parser.ProcessOutgoing(buffer, conn, dst)
+			parser.ProcessOutgoing(buffer, conn, dst, ctx)
 			genericCheck = false
 		}
 	}
 	if genericCheck {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
-		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
+		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger, ctx)
 	}
 
 	// Closing the user client connection
@@ -1053,11 +906,10 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 	}
 
 	for {
-		// logger.Debug("Inside connection")
 		// go routine to read from client
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
@@ -1069,7 +921,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from destination
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
 				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
@@ -1106,14 +958,16 @@ func (ps *ProxySet) StopProxyServer() {
 	}
 	ps.connMutex.Unlock()
 
-	err := ps.Listener.Close()
-	if err != nil {
-		ps.logger.Error("failed to stop proxy server", zap.Error(err))
+	if ps.Listener != nil {
+		err := ps.Listener.Close()
+		if err != nil {
+			ps.logger.Error("failed to stop proxy server", zap.Error(err))
+		}
 	}
 
 	// stop dns server only in case of test mode.
 	if ps.DnsServer != nil {
-		err = ps.DnsServer.Shutdown()
+		err := ps.DnsServer.Shutdown()
 		if err != nil {
 			ps.logger.Error("failed to stop dns server", zap.Error(err))
 		}

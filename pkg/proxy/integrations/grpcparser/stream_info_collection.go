@@ -1,6 +1,7 @@
 package grpcparser
 
 import (
+	"context"
 	"sync"
 
 	"go.keploy.io/server/pkg/hooks"
@@ -99,7 +100,7 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	sic.StreamInfo[streamID] = info
 }
 
-func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32) {
+func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32, ctx context.Context) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 
@@ -113,7 +114,7 @@ func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32) {
 			GRPCReq:  &grpcReq,
 			GRPCResp: &grpcResp,
 		},
-	})
+	}, ctx)
 
 }
 

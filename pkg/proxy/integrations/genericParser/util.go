@@ -1,5 +1,4 @@
 package genericparser
-
 import (
 	"encoding/base64"
 	// "fmt"
@@ -24,52 +23,46 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 }
 
 func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
-
 	for idx, mock := range tcsMocks {
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+			matched := true // Flag to track if all requests match
+
 			for requestIndex, reqBuff := range requestBuffers {
-
-				// bufStr := string(reqBuff)
-				// if !IsAsciiPrintable(bufStr) {
-				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-				// }
-				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-
-				if string(encoded) == string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data == bufStr {
-					log.Debug("matched in first loop")
-					tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-					h.SetTcsMocks(tcsMocks)
-					return true, mock.Spec.GenericResponses
+				bufStr := string(reqBuff)
+				if !IsAsciiPrintable(string(reqBuff)) {
+					bufStr = base64.StdEncoding.EncodeToString(reqBuff)
 				}
+
+				encoded := []byte(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				if !IsAsciiPrintable(mock.Spec.GenericRequests[requestIndex].Message[0].Data) {
+					encoded, _ = PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				}
+
+				// Compare the encoded data
+				if string(encoded) != string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+					matched = false
+					break // Exit the loop if any request doesn't match
+				}
+			}
+
+			if matched {
+				log.Debug("matched in first loop")
+				tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+				h.SetTcsMocks(tcsMocks)
+				return true, mock.Spec.GenericResponses
 			}
 		}
 	}
-	// com := PostgresEncoder(reqBuff)
-	// convert all the configmocks to string array
-	// mockString := make([]string, len(tcsMocks))
-	// for i := 0; i < len(tcsMocks); i++ {
-	// 	mockString[i] = string(tcsMocks[i].Spec.PostgresReq.Payload)
-	// }
-	// // find the closest match
-	// if IsAsciiPrintable(string(reqBuff)) {
-	// 	fmt.Println("Inside String Match")
-	// 	idx := findStringMatch(string(reqBuff), mockString)
-	// 	if idx != -1 {
-	// 		nMatch := tcsMocks[idx].Spec.PostgresResp.Payload
-	// 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-	// 		h.SetConfigMocks(tcsMocks)
-	// 		fmt.Println("Returning mock from String Match !!")
-	// 		return true, nMatch
-	// 	}
-	// }
+
 	idx := findBinaryMatch(tcsMocks, requestBuffers, h)
 	if idx != -1 {
-		log.Debug("matched in first loop")
+		log.Debug("matched in binary match")
 		bestMatch := tcsMocks[idx].Spec.GenericResponses
 		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 		h.SetTcsMocks(tcsMocks)
 		return true, bestMatch
 	}
+
 	return false, nil
 }
 
@@ -92,7 +85,6 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				shingles2 := CreateShingles(reqBuff, k)
 				similarity := JaccardSimilarity(shingles1, shingles2)
 				log.Debugf(hooks.Emoji, "Jaccard Similarity:%f\n", similarity)
-
 
 				if mxSim < similarity {
 					mxSim = similarity
@@ -144,7 +136,7 @@ func AdaptiveK(length, kMin, kMax, N int) int {
 // checks if s is ascii and printable, aka doesn't include tab, backspace, etc.
 func IsAsciiPrintable(s string) bool {
 	for _, r := range s {
-		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
+		if r > unicode.MaxASCII || (!unicode.IsPrint(r) && r != '\r' && r != '\n') {
 			return false
 		}
 	}
