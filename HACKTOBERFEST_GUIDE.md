@@ -40,7 +40,7 @@ ___
 
 ### Learn more about projects and contributing
 
-👨🏻‍💻 <a href="https://github.com/Keploy/Keploy/issues?q=is%3Aissue+is%3Aopen+label%3AHACKTOBERFEST2023">**Code Contribubtion**</a> 
+👨🏻‍💻 <a href="https://github.com/Keploy/Keploy/issues?q=is%3Aissue+is%3Aopen+label%3AHACKTOBERFEST2023">**Code Contribution**</a> 
 
 Code contributions are a great way to get involved in supporting open source, and learn new skills. Here are some examples of ways you can contribute to open-source projects:
 

@@ -31,7 +31,7 @@ Keploy is a **developer-centric** backend testing tool. It makes **backend tests
 
 Ready for the magic? Here are Keploy's core features:
 
-- ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your fave testing libraries(JUnit, go-test, py-test, jest) to see a combined test coverage.
+- ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your favorite testing libraries(JUnit, go-test, py-test, jest) to see a combined test coverage.
 
 
 - 🤖 **EBPF Instrumentation:** Keploy uses EBPF like a secret sauce to make integration code-less, language-agnostic, and oh-so-lightweight.
