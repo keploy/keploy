@@ -59,10 +59,10 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-func SimulateHttp(tc models.TestCase, logger *zap.Logger, apiTimeout uint64) (*models.HttpResp, error) {
+func SimulateHttp(tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HttpResp, error) {
 	resp := &models.HttpResp{}
 
-	logger.Info("making a http request", zap.Any("test case id", tc.Name))
+	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
 		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
@@ -72,16 +72,44 @@ func SimulateHttp(tc models.TestCase, logger *zap.Logger, apiTimeout uint64) (*m
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.ProtoMajor = tc.HttpReq.ProtoMajor
 	req.ProtoMinor = tc.HttpReq.ProtoMinor
-	req.Close = true
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// Creating the client and disabling redirects
-	client := &http.Client{
-		Timeout: time.Second * time.Duration(apiTimeout),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	var client *http.Client
+
+	keepAlive, ok := req.Header["Connection"]
+	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
+		logger.Debug("simulating request with connection:keep-alive")
+		client = &http.Client{
+			Timeout: time.Second * time.Duration(apiTimeout),
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	} else if ok && strings.EqualFold(keepAlive[0], "close") {
+		logger.Debug("simulating request with connection:close")
+		client = &http.Client{
+			Timeout: time.Second * time.Duration(apiTimeout),
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+			},
+		}
+	} else {
+		logger.Debug("simulating request with connection:keep-alive (maxIdleConn=1)")
+		client = &http.Client{
+			Timeout: time.Second * time.Duration(apiTimeout),
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			Transport: &http.Transport{
+				DisableKeepAlives: false,
+				MaxIdleConns:      1,
+			},
+		}
 	}
 
 	httpResp, err := client.Do(req)

@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/connection"
 	"go.keploy.io/server/pkg/hooks/settings"
 	"go.keploy.io/server/pkg/hooks/structs"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	_ "golang.org/x/sys/unix"
 )
@@ -40,13 +41,12 @@ func (h *Hook) launchSocketOpenEvent(connectionFactory *connection.Factory) {
 		h.logger.Error("failed to create perf event reader of socketOpenEvent", zap.Error(err))
 		return
 	}
-	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		socketOpenEventCallback(reader, connectionFactory, h.logger)
 	}()
 }
@@ -60,13 +60,12 @@ func (h *Hook) launchSocketDataEvent(connectionFactory *connection.Factory) {
 		h.logger.Error("failed to create ring buffer of socketDataEvent", zap.Error(err))
 		return
 	}
-	// defer reader.Close()
 	RingEventReaders = append(RingEventReaders, reader)
 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		socketDataEventCallback(reader, connectionFactory, h.logger)
 	}()
 
@@ -81,13 +80,12 @@ func (h *Hook) launchSocketCloseEvent(connectionFactory *connection.Factory) {
 		h.logger.Error("failed to create perf event reader of socketCloseEvent", zap.Error(err))
 		return
 	}
-	// defer reader.Close()
 	PerfEventReaders = append(PerfEventReaders, reader)
 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		socketCloseEventCallback(reader, connectionFactory, h.logger)
 	}()
 }

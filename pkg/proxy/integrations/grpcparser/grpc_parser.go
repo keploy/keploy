@@ -2,6 +2,7 @@ package grpcparser
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 )
 
 type GrpcParser struct {
@@ -33,11 +35,10 @@ func (g *GrpcParser) OutgoingType(buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("PRI * HTTP/2"))
 }
 
-
-func(g *GrpcParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn) {
+func(g *GrpcParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, g.hooks, g.logger)
+		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, g.hooks, g.logger, ctx)
 	case models.MODE_TEST:
 		decodeOutgoingGRPC(requestBuffer, clientConn, destConn, g.hooks, g.logger)
 	default:
@@ -55,7 +56,7 @@ func decodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	}
 }
 
-func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	// Send the client preface to the server. This should be the first thing sent from the client.
 	_, err := destConn.Write(requestBuffer)
 	if err != nil {
@@ -72,9 +73,9 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		defer wg.Done()
-		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder)
+		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder, ctx)
 		if err != nil {
 			// check for EOF error
 			if err == io.EOF {
@@ -91,9 +92,9 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		defer wg.Done()
-		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder)
+		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder, ctx)
 		if err != nil {
 			logger.Error("failed to transfer frame from server to client", zap.Error(err))
 		}
@@ -106,7 +107,7 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 }
 
 // TransferFrame reads one frame from rhs and writes it to lhs.
-func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqFromClient bool, decoder *hpack.Decoder) error {
+func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqFromClient bool, decoder *hpack.Decoder, ctx context.Context) error {
 	isRespFromServer := !isReqFromClient
 	framer := http2.NewFramer(lhs, rhs)
 	for {
@@ -176,7 +177,7 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 			// The trailers frame has been received. The stream has been closed by the server.
 			// Capture the mock and clear the map, as the stream ID can be reused by client.
 			if isRespFromServer && headersFrame.StreamEnded() {
-				sic.PersistMockForStream(streamID)
+				sic.PersistMockForStream(streamID, ctx)
 				sic.ResetStream(streamID)
 			}
 

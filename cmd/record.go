@@ -59,9 +59,6 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path += "/keploy"
 
-			// tcsPath := path + "/tests"
-			// mockPath := path + "/mocks"
-
 			appCmd, err := cmd.Flags().GetString("command")
 
 			if err != nil {
@@ -114,39 +111,31 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.Logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
-			// for _, v := range ports {
-
-			// }
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				r.Logger.Error("failed to read the proxy port")
+				return err
+			}
 
 			r.Logger.Debug("the ports are", zap.Any("ports", ports))
-			// r.recorder.CaptureTraffic(tcsPath, mockPath, appCmd, appContainer, networkName, delay)
-			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay, ports)
+			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
 			return nil
-			// server.Server(version, kServices, conf, Logger)
-			// server.Server(version)
 		},
 	}
 
-	// recordCmd.Flags().Uint32("pid", 0, "Process id of your application.")
-
 	recordCmd.Flags().StringP("path", "p", "", "Path to the local directory where generated testcases/mocks should be stored")
-	// recordCmd.Flags().String("mockPath", "", "Path to the local directory where generated mocks should be stored")
 
 	recordCmd.Flags().StringP("command", "c", "", "Command to start the user application")
-	// recordCmd.MarkFlagRequired("command")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
-	// recordCmd.MarkFlagRequired("containerName")
+
+	recordCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
 	recordCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
-	// recordCmd.MarkFlagRequired("networkName")
 
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
-	// recordCmd.MarkFlagRequired("delay")
 
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
-
-	// recordCmd.Flags().UintSlice()
 
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true

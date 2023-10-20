@@ -7,15 +7,30 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgproto3/v2"
+	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 )
 
-func checkScram(packet string, log *zap.Logger) bool {
-	encoded, err := PostgresDecoder(packet)
-	if err != nil {
-		log.Error("error in decoding packet", zap.Error(err))
-		return false
-	}
+type BackendWrapper struct {
+	BackendWrapper models.Backend
+}
+
+type FrontendWrapper struct {
+	FrontendWrapper models.Frontend
+}
+
+func NewBackend() *BackendWrapper {
+	return &BackendWrapper{}
+}
+
+func NewFrontend() *FrontendWrapper {
+	return &FrontendWrapper{}
+}
+
+func checkScram(encoded []byte, log *zap.Logger) bool {
+	// encoded, err := PostgresDecoder(packet)
+
 	// check if payload contains SCRAM-SHA-256
 	messageType := encoded[0]
 	log.Debug("Message Type: %c\n", zap.String("messageType", string(messageType)))
@@ -24,14 +39,7 @@ func checkScram(packet string, log *zap.Logger) bool {
 	}
 	// Print the message payload (for simplicity, the payload is printed as a string)
 	payload := string(encoded[5:])
-	// fmt.Printf("Payload: %s\n", payload)
 	if messageType == 'R' {
-		// send this payload to get decode the auth type
-		err := findAuthenticationMessageType(encoded[5:], log)
-		if err != nil {
-			log.Error("error in finding authentication message type", zap.Error(err))
-			return false
-		}
 		if strings.Contains(payload, "SCRAM-SHA") {
 			log.Debug("scram packet")
 			return true
@@ -43,6 +51,7 @@ func checkScram(packet string, log *zap.Logger) bool {
 
 func isStartupPacket(packet []byte) bool {
 	protocolVersion := binary.BigEndian.Uint32(packet[4:8])
+	// printStartupPacketDetails(packet)
 	return protocolVersion == 196608 // 3.0 in PostgreSQL
 }
 
@@ -52,7 +61,6 @@ func isRegularPacket(packet []byte) bool {
 }
 
 func printStartupPacketDetails(packet []byte) {
-	// fmt.Printf("Protocol Version: %d\n", binary.BigEndian.Uint32(packet[4:8]))
 
 	// Print key-value pairs (for simplicity, only one key-value pair is shown)
 	keyStart := 8
@@ -85,33 +93,6 @@ func printRegularPacketDetails(packet []byte) {
 	fmt.Printf("Payload: %s\n", payload)
 }
 
-func decodeBuffer(buffer []byte) (*PSQLMessage, error) {
-	if len(buffer) < 6 {
-		return nil, errors.New("invalid buffer length")
-	}
-
-	psqlMessage := &PSQLMessage{
-		Field1: "test",
-		Field2: 123,
-	}
-
-	// Decode the ID (4 bytes)
-	psqlMessage.ID = binary.BigEndian.Uint32(buffer[:4])
-
-	// Decode the payload length (2 bytes)
-	payloadLength := binary.BigEndian.Uint16(buffer[4:6])
-
-	// Check if the buffer contains the full payload
-	if len(buffer[6:]) < int(payloadLength) {
-		return nil, errors.New("incomplete payload in buffer")
-	}
-
-	// Extract the payload from the buffer
-	psqlMessage.Payload = buffer[6 : 6+int(payloadLength)]
-
-	return psqlMessage, nil
-}
-
 const (
 	AuthTypeOk                = 0
 	AuthTypeCleartextPassword = 3
@@ -125,70 +106,275 @@ const (
 	AuthTypeSASLFinal         = 12
 )
 
-func findAuthenticationMessageType(src []byte,log *zap.Logger ) error {
-	// constants.
-	if len(src) < 4 {
-		return errors.New("authentication message too short")
-	}
-	authType := binary.BigEndian.Uint32(src[:4])
+const ProtocolVersionNumber uint32 = 196608 // Replace with actual version number if different
 
-	switch authType {
-	case AuthTypeOk:
-		log.Debug("AuthTypeOk")
-		return nil
-	case AuthTypeCleartextPassword:
-		log.Debug("AuthTypeCleartextPassword")
-		return nil
-	case AuthTypeMD5Password:
-		log.Debug("AuthTypeMD5Password")
-		return nil
-	case AuthTypeSCMCreds:
-		log.Debug("AuthTypeSCMCreds")
-		return errors.New("AuthTypeSCMCreds is unimplemented")
-	case AuthTypeGSS:
-		return nil
-	case AuthTypeGSSCont:
-		return nil
-	case AuthTypeSSPI:
-		return errors.New("AuthTypeSSPI is unimplemented")
-	case AuthTypeSASL:
-		log.Debug("AuthTypeSASL")
-		DecodeSASL(src,log)
-		return nil
-	case AuthTypeSASLContinue:
-		log.Debug("AuthTypeSASLContinue")
+// PG Response Packet Transcoder
+func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.FrontendMessage, error) {
 
-		return nil
-	case AuthTypeSASLFinal:
-		log.Debug("AuthTypeSASLFinal")
-		return nil
+	// fmt.Println("msgType", b.BackendWrapper.MsgType)
+	var msg pgproto3.FrontendMessage
+	switch b.BackendWrapper.MsgType {
+	case 'B':
+		msg = &b.BackendWrapper.Bind
+	case 'C':
+		msg = &b.BackendWrapper.Close
+	case 'D':
+		msg = &b.BackendWrapper.Describe
+	case 'E':
+		msg = &b.BackendWrapper.Execute
+	case 'F':
+		msg = &b.BackendWrapper.FunctionCall
+	case 'f':
+		msg = &b.BackendWrapper.CopyFail
+	case 'd':
+		msg = &b.BackendWrapper.CopyData
+	case 'c':
+		msg = &b.BackendWrapper.CopyDone
+	case 'H':
+		msg = &b.BackendWrapper.Flush
+	case 'P':
+		msg = &b.BackendWrapper.Parse
+	case 'p':
+		switch b.BackendWrapper.AuthType {
+		case pgproto3.AuthTypeSASL:
+			msg = &pgproto3.SASLInitialResponse{}
+		case pgproto3.AuthTypeSASLContinue:
+			msg = &pgproto3.SASLResponse{}
+		case pgproto3.AuthTypeSASLFinal:
+			msg = &pgproto3.SASLResponse{}
+		case pgproto3.AuthTypeGSS, pgproto3.AuthTypeGSSCont:
+			msg = &pgproto3.GSSResponse{}
+		case pgproto3.AuthTypeCleartextPassword, pgproto3.AuthTypeMD5Password:
+			fallthrough
+		default:
+			// to maintain backwards compatability
+			msg = &pgproto3.PasswordMessage{}
+		}
+	case 'Q':
+		msg = &b.BackendWrapper.Query
+	case 'S':
+		msg = &b.BackendWrapper.Sync
+	case 'X':
+		msg = &b.BackendWrapper.Terminate
 	default:
-		return fmt.Errorf("unknown authentication type: %d", authType)
+		return nil, fmt.Errorf("unknown message type: %c", b.BackendWrapper.MsgType)
 	}
+	// fmt.Println("msg--", msgBody)
+	err := msg.Decode(msgBody[5:])
+	if b.BackendWrapper.MsgType == 'P' {
+		*msg.(*pgproto3.Parse) = b.BackendWrapper.Parse
+	}
+	
+	// bits := msg.Encode([]byte{})
+	// // println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
+	// if len(bits) != len(msgBody) {
+	// 	fmt.Println("Encoded Data doesn't match the original data ..")
+	// }
+
+	return msg, err
 }
 
-func DecodeSASL(src []byte, log *zap.Logger) error {
-	var AuthMechanisms []string
-	log.Debug("AuthenticationSASL.Decode")
-	if len(src) < 4 {
-		return errors.New("authentication message too short")
-	}
-
-	authType := binary.BigEndian.Uint32(src)
-	// log.Debug("authType: ", authType)
-	if authType != AuthTypeSASL {
-		return errors.New("bad auth type")
-	}
-
-	authMechanisms := src[4:]
-	for len(authMechanisms) > 1 {
-		idx := bytes.IndexByte(authMechanisms, 0)
-		if idx > 0 {
-			AuthMechanisms = append(AuthMechanisms, string(authMechanisms[:idx]))
-			authMechanisms = authMechanisms[idx+1:]
+func (f *FrontendWrapper) TranslateToReadableResponse(msgBody []byte, logger *zap.Logger) (pgproto3.BackendMessage, error) {
+	f.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(msgBody[1:])) - 4
+	// println("bodylen", f.FrontendWrapper.BodyLen, "of msgtype", msgBody[0])
+	f.FrontendWrapper.MsgType = msgBody[0]
+	var msg pgproto3.BackendMessage
+	switch f.FrontendWrapper.MsgType {
+	case '1':
+		msg = &f.FrontendWrapper.ParseComplete
+	case '2':
+		msg = &f.FrontendWrapper.BindComplete
+	case '3':
+		msg = &f.FrontendWrapper.CloseComplete
+	case 'A':
+		msg = &f.FrontendWrapper.NotificationResponse
+	case 'c':
+		msg = &f.FrontendWrapper.CopyDone
+	case 'C':
+		msg = &f.FrontendWrapper.CommandComplete
+	case 'd':
+		msg = &f.FrontendWrapper.CopyData
+	case 'D':
+		msg = &f.FrontendWrapper.DataRow
+		logger.Debug("Data Row", zap.String("data", string(msgBody)))
+	case 'E':
+		msg = &f.FrontendWrapper.ErrorResponse
+	case 'G':
+		msg = &f.FrontendWrapper.CopyInResponse
+	case 'H':
+		msg = &f.FrontendWrapper.CopyOutResponse
+	case 'I':
+		msg = &f.FrontendWrapper.EmptyQueryResponse
+	case 'K':
+		msg = &f.FrontendWrapper.BackendKeyData
+	case 'n':
+		msg = &f.FrontendWrapper.NoData
+	case 'N':
+		msg = &f.FrontendWrapper.NoticeResponse
+	case 'R':
+		var err error
+		msg, err = f.findAuthenticationMessageType(msgBody)
+		if err != nil {
+			return nil, err
 		}
+	case 's':
+		msg = &f.FrontendWrapper.PortalSuspended
+	case 'S':
+		msg = &f.FrontendWrapper.ParameterStatus
+	case 't':
+		msg = &f.FrontendWrapper.ParameterDescription
+	case 'T':
+		msg = &f.FrontendWrapper.RowDescription
+	case 'V':
+		msg = &f.FrontendWrapper.FunctionCallResponse
+	case 'W':
+		msg = &f.FrontendWrapper.CopyBothResponse
+	case 'Z':
+		msg = &f.FrontendWrapper.ReadyForQuery
+	default:
+		return nil, fmt.Errorf("unknown message type: %c", f.FrontendWrapper.MsgType)
 	}
-	// println("AuthMechanisms: ", AuthMechanisms[0], AuthMechanisms[1])
 
-	return nil
+	logger.Debug("msgFrontend", zap.String("msgFrontend", string(msgBody)))
+
+	err := msg.Decode(msgBody[5:])
+	if err != nil {
+		logger.Error("Error from decoding request message ..", zap.Error(err))
+	}
+
+	bits := msg.Encode([]byte{})
+	// println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
+	if len(bits) != len(msgBody) {
+		fmt.Println("Encoded Data doesn't match the original data ..")
+	}
+
+	return msg, err
+}
+
+func (f *FrontendWrapper) findAuthenticationMessageType(src []byte) (pgproto3.BackendMessage, error) {
+	if len(src) < 4 {
+		return nil, errors.New("authentication message too short")
+	}
+
+	authType, err := parseAuthType(src)
+	if err != nil {
+		return nil, err
+
+	}
+
+	f.FrontendWrapper.AuthType = authType
+	// fmt.Printf("My int32 value is: %d\n", f.FrontendWrapper.AuthType)
+	switch f.FrontendWrapper.AuthType {
+	case pgproto3.AuthTypeOk:
+		// fmt.Println("AuthTypeOk")
+		return &f.FrontendWrapper.AuthenticationOk, nil
+	case pgproto3.AuthTypeCleartextPassword:
+		// fmt.Println("AuthTypeCleartextPassword")
+		return &f.FrontendWrapper.AuthenticationCleartextPassword, nil
+	case pgproto3.AuthTypeMD5Password:
+		// fmt.Println("AuthTypeMD5Password")
+		return &f.FrontendWrapper.AuthenticationMD5Password, nil
+	case pgproto3.AuthTypeSCMCreds:
+		return nil, errors.New("AuthTypeSCMCreds is unimplemented")
+	case pgproto3.AuthTypeGSS:
+		return &f.FrontendWrapper.AuthenticationGSS, nil
+	case pgproto3.AuthTypeGSSCont:
+		return &f.FrontendWrapper.AuthenticationGSSContinue, nil
+	case pgproto3.AuthTypeSSPI:
+		return nil, errors.New("AuthTypeSSPI is unimplemented")
+	case pgproto3.AuthTypeSASL:
+		return &f.FrontendWrapper.AuthenticationSASL, nil
+	case pgproto3.AuthTypeSASLContinue:
+		return &f.FrontendWrapper.AuthenticationSASLContinue, nil
+	case pgproto3.AuthTypeSASLFinal:
+		return &f.FrontendWrapper.AuthenticationSASLFinal, nil
+	default:
+		return nil, fmt.Errorf("unknown authentication type: %d", f.FrontendWrapper.AuthType)
+	}
+
+}
+
+// GetAuthType returns the authType used in the current state of the frontend.
+// See SetAuthType for more information.
+func parseAuthType(buffer []byte) (int32, error) {
+	// Create a bytes reader from the buffer
+	reader := bytes.NewReader(buffer)
+
+	// Skip the message type (1 byte) as you know it's 'R'
+	reader.Seek(1, 0)
+
+	// Read the length of the message (4 bytes)
+	var length int32
+	err := binary.Read(reader, binary.BigEndian, &length)
+	if err != nil {
+		return 0, err
+	}
+
+	// Read the auth type code (4 bytes)
+	var authType int32
+	err = binary.Read(reader, binary.BigEndian, &authType)
+	if err != nil {
+		return 0, err
+	}
+
+	return authType, nil
+}
+
+const (
+	minStartupPacketLen = 4     // minStartupPacketLen is a single 32-bit int version or code.
+	maxStartupPacketLen = 10000 // maxStartupPacketLen is MAX_STARTUP_PACKET_LENGTH from PG source.
+	sslRequestNumber    = 80877103
+	cancelRequestCode   = 80877102
+	gssEncReqNumber     = 80877104
+)
+
+func (b *BackendWrapper) DecodeStartupMessage(buf []byte) (pgproto3.FrontendMessage, error) {
+
+	reader := pgproto3.NewByteReader(buf)
+	buf, err := reader.Next(4)
+
+	if err != nil {
+		return nil, err
+	}
+	msgSize := int(binary.BigEndian.Uint32(buf) - 4)
+
+	if msgSize < minStartupPacketLen || msgSize > maxStartupPacketLen {
+		return nil, fmt.Errorf("invalid length of startup packet: %d", msgSize)
+	}
+
+	buf, err = reader.Next(msgSize)
+	if err != nil {
+		return nil, fmt.Errorf("invalid length of startup packet: %d", msgSize)
+	}
+
+	code := binary.BigEndian.Uint32(buf)
+
+	switch code {
+	case ProtocolVersionNumber:
+		err := b.BackendWrapper.StartupMessage.Decode(buf)
+		if err != nil {
+			return nil, err
+		}
+		return &b.BackendWrapper.StartupMessage, nil
+	case sslRequestNumber:
+		err := b.BackendWrapper.SSlRequest.Decode(buf)
+		if err != nil {
+			return nil, err
+		}
+		return &b.BackendWrapper.SSlRequest, nil
+	case cancelRequestCode:
+		err := b.BackendWrapper.CancelRequest.Decode(buf)
+		if err != nil {
+			return nil, err
+		}
+		return &b.BackendWrapper.CancelRequest, nil
+	case gssEncReqNumber:
+		err := b.BackendWrapper.GssEncRequest.Decode(buf)
+		if err != nil {
+			return nil, err
+		}
+		return &b.BackendWrapper.GssEncRequest, nil
+	default:
+		return nil, fmt.Errorf("unknown startup message code: %d", code)
+	}
 }
