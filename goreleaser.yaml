@@ -9,6 +9,7 @@ builds:
     main: ./main.go
     ldflags:
       - -s -w -X main.Dsn={{.Env.SENTRY_DSN_BINARY}}
+      - -s -w -X main.version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:
