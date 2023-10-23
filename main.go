@@ -71,6 +71,7 @@ func main() {
 	if version == "" {
 		version = getKeployVersion()
 	}
+	utils.VersionForTelemetry = version
 	fmt.Println(logo, " ")
 	fmt.Printf("%v\n\n", version)
 	isDocker := os.Getenv("IS_DOCKER_CMD")
