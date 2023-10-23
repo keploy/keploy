@@ -294,10 +294,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	exitLoop := false
 	for _, tc := range tcs {
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		filteredTcsMocks, err := filterTcsMocks(tc, tcsMocks)
-		if err != nil {
-			t.logger.Error("failed to filter the mocks.", zap.Any("error", err.Error()))
-		}
+		filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
 		loadedHooks.SetTcsMocks(filteredTcsMocks)
 
 		select {

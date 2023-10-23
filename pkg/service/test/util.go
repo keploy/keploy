@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/models"
+	"go.uber.org/zap"
 )
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
@@ -240,29 +241,32 @@ func Contains(elems []string, v string) bool {
 }
 
 // Filter the mocks based on req and res timestamp of test
-func filterTcsMocks(tc *models.TestCase, m []*models.Mock) ([]*models.Mock, error) {
+func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
 	filteredMocks := make([]*models.Mock, 0)
 
 	if tc.HttpReq.Timestamp == (time.Time{}) {
-		return filteredMocks, fmt.Errorf("request timestamp is missing of %s", tc.Name)
+		logger.Warn("request timestamp is missing of " + tc.Name)
+		return m
 	}
 
 	if tc.HttpResp.Timestamp == (time.Time{}) {
-		return filteredMocks, fmt.Errorf("response timestamp is misssing of  %s", tc.Name)
+		logger.Warn("response timestamp is misssing of " + tc.Name)
+		return m
 	}
 
 	for _, mock := range m {
-		if mock.Spec.ReqTimestampMock == (time.Time{}) {
-			return filteredMocks, fmt.Errorf("request timestamp of mock is missing for %s", tc.Name)
+		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
+			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
+			logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
+			filteredMocks = append(filteredMocks, mock)
+			continue
 		}
-		if mock.Spec.ResTimestampMock == (time.Time{}) {
-			return filteredMocks, fmt.Errorf("response timestamp of mock is missing for %s", tc.Name)
-		}
+
 		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
 		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
 			filteredMocks = append(filteredMocks, mock)
 		}
 	}
 
-	return filteredMocks, nil
+	return filteredMocks
 }
