@@ -4,23 +4,20 @@ type Kind string
 type BodyType string
 type Version string
 
-const V1Beta1 = Version("api.keploy.io/v1beta1")
-
 var (
-	currentVersion = V1Beta1
+	V1Beta1 Version
+	V1Beta2 Version
 )
 
-func SetVersion(V1 string) {
-	currentVersion = Version(V1)
+func SetVersion(V1 string, V2 string){
+	V1Beta1 = Version(V1)
+	V1Beta2 = Version(V2)
 }
 
-func GetVersion() (V1 Version) {
-	return currentVersion
+func GetVersion() (V1 Version, V2 Version){
+	return V1Beta1, V1Beta2
 }
 
-//TODO: Why are we declaring mock types in testcase.go file?
-
-// mocks types
 const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
