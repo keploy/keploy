@@ -62,7 +62,6 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
-
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
@@ -210,6 +209,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
+
 	errChan := make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", pid))
 
@@ -293,6 +293,10 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	time.Sleep(time.Duration(delay) * time.Second)
 	exitLoop := false
 	for _, tc := range tcs {
+		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
+		filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
+		loadedHooks.SetTcsMocks(filteredTcsMocks)
+
 		select {
 		case err = <-errChan:
 			isApplicationStopped = true

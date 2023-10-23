@@ -137,6 +137,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 	isPreviousChunkRequest := false
 	logger.Debug("the iteration for the pg request starts", zap.Any("pgReqs", len(pgRequests)), zap.Any("pgResps", len(pgResponses)))
+
+	reqTimestampMock := time.Now()
+	var resTimestampMock time.Time
+
 	for {
 
 		sigChan := make(chan os.Signal, 1)
@@ -151,6 +155,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					Spec: models.MockSpec{
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
 					},
 				},ctx)
 				pgRequests = []models.Backend{}
@@ -178,6 +184,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					Spec: models.MockSpec{
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
 					},
 				},ctx)
 				pgRequests = []models.Backend{}
@@ -282,6 +290,11 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			}
 			isPreviousChunkRequest = true
 		case buffer := <-destBufferChannel:
+			if isPreviousChunkRequest {
+				// store the request timestamp
+				reqTimestampMock = time.Now()
+			}
+
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
@@ -388,6 +401,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				}
 			}
 
+			resTimestampMock = time.Now()
+
 			logger.Debug("the iteration for the postgres response ends with no of postgresReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			isPreviousChunkRequest = false
 		case err := <-errChannel:
@@ -418,10 +433,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 // This is the decoding function for the postgres wiremessage
 func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger,ctx context.Context) error {
 	pgRequests := [][]byte{requestBuffer}
-	tcsMocks := h.GetTcsMocks()
-	// change auth to md5 instead of scram
-	// CheckValidEncode(tcsMocks, h, logger)
-	ChangeAuthToMD5(tcsMocks, h, logger)
+	
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
@@ -452,6 +464,12 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			logger.Debug("the postgres request buffer is empty")
 			continue
 		}
+
+		tcsMocks := h.GetTcsMocks()
+		// change auth to md5 instead of scram
+		// CheckValidEncode(tcsMocks, h, logger)
+		ChangeAuthToMD5(tcsMocks, h, logger)
+
 
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
 
