@@ -246,10 +246,10 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 		}()
 	}
-
+	V1Beta1, _ := models.GetVersion()
 	// testReport stores the result of all testruns
 	testReport := &models.TestReport{
-		Version: models.V1Beta1,
+		Version: V1Beta1,
 		// Name:    runId,
 		Total:  len(tcs),
 		Status: string(models.TestRunStatusRunning),
@@ -338,13 +338,13 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				continue
 			}
 			testPass, testResult := t.testHttp(*tc, resp)
-			
+
 			if !testPass {
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
 			} else {
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(tc.Name)), zap.Any("testset id", models.HighlightPassingString(testSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
 			}
-			
+
 			testStatus := models.TestStatusPending
 			if testPass {
 				testStatus = models.TestStatusPassed
@@ -423,7 +423,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	} else {
 		pp.SetColorScheme(models.PassingColorScheme)
 	}
-	
+
 	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure)
 
 	if err != nil {
