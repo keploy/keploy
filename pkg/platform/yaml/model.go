@@ -419,6 +419,14 @@ func decodeMySqlMessage(yamlSpec *spec.MySQLSpec, logger *zap.Logger) (*models.M
 				return nil, err
 			}
 			req.Message = requestMessage
+		case "AUTH_SWITCH_RESPONSE":
+			requestMessage := &models.AuthSwitchRequestPacket{}
+			err := v.Message.Decode(requestMessage)
+			if err != nil {
+				logger.Error(Emoji+"failed to unmarshal yml document into MySQLComStmtClosePacket", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
 		case "COM_CHANGE_USER":
 			requestMessage := &models.MySQLComChangeUserPacket{}
 			err := v.Message.Decode(requestMessage)
@@ -476,6 +484,14 @@ func decodeMySqlMessage(yamlSpec *spec.MySQLSpec, logger *zap.Logger) (*models.M
 			resp.Message = responseMessage
 		case "RESULT_SET_PACKET":
 			responseMessage := &models.MySQLResultSet{}
+			err := v.Message.Decode(responseMessage)
+			if err != nil {
+				logger.Error(Emoji+"failed to unmarshal yml document into MySQLResultSet ", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case "AUTH_SWITCH_REQUEST":
+			responseMessage := &models.AuthSwitchRequestPacket{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
 				logger.Error(Emoji+"failed to unmarshal yml document into MySQLResultSet ", zap.Error(err))

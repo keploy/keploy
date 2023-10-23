@@ -206,7 +206,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetType = "AUTH_SWITCH_REQUEST"
 		packetData, err = decodeAuthSwitchRequest(data)
 		lastCommand = 0xFE
-	case data[0] == 0xFE && expectingAuthSwitchResponse:
+	case data[0] == 0xFE || expectingAuthSwitchResponse:
 		packetType = "AUTH_SWITCH_RESPONSE"
 		packetData, err = decodeAuthSwitchResponse(data)
 		expectingAuthSwitchResponse = false
@@ -226,7 +226,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetType = "COM_STMT_RESET"
 		packetData, err = decodeComStmtReset(data)
 		lastCommand = 0x1a
-	case data[0] == 0x8d: // Handshake Response packet
+	case data[0] == 0x8d || expectingHandshakeResponse: // Handshake Response packet
 		packetType = "HANDSHAKE_RESPONSE"
 		packetData, err = decodeHandshakeResponse(data)
 		lastCommand = 0x8d // This value may differ depending on the handshake response protocol version
