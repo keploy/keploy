@@ -345,17 +345,6 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 	return mxIdx
 }
 
-// CreateShingles produces a set of k-shingles from a byte buffer.
-func CreateShingles(data []byte, k int) map[string]struct{} {
-	shingles := make(map[string]struct{})
-	for i := 0; i < len(data)-k+1; i++ {
-		shingle := string(data[i : i+k])
-		shingles[shingle] = struct{}{}
-	}
-	return shingles
-}
-
-
 func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	// isScram := false
 	for _, mock := range tcsMocks {
