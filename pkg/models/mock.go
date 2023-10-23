@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type Mock struct {
 	Version Version  `json:"Version,omitempty"`
 	Name    string   `json:"Name,omitempty"`
@@ -31,6 +33,9 @@ type MockSpec struct {
 	//for grpc
 	GRPCReq  *GrpcReq  `json:"gRPCRequest,omitempty"`
 	GRPCResp *GrpcResp `json:"grpcResponse,omitempty"`
+
+	ReqTimestampMock time.Time `json:"ReqTimestampMock,omitempty"`
+	ResTimestampMock time.Time `json:"ResTimestampMock,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
