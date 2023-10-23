@@ -58,7 +58,7 @@ type CapabilityFlags uint32
 
 var handshakePluginName string
 
-func encodeToBinary(packet interface{}, operation string, sequence int) ([]byte, error) {
+func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operation string, sequence int) ([]byte, error) {
 	var data []byte
 	var err error
 	var bypassHeader = false
@@ -98,7 +98,7 @@ func encodeToBinary(packet interface{}, operation string, sequence int) ([]byte,
 		if !ok {
 			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
 		}
-		data, err = encodeMySQLOK(p)
+		data, err = encodeMySQLOK(p, header)
 		bypassHeader = true
 	case "COM_STMT_PREPARE_OK":
 		p, ok := packet.(*models.MySQLStmtPrepareOk)

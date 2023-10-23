@@ -451,9 +451,10 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 		)
 		logger.Debug("MySQL requests", zap.Any("mysqlRequests", mysqlRequests))
 		if firstLoop || doHandshakeAgain {
+			header := configMocks[0].Spec.MySqlResponses[configResponseRead].Header
 			packet := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
 			opr := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-			binaryPacket, err := encodeToBinary(&packet, opr, 0)
+			binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
 			if err != nil {
 				logger.Error("Failed to encode to binary", zap.Error(err))
 				return
@@ -462,9 +463,10 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 			configResponseRead++
 			requestBuffer, err = util.ReadBytes(clientConn)
 			// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
+			header = configMocks[0].Spec.MySqlResponses[configResponseRead].Header
 			handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
 			opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-			handshakeResponseBinary, err := encodeToBinary(&handshakeResponseFromConfig, opr2, 1)
+			handshakeResponseBinary, err := encodeToBinary(&handshakeResponseFromConfig, header, opr2, 1)
 			// _, err = destConn.Write(requestBuffer)
 			//fmt.Println(oprRequest, requestHeader, mysqlRequest, handshakeResponseFromConfig, err1)
 			_, err = clientConn.Write(handshakeResponseBinary)
@@ -476,9 +478,10 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 					configResponseRead++
 					//Private Key
 					requestBuffer, err = util.ReadBytes(clientConn)
+					header = configMocks[0].Spec.MySqlResponses[configResponseRead].Header
 					handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
 					opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-					encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, opr2, 1)
+					encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, header, opr2, 1)
 					_, err = clientConn.Write(encodedResponseBinary)
 				}
 				if doHandshakeAgain && (configResponseRead == len(configMocks[0].Spec.MySqlResponses)) {
@@ -487,9 +490,10 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 					configResponseRead++
 					//Private Key
 					requestBuffer, err = util.ReadBytes(clientConn)
+					header := configMocks[0].Spec.MySqlResponses[configResponseRead].Header
 					handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
 					opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-					encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, opr2, 1)
+					encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, header, opr2, 1)
 					_, err = clientConn.Write(encodedResponseBinary)
 					configResponseRead++
 					//Encrypted Password
@@ -526,9 +530,10 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 				logger.Error("Mock response reading pointer out of bounds")
 				return
 			}
+			header := tcsMocks[0].Spec.MySqlResponses[mockResponseRead].Header
 			handshakeResponseFromConfig := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Message
 			opr2 := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header.PacketType
-			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, opr2, mockResponseRead+1)
+			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, header, opr2, mockResponseRead+1)
 			_, err = clientConn.Write(responseBinary)
 			mockResponseRead++
 			time.Sleep(1000 * time.Millisecond)

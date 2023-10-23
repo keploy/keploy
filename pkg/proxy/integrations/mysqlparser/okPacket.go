@@ -53,7 +53,7 @@ func decodeMySQLOK(data []byte) (*OKPacket, error) {
 	return packet, nil
 }
 
-func encodeMySQLOK(packet *models.MySQLOKPacket) ([]byte, error) {
+func encodeMySQLOK(packet *models.MySQLOKPacket, header *models.MySQLPacketHeader) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	// payload (without the header)
 	payload := new(bytes.Buffer)
@@ -69,11 +69,7 @@ func encodeMySQLOK(packet *models.MySQLOKPacket) ([]byte, error) {
 	binary.Write(payload, binary.LittleEndian, packet.Warnings)
 	// info
 	if len(packet.Info) > 0 {
-		payload.Write([]byte{0})
 		payload.WriteString(packet.Info)
-	} else if payload.Bytes()[payload.Len()-1] == 0 {
-		// Trim the extra 0 byte
-		payload.Truncate(payload.Len() - 1)
 	}
 
 	// header bytes
@@ -83,13 +79,14 @@ func encodeMySQLOK(packet *models.MySQLOKPacket) ([]byte, error) {
 	buf.WriteByte(byte(packetLength >> 8))
 	buf.WriteByte(byte(packetLength >> 16))
 	// Write packet sequence number (1 byte)
-	buf.WriteByte(1)
+	buf.WriteByte(header.PacketNumber)
 
 	// Write payload
 	buf.Write(payload.Bytes())
 
 	return buf.Bytes(), nil
 }
+
 func encodeMySQLOKConnectionPhase(packet interface{}, operation string, sequence int) ([]byte, error) {
 	innerPacket, ok := packet.(*interface{})
 	if ok {
