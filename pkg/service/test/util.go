@@ -245,12 +245,12 @@ func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 	filteredMocks := make([]*models.Mock, 0)
 
 	if tc.HttpReq.Timestamp == (time.Time{}) {
-		logger.Warn("request timestamp is missing of " + tc.Name)
+		logger.Warn("request timestamp is missing for " + tc.Name)
 		return m
 	}
 
 	if tc.HttpResp.Timestamp == (time.Time{}) {
-		logger.Warn("response timestamp is misssing of " + tc.Name)
+		logger.Warn("response timestamp is missing for " + tc.Name)
 		return m
 	}
 
