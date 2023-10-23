@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/pkg/models"
 )
@@ -239,15 +240,29 @@ func Contains(elems []string, v string) bool {
 }
 
 // Filter the mocks based on req and res timestamp of test
-func filterTcsMocks(tc *models.TestCase, m []*models.Mock) []*models.Mock {
+func filterTcsMocks(tc *models.TestCase, m []*models.Mock) ([]*models.Mock, error) {
 	filteredMocks := make([]*models.Mock, 0)
 
+	if tc.HttpReq.Timestamp == (time.Time{}) {
+		return filteredMocks, fmt.Errorf("request timestamp is missing of %s", tc.Name)
+	}
+
+	if tc.HttpResp.Timestamp == (time.Time{}) {
+		return filteredMocks, fmt.Errorf("response timestamp is misssing of  %s", tc.Name)
+	}
+
 	for _, mock := range m {
+		if mock.Spec.ReqTimestampMock == (time.Time{}) {
+			return filteredMocks, fmt.Errorf("request timestamp of mock is missing for %s", tc.Name)
+		}
+		if mock.Spec.ResTimestampMock == (time.Time{}) {
+			return filteredMocks, fmt.Errorf("response timestamp of mock is missing for %s", tc.Name)
+		}
 		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
 		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
 			filteredMocks = append(filteredMocks, mock)
 		}
 	}
 
-	return filteredMocks
+	return filteredMocks, nil
 }

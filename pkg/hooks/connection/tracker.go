@@ -90,7 +90,7 @@ func (conn *Tracker) decRecordTestCount() {
 
 // IsComplete() checks if the current connection has valid request & response info to capture
 // and also returns the request and response data buffer.
-func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time) {
+func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 
@@ -219,7 +219,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time) {
 		conn.reqTimestampTest = conn.reqTimestampTest[1:]
 	}
 
-	return recordTraffic, requestBuf, responseBuf, reqTimestampTest
+	return recordTraffic, requestBuf, responseBuf, reqTimestampTest, conn.resTimestampTest
 	// // Check if other conditions for completeness are met.
 	// return conn.closeTimestamp != 0 &&
 	// 	conn.totalReadBytes == conn.recvBytes &&

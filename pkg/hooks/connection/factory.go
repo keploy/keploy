@@ -42,7 +42,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, ctx conte
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
 	for connID, tracker := range factory.connections {
-		ok, requestBuf, responseBuf, reqTimestampTest := tracker.IsComplete()
+		ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
 		if ok {
 
 			if len(requestBuf) == 0 && len(responseBuf) == 0 {
@@ -65,7 +65,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, ctx conte
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
 				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, tracker.resTimestampTest)
+				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest)
 			case models.MODE_TEST:
 				factory.logger.Debug("skipping tracker in test mode")
 			default:
