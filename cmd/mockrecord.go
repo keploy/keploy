@@ -67,7 +67,7 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 
 
 
-			proxyPort, err := cmd.Flags().GetUint32("proxyPort")
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				mr.logger.Error(Emoji + "failed to read the proxy port")
 				return
