@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -378,7 +377,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 							h.logger.Debug("application inode sent to kernel successfully", zap.Any("user inode", inode), zap.Any("time", time.Now().UnixNano()))
 						}
 
-            //inspecting it again to get the ip of the container used in test mode.
+						//inspecting it again to get the ip of the container used in test mode.
 						containerDetails, err := dockerClient.ContainerInspect(context.Background(), appContainer)
 						if err != nil {
 							h.logger.Error(fmt.Sprintf("failed to get inspect app container:%v to retrive the ip", containerDetails))
@@ -459,6 +458,10 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 	parts := strings.Fields(appCmd)
 	cmd := exec.Command(parts[0], parts[1:]...)
 
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
 	// Set the output of the command
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -498,34 +501,30 @@ func (h *Hook) runApp(appCmd string, isDocker bool) error {
 		}
 
 		// Switch the user
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
 	}
 
 	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
 
-	// Run the command, this handles non-zero exit code get from application.
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
-
-	fmt.Println(os.Getwd())
-
 	err := cmd.Run()
 	if err != nil {
-		select {
-		case <-stopper:
-			return ErrInterrupted
-		default:
+		if h.userAppShutdownInitiated {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
 					if status.Signaled() {
 						return ErrInterrupted
 					}
+					if status.Exited() {
+						h.logger.Warn(fmt.Sprintf("userApplication has exited with exit code: %v", status.ExitStatus()))
+						return ErrInterrupted
+					}
 				}
 			}
-			h.logger.Error("couldn't start user application as command failed with error", zap.Error(err))
-			return ErrCommandError
+			h.logger.Warn("userApplication might not have shut down correctly. Please verify if it has been closed", zap.Error(err))
+			return ErrInterrupted
 		}
+		h.logger.Error("userApplication failed to run with the following error. Please check application logs", zap.Error(err))
+		return ErrCommandError
 	} else {
 		return ErrUnExpected
 	}

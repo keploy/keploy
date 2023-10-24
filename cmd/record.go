@@ -161,8 +161,14 @@ func (r *Record) GetCmd() *cobra.Command {
 				ports = confRecord.PassThroughPorts
 			}
 
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				r.logger.Error("failed to read the proxy port")
+				return err
+			}
+			
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, appCmd, appContainer, networkName, delay, ports)
+			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
 			return nil
 		},
 	}
@@ -172,6 +178,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
+
+	recordCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
 	recordCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 

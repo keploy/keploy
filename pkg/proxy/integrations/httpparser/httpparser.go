@@ -517,7 +517,11 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			}
 			finalReq = append(finalReq, request...)
 		}
-		handleChunkedRequests(&finalReq, clientConn, destConn, logger)
+		
+		// Capture the request timestamp
+		reqTimestampMock := time.Now()
+
+		handleChunkedRequests(&finalReq, clientConn, destConn, logger)		
 		// read the response from the actual server
 		resp, err = util.ReadBytes(destConn)
 		if err != nil {
@@ -529,6 +533,9 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 				return err
 			}
 		}
+
+		// Capturing the response timestamp
+		resTimestampcMock := time.Now()
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
@@ -620,6 +627,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					Body:       string(respBody),
 				},
 				Created: time.Now().Unix(),
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampcMock,
 			},
 		}, ctx)
 		finalReq = []byte("")
