@@ -94,14 +94,22 @@ func (s *Serve) GetCmd() *cobra.Command {
 				s.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return
 			}
+
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				s.logger.Error("failed to read the proxy port")
+				return
+			}
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			s.server.Serve(path, testReportPath, delay, pid, port, language, ports, apiTimeout)
+			s.server.Serve(path,proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout)
 		},
 	}
 
 	serveCmd.Flags().Uint32("pid", 0, "Process id of your application.")
 	serveCmd.MarkFlagRequired("pid")
+
+	serveCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
 	serveCmd.Flags().Uint32("port", 6789, "Port at which you want to run graphql Server")
 

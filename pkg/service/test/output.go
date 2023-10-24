@@ -20,8 +20,8 @@ type DiffsPrinter struct {
 	testCase  string
 	statusExp string
 	statusAct string
-	headerExp string
-	headerAct string
+	headerExp map[string]string
+	headerAct map[string]string
 	bodyExp   string
 	bodyAct   string
 	bodyNoise map[string][]string
@@ -29,7 +29,7 @@ type DiffsPrinter struct {
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", "", "", "", "", map[string][]string{}, map[string][]string{}}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string]string{}}
 }
 
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
@@ -52,9 +52,7 @@ func (d *DiffsPrinter) Render() {
 		diffs = append(diffs, sprintDiff(d.statusExp, d.statusAct, "status"))
 	}
 
-	if d.headerExp != d.headerAct {
-		diffs = append(diffs, sprintDiff(fmt.Sprint(d.headerExp), fmt.Sprint(d.headerAct), "header"))
-	}
+	diffs = append(diffs, sprintDiffHeader(d.headerExp, d.headerAct))
 
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
@@ -83,9 +81,35 @@ func (d *DiffsPrinter) Render() {
 
 /*
  * Returns a nice diff table where the left is the expect and the right
- * is the actual. Its generic because it works with whatever string. For
- * JSON-based diffs use SprintJSONDiff
- * field: body, stauts, header...
+ * is the actual. each entry in expect and actual will contain the key
+ * and the corresponding value. 
+ */
+func sprintDiffHeader(expect, actual map[string]string) string {
+	
+	expectAll := ""
+	actualAll := ""
+	for key, expValue := range expect {
+		actValue := key + ": " + actual[key] 
+		expValue = key + ": " + expValue 
+		// Offset will be where the string start to unmatch
+		offset, _ := diffIndex(expValue, actValue)
+
+		// Color of the unmatch, can be changed
+		cE, cA := color.FgHiRed, color.FgHiGreen
+
+		expectAll += breakWithColor(expValue, &cE, offset)
+		actualAll += breakWithColor(actValue, &cA, offset)
+	}
+	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
+		return expectActualTable(expectAll, actualAll, "header", false) // Don't centerize
+	}
+	return expectActualTable(expectAll, actualAll, "header", true)
+}
+
+/*
+ * Returns a nice diff table where the left is the expect and the right
+ * is the actual. For JSON-based diffs use SprintJSONDiff
+ * field: body, status...
  */
 func sprintDiff(expect, actual, field string) string {
 

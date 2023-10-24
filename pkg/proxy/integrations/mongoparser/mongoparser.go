@@ -424,6 +424,9 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			}
 		}
 
+		// Capturing the request's timestamp
+		reqTimestampMock := time.Now()
+
 		// read reply message from the mongo server
 		tmpStr := ""
 		started = time.Now()
@@ -468,7 +471,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
 						defer utils.HandlePanic()
-						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
+						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx, reqTimestampMock)
 					}()
 				}
 				tmpStr := ""
@@ -527,7 +530,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
 			defer utils.HandlePanic()
-			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
+			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx, reqTimestampMock)
 		}()
 		requestBuffer = []byte("read form client connection")
 
@@ -535,7 +538,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 
 }
 
-func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context) {
+func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context, reqTimestampMock time.Time) {
 	// // capture if the wiremessage is a mongo operation call
 
 	shouldRecordCalls := true
@@ -582,10 +585,12 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 			Kind:    models.Mongo,
 			Name:    name,
 			Spec: models.MockSpec{
-				Metadata:       meta1,
-				MongoRequests:  mongoRequests,
-				MongoResponses: mongoResponses,
-				Created:        time.Now().Unix(),
+				Metadata:         meta1,
+				MongoRequests:    mongoRequests,
+				MongoResponses:   mongoResponses,
+				Created:          time.Now().Unix(),
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: time.Now(),
 			},
 		}
 		h.AppendMocks(mongoMock, ctx)

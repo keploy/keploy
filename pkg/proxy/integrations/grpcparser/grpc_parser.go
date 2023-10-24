@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -105,7 +106,7 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 			}
 			return fmt.Errorf("error reading frame %v", err)
 		}
-		//PrintFrame(frame)
+		//PrintFrame(frame)	
 
 		switch frame.(type) {
 		case *http2.SettingsFrame:
@@ -175,8 +176,14 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 				return fmt.Errorf("could not write data frame: %v", err)
 			}
 			if isReqFromClient {
+				// Capturing the request timestamp
+				sic.ReqTimestampMock = time.Now()
+
 				sic.AddPayloadForRequest(dataFrame.StreamID, dataFrame.Data())
 			} else if isRespFromServer {
+				// Capturing the response timestamp
+				sic.ResTimestampMock = time.Now()
+
 				sic.AddPayloadForResponse(dataFrame.StreamID, dataFrame.Data())
 			}
 		case *http2.PingFrame:
