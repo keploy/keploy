@@ -75,10 +75,13 @@ func setupLogger() *zap.Logger {
 
 	// Customize the encoder config to put the emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
+  logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+
 	logCfg.OutputPaths = []string{
 		"stdout",
 		"/tmp/keploy-logs.txt",
 	}
+  
 	if debugMode {
 		go func() {
 			defer utils.HandlePanic()
