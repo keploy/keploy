@@ -440,7 +440,7 @@ var (
 
 func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
-	doHandshakeAgain := false
+	doHandshakeAgain := true
 	configResponseRead := 0
 	for {
 		configMocks := h.GetConfigMocks()
@@ -471,7 +471,7 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 			//fmt.Println(oprRequest, requestHeader, mysqlRequest, handshakeResponseFromConfig, err1)
 			_, err = clientConn.Write(handshakeResponseBinary)
 
-			if doHandshakeAgain && (configResponseRead == len(configMocks[0].Spec.MySqlResponses)) {
+			if doHandshakeAgain && ((configResponseRead + 1) == len(configMocks[0].Spec.MySqlResponses)) {
 				doHandshakeAgain = false
 			} else {
 				if opr2 == "AUTH_SWITCH_REQUEST" {
@@ -484,7 +484,7 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 					encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, header, opr2, 1)
 					_, err = clientConn.Write(encodedResponseBinary)
 				}
-				if doHandshakeAgain && (configResponseRead == len(configMocks[0].Spec.MySqlResponses)) {
+				if doHandshakeAgain && ((configResponseRead + 1) == len(configMocks[0].Spec.MySqlResponses)) {
 					doHandshakeAgain = false
 				} else {
 					configResponseRead++
@@ -502,6 +502,7 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 					opr3 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
 					encodedResponseBinary, _ = encodeMySQLOKConnectionPhase(&ResponseFromConfigNext, opr3, 6)
 					_, err = clientConn.Write(encodedResponseBinary)
+					doHandshakeAgain = false
 				}
 
 			}
