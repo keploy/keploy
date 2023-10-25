@@ -530,7 +530,7 @@ func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []b
 				logger.Error("Mock response reading pointer out of bounds")
 				return
 			}
-			header := tcsMocks[0].Spec.MySqlResponses[mockResponseRead].Header
+			header := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header
 			handshakeResponseFromConfig := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Message
 			opr2 := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header.PacketType
 			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, header, opr2, mockResponseRead+1)
@@ -660,7 +660,9 @@ func bytesToMySQLPacket(buffer []byte) MySQLPacket {
 		log.Fatalf("Error: buffer is nil or too short to be a valid MySQL packet")
 		return MySQLPacket{}
 	}
-	length := binary.LittleEndian.Uint32(append(buffer[0:3], 0))
+	tempBuffer := make([]byte, 4)
+	copy(tempBuffer, buffer[:3])
+	length := binary.LittleEndian.Uint32(tempBuffer)
 	sequenceID := buffer[3]
 	payload := buffer[4:]
 	return MySQLPacket{
