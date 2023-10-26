@@ -2,7 +2,6 @@ package yaml
 
 import (
 	"errors"
-	"fmt"
 
 	"strings"
 
@@ -109,10 +108,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			responses = append(responses, resp)
 		}
 		mongoSpec := spec.MongoSpec{
-			Metadata:  mock.Spec.Metadata,
-			Requests:  requests,
-			Response:  responses,
-			CreatedAt: mock.Spec.Created,
+			Metadata:         mock.Spec.Metadata,
+			Requests:         requests,
+			Response:         responses,
+			CreatedAt:        mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
@@ -125,10 +124,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 
 	case models.HTTP:
 		httpSpec := spec.HttpSpec{
-			Metadata: mock.Spec.Metadata,
-			Request:  *mock.Spec.HttpReq,
-			Response: *mock.Spec.HttpResp,
-			Created:  mock.Spec.Created,
+			Metadata:         mock.Spec.Metadata,
+			Request:          *mock.Spec.HttpReq,
+			Response:         *mock.Spec.HttpResp,
+			Created:          mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
@@ -156,8 +155,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			Metadata:          mock.Spec.Metadata,
 			PostgresRequests:  mock.Spec.PostgresRequests,
 			PostgresResponses: mock.Spec.PostgresResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
+			ReqTimestampMock:  mock.Spec.ReqTimestampMock,
+			ResTimestampMock:  mock.Spec.ResTimestampMock,
 		}
 
 		err := yamlDoc.Spec.Encode(postgresSpec)
@@ -167,8 +166,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 		}
 	case models.GRPC_EXPORT:
 		gRPCSpec := spec.GrpcSpec{
-			GrpcReq:  *mock.Spec.GRPCReq,
-			GrpcResp: *mock.Spec.GRPCResp,
+			GrpcReq:          *mock.Spec.GRPCReq,
+			GrpcResp:         *mock.Spec.GRPCResp,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
@@ -283,7 +282,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				HttpReq:  &httpSpec.Request,
 				HttpResp: &httpSpec.Response,
 
-				Created: httpSpec.Created,
+				Created:          httpSpec.Created,
 				ReqTimestampMock: httpSpec.ReqTimestampMock,
 				ResTimestampMock: httpSpec.ResTimestampMock,
 			}
@@ -308,8 +307,8 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				GRPCResp: &grpcSpec.GrpcResp,
-				GRPCReq: &grpcSpec.GrpcReq,
+				GRPCResp:         &grpcSpec.GrpcResp,
+				GRPCReq:          &grpcSpec.GrpcReq,
 				ReqTimestampMock: grpcSpec.ReqTimestampMock,
 				ResTimestampMock: grpcSpec.ResTimestampMock,
 			}
@@ -342,9 +341,8 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				// OutputBinary: genericSpec.Objects,
 				PostgresRequests:  PostSpec.PostgresRequests,
 				PostgresResponses: PostSpec.PostgresResponses,
-				ReqTimestampMock: PostSpec.ReqTimestampMock,
-				ResTimestampMock: PostSpec.ResTimestampMock,
-
+				ReqTimestampMock:  PostSpec.ReqTimestampMock,
+				ResTimestampMock:  PostSpec.ResTimestampMock,
 			}
 		case models.SQL:
 			mysqlSpec := spec.MySQLSpec{}
@@ -462,8 +460,6 @@ func decodeMySqlMessage(yamlSpec *spec.MySQLSpec, logger *zap.Logger) (*models.M
 			req.Message = requestMessage
 		}
 		requests = append(requests, req)
-
-		fmt.Println(req, requests, mockSpec)
 	}
 	mockSpec.MySqlRequests = requests
 
@@ -540,8 +536,8 @@ func decodeMySqlMessage(yamlSpec *spec.MySQLSpec, logger *zap.Logger) (*models.M
 }
 func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
-		Metadata: yamlSpec.Metadata,
-		Created:  yamlSpec.CreatedAt,
+		Metadata:         yamlSpec.Metadata,
+		Created:          yamlSpec.CreatedAt,
 		ReqTimestampMock: yamlSpec.ReqTimestampMock,
 		ResTimestampMock: yamlSpec.ResTimestampMock,
 	}
