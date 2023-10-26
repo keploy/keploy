@@ -197,6 +197,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if len(ports) == 0 {
 				ports = confTest.PassThroughPorts
+			}
 
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {

@@ -19,14 +19,6 @@ func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	}
 }
 
-func arrayToMap(arr []string) map[string]bool {
-	res := map[string]bool{}
-	for i := range arr {
-		res[arr[i]] = true
-	}
-	return res
-}
-
 func Match(exp, act string, noise map[string][]string, log *zap.Logger) (string, string, bool, error) {
 
 	expected, err := UnmarshallJson(exp, log)
