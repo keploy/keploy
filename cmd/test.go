@@ -186,16 +186,24 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if len(ports) == 0 {
 				ports = confTest.PassThroughPorts
+      }
+      
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				t.logger.Error("failed to read the proxyport")
+				return err
 			}
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout)
+			t.tester.Test(path, proxyPort, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout)
 			return nil
 		},
 	}
 
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+
+	testCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
