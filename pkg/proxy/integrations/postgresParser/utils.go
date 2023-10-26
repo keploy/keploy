@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
+	"go.keploy.io/server/pkg/proxy/util"
 )
 
 func PostgresDecoder(encoded string) ([]byte, error) {
@@ -310,16 +311,6 @@ func PostgresEncoder(buffer []byte) string {
 	return encoded
 }
 
-func AdaptiveK(length, kMin, kMax, N int) int {
-	k := length / N
-	if k < kMin {
-		return kMin
-	} else if k > kMax {
-		return kMax
-	}
-	return k
-}
-
 
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
@@ -334,10 +325,10 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 			for requestIndex, reqBuff := range requestBuffers {
 				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
 
-				k := AdaptiveK(len(reqBuff), 3, 8, 5)
-				shingles1 := CreateShingles(encoded, k)
-				shingles2 := CreateShingles(reqBuff, k)
-				similarity := JaccardSimilarity(shingles1, shingles2)
+				k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+				shingles1 := util.CreateShingles(encoded, k)
+				shingles2 := util.CreateShingles(reqBuff, k)
+				similarity := util.JaccardSimilarity(shingles1, shingles2)
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx
@@ -352,33 +343,6 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 		return sameHeader
 	}
 	return mxIdx
-}
-
-// CreateShingles produces a set of k-shingles from a byte buffer.
-func CreateShingles(data []byte, k int) map[string]struct{} {
-	shingles := make(map[string]struct{})
-	for i := 0; i < len(data)-k+1; i++ {
-		shingle := string(data[i : i+k])
-		shingles[shingle] = struct{}{}
-	}
-	return shingles
-}
-
-// JaccardSimilarity computes the Jaccard similarity between two sets of shingles.
-func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
-	intersectionSize := 0
-	for k := range setA {
-		if _, exists := setB[k]; exists {
-			intersectionSize++
-		}
-	}
-
-	unionSize := len(setA) + len(setB) - intersectionSize
-
-	if unionSize == 0 {
-		return 0.0
-	}
-	return float64(intersectionSize) / float64(unionSize)
 }
 
 func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
