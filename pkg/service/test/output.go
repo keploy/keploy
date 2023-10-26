@@ -29,15 +29,15 @@ type DiffsPrinter struct {
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string]string{}}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}}
 }
 
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 	d.statusExp, d.statusAct = exp, act
 }
 
-func (d *DiffsPrinter) PushHeaderDiff(exp, act string, noise map[string][]string) {
-	d.headerExp, d.headerAct, d.headNoise = exp, act, noise
+func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]string) {
+	d.headerExp[key], d.headerAct[key], d.headNoise = exp, act, noise
 }
 
 func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) {
