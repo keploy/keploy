@@ -152,7 +152,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			noise := confTest.Noise
 
 			noiseJSON, err := test.UnmarshallJson(noise, t.logger)
-
+      
 			if err != nil {
 				t.logger.Error("Failed to unmarshall the noise flag", zap.Error((err)))
 			}
@@ -197,8 +197,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if len(ports) == 0 {
 				ports = confTest.PassThroughPorts
-			}
-
+      }
+      
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				t.logger.Error("failed to read the proxyport")
