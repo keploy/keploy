@@ -466,12 +466,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	noise := tc.Noise
 
 	var (
-		bodyNoise   map[string][]string
-		headerNoise map[string][]string
+		bodyNoise   = map[string][]string{}
+		headerNoise = map[string][]string{}
 	)
-
-	bodyNoise = map[string][]string{}
-	headerNoise = map[string][]string{}
 
 	for _, n := range noise {
 		a := strings.Split(n, ".")

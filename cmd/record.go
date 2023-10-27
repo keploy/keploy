@@ -167,6 +167,10 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 			
+			if proxyPort == 0 {
+				proxyPort = confRecord.ProxyPort
+			}
+
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
 			return nil

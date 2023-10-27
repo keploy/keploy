@@ -9,6 +9,7 @@ type Record struct {
 	Path string  `json:"path" yaml:"path"`
 	Command string `json:"command" yaml:"command"`
 	ContainerName string `json:"containerName" yaml:"containerName"`
+	ProxyPort uint32 `json:"proxyport" yaml:"proxyport"`
 	NetworkName string `json:"networkName" yaml:"networkName"`
 	Delay uint64 `json:"delay" yaml:"delay"`
 	PassThroughPorts []uint `json:"passThroughPorts" yaml:"passThroughPorts"`
@@ -16,6 +17,7 @@ type Record struct {
 
 type Test struct {
 	Path string  `json:"path" yaml:"path"`
+	ProxyPort uint32 `json:"proxyport" yaml:"proxyport"`
 	Command string `json:"command" yaml:"command"`
 	ContainerName string `json:"containerName" yaml:"containerName"`
 	NetworkName string `json:"networkName" yaml:"networkName"`
