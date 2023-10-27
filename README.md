@@ -79,7 +79,9 @@ Keploy can be utilized on Linux natively and through WSL on Windows.
  ```
   curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
-
+```
+  keploy record --help or  keploy test --help
+```
 ### Capturing Test cases
 To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you
 have to set any environment variables do it like you usually do it:
