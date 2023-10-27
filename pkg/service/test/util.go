@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +103,15 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 	return nil
 }
 
+func MatchesAnyRegex(str string, regexArray []string) bool {
+    for _, pattern := range regexArray {
+        re := regexp.MustCompile(pattern)
+        if re.MatchString(str) {
+            return true
+        }
+    }
+    return false
+}
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string][]string) bool {
 	if res == nil {
@@ -111,6 +121,9 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
 		_, isNoisy := noise[k]
+		if isNoisy && len(noise[k]) != 0 {
+			isNoisy = MatchesAnyRegex(v[0], noise[k])
+		}
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h2[k]
 		if !isNoisy {
@@ -185,6 +198,9 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	}
 	for k, v := range h2 {
 		_, isNoisy := noise[k]
+		if isNoisy && len(noise[k]) != 0 {
+			isNoisy = MatchesAnyRegex(v[0], noise[k])
+		}
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h1[k]
 		if isNoisy && checkKey(res, k) {

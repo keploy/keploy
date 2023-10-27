@@ -64,6 +64,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
 		_, ok := noiseMap[key]
+		if ok && len(noiseMap[key]) != 0 {
+			ok = MatchesAnyRegex(actual.(string), noiseMap[key])
+		}
 		if expected != actual && !ok {
 			return false, nil
 		}
@@ -81,6 +84,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 			}
 			// remove the noisy key from both expected and actual JSON.
 			if _, ok := noiseMap[prefix+k]; ok {
+				if len(noiseMap[prefix+k]) != 0 && !MatchesAnyRegex(val.(string), noiseMap[prefix+k]) {
+					continue
+				}
 				delete(expMap, prefix+k)
 				delete(actMap, k)
 				continue
@@ -96,6 +102,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 
 	case reflect.Slice:
 		if _, ok := noiseMap[key]; ok {
+			if len(noiseMap[key]) != 0 && !MatchesAnyRegex(actual.(string), noiseMap[key]) {
+				return false, nil
+			}
 			return true, nil
 		}
 		expSlice := reflect.ValueOf(expected)
