@@ -2,6 +2,7 @@
 record: 
   path: ""
   command: ""
+  proxyport: 0
   containerName: "" 
   networkName: ""
   delay: 5
@@ -9,9 +10,10 @@ record:
 test: 
   path: ""
   command: ""
+  proxyport: 0
   containerName: ""
   networkName: ""
-  testSets: ["test-set-0"]
+  testSets: []
   noise: |
     {
       "body": {},
