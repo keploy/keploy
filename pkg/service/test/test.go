@@ -41,7 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) TestHelper(path string, proxyPort uint32, testReportPath string, appCmd string, testsets *[]string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) (map[string]string, *yaml.TestReport, context.Context, bool, *proxy.ProxySet, chan bool, platform.TestCaseDB, *hooks.Hook, chan bool, bool) {
 
 	var ps *proxy.ProxySet
 
@@ -52,7 +52,6 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
-	tele.Ping(false)
 
 	testReportFS := yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
@@ -62,24 +61,23 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
-
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
 	select {
 	case <-stopper:
-		return false
+		return nil, nil, nil, false, nil, nil, nil, nil, nil, false
 	default:
 		// load the ebpf hooks into the kernel
 		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background()); err != nil {
-			return false
+			return nil, nil, nil, false, nil, nil, nil, nil, nil, false
 		}
 	}
 
 	select {
 	case <-stopper:
 		loadedHooks.Stop(true)
-		return false
+		return nil, nil, nil, false, nil, nil, nil, nil, nil, false
 	default:
 		// start the proxy
 		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
@@ -88,17 +86,15 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	// proxy update its state in the ProxyPorts map
 	//Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
-		return false
+		return nil, nil, nil, false, nil, nil, nil, nil, nil, false
 	}
 
 	sessions, err := yaml.ReadSessionIndices(path, t.logger)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
-		return false
+		return nil, nil, nil, false, nil, nil, nil, nil, nil, false
 	}
 	t.logger.Debug(fmt.Sprintf("the session indices are:%v", sessions))
-
-	result := true
 
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
@@ -127,21 +123,28 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		}
 	}()
 
-	testRes := false
-
-	exitLoop := false
-
-	if len(testsets) == 0 {
+	if len(*testsets) == 0 {
 		// by default, run all the recorded test sets
-		testsets = sessions
+		*testsets = sessions
 	}
-
 	sessionsMap := map[string]string{}
 
 	for _, sessionIndex := range sessions {
 		sessionsMap[sessionIndex] = sessionIndex
 	}
+	return sessionsMap, testReportFS, ctx, abortStopHooksForcefully, ps, exitCmd, ys, loadedHooks, abortStopHooksInterrupt, true
 
+}
+
+func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+
+	testRes := false
+	result := true
+	exitLoop := false
+	sessionsMap, testReportFS, ctx, abortStopHooksForcefully, ps, exitCmd, ys, loadedHooks, abortStopHooksInterrupt, ok := t.TestHelper(path, proxyPort, testReportPath, appCmd, &testsets, appContainer, appNetwork, Delay, passThorughPorts, apiTimeout)
+	if !ok {
+		return false
+	}
 	for _, sessionIndex := range testsets {
 		// checking whether the provided testset match with a recorded testset.
 		if _, ok := sessionsMap[sessionIndex]; !ok {
@@ -183,8 +186,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) models.TestRunStatus {
-
+func (t *tester) RunTestSetHelper(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) ([]*models.TestCase, chan error, bool, *models.TestReport, bool,  ) {
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
@@ -199,7 +201,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	}
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", testSet, tcs))
-
 	configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, testSet))
 	if err != nil {
 		t.logger.Error(err.Error())
@@ -225,7 +226,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 		}
 	}()
-
 	if len(appCmd) == 0 && pid != 0 {
 		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
@@ -267,12 +267,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		testRunChan <- testReport.Name
 	}
 
-	var (
-		success = 0
-		failure = 0
-		status  = models.TestRunStatusPassed
-	)
-
 	var userIp string
 
 	//check if the user application is running docker container using IDE
@@ -291,8 +285,21 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	// added delay to hold running keploy tests until application starts
 	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(tcs)), zap.Any("test-set", testSet))
 	time.Sleep(time.Duration(delay) * time.Second)
+}
+
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) models.TestRunStatus {
+	tcs, errChan, isApplicationStopped, testReport, diDE, userIP := t.RunTestSetHelper(testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx)
 	exitLoop := false
+	var err error
+	var (
+		success = 0
+		failure = 0
+		status  = models.TestRunStatusPassed
+	)
 	for _, tc := range tcs {
+		// filter the tcsMocks
+		// set the filtered mocks
+
 		select {
 		case err = <-errChan:
 			isApplicationStopped = true
@@ -416,7 +423,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 
-	t.logger.Info("test report for " + testSet + ": " , zap.Any("name: ", testReport.Name), zap.Any("path: ", path + "/" + testReport.Name))
+	t.logger.Info("test report for "+testSet+": ", zap.Any("name: ", testReport.Name), zap.Any("path: ", path+"/"+testReport.Name))
 
 	if status == models.TestRunStatusFailed {
 		pp.SetColorScheme(models.FailingColorScheme)
