@@ -92,6 +92,11 @@ For instance, if you're using a simple Golang program, the command would resembl
 ```zsh
 keploy record -c "go run main.go"
 ```
+To capture Test cases in a local directory use the -p flag this will store the genearated tests/mocks in that Directory
+
+```zsh
+keploy record -c "go run main.go" -p "path to the directory"
+```
 
 ### Running Testcases
 To run the test cases and generate a test coverage report, use this terminal command where you usually run your app, if
