@@ -10,6 +10,13 @@ import (
 	sentry "github.com/getsentry/sentry-go"
 )
 
+func CheckFileExists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
 	if err != nil {
