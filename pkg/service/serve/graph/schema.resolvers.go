@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/serve/graph/model"
+	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -56,7 +57,16 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
+
+	noiseJSON, err := test.UnmarshallJson(r.Resolver.Noise, r.Logger)
+	if err != nil {
+		r.Logger.Error("failed to unmarshall noise json")
+		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
+	}
 	noiseConfig := map[string]interface{}{}
+	noiseConfig["body"] = noiseJSON.(map[string]interface{})["body"]
+	noiseConfig["header"] = noiseJSON.(map[string]interface{})["header"]
+
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
