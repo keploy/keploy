@@ -264,20 +264,13 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						AuthType:            pg.BackendWrapper.AuthType,
 					}
 
+					after_encoded, _ := PostgresDecoderBackend(*pg_mock)
+					if len(after_encoded) != len(buffer) {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
+						pg_mock.Payload = bufStr
+					}
 					pgRequests = append(pgRequests, *pg_mock)
-					// after_encoded, _ := PostgresDecoderBackend(*pg_mock)
-					// fmt.Println("AFTER NAME ...", pg.BackendWrapper.Parse.Name)
-					// fmt.Println("AFTER QUERY ... ", pg.BackendWrapper.Parse.Query)
-					// fmt.Println("AFTER ParameterOIDs... ", pg.BackendWrapper.Parse.ParameterOIDs)
-					// if len(after_encoded) != len(buffer) {
-					// 	s := findDuplicates(pg.BackendWrapper.PacketTypes)
-					// 	for _, v := range s {
-					// 		fmt.Printf("This is the repeated Header%s\t", v)
-					// 	}
-					// 	fmt.Println("Lengths are not same after encoding response for ", bufStr)
-					// 	fmt.Println("-----------------")
-
-					// }
+					
 				}
 
 				if isStartupPacket(buffer) {
@@ -468,7 +461,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		tcsMocks := h.GetTcsMocks()
 		// change auth to md5 instead of scram
 		// CheckValidEncode(tcsMocks, h, logger)
-		ChangeAuthToMD5(tcsMocks, h, logger)
+		// ChangeAuthToMD5(tcsMocks, h, logger)
 
 
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
