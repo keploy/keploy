@@ -294,8 +294,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	exitLoop := false
 	for _, tc := range tcs {
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
-		loadedHooks.SetTcsMocks(filteredTcsMocks)
+		// filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
+		// loadedHooks.SetTcsMocks(filteredTcsMocks)
 
 		select {
 		case err = <-errChan:

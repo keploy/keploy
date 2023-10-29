@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -52,7 +51,7 @@ func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	case models.MODE_RECORD:
 		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
-		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger,ctx)
+		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -155,10 +154,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					Spec: models.MockSpec{
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
+						ReqTimestampMock:  reqTimestampMock,
+						ResTimestampMock:  resTimestampMock,
 					},
-				},ctx)
+				}, ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
 
@@ -184,10 +183,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					Spec: models.MockSpec{
 						PostgresRequests:  pgRequests,
 						PostgresResponses: pgResponses,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
+						ReqTimestampMock:  reqTimestampMock,
+						ResTimestampMock:  resTimestampMock,
 					},
-				},ctx)
+				}, ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
 			}
@@ -233,10 +232,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					}
 
 					pg_mock := &models.Backend{
-						PacketTypes: pg.BackendWrapper.PacketTypes,
-						Identfier:   "ClientRequest",
-						Length:      uint32(len(requestBuffer)),
-						// Payload:             bufStr,
+						PacketTypes:         pg.BackendWrapper.PacketTypes,
+						Identfier:           "ClientRequest",
+						Length:              uint32(len(requestBuffer)),
+						Payload:             bufStr,
 						Bind:                pg.BackendWrapper.Bind,
 						Binds:               pg.BackendWrapper.Binds,
 						PasswordMessage:     pg.BackendWrapper.PasswordMessage,
@@ -270,7 +269,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						pg_mock.Payload = bufStr
 					}
 					pgRequests = append(pgRequests, *pg_mock)
-					
+
 				}
 
 				if isStartupPacket(buffer) {
@@ -344,10 +343,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 					// from here take the msg and append its readabable form to the pgResponses
 					pg_mock := &models.Frontend{
-						PacketTypes: pg.FrontendWrapper.PacketTypes,
-						Identfier:   "ServerResponse",
-						Length:      uint32(len(requestBuffer)),
-						// Payload:                         bufStr,
+						PacketTypes:                     pg.FrontendWrapper.PacketTypes,
+						Identfier:                       "ServerResponse",
+						Length:                          uint32(len(requestBuffer)),
+						Payload:                         bufStr,
 						AuthenticationOk:                pg.FrontendWrapper.AuthenticationOk,
 						AuthenticationCleartextPassword: pg.FrontendWrapper.AuthenticationCleartextPassword,
 						AuthenticationMD5Password:       pg.FrontendWrapper.AuthenticationMD5Password,
@@ -424,9 +423,9 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 }
 
 // This is the decoding function for the postgres wiremessage
-func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger,ctx context.Context) error {
+func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	pgRequests := [][]byte{requestBuffer}
-	
+
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
@@ -461,8 +460,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		tcsMocks := h.GetTcsMocks()
 		// change auth to md5 instead of scram
 		// CheckValidEncode(tcsMocks, h, logger)
-		// ChangeAuthToMD5(tcsMocks, h, logger)
-
+		ChangeAuthToMD5(tcsMocks, h, logger)
 
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
 
@@ -473,9 +471,9 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 		for _, pgResponse := range pgResponses {
 			encoded, err := PostgresDecoder(pgResponse.Payload)
-			if len(pgResponse.PacketTypes) > 0 {
-				encoded, err = PostgresDecoderFrontend(pgResponse)
-			}
+			// if len(pgResponse.PacketTypes) > 0 {
+			// 	encoded, err = PostgresDecoderFrontend(pgResponse)
+			// }
 
 			if err != nil {
 				logger.Error("failed to decode the response message in proxy for postgres dependency", zap.Error(err))

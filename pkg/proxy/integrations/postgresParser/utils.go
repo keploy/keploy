@@ -321,7 +321,8 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
-				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+				// encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+				var encoded []byte
 				if mock.Spec.PostgresRequests[requestIndex].Payload != "" {
 					encoded, _ = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
 				}
@@ -485,7 +486,8 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+				// encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+				var encoded []byte
 				if mock.Spec.PostgresRequests[requestIndex].Payload != "" {
 					encoded, _ = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
 				}
@@ -512,7 +514,7 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 		// fmt.Println("matched in first loop")
 		bestMatch := tcsMocks[idx].Spec.PostgresResponses
 		// println("Lenght of tcsMocks", len(tcsMocks), " BestMatch -->", tcsMocks[idx].Spec.GenericRequests[0].Message[0].Data)
-		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
+		// tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
 		h.SetTcsMocks(tcsMocks)
 		return true, bestMatch
 	}
