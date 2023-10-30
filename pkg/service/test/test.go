@@ -61,9 +61,6 @@ func (t *tester) TestHelper(path string, proxyPort uint32, testReportPath string
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
 
-	// Recover from panic and gracfully shutdown
-	defer loadedHooks.Recover(routineId)
-
 	select {
 	case <-stopper:
 		return nil, nil, nil, false, nil, nil, nil, nil, nil, false
@@ -142,6 +139,9 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	result := true
 	exitLoop := false
 	sessionsMap, testReportFS, ctx, abortStopHooksForcefully, ps, exitCmd, ys, loadedHooks, abortStopHooksInterrupt, ok := t.TestHelper(path, proxyPort, testReportPath, appCmd, &testsets, appContainer, appNetwork, Delay, passThorughPorts, apiTimeout)
+	// Recover from panic and gracfully shutdown
+	defer loadedHooks.Recover(pkg.GenerateRandomID())
+	models.SetVersion("api.keploy.io/v1beta1", "api.keploy.io/v1beta2")
 	if !ok {
 		return false
 	}
@@ -186,25 +186,23 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	return false
 }
 
-func (t *tester) RunTestSetHelper(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) ([]*models.TestCase, chan error, bool, *models.TestReport, bool,  ) {
-	// Recover from panic and gracfully shutdown
-	defer loadedHooks.Recover(pkg.GenerateRandomID())
+func (t *tester) RunTestSetHelper(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) ([]*models.TestCase, chan error, *models.TestReport, bool, string, []*models.Mock, models.TestRunStatus) {
 
 	tcs, err := ys.ReadTestcase(filepath.Join(path, testSet, "tests"), nil)
 	if err != nil {
-		return models.TestRunStatusFailed
+		return nil, nil, nil, false, "", nil, models.TestRunStatusFailed
 	}
 
 	if len(tcs) == 0 {
 		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", testSet))
-		return models.TestRunStatusPassed
+		return nil, nil, nil, false, "", nil, models.TestRunStatusFailed
 	}
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", testSet, tcs))
 	configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, testSet))
 	if err != nil {
 		t.logger.Error(err.Error())
-		return models.TestRunStatusFailed
+		return nil, nil, nil, false, "", nil, models.TestRunStatusFailed
 	}
 
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, tcsMocks))
@@ -214,18 +212,6 @@ func (t *tester) RunTestSetHelper(testSet, path, testReportPath, appCmd, appCont
 	errChan := make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", pid))
 
-	isApplicationStopped := false
-
-	defer func() {
-		if len(appCmd) == 0 && pid != 0 {
-			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
-		} else {
-			// stop the user application
-			if !isApplicationStopped {
-				loadedHooks.StopUserApplication()
-			}
-		}
-	}()
 	if len(appCmd) == 0 && pid != 0 {
 		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
@@ -259,7 +245,7 @@ func (t *tester) RunTestSetHelper(testSet, path, testReportPath, appCmd, appCont
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 	if err != nil {
 		t.logger.Error(err.Error())
-		return models.TestRunStatusPassed
+		return nil, nil, nil, false, "", nil, models.TestRunStatusFailed
 	}
 
 	//if running keploy-tests along with unit tests
@@ -285,10 +271,148 @@ func (t *tester) RunTestSetHelper(testSet, path, testReportPath, appCmd, appCont
 	// added delay to hold running keploy tests until application starts
 	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(tcs)), zap.Any("test-set", testSet))
 	time.Sleep(time.Duration(delay) * time.Second)
+	return tcs, errChan, testReport, dIDE, userIp, tcsMocks, ""
+}
+
+func (t *tester) simulateRequest(tc *models.TestCase, loadedHooks *hooks.Hook, appCmd string, userIp string, testSet string, apiTimeout uint64, success, failure *int, status models.TestRunStatus, testReportFS yaml.TestReportFS, testReport *models.TestReport, path string, dIDE bool) {
+	switch tc.Kind {
+	case models.HTTP:
+		started := time.Now().UTC()
+		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
+
+		ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
+		if ok || dIDE {
+			tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
+			t.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
+		}
+		t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
+		resp, err := pkg.SimulateHttp(*tc, testSet, t.logger, apiTimeout)
+		t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
+		t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
+
+		if err != nil {
+			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString("false")))
+			return
+		}
+		testPass, testResult := t.testHttp(*tc, resp)
+
+		if !testPass {
+			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
+		} else {
+			t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(tc.Name)), zap.Any("testset id", models.HighlightPassingString(testSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
+		}
+
+		testStatus := models.TestStatusPending
+		if testPass {
+			testStatus = models.TestStatusPassed
+			*success++
+		} else {
+			testStatus = models.TestStatusFailed
+			*failure++
+			status = models.TestRunStatusFailed
+		}
+
+		testReportFS.Lock()
+		testReportFS.SetResult(testReport.Name, models.TestResult{
+			Kind:       models.HTTP,
+			Name:       testReport.Name,
+			Status:     testStatus,
+			Started:    started.Unix(),
+			Completed:  time.Now().UTC().Unix(),
+			TestCaseID: tc.Name,
+			Req: models.HttpReq{
+				Method:     tc.HttpReq.Method,
+				ProtoMajor: tc.HttpReq.ProtoMajor,
+				ProtoMinor: tc.HttpReq.ProtoMinor,
+				URL:        tc.HttpReq.URL,
+				URLParams:  tc.HttpReq.URLParams,
+				Header:     tc.HttpReq.Header,
+				Body:       tc.HttpReq.Body,
+			},
+			Res: models.HttpResp{
+				StatusCode:    tc.HttpResp.StatusCode,
+				Header:        tc.HttpResp.Header,
+				Body:          tc.HttpResp.Body,
+				StatusMessage: tc.HttpResp.StatusMessage,
+				ProtoMajor:    tc.HttpResp.ProtoMajor,
+				ProtoMinor:    tc.HttpResp.ProtoMinor,
+			},
+			// Mocks:        httpSpec.Mocks,
+			// TestCasePath: tcsPath,
+			TestCasePath: path + "/" + testSet,
+			// MockPath:     mockPath,
+			// Noise:        httpSpec.Assertions["noise"],
+			Noise:  tc.Noise,
+			Result: *testResult,
+		})
+		testReportFS.Lock()
+		testReportFS.Unlock()
+
+	}
+}
+
+func (t *tester) fetchTestResults(testReportFS yaml.TestReportFS, testReport *models.TestReport, status models.TestRunStatus, testSet string, success, failure *int, ctx context.Context, testReportPath, path string) models.TestRunStatus {
+
+	// store the result of the testrun as test-report
+	testResults, err := testReportFS.GetResults(testReport.Name)
+	if err != nil && (status == models.TestRunStatusFailed || status == models.TestRunStatusPassed) && (*success+*failure == 0) {
+		t.logger.Error("failed to fetch test results", zap.Error(err))
+		return models.TestRunStatusFailed
+	}
+	testReport.TestSet = testSet
+	testReport.Total = len(testResults)
+	testReport.Status = string(status)
+	testReport.Tests = testResults
+	testReport.Success = *success
+	testReport.Failure = *failure
+
+	resultForTele, ok := ctx.Value("resultForTele").(*[]int)
+	if !ok {
+		t.logger.Debug("resultForTele is not of type *[]int")
+	}
+	(*resultForTele)[0] += *success
+	(*resultForTele)[1] += *failure
+
+	err = testReportFS.Write(context.Background(), testReportPath, testReport)
+
+	t.logger.Info("test report for "+testSet+": ", zap.Any("name: ", testReport.Name), zap.Any("path: ", path+"/"+testReport.Name))
+
+	if status == models.TestRunStatusFailed {
+		pp.SetColorScheme(models.FailingColorScheme)
+	} else {
+		pp.SetColorScheme(models.PassingColorScheme)
+	}
+
+	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure)
+
+	if err != nil {
+		t.logger.Error(err.Error())
+		return models.TestRunStatusFailed
+	}
+
+	t.logger.Debug("the result before", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
+	t.logger.Debug("the result after", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
+	return status
 }
 
 func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) models.TestRunStatus {
-	tcs, errChan, isApplicationStopped, testReport, diDE, userIP := t.RunTestSetHelper(testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx)
+	tcs, errChan, testReport, dIDE, userIP, _, initialStatus := t.RunTestSetHelper(testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx)
+	if initialStatus != ""{
+		return initialStatus
+	}
+	isApplicationStopped := false
+	// Recover from panic and gracfully shutdown
+	defer loadedHooks.Recover(pkg.GenerateRandomID())
+	defer func() {
+		if len(appCmd) == 0 && pid != 0 {
+			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
+		} else {
+			// stop the user application
+			if !isApplicationStopped {
+				loadedHooks.StopUserApplication()
+			}
+		}
+	}()
 	exitLoop := false
 	var err error
 	var (
@@ -297,8 +421,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		status  = models.TestRunStatusPassed
 	)
 	for _, tc := range tcs {
-		// filter the tcsMocks
-		// set the filtered mocks
+		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
+		// filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
+		// loadedHooks.SetTcsMocks(filteredTcsMocks)
 
 		select {
 		case err = <-errChan:
@@ -325,122 +450,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if exitLoop {
 			break
 		}
-		switch tc.Kind {
-		case models.HTTP:
-			started := time.Now().UTC()
-			t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-
-			ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-			if ok || dIDE {
-				tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
-				t.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
-			}
-			t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
-			resp, err := pkg.SimulateHttp(*tc, testSet, t.logger, apiTimeout)
-			t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-			t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
-
-			if err != nil {
-				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString("false")))
-				continue
-			}
-			testPass, testResult := t.testHttp(*tc, resp)
-
-			if !testPass {
-				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
-			} else {
-				t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(tc.Name)), zap.Any("testset id", models.HighlightPassingString(testSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
-			}
-
-			testStatus := models.TestStatusPending
-			if testPass {
-				testStatus = models.TestStatusPassed
-				success++
-			} else {
-				testStatus = models.TestStatusFailed
-				failure++
-				status = models.TestRunStatusFailed
-			}
-
-			testReportFS.Lock()
-			testReportFS.SetResult(testReport.Name, models.TestResult{
-				Kind:       models.HTTP,
-				Name:       testReport.Name,
-				Status:     testStatus,
-				Started:    started.Unix(),
-				Completed:  time.Now().UTC().Unix(),
-				TestCaseID: tc.Name,
-				Req: models.HttpReq{
-					Method:     tc.HttpReq.Method,
-					ProtoMajor: tc.HttpReq.ProtoMajor,
-					ProtoMinor: tc.HttpReq.ProtoMinor,
-					URL:        tc.HttpReq.URL,
-					URLParams:  tc.HttpReq.URLParams,
-					Header:     tc.HttpReq.Header,
-					Body:       tc.HttpReq.Body,
-				},
-				Res: models.HttpResp{
-					StatusCode:    tc.HttpResp.StatusCode,
-					Header:        tc.HttpResp.Header,
-					Body:          tc.HttpResp.Body,
-					StatusMessage: tc.HttpResp.StatusMessage,
-					ProtoMajor:    tc.HttpResp.ProtoMajor,
-					ProtoMinor:    tc.HttpResp.ProtoMinor,
-				},
-				// Mocks:        httpSpec.Mocks,
-				// TestCasePath: tcsPath,
-				TestCasePath: path + "/" + testSet,
-				// MockPath:     mockPath,
-				// Noise:        httpSpec.Assertions["noise"],
-				Noise:  tc.Noise,
-				Result: *testResult,
-			})
-			testReportFS.Lock()
-			testReportFS.Unlock()
-
-		}
+		t.simulateRequest(tc, loadedHooks, appCmd, userIP, testSet, apiTimeout, &success, &failure, status, testReportFS, testReport, path, dIDE)
 	}
-
-	// store the result of the testrun as test-report
-	testResults, err := testReportFS.GetResults(testReport.Name)
-	if err != nil && (status == models.TestRunStatusFailed || status == models.TestRunStatusPassed) && (success+failure == 0) {
-		t.logger.Error("failed to fetch test results", zap.Error(err))
-		return models.TestRunStatusFailed
-	}
-	testReport.TestSet = testSet
-	testReport.Total = len(testResults)
-	testReport.Status = string(status)
-	testReport.Tests = testResults
-	testReport.Success = success
-	testReport.Failure = failure
-
-	resultForTele, ok := ctx.Value("resultForTele").(*[]int)
-	if !ok {
-		t.logger.Debug("resultForTele is not of type *[]int")
-	}
-	(*resultForTele)[0] += success
-	(*resultForTele)[1] += failure
-
-	err = testReportFS.Write(context.Background(), testReportPath, testReport)
-
-	t.logger.Info("test report for "+testSet+": ", zap.Any("name: ", testReport.Name), zap.Any("path: ", path+"/"+testReport.Name))
-
-	if status == models.TestRunStatusFailed {
-		pp.SetColorScheme(models.FailingColorScheme)
-	} else {
-		pp.SetColorScheme(models.PassingColorScheme)
-	}
-
-	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure)
-
-	if err != nil {
-		t.logger.Error(err.Error())
-		return models.TestRunStatusFailed
-	}
-
-	t.logger.Debug("the result before", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
-	t.logger.Debug("the result after", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
-
+	status = t.fetchTestResults(testReportFS, testReport, status, testSet, &success, &failure, ctx, testReportPath, path)
 	return status
 }
 
