@@ -33,9 +33,6 @@ type MockSpec struct {
 	//for grpc
 	GRPCReq  *GrpcReq  `json:"gRPCRequest,omitempty"`
 	GRPCResp *GrpcResp `json:"grpcResponse,omitempty"`
-	//for MySql
-	MySqlRequests  []MySQLRequest  `json:"MySqlRequests,omitempty"`
-	MySqlResponses []MySQLResponse `json:"MySqlResponses,omitempty"`
 
 	ReqTimestampMock time.Time `json:"ReqTimestampMock,omitempty"`
 	ResTimestampMock time.Time `json:"ResTimestampMock,omitempty"`
