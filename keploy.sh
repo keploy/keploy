@@ -15,7 +15,7 @@ installKeploy (){
     done
 
     install_keploy_arm() {
-        curl --silent --location "https://github.com/PranshuSrivastava/keploy/releases/download/v2.0.12/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 

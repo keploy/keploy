@@ -112,6 +112,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			Requests:  requests,
 			Response:  responses,
 			CreatedAt: mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 
 		err := yamlDoc.Spec.Encode(mongoSpec)
@@ -126,6 +128,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			Request:  *mock.Spec.HttpReq,
 			Response: *mock.Spec.HttpResp,
 			Created:  mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		err := yamlDoc.Spec.Encode(httpSpec)
 		if err != nil {
@@ -137,6 +141,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			Metadata: mock.Spec.Metadata,
 			GenericRequests:  mock.Spec.GenericRequests,
 			GenericResponses: mock.Spec.GenericResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		err := yamlDoc.Spec.Encode(genericSpec)
 		if err != nil {
@@ -144,10 +150,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 			return nil, err
 		}
 	case models.Postgres:
+
 		postgresSpec := spec.PostgresSpec{
 			Metadata: mock.Spec.Metadata,
 			PostgresRequests:  mock.Spec.PostgresRequests,
 			PostgresResponses: mock.Spec.PostgresResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 
 		err := yamlDoc.Spec.Encode(postgresSpec)
@@ -159,6 +168,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 		gRPCSpec := spec.GrpcSpec{
 			GrpcReq:  *mock.Spec.GRPCReq,
 			GrpcResp: *mock.Spec.GRPCResp,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		err := yamlDoc.Spec.Encode(gRPCSpec)
 		if err != nil {
@@ -231,6 +242,8 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				HttpReq:  &httpSpec.Request,
 				HttpResp: &httpSpec.Response,
 				Created: httpSpec.Created,
+				ReqTimestampMock: httpSpec.ReqTimestampMock,
+				ResTimestampMock: httpSpec.ResTimestampMock,
 			}
 		case models.Mongo:
 			mongoSpec := spec.MongoSpec{}
@@ -252,8 +265,11 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				logger.Error(Emoji+"failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
-			mock.Spec = models.MockSpec{GRPCResp: &grpcSpec.GrpcResp,
+			mock.Spec = models.MockSpec{
+				GRPCResp: &grpcSpec.GrpcResp,
 				GRPCReq: &grpcSpec.GrpcReq,
+				ReqTimestampMock: grpcSpec.ReqTimestampMock,
+				ResTimestampMock: grpcSpec.ResTimestampMock,
 			}
 		case models.GENERIC:
 			genericSpec := spec.GenericSpec{}
@@ -266,19 +282,27 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				Metadata: genericSpec.Metadata,
 				GenericRequests:  genericSpec.GenericRequests,
 				GenericResponses: genericSpec.GenericResponses,
+				ReqTimestampMock: genericSpec.ReqTimestampMock,
+				ResTimestampMock: genericSpec.ResTimestampMock,
 			}
 
 		case models.Postgres:
-			genericSpec := spec.PostgresSpec{}
-			err := m.Spec.Decode(&genericSpec)
+
+			PostSpec := spec.PostgresSpec{}
+			err := m.Spec.Decode(&PostSpec)
+
 			if err != nil {
 				logger.Error("failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata: genericSpec.Metadata,
-				GenericRequests:  genericSpec.PostgresRequests,
-				GenericResponses: genericSpec.PostgresResponses,
+				Metadata: PostSpec.Metadata,
+				// OutputBinary: genericSpec.Objects,
+				PostgresRequests:  PostSpec.PostgresRequests,
+				PostgresResponses: PostSpec.PostgresResponses,
+				ReqTimestampMock: PostSpec.ReqTimestampMock,
+				ResTimestampMock: PostSpec.ResTimestampMock,
+
 			}
 		default:
 			logger.Error("failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
@@ -294,6 +318,8 @@ func decodeMongoMessage(yamlSpec *spec.MongoSpec, logger *zap.Logger) (*models.M
 	mockSpec := models.MockSpec{
 		Metadata: yamlSpec.Metadata,
 		Created:  yamlSpec.CreatedAt,
+		ReqTimestampMock: yamlSpec.ReqTimestampMock,
+		ResTimestampMock: yamlSpec.ResTimestampMock,
 	}
 
 	// mongo request

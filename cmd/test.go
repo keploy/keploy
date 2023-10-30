@@ -8,8 +8,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/test"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func NewCmdTest(logger *zap.Logger) *Test {
@@ -18,6 +20,21 @@ func NewCmdTest(logger *zap.Logger) *Test {
 		tester: tester,
 		logger: logger,
 	}
+}
+
+func getTestConfig() (*models.Test, error) {
+	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	decoder := yamlLib.NewDecoder(file)
+	var doc models.Config
+	err = decoder.Decode(&doc)
+	if err != nil {
+		return nil, fmt.Errorf(Emoji, "failed to decode the keploy-config.yaml. error: %v", err.Error())
+	}
+	return &doc.Test, nil
 }
 
 type Test struct {
@@ -32,10 +49,21 @@ func (t *Test) GetCmd() *cobra.Command {
 		Example: `sudo -E env PATH=$PATH keploy test -c "/path/to/user/app" --delay 6`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
+
+			confTest, err := getTestConfig()
+			if err != nil {
+				t.logger.Error("failed to get the test config from config file")
+				return err
+			}
+			
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				t.logger.Error("failed to read the testcase path input")
 				return err
+			}
+			
+			if len(path) == 0 {
+				path = confTest.Path
 			}
 
 			//if user provides relative path
@@ -63,6 +91,11 @@ func (t *Test) GetCmd() *cobra.Command {
 			if err != nil {
 				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
+
+			if appCmd == "" {
+				appCmd = confTest.Command
+			}
+
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
@@ -77,6 +110,11 @@ func (t *Test) GetCmd() *cobra.Command {
 			if err != nil {
 				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
+
+			if appContainer == "" {
+				appContainer = confTest.ContainerName
+			}
+
 			var hasContainerName bool
 			if isDockerCmd {
 				for _, arg := range os.Args {
@@ -97,15 +135,27 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
+			if networkName == "" {
+				networkName = confTest.NetworkName
+			}
+        
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
 
 			if err != nil {
 				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
 			}
 
+			if len(testSets) == 0 {
+				testSets = confTest.TestSets
+			}
+
 			delay, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
 				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
+			}
+
+			if delay == 5 {
+				delay = confTest.Delay
 			}
 
 			if delay <= 5 {
@@ -122,6 +172,10 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
 			}
 
+			if apiTimeout == 5 {
+				apiTimeout = confTest.ApiTimeout
+			}
+
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
@@ -130,14 +184,26 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			if len(ports) == 0 {
+				ports = confTest.PassThroughPorts
+      }
+      
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				t.logger.Error("failed to read the proxyport")
+				return err
+			}
+
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout)
+			t.tester.Test(path, proxyPort, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout)
 			return nil
 		},
 	}
 
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+
+	testCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 

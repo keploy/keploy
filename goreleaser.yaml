@@ -7,8 +7,9 @@ builds:
   - binary: keploy
     id: keploy
     main: ./main.go
-    # ldflags:
-    #   - -X main.Dsn={{.Env.SENTRY_DSN_BINARY}}
+    ldflags:
+      - -s -w -X main.Dsn={{.Env.SENTRY_DSN_BINARY}}
+      - -s -w -X main.version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:

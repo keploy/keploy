@@ -10,6 +10,8 @@ import (
 	sentry "github.com/getsentry/sentry-go"
 )
 
+var VersionForSentry string
+
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
 	if err != nil {
