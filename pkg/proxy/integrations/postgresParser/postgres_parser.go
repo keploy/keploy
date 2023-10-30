@@ -300,7 +300,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				pg := NewFrontend()
 				if !isStartupPacket(buffer) && len(buffer) > 5 && bufStr != "Tg==" {
 					bufferCopy := buffer
-					// fmt.Println("bufferCopy is ", bufferCopy)
+			
 					ps := make([]pgproto3.ParameterStatus, 0)
 					dataRows := []pgproto3.DataRow{}
 
@@ -346,7 +346,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PacketTypes:                     pg.FrontendWrapper.PacketTypes,
 						Identfier:                       "ServerResponse",
 						Length:                          uint32(len(requestBuffer)),
-						Payload:                         bufStr,
+						// Payload:                         bufStr,
 						AuthenticationOk:                pg.FrontendWrapper.AuthenticationOk,
 						AuthenticationCleartextPassword: pg.FrontendWrapper.AuthenticationCleartextPassword,
 						AuthenticationMD5Password:       pg.FrontendWrapper.AuthenticationMD5Password,
@@ -381,11 +381,12 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						MsgType:                         pg.FrontendWrapper.MsgType,
 						AuthType:                        pg.FrontendWrapper.AuthType,
 					}
-					// after_encoded, _ := PostgresDecoderFrontend(*pg_mock)
-					// if len(after_encoded) != len(buffer) {
-					// 	logger.Info("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
-					// 	pg_mock.Payload = bufStr
-					// }
+
+					after_encoded, _ := PostgresDecoderFrontend(*pg_mock)
+					if len(after_encoded) != len(buffer) {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
+						pg_mock.Payload = bufStr
+					}
 					pgResponses = append(pgResponses, *pg_mock)
 				}
 
@@ -465,7 +466,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		tcsMocks := h.GetTcsMocks()
 		// change auth to md5 instead of scram
 		// CheckValidEncode(tcsMocks, h, logger)
-		// ChangeAuthToMD5(tcsMocks, h, logger)
+		ChangeAuthToMD5(tcsMocks, h, logger)
 
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
 
