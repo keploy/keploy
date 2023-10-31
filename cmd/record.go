@@ -91,6 +91,50 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			appCmd, err := cmd.Flags().GetString("command")
+			if err != nil {
+				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+			}
+			
+			appContainer, err := cmd.Flags().GetString("containerName")
+			if err != nil {
+				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+			}
+
+			networkName, err := cmd.Flags().GetString("networkName")
+			if err != nil {
+				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+			}
+
+			delay, err := cmd.Flags().GetUint64("delay")
+			if err != nil {
+				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
+			}
+
+			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				r.logger.Error("failed to read the proxy port")
+				return err
+			}
+
+			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
+
+			if appCmd == "" {
+				fmt.Println("Error: missing required -c flag\n")
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				}
+				fmt.Println("Example usage:\n", cmd.Example, "\n")
+
+				return errors.New("missing required -c flag")
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -110,26 +154,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path += "/keploy"
 
-			appCmd, err := cmd.Flags().GetString("command")
-
-			if err != nil {
-				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
-			}
-			
-			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag\n")
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				}
-				fmt.Println("Example usage:\n", cmd.Example, "\n")
-
-				return errors.New("missing required -c flag")
-			}
-			appContainer, err := cmd.Flags().GetString("containerName")
-
-			if err != nil {
-				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
-			}
+			r.logger.Info("", zap.Any("keploy test and mock path", path))
 
 			var hasContainerName bool
 			if isDockerCmd {
@@ -145,33 +170,6 @@ func (r *Record) GetCmd() *cobra.Command {
 					return errors.New("missing required --containerName flag")
 				}
 			}
-			networkName, err := cmd.Flags().GetString("networkName")
-
-			if err != nil {
-				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
-			}
-
-			delay, err := cmd.Flags().GetUint64("delay")
-
-			if err != nil {
-				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
-			}
-
-			r.logger.Info("", zap.Any("keploy test and mock path", path))
-
-			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
-			if err != nil {
-				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
-			proxyPort, err := cmd.Flags().GetUint32("proxyport")
-			if err != nil {
-				r.logger.Error("failed to read the proxy port")
-				return err
-			}
-
-			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)

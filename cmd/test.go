@@ -103,6 +103,73 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			appCmd, err := cmd.Flags().GetString("command")
+			if err != nil {
+				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+			}
+
+			appContainer, err := cmd.Flags().GetString("containerName")
+
+			if err != nil {
+				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+			}
+
+			networkName, err := cmd.Flags().GetString("networkName")
+
+			if err != nil {
+				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+			}
+
+			testSets, err := cmd.Flags().GetStringSlice("testsets")
+
+			if err != nil {
+				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
+			}
+
+			delay, err := cmd.Flags().GetUint64("delay")
+			if err != nil {
+				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
+			}
+
+			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
+			if err != nil {
+				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
+			}
+
+			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				t.logger.Error("failed to read the proxyport")
+				return err
+			}
+
+			noiseConfig := map[string]interface{}{}
+			t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &noiseConfig)
+
+			if appCmd == "" {
+				fmt.Println("Error: missing required -c flag\n")
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				}
+				fmt.Println("Example usage:\n", cmd.Example, "\n")
+
+				return errors.New("missing required -c flag")
+			}
+
+			if delay <= 5 {
+				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				} else {
+					fmt.Println("Example usage:\n", cmd.Example, "\n")
+				}
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -124,25 +191,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			testReportPath := path + "/testReports"
 
-			appCmd, err := cmd.Flags().GetString("command")
-			if err != nil {
-				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
-			}
-
-			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag\n")
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				}
-				fmt.Println("Example usage:\n", cmd.Example, "\n")
-
-				return errors.New("missing required -c flag")
-			}
-			appContainer, err := cmd.Flags().GetString("containerName")
-
-			if err != nil {
-				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
-			}
+			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			var hasContainerName bool
 			if isDockerCmd {
@@ -158,53 +207,6 @@ func (t *Test) GetCmd() *cobra.Command {
 					return errors.New("missing required --containerName flag")
 				}
 			}
-			networkName, err := cmd.Flags().GetString("networkName")
-
-			if err != nil {
-				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
-			}
-
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
-
-			if err != nil {
-				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
-			}
-
-			delay, err := cmd.Flags().GetUint64("delay")
-			if err != nil {
-				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
-			}
-
-			if delay <= 5 {
-				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				} else {
-					fmt.Println("Example usage:\n", cmd.Example, "\n")
-				}
-			}
-
-			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
-			if err != nil {
-				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
-			}
-
-			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
-
-			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
-			if err != nil {
-				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
-			proxyPort, err := cmd.Flags().GetUint32("proxyport")
-			if err != nil {
-				t.logger.Error("failed to read the proxyport")
-				return err
-			}
-
-			noiseConfig := map[string]interface{}{}
-			t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &noiseConfig)
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
