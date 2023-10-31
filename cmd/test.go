@@ -23,8 +23,8 @@ func NewCmdTest(logger *zap.Logger) *Test {
 	}
 }
 
-func readTestConfig() (*models.Test, error) {
-	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
+func readTestConfig(configPath string) (*models.Test, error) {
+	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -38,12 +38,13 @@ func readTestConfig() (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, noiseConfig *map[string]interface{}) {
-	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, noiseConfig *map[string]interface{}, configPath string) {
+	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
+	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		t.logger.Info("keploy configuration file not found")
 		return
 	}
-	confTest, err := readTestConfig()
+	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
 		t.logger.Error("failed to get the test config from config file")
 		return
@@ -109,19 +110,16 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			appContainer, err := cmd.Flags().GetString("containerName")
-
 			if err != nil {
 				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 
 			networkName, err := cmd.Flags().GetString("networkName")
-
 			if err != nil {
 				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
-
 			if err != nil {
 				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
 			}
@@ -149,7 +147,14 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			noiseConfig := map[string]interface{}{}
-			t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &noiseConfig)
+
+			configPath, err := cmd.Flags().GetString("config-path")
+			if err != nil {
+				t.logger.Error("failed to read the config path")
+				return err
+			}
+
+			t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &noiseConfig, configPath)
 
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -231,6 +236,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	testCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
