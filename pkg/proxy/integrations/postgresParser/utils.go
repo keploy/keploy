@@ -9,8 +9,8 @@ import (
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.uber.org/zap"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.uber.org/zap"
 )
 
 func PostgresDecoder(encoded string) ([]byte, error) {
@@ -304,13 +304,11 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 	return reqbuffer, nil
 }
 
-
 func PostgresEncoder(buffer []byte) string {
 	// encode the buffer to base 64 string ..
 	encoded := base64.StdEncoding.EncodeToString(buffer)
 	return encoded
 }
-
 
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
@@ -345,13 +343,58 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 	return mxIdx
 }
 
+// func IsCrDBPresent(mocks []*models.Mock) bool {
+// 	// Check if the identifier is "StartupResponse"
+// 	if mocks[0].Spec.PostgresRequests[1].Identfier != "StartupResponse" {
+// 		return false
+// 	}
+
+// 	// Check if the length of postgresResponse is 2
+// 	if len(mocks[0].Spec.PostgresRequests) < 2 {
+// 		return false
+// 	}
+
+// 	// Iterate through ParameterStatus elements
+// 	for _, parameterStatus := range mocks[0].Spec.PostgresRequests[1].ParameterStatusCombined {
+// 		if parameterStatus.Name == "cockroach" && parameterStatus.Value == "ccl" {
+// 			return true
+// 		}
+// 	}
+
+// 	return false
+// }
+
+func IsCrDBPresent(mocks []models.Frontend) bool {
+
+	// Check if the length of postgresResponse is 2
+	if len(mocks) == 2 {
+		return true
+	}
+
+	// Iterate through ParameterStatus elements
+	for _, parameterStatus := range mocks[1].ParameterStatusCombined {
+		if parameterStatus.Name == "crdb_version" {
+			return true
+		}
+	}
+
+	return false
+}
+
+
+var calledOnce = false
+
 func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	// isScram := false
+
 	for _, mock := range tcsMocks {
 		// if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 		for requestIndex, reqBuff := range mock.Spec.PostgresRequests {
 			encode, _ := PostgresDecoderBackend(reqBuff)
-
+			if IsCrDBPresent(mock.Spec.PostgresResponses){
+				fmt.Println("CrDB is present")
+				return
+			}
 			if reqBuff.Identfier == "StartupRequest" {
 				log.Debug("CHANGING TO MD5 for Response")
 				// mock.Spec.GenericResponses[requestIndex].Message[0].Data = "UgAAAAwAAAAF4I8BHg=="
