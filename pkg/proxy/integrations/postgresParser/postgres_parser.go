@@ -432,7 +432,6 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 // This is the decoding function for the postgres wiremessage
 func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	pgRequests := [][]byte{requestBuffer}
-
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
@@ -467,13 +466,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		tcsMocks := h.GetTcsMocks()
 		// change auth to md5 instead of scram
 		// CheckValidEncode(tcsMocks, h, logger)
-		if !calledOnce {
-			ChangeAuthToMD5(tcsMocks, h, logger)
-			calledOnce = true
-		}
-
-		
-
+		ChangeAuthToMD5(tcsMocks, h, logger)
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
 
 		if !matched {

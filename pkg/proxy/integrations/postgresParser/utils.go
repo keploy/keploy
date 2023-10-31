@@ -366,7 +366,7 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 
 func IsCrDBPresent(mocks []models.Frontend) bool {
 
-	// Check if the length of postgresResponse is 2
+	// Check if the length of postgresResponse is not 2
 	if len(mocks) == 2 {
 		return true
 	}
@@ -381,7 +381,6 @@ func IsCrDBPresent(mocks []models.Frontend) bool {
 	return false
 }
 
-
 var calledOnce = false
 
 func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
@@ -391,8 +390,9 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 		// if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 		for requestIndex, reqBuff := range mock.Spec.PostgresRequests {
 			encode, _ := PostgresDecoderBackend(reqBuff)
-			if IsCrDBPresent(mock.Spec.PostgresResponses){
+			if IsCrDBPresent(mock.Spec.PostgresResponses) && reqBuff.Identfier == "StartupRequest" && !calledOnce {
 				fmt.Println("CrDB is present")
+				calledOnce = true
 				return
 			}
 			if reqBuff.Identfier == "StartupRequest" {
