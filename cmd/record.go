@@ -23,8 +23,8 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 	}
 }
 
-func readRecordConfig() (*models.Record, error) {
-	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
+func readRecordConfig(configPath string) (*models.Record, error) {
+	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -38,12 +38,13 @@ func readRecordConfig() (*models.Record, error) {
 	return &doc.Record, nil
 }
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint) {
-	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) {
+	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
+	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		t.logger.Info("keploy configuration file not found")
 		return
 	}
-	confRecord, err := readRecordConfig()
+	confRecord, err := readRecordConfig(configFilePath)
 	if err != nil {
 		t.logger.Error("failed to get the record config from config file")
 		return
@@ -123,7 +124,13 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
-			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
+			configPath, err := cmd.Flags().GetString("config-path")
+			if err != nil {
+				r.logger.Error("failed to read the config path")
+				return err
+			}
+
+			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
 
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -190,6 +197,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true
