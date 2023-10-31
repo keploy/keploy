@@ -125,8 +125,7 @@ Here are a few points to consider before recording!
 - You must run all of the containers on the same network when you're using **docker run command** (you can add your custom **network name** using `--network` flag in **docker run command**).
 - In your **Docker Compose** file, every container should run on the same network.
 - `Docker_CMD_to_run_user_container` refers to the Docker **command for launching** the application.
-
-# Add the required commands to your DockerFile
+- Add the required commands to your DockerFile as stated below.
 
 ```Dockerfile
 ...
