@@ -1,6 +1,7 @@
 package genericparser
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 
@@ -15,13 +16,14 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
-func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
+		encodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodeGenericOutgoing(requestBuffer, clientConn, destConn, h, logger)
 	case models.MODE_OFF:
@@ -33,7 +35,6 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	genericRequests := [][]byte{requestBuffer}
 	logger.Debug("into the generic parser in test mode")
 	for {
-		tcsMocks := h.GetTcsMocks()
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
 		err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
@@ -60,6 +61,9 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			logger.Debug("the generic request buffer is empty")
 			continue
 		}
+
+		tcsMocks := h.GetTcsMocks()
+
 		// bestMatchedIndx := 0
 		// fuzzy match gives the index for the best matched generic mock
 		matched, genericResponses := fuzzymatch(tcsMocks, genericRequests, h)
@@ -119,7 +123,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	}
 }
 
-func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) error {
+func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	// destinationWriteChannel := make(chan []byte)
 	// clientWriteChannel := make(chan []byte)
 	// errChannel := make(chan error)
@@ -158,18 +162,20 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
 	}()
 
 	isPreviousChunkRequest := false
+	var reqTimestampMock time.Time = time.Now()
+	var resTimestampMock time.Time
 
 	// ticker := time.NewTicker(1 * time.Second)
 	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
@@ -189,8 +195,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					Spec: models.MockSpec{
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -214,8 +222,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					Spec: models.MockSpec{
 						GenericRequests:  genericRequests,
 						GenericResponses: genericResponses,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
 					},
-				})
+				}, ctx)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}
@@ -243,6 +253,10 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 			isPreviousChunkRequest = true
 		case buffer := <-destBufferChannel:
+			if isPreviousChunkRequest {
+				// store the request timestamp
+				reqTimestampMock = time.Now()
+			}
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
@@ -269,6 +283,8 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 					},
 				})
 			}
+
+			resTimestampMock = time.Now()
 
 			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			isPreviousChunkRequest = false

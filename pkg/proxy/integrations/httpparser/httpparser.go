@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -62,10 +63,10 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	return true
 }
 
-func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h)
+		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h, ctx)
 		if err != nil {
 			logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
@@ -460,7 +461,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook) error {
+func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook, ctx context.Context) error {
 	var resp []byte
 	var finalResp []byte
 	var finalReq []byte
@@ -516,7 +517,11 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			}
 			finalReq = append(finalReq, request...)
 		}
-		handleChunkedRequests(&finalReq, clientConn, destConn, logger)
+		
+		// Capture the request timestamp
+		reqTimestampMock := time.Now()
+
+		handleChunkedRequests(&finalReq, clientConn, destConn, logger)		
 		// read the response from the actual server
 		resp, err = util.ReadBytes(destConn)
 		if err != nil {
@@ -528,6 +533,9 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 				return err
 			}
 		}
+
+		// Capturing the response timestamp
+		resTimestampcMock := time.Now()
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
@@ -619,8 +627,10 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					Body:       string(respBody),
 				},
 				Created: time.Now().Unix(),
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampcMock,
 			},
-		})
+		}, ctx)
 		finalReq = []byte("")
 		finalResp = []byte("")
 

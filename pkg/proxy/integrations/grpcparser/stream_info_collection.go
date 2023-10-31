@@ -1,7 +1,9 @@
 package grpcparser
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -14,6 +16,8 @@ type StreamInfoCollection struct {
 	hook       *hooks.Hook
 	mutex      sync.Mutex
 	StreamInfo map[uint32]models.GrpcStream
+	ReqTimestampMock time.Time
+	ResTimestampMock time.Time
 }
 
 func NewStreamInfoCollection(h *hooks.Hook) *StreamInfoCollection {
@@ -99,7 +103,7 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	sic.StreamInfo[streamID] = info
 }
 
-func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32) {
+func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32, ctx context.Context) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 
@@ -112,8 +116,10 @@ func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32) {
 		Spec: models.MockSpec{
 			GRPCReq:  &grpcReq,
 			GRPCResp: &grpcResp,
+			ReqTimestampMock: sic.ReqTimestampMock,
+			ResTimestampMock: sic.ResTimestampMock,
 		},
-	})
+	}, ctx)
 
 }
 

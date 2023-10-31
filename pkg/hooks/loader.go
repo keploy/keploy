@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -44,14 +46,15 @@ type Hook struct {
 
 	platform.TestCaseDB
 
-	logger        *zap.Logger
-	proxyPort     uint32
-	tcsMocks      []*models.Mock
-	configMocks   []*models.Mock
-	mu            *sync.Mutex
-	mutex         sync.RWMutex
-	userAppCmd    *exec.Cmd
-	mainRoutineId int
+	logger                   *zap.Logger
+	proxyPort                uint32
+	tcsMocks                 []*models.Mock
+	configMocks              []*models.Mock
+	mu                       *sync.Mutex
+	mutex                    sync.RWMutex
+	userAppCmd               *exec.Cmd
+	userAppShutdownInitiated bool
+	mainRoutineId            int
 
 	// ebpf objects and events
 	stopper  chan os.Signal
@@ -97,7 +100,7 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hoo
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
 	}
 	return &Hook{
-		logger: logger,
+		logger:        logger,
 		TestCaseDB:    db,
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
@@ -121,10 +124,10 @@ func (h *Hook) GetDepsSize() int {
 	return size
 }
 
-func (h *Hook) AppendMocks(m *models.Mock) error {
+func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	err := h.TestCaseDB.WriteMock(m)
+	err := h.TestCaseDB.WriteMock(m, ctx)
 	if err != nil {
 		return err
 	}
@@ -322,6 +325,8 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
+	h.logger.Info("keploy has initiated the shutdown of the user application.")
+	h.userAppShutdownInitiated = true
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
@@ -436,7 +441,7 @@ func (h *Hook) Stop(forceStop bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context) error {
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err
@@ -474,9 +479,9 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32) error {
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		for {
-			connectionFactory.HandleReadyConnections(h.TestCaseDB)
+			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx)
 			time.Sleep(1 * time.Second)
 		}
 	}()

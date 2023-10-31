@@ -1,14 +1,15 @@
 # GoReleaser configuration
 archives:
- - 
+ -
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    
+
 builds:
   - binary: keploy
     id: keploy
     main: ./main.go
-    # ldflags:
-    #   - -s -w -X main.build={{.Version}}
+    ldflags:
+      - -s -w -X main.dsn={{.Env.SENTRY_DSN_BINARY}}
+      - -s -w -X main.version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:

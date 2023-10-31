@@ -3,17 +3,19 @@ package main
 import (
 	"fmt"
 	_ "net/http/pprof"
+	"time"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	v "github.com/hashicorp/go-version"
+	"github.com/cloudflare/cfssl/log"
+	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/cmd"
+	"go.keploy.io/server/utils"
 )
 
 // version is the version of the server and will be injected during build by ldflags
 // see https://goreleaser.com/customization/build/
 
 var version string
+var dsn string
 
 const logo string = `
        ▓██▓▄
@@ -27,46 +29,24 @@ const logo string = `
         ▓
 `
 
-func getKeployVersion() string {
-
-	repo, err := git.PlainOpen(".")
-	if err != nil {
-		return "v0.1.0-dev"
-	}
-
-	tagIter, err := repo.Tags()
-	if err != nil {
-		return "v0.1.0-dev"
-	}
-
-	var latestTag string
-	var latestTagVersion *v.Version
-
-	err = tagIter.ForEach(func(tagRef *plumbing.Reference) error {
-		tagName := tagRef.Name().Short()
-		tagVersion, err := v.NewVersion(tagName)
-		if err == nil {
-			if latestTagVersion == nil || latestTagVersion.LessThan(tagVersion) {
-				latestTagVersion = tagVersion
-				latestTag = tagName
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return "v0.1.0-dev"
-	}
-
-	return latestTag + "-dev"
-}
-
 func main() {
 	if version == "" {
-		version = getKeployVersion()
+		version = "2-dev"
 	}
-
 	fmt.Println(logo, " ")
-	fmt.Printf("%v\n\n", version)
+	fmt.Printf("version: %v\n\n", version)
+	//Initialise sentry.
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn:              dsn,
+		TracesSampleRate: 1.0,
+	})
+	//Set the version
+	utils.KeployVersion = version
+	log.Level = 0
+	if err != nil {
+		log.Debug("Could not initialise sentry.", err)
+	}
+	defer utils.HandlePanic()
+	defer sentry.Flush(2 * time.Second)
 	cmd.Execute()
 }

@@ -1,6 +1,7 @@
 package connection
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,13 +36,13 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 	}
 }
 
-func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 
+func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, ctx context.Context) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
 	for connID, tracker := range factory.connections {
-		ok, requestBuf, responseBuf := tracker.IsComplete()
+		ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
 		if ok {
 
 			if len(requestBuf) == 0 && len(responseBuf) == 0 {
@@ -64,7 +65,7 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB) {
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
 				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(db, parsedHttpReq, parsedHttpRes, factory.logger)
+				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest)
 			case models.MODE_TEST:
 				factory.logger.Debug("skipping tracker in test mode")
 			default:
@@ -96,7 +97,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger) {
+func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
@@ -125,14 +126,16 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Header:    pkg.ToYamlHttpHeader(req.Header),
 			Body:      string(reqBody),
 			URLParams: pkg.UrlParams(req),
+			Timestamp: reqTimeTest,
 		},
 		HttpResp: models.HttpResp{
 			StatusCode: resp.StatusCode,
 			Header:     pkg.ToYamlHttpHeader(resp.Header),
 			Body:       string(respBody),
+			Timestamp:  resTimeTest,
 		},
 		// Mocks: mocks,
-	})
+	}, ctx)
 	if err != nil {
 		logger.Error("failed to record the ingress requests", zap.Error(err))
 		return

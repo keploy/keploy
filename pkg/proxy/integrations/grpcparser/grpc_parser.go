@@ -2,10 +2,12 @@ package grpcparser
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -14,16 +16,17 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 )
 
 func IsOutgoingGRPC(buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("PRI * HTTP/2"))
 }
 
-func ProcessOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func ProcessOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, h, logger)
+		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
 		decodeOutgoingGRPC(requestBuffer, clientConn, destConn, h, logger)
 	default:
@@ -41,7 +44,7 @@ func decodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	}
 }
 
-func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	// Send the client preface to the server. This should be the first thing sent from the client.
 	_, err := destConn.Write(requestBuffer)
 	if err != nil {
@@ -58,9 +61,9 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		defer wg.Done()
-		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder)
+		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder, ctx)
 		if err != nil {
 			// check for EOF error
 			if err == io.EOF {
@@ -77,9 +80,9 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
-
+		defer utils.HandlePanic()
 		defer wg.Done()
-		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder)
+		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder, ctx)
 		if err != nil {
 			logger.Error("failed to transfer frame from server to client", zap.Error(err))
 		}
@@ -92,7 +95,7 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 }
 
 // TransferFrame reads one frame from rhs and writes it to lhs.
-func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqFromClient bool, decoder *hpack.Decoder) error {
+func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqFromClient bool, decoder *hpack.Decoder, ctx context.Context) error {
 	isRespFromServer := !isReqFromClient
 	framer := http2.NewFramer(lhs, rhs)
 	for {
@@ -103,7 +106,7 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 			}
 			return fmt.Errorf("error reading frame %v", err)
 		}
-		//PrintFrame(frame)
+		//PrintFrame(frame)	
 
 		switch frame.(type) {
 		case *http2.SettingsFrame:
@@ -162,7 +165,7 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 			// The trailers frame has been received. The stream has been closed by the server.
 			// Capture the mock and clear the map, as the stream ID can be reused by client.
 			if isRespFromServer && headersFrame.StreamEnded() {
-				sic.PersistMockForStream(streamID)
+				sic.PersistMockForStream(streamID, ctx)
 				sic.ResetStream(streamID)
 			}
 
@@ -173,8 +176,14 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 				return fmt.Errorf("could not write data frame: %v", err)
 			}
 			if isReqFromClient {
+				// Capturing the request timestamp
+				sic.ReqTimestampMock = time.Now()
+
 				sic.AddPayloadForRequest(dataFrame.StreamID, dataFrame.Data())
 			} else if isRespFromServer {
+				// Capturing the response timestamp
+				sic.ResTimestampMock = time.Now()
+
 				sic.AddPayloadForResponse(dataFrame.StreamID, dataFrame.Data())
 			}
 		case *http2.PingFrame:

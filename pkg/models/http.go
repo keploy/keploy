@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type Method string
 
 type HttpReq struct {
@@ -13,6 +15,7 @@ type HttpReq struct {
 	BodyType   string            `json:"body_type" yaml:"body_type"`
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
+	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
 }
 
 type FormData struct {
@@ -30,4 +33,5 @@ type HttpResp struct {
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
 	Binary        string            `json:"binary" yaml:"binary,omitempty"`
+	Timestamp     time.Time         `json:"timestamp" yaml:"timestamp"`
 }

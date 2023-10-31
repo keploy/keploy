@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
+	"go.keploy.io/server/utils"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -38,6 +39,7 @@ import (
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -90,7 +92,6 @@ type Conn struct {
 func (c *Conn) Read(b []byte) (n int, err error) {
 	return c.r.Read(b)
 }
-
 
 func directoryExists(path string) bool {
 	info, err := os.Stat(path)
@@ -297,7 +298,7 @@ func containsJava(input string) bool {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
 
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
@@ -385,8 +386,8 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if isPortAvailable(opt.Port) {
 		go func() {
 			defer h.Recover(pkg.GenerateRandomID())
-
-			proxySet.startProxy()
+			defer utils.HandlePanic()
+			proxySet.startProxy(ctx)
 		}()
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
@@ -394,7 +395,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
 			go func() {
 				defer h.Recover(pkg.GenerateRandomID())
-
+				defer utils.HandlePanic()
 				proxySet.startDnsServer()
 			}()
 		}
@@ -419,7 +420,6 @@ func isPortAvailable(port uint32) bool {
 	defer ln.Close()
 	return true
 }
-
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -497,7 +497,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 }
 
 // startProxy function initiates a proxy on the specified port to handle redirected outgoing network calls.
-func (ps *ProxySet) startProxy() {
+func (ps *ProxySet) startProxy(ctx context.Context) {
 
 	port := ps.Port
 
@@ -539,12 +539,11 @@ func (ps *ProxySet) startProxy() {
 		ps.connMutex.Unlock()
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
-			ps.handleConnection(conn, port)
+			defer utils.HandlePanic()
+			ps.handleConnection(conn, port, ctx)
 		}()
 	}
 }
-
 
 func (ps *ProxySet) startDnsServer() {
 
@@ -731,7 +730,7 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
-func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
+func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Context) {
 
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
@@ -741,7 +740,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
-
 
 	ps.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
@@ -765,123 +763,147 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32) {
 
 	// releases the occupied source port when done fetching the destination info
 	ps.hook.CleanProxyEntry(uint16(sourcePort))
-
-	clientConnId := getNextID()
-	reader := bufio.NewReader(conn)
-	initialData := make([]byte, 5)
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		if err == io.EOF && len(testBuffer) == 0 {
-			ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
-			conn.Close()
-			return
+	//checking for the destination port of mysql
+	if destInfo.DestPort == 3306 {
+		var dst net.Conn
+		var actualAddress = ""
+		if destInfo.IpVersion == 4 {
+			actualAddress = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.DestIp4), destInfo.DestPort)
+		} else if destInfo.IpVersion == 6 {
+			actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
 		}
-		ps.logger.Error("failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
-	isTLS := isTLSHandshake(testBuffer)
-	multiReader := io.MultiReader(reader, conn)
-	conn = &CustomConn{
-		Conn:   conn,
-		r:      multiReader,
-		logger: ps.logger,
-	}
-	if isTLS {
-		conn, err = ps.handleTLSConnection(conn)
-		if err != nil {
-			ps.logger.Error("failed to handle TLS connection", zap.Error(err))
-			return
-		}
-	}
-	connEstablishedAt := time.Now()
-
-	// attempt to read the conn until buffer is either filled or connection is closed
-	var buffer []byte
-	buffer, err = util.ReadBytes(conn)
-	if err != nil && err != io.EOF {
-		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
-
-	if err == io.EOF && len(buffer) == 0 {
-		ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
-		return
-	}
-
-	ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
-	ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
-	readRequestDelay := time.Since(connEstablishedAt)
-	if err != nil {
-		ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-		return
-	}
-
-	// dst stores the connection with actual destination for the outgoing network call
-	var dst net.Conn
-	var actualAddress = ""
-	if destInfo.IpVersion == 4 {
-		actualAddress = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.DestIp4), destInfo.DestPort)
-	} else if destInfo.IpVersion == 6 {
-		actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
-	}
-
-	//Dialing for tls connection
-	destConnId := getNextID()
-	logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
-	if isTLS {
-		logger.Debug("", zap.Any("isTLS", isTLS))
-		config := &tls.Config{
-			InsecureSkipVerify: false,
-			ServerName:         destinationUrl,
-		}
-		dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
-		if err != nil && models.GetMode() != models.MODE_TEST {
-			logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
-			return
-		}
-	} else {
-		dst, err = net.Dial("tcp", actualAddress)
-		if err != nil && models.GetMode() != models.MODE_TEST {
-			logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
-			conn.Close()
-			return
-		}
-	}
-
-	for _, port := range ps.PassThroughPorts {
-		if port == uint(destInfo.DestPort) {
-			err = ps.callNext(buffer, conn, dst, logger)
+		destConnId := getNextID()
+		if models.GetMode() != models.MODE_TEST {
+			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil {
-				logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
+				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+				// }
+			}
+		}
+		clientConnId := getNextID()
+		connEstablishedAt := time.Now()
+		readRequestDelay := time.Since(connEstablishedAt)
+		mysqlparser.ProcessOutgoingMySql(clientConnId, destConnId, []byte{}, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger, ctx)
+
+	} else {
+		clientConnId := getNextID()
+		reader := bufio.NewReader(conn)
+		initialData := make([]byte, 5)
+		testBuffer, err := reader.Peek(len(initialData))
+		if err != nil {
+			if err == io.EOF && len(testBuffer) == 0 {
+				ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
+				conn.Close()
+				return
+			}
+			ps.logger.Error("failed to peek the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+			return
+		}
+
+		isTLS := isTLSHandshake(testBuffer)
+		multiReader := io.MultiReader(reader, conn)
+		conn = &CustomConn{
+			Conn:   conn,
+			r:      multiReader,
+			logger: ps.logger,
+		}
+		if isTLS {
+			conn, err = ps.handleTLSConnection(conn)
+			if err != nil {
+				ps.logger.Error("failed to handle TLS connection", zap.Error(err))
 				return
 			}
 		}
+		connEstablishedAt := time.Now()
+		// attempt to read the conn until buffer is either filled or connection is closed
+		var buffer []byte
+		buffer, err = util.ReadBytes(conn)
+		if err != nil && err != io.EOF {
+			ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+			return
+		}
+
+		if err == io.EOF && len(buffer) == 0 {
+			ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
+			return
+		}
+
+		ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
+		ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
+		readRequestDelay := time.Since(connEstablishedAt)
+		if err != nil {
+			ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+			return
+		}
+
+		// dst stores the connection with actual destination for the outgoing network call
+		var dst net.Conn
+		var actualAddress = ""
+		if destInfo.IpVersion == 4 {
+			actualAddress = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.DestIp4), destInfo.DestPort)
+		} else if destInfo.IpVersion == 6 {
+			actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
+		}
+
+		//Dialing for tls connection
+		destConnId := getNextID()
+		logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
+		if isTLS {
+			logger.Debug("", zap.Any("isTLS", isTLS))
+			config := &tls.Config{
+				InsecureSkipVerify: false,
+				ServerName:         destinationUrl,
+			}
+			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			if err != nil && models.GetMode() != models.MODE_TEST {
+				logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		} else {
+			dst, err = net.Dial("tcp", actualAddress)
+			if err != nil && models.GetMode() != models.MODE_TEST {
+				logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+				conn.Close()
+				return
+			}
+		}
+
+		for _, port := range ps.PassThroughPorts {
+			if port == uint(destInfo.DestPort) {
+				err = ps.callNext(buffer, conn, dst, logger)
+				if err != nil {
+					logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
+					return
+				}
+			}
+		}
+
+		switch {
+		case httpparser.IsOutgoingHTTP(buffer):
+			// capture the otutgoing http text messages
+			httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger, ctx)
+		case mongoparser.IsOutgoingMongo(buffer):
+			logger.Debug("into mongo parsing mode")
+			mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger, ctx)
+		case postgresparser.IsOutgoingPSQL(buffer):
+
+			logger.Debug("into psql desp mode, before passing")
+			postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger, ctx)
+
+		case grpcparser.IsOutgoingGRPC(buffer):
+			grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger, ctx)
+		default:
+			logger.Debug("the external dependecy call is not supported")
+			genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger, ctx)
+		}
 	}
-
-	switch {
-	case httpparser.IsOutgoingHTTP(buffer):
-		// capture the otutgoing http text messages
-		httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger)
-	case mongoparser.IsOutgoingMongo(buffer):
-		logger.Debug("into mongo parsing mode")
-		mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger)
-
-	case postgresparser.IsOutgoingPSQL(buffer):
-
-		logger.Debug("into psql desp mode, before passing")
-		postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger)
-	case grpcparser.IsOutgoingGRPC(buffer):
-		grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger)
-	default:
-		logger.Debug("the external dependecy call is not supported")
-		genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger)
-	}
-
 	// Closing the user client connection
 	conn.Close()
 	duration := time.Since(start)
-	logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
+	ps.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 }
 
 func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
@@ -906,7 +928,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from client
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
@@ -918,7 +940,7 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		// go routine to read from destination
 		go func() {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
-
+			defer utils.HandlePanic()
 			buffer, err := util.ReadBytes(destConn)
 			if err != nil {
 				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
