@@ -1,13 +1,13 @@
 # keploy-config.yaml
-record: 
+record:
   path: ""
   command: ""
   proxyport: 0
-  containerName: "" 
+  containerName: ""
   networkName: ""
   delay: 5
   passThroughPorts: []
-test: 
+test:
   path: ""
   command: ""
   proxyport: 0
