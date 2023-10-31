@@ -16,7 +16,7 @@ RUN go mod download
 COPY . /app
 
 # Build the keploy binary
-RUN go build -ldflags="-X main.Dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy .
+RUN go build -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim

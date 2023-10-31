@@ -15,7 +15,7 @@ import (
 // see https://goreleaser.com/customization/build/
 
 var version string
-var Dsn string
+var dsn string
 
 const logo string = `
        ▓██▓▄
@@ -34,14 +34,14 @@ func main() {
 		version = "2-dev"
 	}
 	fmt.Println(logo, " ")
-	fmt.Printf("%v\n\n", version)
+	fmt.Printf("version: %v\n\n", version)
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              Dsn,
+		Dsn:              dsn,
 		TracesSampleRate: 1.0,
 	})
 	//Set the version
-	utils.VersionForSentry = version
+	utils.KeployVersion = version
 	log.Level = 0
 	if err != nil {
 		log.Debug("Could not initialise sentry.", err)
