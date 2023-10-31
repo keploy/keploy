@@ -1,0 +1,57 @@
+version: api.keploy.io/v1beta2
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/cockroachdb/create
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Cache-Control: no-cache
+            Content-Length: "379"
+            Content-Type: application/json
+            Host: localhost:8080
+            Postman-Token: 4e3a61bf-77a9-4101-9a26-4ba6174d769c
+            User-Agent: PostmanRuntime/7.32.1
+        body: |-
+            {
+                "title":"Meet Sarthak, Our Next Feature for CC Network",
+                "body":"After introducing the CC Italy Chapter to you in July, the CC Netherlands Chapter in August, CC Bangladesh Chapter in September, CC Tanzania Chapter in October, and the CC India Chapter in November, the CC Mexico Chapter in December, and CC Argentina Chapter in January, we are now traveling to Africa"
+            }
+        body_type: ""
+        timestamp: 2023-10-31T09:06:46.640991793Z
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "27"
+            Content-Type: text/plain; charset=utf-8
+            Date: Tue, 31 Oct 2023 09:06:46 GMT
+        body: Item created in CockroachDB
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-10-31T09:06:48.989084916Z
+    objects: []
+    assertions:
+        noise:
+            - header.Date
+    created: 1698743208
+curl: |-
+    curl --request POST \
+      --url http://localhost:8080/cockroachdb/create \
+      --header 'Postman-Token: 4e3a61bf-77a9-4101-9a26-4ba6174d769c' \
+      --header 'Host: localhost:8080' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Content-Type: application/json' \
+      --header 'User-Agent: PostmanRuntime/7.32.1' \
+      --header 'Accept: */*' \
+      --header 'Cache-Control: no-cache' \
+      --data '{
+        "title":"Meet Sarthak, Our Next Feature for CC Network",
+        "body":"After introducing the CC Italy Chapter to you in July, the CC Netherlands Chapter in August, CC Bangladesh Chapter in September, CC Tanzania Chapter in October, and the CC India Chapter in November, the CC Mexico Chapter in December, and CC Argentina Chapter in January, we are now traveling to Africa"
+    }'
