@@ -22,7 +22,7 @@ type Test struct {
 	ContainerName string `json:"containerName" yaml:"containerName"`
 	NetworkName string `json:"networkName" yaml:"networkName"`
 	TestSets []string `json:"testSets" yaml:"testSets"`
-	Noise string `json:"noise" yaml:"noise"`
+	GlobalNoise string `json:"globalNoise" yaml:"globalNoise"`
 	Delay uint64 `json:"delay" yaml:"delay"`
 	ApiTimeout uint64 `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts []uint `json:"passThroughPorts" yaml:"passThroughPorts"`
