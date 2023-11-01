@@ -25,8 +25,8 @@ import (
 	"github.com/cloudflare/cfssl/log"
 
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/hooks"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/utils"
 )
 
@@ -49,6 +49,21 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 		break
 	}
 	return nil
+}
+func isMultiLine(query string) bool {
+	// Check if the query contains at least one newline character
+	var NewQuery = strings.Contains(query, "\n")
+	return NewQuery
+}
+
+// convert multiline query to single line
+func ConvertQuery(query string) string {
+	fmt.Println(query)
+	if isMultiLine(query) {
+		query = strings.ReplaceAll(query, "\n", " ")
+		query = strings.ReplaceAll(query, "\t", " ")
+	}
+	return query
 }
 
 func ValidatePath(path string) (string, error) {

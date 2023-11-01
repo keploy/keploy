@@ -99,7 +99,7 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName))
 		return err
 	}
-
+	
 	data := []byte("---\n")
 	if isFileEmpty {
 		data = []byte{}
@@ -125,9 +125,9 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context) error {
 	ys.tele.RecordedTestAndMocks()
 	testsTotal, ok := ctx.Value("testsTotal").(*int)
-	if !ok{
+	if !ok {
 		ys.Logger.Debug("failed to get testsTotal from context")
-	}else{
+	} else {
 		*testsTotal++
 	}
 	var tcsName string

@@ -226,6 +226,18 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 							pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
 						}
 
+						if pg.BackendWrapper.MsgType == 'Q' {
+							updated_query := util.ConvertQuery(pg.BackendWrapper.Query.String)
+							pg.BackendWrapper.Query.String = updated_query
+							//fmt.Println(pg.BackendWrapper.Query.String)
+						}
+
+						if pg.BackendWrapper.MsgType == 'P' {
+							updated_query := util.ConvertQuery(pg.BackendWrapper.Parse.Query)
+							pg.BackendWrapper.Parse.Query = updated_query
+							//fmt.Println("p:", pg.BackendWrapper.Parse.Query)
+						}
+
 						pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
 
 						i += (5 + pg.BackendWrapper.BodyLen)
@@ -264,19 +276,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					}
 
 					pgRequests = append(pgRequests, *pg_mock)
-					// after_encoded, _ := PostgresDecoderBackend(*pg_mock)
-					// fmt.Println("AFTER NAME ...", pg.BackendWrapper.Parse.Name)
-					// fmt.Println("AFTER QUERY ... ", pg.BackendWrapper.Parse.Query)
-					// fmt.Println("AFTER ParameterOIDs... ", pg.BackendWrapper.Parse.ParameterOIDs)
-					// if len(after_encoded) != len(buffer) {
-					// 	s := findDuplicates(pg.BackendWrapper.PacketTypes)
-					// 	for _, v := range s {
-					// 		fmt.Printf("This is the repeated Header%s\t", v)
-					// 	}
-					// 	fmt.Println("Lengths are not same after encoding response for ", bufStr)
-					// 	fmt.Println("-----------------")
 
-					// }
 				}
 
 				if isStartupPacket(buffer) {
