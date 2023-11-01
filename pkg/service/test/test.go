@@ -41,7 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, globalNoise models.GlobalNoise, noise models.TestsetNoise) bool {
+func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, tests map[string][]string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, globalNoise models.GlobalNoise, noise models.TestsetNoise) bool {
 
 	var ps *proxy.ProxySet
 
@@ -130,28 +130,20 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	exitLoop := false
 
-	if len(testsets) == 0 {
-		// by default, run all the recorded test sets
-		testsets = sessions
-	}
-
-	sessionsMap := map[string]string{}
-
 	for _, sessionIndex := range sessions {
-		sessionsMap[sessionIndex] = sessionIndex
-	}
-
-	for _, sessionIndex := range testsets {
 		// checking whether the provided testset match with a recorded testset.
-		if _, ok := sessionsMap[sessionIndex]; !ok {
+		testcases := ArrayToMap(tests[sessionIndex])
+		if _, ok := tests[sessionIndex]; !ok && len(tests) != 0 {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
+
 		noiseConfig := globalNoise
 		if tsNoise, ok := noise[sessionIndex]; ok {
 			noiseConfig = JoinNoises(globalNoise, tsNoise)
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, testcases, noiseConfig)
+
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -186,7 +178,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig models.GlobalNoise) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise) models.TestRunStatus {
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -297,6 +289,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	time.Sleep(time.Duration(delay) * time.Second)
 	exitLoop := false
 	for _, tc := range tcs {
+		if _, ok = testcases[tc.Name]; !ok && len(testcases) != 0 {
+			continue
+		}
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
 		filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
 		loadedHooks.SetTcsMocks(filteredTcsMocks)

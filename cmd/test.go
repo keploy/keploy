@@ -38,7 +38,7 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, noise *models.TestsetNoise, configPath string) {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, noise *models.TestsetNoise, configPath string) {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		t.logger.Info("keploy configuration file not found")
@@ -58,8 +58,17 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *appCmd == "" {
 		*appCmd = confTest.Command
 	}
-	if len(*testsets) == 0 {
-		*testsets = confTest.TestSets
+	if len(*tests) == 0 {
+		testsJSON, err := test.UnmarshallJson(confTest.Tests, t.logger)
+		if err != nil {
+			t.logger.Error("Failed to unmarshall the tests field")
+		}
+		for ts, tc := range testsJSON.(map[string]interface{}) {
+			(*tests)[ts] = []string{}
+			for _, tc := range tc.([]interface{}) {
+				(*tests)[ts] = append((*tests)[ts], tc.(string))
+			}
+		}
 	}
 	if *appContainer == "" {
 		*appContainer = confTest.ContainerName
@@ -78,7 +87,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
-		t.logger.Error("Failed to unmarshall the noise flag")
+		t.logger.Error("Failed to unmarshall the noise field")
 	}
 
 	for scope, v := range noiseJSON.(map[string]interface{}) {
@@ -143,11 +152,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
-			if err != nil {
-				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
-			}
-
 			delay, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
 				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
@@ -176,10 +180,29 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			tests := map[string][]string{}
+        
+			testSet, err := cmd.Flags().GetString("testset")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+			if testSet != "" {
+				tests[testSet] = []string{}
+			}
+
+			testcases, err := cmd.Flags().GetStringSlice("testcases")
+			if err != nil {
+				t.logger.Error("Failed to get the testcases flag", zap.Error((err)))
+			}
+			if len(testcases) > 0 {
+				tests[testSet] = testcases
+			}
+
 			globalNoise := make(models.GlobalNoise)
 			noise := make(models.TestsetNoise)
 
-			t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &noise, configPath)
+			t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &noise, configPath)
 
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -240,7 +263,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, proxyPort, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout, globalNoise, noise)
+			t.tester.Test(path, proxyPort, testReportPath, appCmd, tests, appContainer, networkName, delay, ports, apiTimeout, globalNoise, noise)
+
 			return nil
 		},
 	}
@@ -251,7 +275,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
-	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run")
+	testCmd.Flags().StringP("testset", "t", "", "Testsets to run")
+	testCmd.Flags().StringSlice("testcases", []string{}, "Testcases to run")
 	
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 

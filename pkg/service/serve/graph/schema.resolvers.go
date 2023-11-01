@@ -99,10 +99,22 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		globalNoise = test.JoinNoises(globalNoise, tsNoise)
 	}
 
+	testsJSON, err := test.UnmarshallJson(r.Resolver.Tests, r.Logger)
+	if err != nil {
+		r.Logger.Error("Failed to unmarshall the tests json")
+	}
+
+	tests := map[string]bool{}
+	testcases := testsJSON.(map[string]interface{})[testSet]
+	for _ , tc := range testcases.([]interface{}) {
+			tests[tc.(string)] = true
+	}
+
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, globalNoise)
+
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, tests, globalNoise)
 	}()
 
 	testRunID := <-testRunChan

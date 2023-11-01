@@ -21,7 +21,7 @@ type Test struct {
 	ProxyPort uint32 `json:"proxyport" yaml:"proxyport"`
 	ContainerName string `json:"containerName" yaml:"containerName"`
 	NetworkName string `json:"networkName" yaml:"networkName"`
-	TestSets []string `json:"testSets" yaml:"testSets"`
+	Tests string `json:"tests" yaml:"tests"`
 	GlobalNoise string `json:"globalNoise" yaml:"globalNoise"`
 	Delay uint64 `json:"delay" yaml:"delay"`
 	ApiTimeout uint64 `json:"apiTimeout" yaml:"apiTimeout"`

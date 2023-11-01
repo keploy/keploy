@@ -1,0 +1,20 @@
+# keploy-config.yaml
+record:
+  path: ""
+  command: ""
+  containerName: ""
+  networkName: ""
+  delay: 5
+  passThroughPorts: []
+test:
+  path: ""
+  command: ""
+  containerName: ""
+  networkName: ""
+  tests: |
+    {
+      "test-set-0": ["test-2"]
+    }
+  delay: 5
+  apiTimeout: 5
+  passThroughPorts: []
