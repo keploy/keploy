@@ -14,10 +14,18 @@ test:
   containerName: ""
   networkName: ""
   testSets: []
-  noise: |
+  noise: |-
     {
-      "body": {},
-      "header": {}
+      "global": {
+        "body": {},
+        "header": {}
+      },
+      "test-sets": {
+        "test-set-0": {
+          "body": {},
+          "header": {}
+        }
+      } 
     }
   delay: 5
   apiTimeout: 5

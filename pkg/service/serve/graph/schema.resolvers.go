@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -63,14 +64,45 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		r.Logger.Error("failed to unmarshall noise json")
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
-	noiseConfig := map[string]interface{}{}
-	noiseConfig["body"] = noiseJSON.(map[string]interface{})["body"]
-	noiseConfig["header"] = noiseJSON.(map[string]interface{})["header"]
+
+	globalNoise := make(models.GlobalNoise)
+	noise := make(models.TestsetNoise)
+
+	for scope, v := range noiseJSON.(map[string]interface{}) {
+		if scope == "global" {
+				for k1, v1 := range v.(map[string]interface{}) {
+					globalNoise[k1] = map[string][]string{}
+					for k2, v2 := range v1.(map[string]interface{}) {
+						globalNoise[k1][k2] = []string{}
+						for _, val := range v2.([]interface{}) {
+							globalNoise[k1][k2] = append(globalNoise[k1][k2], val.(string))
+						}
+					}
+				}
+		} else {
+			for testset, v1 := range v.(map[string]interface{}) {
+				noise[testset] = map[string]map[string][]string{}
+				for k2, v2 := range v1.(map[string]interface{}) {
+					noise[testset][k2] = map[string][]string{}
+					for k3, v3 := range v2.(map[string]interface{}) {
+						noise[testset][k2][k3] = []string{}
+						for _, val := range v3.([]interface{}) {
+							noise[testset][k2][k3] = append(noise[testset][k2][k3], val.(string))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if tsNoise, ok := noise[testSet]; ok {
+		globalNoise = test.JoinNoises(globalNoise, tsNoise)
+	}
 
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, noiseConfig)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, globalNoise)
 	}()
 
 	testRunID := <-testRunChan
