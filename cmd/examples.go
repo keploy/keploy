@@ -27,7 +27,7 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.
 `
 
 var withoutexampleOneClickInstall = `
-Note: If installed keploy without One Click Install, use "keploy example --withoutOneClickInstall true"
+Note: If installed keploy without One Click Install, use "keploy example --customSetup true"
 `
 var examples = `
 Golang Application
@@ -98,17 +98,17 @@ type Example struct {
 }
 
 func (e *Example) GetCmd() *cobra.Command {
-	var withoutOneClickInstall bool
+	var customSetup bool
 	var exampleCmd = &cobra.Command{
 		Use:   "example",
 		Short: "Example to record and test via keploy",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			withoutOneClickInstall, err := cmd.Flags().GetBool("withoutOneClickInstall")
+			customSetup, err := cmd.Flags().GetBool("customSetup")
 			if err != nil {
-				e.logger.Error("failed to read the withoutOneClickInstall flag")
+				e.logger.Error("failed to read the customSetup flag")
 				return err
 			}
-			if withoutOneClickInstall {
+			if customSetup {
 				fmt.Println(examples)
 			} else {
 				fmt.Println(exampleOneClickInstall)
@@ -119,7 +119,7 @@ func (e *Example) GetCmd() *cobra.Command {
 	}
 	exampleCmd.SetHelpTemplate(customHelpTemplate)
 
-	exampleCmd.Flags().Bool("withoutOneClickInstall", withoutOneClickInstall, "Check if the user is using one click install")
+	exampleCmd.Flags().Bool("customSetup", customSetup, "Check if the user is using one click install")
 
 	return exampleCmd
 }
