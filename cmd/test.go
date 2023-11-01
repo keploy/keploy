@@ -76,7 +76,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *apiTimeout == 5 {
 		*apiTimeout = confTest.ApiTimeout
 	}
-	noiseJSON, err := test.UnmarshallJson(confTest.Noise, t.logger)
+	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
 		t.logger.Error("Failed to unmarshall the noise flag")
 	}
