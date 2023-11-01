@@ -14,7 +14,7 @@ test:
   containerName: ""
   networkName: ""
   testSets: []
-  noise: |-
+  globalNoise: |-
     {
       "global": {
         "body": {},
