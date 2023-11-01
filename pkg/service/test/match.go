@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"fmt"
 
 	"go.uber.org/zap"
 )
@@ -19,12 +20,27 @@ func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	}
 }
 
-func arrayToMap(arr []string) map[string]bool {
+func ArrayToMap(arr []string) map[string]bool {
 	res := map[string]bool{}
 	for i := range arr {
 		res[arr[i]] = true
 	}
 	return res
+}
+
+func InterfaceToString(val interface{}) string {
+	switch v := val.(type) {
+	case int:
+		return fmt.Sprintf("%d", v)
+	case float64:
+		return fmt.Sprintf("%f", v)
+	case bool:
+		return fmt.Sprintf("%t", v)
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func Match(exp, act string, noise map[string][]string, log *zap.Logger) (string, string, bool, error) {
@@ -71,9 +87,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 	}
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
-		_, ok := noiseMap[key]
-		if ok && len(noiseMap[key]) != 0 {
-			ok = MatchesAnyRegex(actual.(string), noiseMap[key])
+		regexArr, ok := CheckStringExist(key, noiseMap)
+		if ok && len(regexArr) != 0 {
+			ok, _ = MatchesAnyRegex(InterfaceToString(actual), regexArr)
 		}
 		if expected != actual && !ok {
 			return false, nil
@@ -91,8 +107,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 				return false, nil
 			}
 			// remove the noisy key from both expected and actual JSON.
-			if _, ok := noiseMap[prefix+k]; ok {
-				if len(noiseMap[prefix+k]) != 0 && !MatchesAnyRegex(val.(string), noiseMap[prefix+k]) {
+			if regexArr, ok := CheckStringExist(prefix+k, noiseMap); ok {
+				ok, _ := MatchesAnyRegex(InterfaceToString(val), regexArr)
+				if len(regexArr) != 0 && !ok {
 					continue
 				}
 				delete(expMap, prefix+k)
@@ -109,8 +126,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 		}
 
 	case reflect.Slice:
-		if _, ok := noiseMap[key]; ok {
-			if len(noiseMap[key]) != 0 && !MatchesAnyRegex(actual.(string), noiseMap[key]) {
+		if regexArr, ok := CheckStringExist(key, noiseMap); ok {
+			ok, _ := MatchesAnyRegex(InterfaceToString(actual), regexArr)
+			if len(regexArr) != 0 && !ok {
 				return false, nil
 			}
 			return true, nil

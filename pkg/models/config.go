@@ -27,3 +27,8 @@ type Test struct {
 	ApiTimeout uint64 `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts []uint `json:"passThroughPorts" yaml:"passThroughPorts"`
 }
+
+type (
+	GlobalNoise map[string]map[string][]string
+	TestsetNoise map[string]map[string]map[string][]string
+)
