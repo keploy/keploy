@@ -39,6 +39,12 @@ var globalNoise = `
 	}
 }`
 
+var tests = `
+{
+	"test-set-name": ["test-case-name"]
+}
+`
+
 func (g *generator) Generate(configPath string) {
 
 	testConfig := models.Test {
@@ -47,7 +53,7 @@ func (g *generator) Generate(configPath string) {
 		ProxyPort: 0,
 		ContainerName: "",
 		NetworkName: "",
-		TestSets: []string{},
+		Tests: tests,
 		GlobalNoise: globalNoise,
 		Delay: 5,
 		ApiTimeout: 5,
