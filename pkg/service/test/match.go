@@ -20,8 +20,8 @@ func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	}
 }
 
-func ArrayToMap(arr []string) map[string]bool {
-	res := map[string]bool{}
+func ArrayToMap[V comparable](arr []V) map[V]bool {
+	res := map[V]bool{}
 	for i := range arr {
 		res[arr[i]] = true
 	}
