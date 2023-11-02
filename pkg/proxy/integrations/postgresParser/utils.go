@@ -58,6 +58,7 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 			}
 		case string('D'):
 			msg = &pgproto3.DataRow{
+				RowValues: response.DataRows[dtr].RowValues,
 				Values: response.DataRows[dtr].Values,
 			}
 			dtr++

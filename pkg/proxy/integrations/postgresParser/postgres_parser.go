@@ -51,7 +51,7 @@ func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	case models.MODE_RECORD:
 		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	case models.MODE_TEST:
-		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger,ctx)
+		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -232,9 +232,9 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					}
 
 					pg_mock := &models.Backend{
-						PacketTypes:         pg.BackendWrapper.PacketTypes,
-						Identfier:           "ClientRequest",
-						Length:              uint32(len(requestBuffer)),
+						PacketTypes: pg.BackendWrapper.PacketTypes,
+						Identfier:   "ClientRequest",
+						Length:      uint32(len(requestBuffer)),
 						// Payload:             bufStr,
 						Bind:                pg.BackendWrapper.Bind,
 						Binds:               pg.BackendWrapper.Binds,
@@ -300,7 +300,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				pg := NewFrontend()
 				if !isStartupPacket(buffer) && len(buffer) > 5 && bufStr != "Tg==" {
 					bufferCopy := buffer
-			
+
+					//Saving list of packets in case of multiple packets in a single buffer steam
 					ps := make([]pgproto3.ParameterStatus, 0)
 					dataRows := []pgproto3.DataRow{}
 
@@ -321,13 +322,13 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 							pg.FrontendWrapper.CommandComplete = *msg.(*pgproto3.CommandComplete)
 							pg.FrontendWrapper.CommandCompletes = append(pg.FrontendWrapper.CommandCompletes, pg.FrontendWrapper.CommandComplete)
 						}
-						if pg.FrontendWrapper.DataRow.Values != nil {
+						if pg.FrontendWrapper.DataRow.RowValues != nil {
 							// Create a new slice for each DataRow
-							valuesCopy := make([][]byte, len(pg.FrontendWrapper.DataRow.Values))
-							copy(valuesCopy, pg.FrontendWrapper.DataRow.Values)
+							valuesCopy := make([]string, len(pg.FrontendWrapper.DataRow.RowValues))
+							copy(valuesCopy, pg.FrontendWrapper.DataRow.RowValues)
 
 							row := pgproto3.DataRow{
-								Values: valuesCopy, // Use the copy of the values
+								RowValues: valuesCopy, // Use the copy of the values
 							}
 							// fmt.Println("row is ", row)
 							dataRows = append(dataRows, row)
@@ -343,9 +344,9 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 					// from here take the msg and append its readabable form to the pgResponses
 					pg_mock := &models.Frontend{
-						PacketTypes:                     pg.FrontendWrapper.PacketTypes,
-						Identfier:                       "ServerResponse",
-						Length:                          uint32(len(requestBuffer)),
+						PacketTypes: pg.FrontendWrapper.PacketTypes,
+						Identfier:   "ServerResponse",
+						Length:      uint32(len(requestBuffer)),
 						// Payload:                         bufStr,
 						AuthenticationOk:                pg.FrontendWrapper.AuthenticationOk,
 						AuthenticationCleartextPassword: pg.FrontendWrapper.AuthenticationCleartextPassword,
@@ -462,7 +463,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			logger.Debug("the postgres request buffer is empty")
 			continue
 		}
-
 		tcsMocks := h.GetTcsMocks()
 		// change auth to md5 instead of scram
 		// CheckValidEncode(tcsMocks, h, logger)
@@ -584,7 +584,7 @@ func encodePostgresOutgoing2(requestBuffer []byte, clientConn, destConn net.Conn
 			// 	},
 			// },
 			Identfier: "Clientrequest",
-			Payload:  bufStr,
+			Payload:   bufStr,
 		})
 	}
 	_, err := destConn.Write(requestBuffer)
