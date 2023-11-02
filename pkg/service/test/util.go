@@ -105,11 +105,12 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 
 func JoinNoises(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) models.GlobalNoise {
 	noise := globalNoise
-	for k1, v1 := range tsNoise {
-		for k2, v2 := range v1 {
-			noise[k1][k2] = v2
-		}
-	} 
+	for field, regexArr := range tsNoise["body"] {
+		noise["body"][field] = regexArr
+	}
+	for field, regexArr := range tsNoise["header"] {
+		noise["header"][field] = regexArr
+	}
 	return noise
 }
 

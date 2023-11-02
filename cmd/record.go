@@ -95,21 +95,25 @@ func (r *Record) GetCmd() *cobra.Command {
 			appCmd, err := cmd.Flags().GetString("command")
 			if err != nil {
 				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				return err
 			}
 			
 			appContainer, err := cmd.Flags().GetString("containerName")
 			if err != nil {
 				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				return err
 			}
 
 			networkName, err := cmd.Flags().GetString("networkName")
 			if err != nil {
 				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				return err
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
 				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				return err
 			}
 
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
@@ -133,13 +137,13 @@ func (r *Record) GetCmd() *cobra.Command {
 			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
 
 			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag\n")
+				fmt.Println("Error: missing required -c flag or appCmd in config file")
 				if isDockerCmd {
 					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				}
-				fmt.Println("Example usage:\n", cmd.Example, "\n")
+				fmt.Println("Example usage:\n", cmd.Example)
 
-				return errors.New("missing required -c flag")
+				return errors.New("missing required -c flag or appCmd in config file")
 			}
 
 			//if user provides relative path
@@ -172,9 +176,9 @@ func (r *Record) GetCmd() *cobra.Command {
 					}
 				}
 				if !hasContainerName && appContainer == "" {
-					fmt.Println("Error: missing required --containerName flag")
+					fmt.Println("Error: missing required --containerName flag or containerName in config file")
 					fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag")
+					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
 

@@ -66,7 +66,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	}
 
 	globalNoise := make(models.GlobalNoise)
-	noise := make(models.TestsetNoise)
+	testSetNoise := make(models.TestsetNoise)
 
 	for scope, v := range noiseJSON.(map[string]interface{}) {
 		if scope == "global" {
@@ -81,13 +81,13 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 				}
 		} else {
 			for testset, v1 := range v.(map[string]interface{}) {
-				noise[testset] = map[string]map[string][]string{}
+				testSetNoise[testset] = map[string]map[string][]string{}
 				for k2, v2 := range v1.(map[string]interface{}) {
-					noise[testset][k2] = map[string][]string{}
+					testSetNoise[testset][k2] = map[string][]string{}
 					for k3, v3 := range v2.(map[string]interface{}) {
-						noise[testset][k2][k3] = []string{}
+						testSetNoise[testset][k2][k3] = []string{}
 						for _, val := range v3.([]interface{}) {
-							noise[testset][k2][k3] = append(noise[testset][k2][k3], val.(string))
+							testSetNoise[testset][k2][k3] = append(testSetNoise[testset][k2][k3], val.(string))
 						}
 					}
 				}
@@ -95,7 +95,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		}
 	}
 
-	if tsNoise, ok := noise[testSet]; ok {
+	if tsNoise, ok := testSetNoise[testSet]; ok {
 		globalNoise = test.JoinNoises(globalNoise, tsNoise)
 	}
 
