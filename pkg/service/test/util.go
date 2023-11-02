@@ -123,7 +123,7 @@ func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
     return false, ""
 }
 
-func MapToArray(mp map[string][]string) []string {
+func MapToArray[V any] (mp map[string]V) []string {
 	var result []string
 	for k := range mp {
 		result = append(result, k)

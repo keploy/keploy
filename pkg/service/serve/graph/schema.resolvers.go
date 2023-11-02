@@ -104,17 +104,16 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		r.Logger.Error("Failed to unmarshall the tests json")
 	}
 
-	tests := map[string]bool{}
-	testcases := testsJSON.(map[string]interface{})[testSet]
-	for _ , tc := range testcases.([]interface{}) {
-			tests[tc.(string)] = true
+	var testcasesArr []string
+	for _, v := range testsJSON.(map[string]interface{})[testSet].([]interface{}) {
+		testcasesArr = append(testcasesArr, v.(string))
 	}
 
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
 
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, tests, globalNoise)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, test.ArrayToMap(testcasesArr), globalNoise)
 	}()
 
 	testRunID := <-testRunChan
