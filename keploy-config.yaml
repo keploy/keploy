@@ -6,6 +6,9 @@ record:
   networkName: ""
   delay: 5
   passThroughPorts: []
+  passThroughURL: []
+  passThroughHeader: []
+
 test:
   path: ""
   command: ""
