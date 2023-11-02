@@ -442,24 +442,35 @@ func decodeOpMsgSectionSequence(section string) (string, string, error) {
 
 }
 
-func decodeOpMsgSectionSingle(section string) (string, error) {
-	var message = ""
-	
-	// Define the regular expression pattern
-	pattern := `\{ SectionSingle msg: (.+?) \}`
-
-	// Compile the regular expression
-	regex := regexp.MustCompile(pattern)
-
-	// Find submatches using the regular expression
-	submatches := regex.FindStringSubmatch(section)
-	if submatches == nil || len(submatches) != 2 {
-		return message, errors.New("invalid format of message section single")
+func extractSectionSingle(data string) (string, error) {
+	// Look for the prefix before the actual content
+	prefix := "{ SectionSingle msg: "
+	startIndex := strings.Index(data, prefix)
+	if startIndex == -1 {
+		return "", fmt.Errorf("start not found")
 	}
-	// expectedIdentifier = submatches[1]
-	message = submatches[1]
-	return message, nil
+
+	// Adjust the start index to skip the prefix
+	startIndex += len(prefix)
+
+	// We'll assume the content ends with " }" that closes the sectionSingle
+	endIndex := strings.LastIndex(data[startIndex:], " }")
+	if endIndex == -1 {
+		return "", fmt.Errorf("end not found")
+	}
+
+	// Adjust the end index relative to the entire string
+	endIndex += startIndex
+
+	// Extract the content between the start and end indexes
+	content := data[startIndex:endIndex]
+
+	// Clean up the extracted content
+	content = strings.Trim(content, " ")
+
+	return content, nil
 }
+
 
 func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
@@ -491,7 +502,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opM
 				msgs:       docs,
 			})
 		case strings.HasPrefix(messageValue, "{ SectionSingle msg:"):
-			sectionStr, err := decodeOpMsgSectionSingle(responseOpMsg.Sections[messageIndex])
+			sectionStr, err := extractSectionSingle(responseOpMsg.Sections[messageIndex])
 			if err != nil {
 				logger.Error("failed to extract the msg section from recorded message single section", zap.Error(err))
 				return nil, err
