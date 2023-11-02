@@ -7,7 +7,7 @@ import (
 )
 
 type TestCaseDB interface {
-	WriteTestcase(tc *models.TestCase, ctx context.Context) error
+	WriteTestcase(tc *models.TestCase, ctx context.Context, url []string, header []string) error
 	WriteMock(tc *models.Mock, ctx context.Context) error
 
 	ReadTestcase(path string, options interface{}) ([]*models.TestCase, error)

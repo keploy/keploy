@@ -95,7 +95,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if appCmd == "" {
 				appCmd = confRecord.Command
 			}
-			
+
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
@@ -160,15 +160,17 @@ func (r *Record) GetCmd() *cobra.Command {
 			if len(ports) == 0 {
 				ports = confRecord.PassThroughPorts
 			}
+			url := confRecord.PassThroughURL
+			header := confRecord.PassThroughHeader
 
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				r.logger.Error("failed to read the proxy port")
 				return err
 			}
-			
+
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, url, header)
 			return nil
 		},
 	}
