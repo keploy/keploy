@@ -134,7 +134,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 		}
 	case models.GENERIC:
 		genericSpec := spec.GenericSpec{
-			Metadata: mock.Spec.Metadata,
+			Metadata:         mock.Spec.Metadata,
 			GenericRequests:  mock.Spec.GenericRequests,
 			GenericResponses: mock.Spec.GenericResponses,
 		}
@@ -146,7 +146,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, erro
 	case models.Postgres:
 
 		postgresSpec := spec.PostgresSpec{
-			Metadata: mock.Spec.Metadata,
+			Metadata:          mock.Spec.Metadata,
 			PostgresRequests:  mock.Spec.PostgresRequests,
 			PostgresResponses: mock.Spec.PostgresResponses,
 		}
@@ -180,7 +180,11 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		Kind:    yamlTestcase.Kind,
 		Name:    yamlTestcase.Name,
 	}
-
+	if tc.Version == "api.keploy-enterprise.io/v1beta1" {
+		logger.Info("This testcase was recorded using the the enterprise version, may not work properly with the open source version", zap.String("tc kind:", string(tc.Kind)))
+	} else if tc.Version != "api.keploy.io/v1beta1" {
+		logger.Info("This testcase was not recorded using Keploy, may not work properly.", zap.String("tc version:", string(tc.Version)))
+	}
 	switch tc.Kind {
 	case models.HTTP:
 		httpSpec := spec.HttpSpec{}
@@ -219,6 +223,16 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			Name:    m.Name,
 			Kind:    m.Kind,
 		}
+		if m.Version == "api.keploy-enterprise.io/v1beta1" {
+			logger.Info("This mock was recorded using the the enterprise version, may not work properly with the open source version", zap.String("mock kind:", string(m.Kind)))
+		} else if m.Version != "api.keploy.io/v1beta1" {
+			logger.Info("This mock was not recorded using Keploy, may not work properly.", zap.String("mock version:", string(m.Version)))
+		}
+		mockCheck := strings.Split(string(m.Kind), "-")
+		if len(mockCheck) > 1 {
+			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
+			continue
+		}
 		switch m.Kind {
 		case models.HTTP:
 			httpSpec := spec.HttpSpec{}
@@ -231,7 +245,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				Metadata: httpSpec.Metadata,
 				HttpReq:  &httpSpec.Request,
 				HttpResp: &httpSpec.Response,
-				Created: httpSpec.Created,
+				Created:  httpSpec.Created,
 			}
 		case models.Mongo:
 			mongoSpec := spec.MongoSpec{}
@@ -264,7 +278,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata: genericSpec.Metadata,
+				Metadata:         genericSpec.Metadata,
 				GenericRequests:  genericSpec.GenericRequests,
 				GenericResponses: genericSpec.GenericResponses,
 			}
@@ -283,11 +297,10 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 				// OutputBinary: genericSpec.Objects,
 				PostgresRequests:  PostSpec.PostgresRequests,
 				PostgresResponses: PostSpec.PostgresResponses,
-
 			}
 		default:
 			logger.Error("failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
-			return nil, errors.New("yaml doc of unknown type")
+			continue
 		}
 		mocks = append(mocks, &mock)
 	}

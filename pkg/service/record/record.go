@@ -31,7 +31,6 @@ func NewRecorder(logger *zap.Logger) Recorder {
 func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
 
 	var ps *proxy.ProxySet
-	models.SetVersion("api.keploy.io/v1beta1", "api.keploy.io/v1beta2")
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 

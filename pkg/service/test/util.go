@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,8 +9,34 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/proxy"
 )
+
+type InitialiseRunTestSetReturn struct {
+	Tcs           []*models.TestCase
+	ErrChan       chan error
+	TestReport    *models.TestReport
+	DIDE          bool
+	UserIP        string
+	InitialStatus models.TestRunStatus
+}
+
+type InitialiseTestReturn struct {
+	SessionsMap              map[string]string
+	TestReportFS             *yaml.TestReport
+	Ctx                      context.Context
+	AbortStopHooksForcefully bool
+	Ps                       *proxy.ProxySet
+	ExitCmd                  chan bool
+	Ys                       platform.TestCaseDB
+	LoadedHooks              *hooks.Hook
+	AbortStopHooksInterrupt  chan bool
+	Ok                       bool
+}
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
 	m := map[string][]string{}
@@ -75,7 +102,6 @@ func Flatten(j interface{}) map[string][]string {
 	return o
 }
 
-
 func AddHttpBodyToMap(body string, m map[string][]string) error {
 	// add body
 	if json.Valid([]byte(body)) {
@@ -99,7 +125,6 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 	}
 	return nil
 }
-
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
 	if res == nil {

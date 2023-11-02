@@ -157,7 +157,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
+					Version: models.V1Beta1,
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
@@ -184,7 +184,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
+					Version: models.V1Beta1,
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
