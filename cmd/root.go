@@ -75,10 +75,13 @@ func setupLogger() *zap.Logger {
 
 	// Customize the encoder config to put the emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
+  logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+
 	logCfg.OutputPaths = []string{
 		"stdout",
-		"/tmp/keploy-logs.txt",
+		"./keploy-logs.txt",
 	}
+  
 	if debugMode {
 		go func() {
 			defer utils.HandlePanic()
@@ -180,6 +183,14 @@ func checkForDebugFlag(args []string) bool {
 	return false
 }
 
+func deleteLogs(logger *zap.Logger) {
+	err := os.Remove("keploy-logs.txt")
+	if err != nil {
+		logger.Error("Error removing log file: %v\n", zap.String("error", err.Error()))
+		return
+	}
+}
+
 func (r *Root) execute() {
 	// Root command
 	var rootCmd = &cobra.Command{
@@ -196,6 +207,7 @@ func (r *Root) execute() {
 	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
+	defer deleteLogs(r.logger)
 	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd

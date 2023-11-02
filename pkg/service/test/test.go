@@ -138,7 +138,7 @@ func (t *tester) InitialiseTest(path string, proxyPort uint32, testReportPath st
 
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool {
+func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, noiseConfig map[string]interface{}) bool {
 
 	testRes := false
 	result := true
@@ -155,7 +155,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, initialisedValues.Ys, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, apiTimeout, initialisedValues.Ctx)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, initialisedValues.Ys, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, apiTimeout, initialisedValues.Ctx, noiseConfig)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -206,15 +206,16 @@ func (t *tester) InitialiseRunTestSet(testSet, path, testReportPath, appCmd, app
 	}
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", testSet, returnVal.Tcs))
-	configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, testSet))
+	var configMocks []*models.Mock
+	configMocks, returnVal.TcsMocks, err = ys.ReadMocks(filepath.Join(path, testSet))
 	if err != nil {
 		t.logger.Error(err.Error())
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
-	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, tcsMocks))
+	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, returnVal.TcsMocks))
 	loadedHooks.SetConfigMocks(configMocks)
-	loadedHooks.SetTcsMocks(tcsMocks)
+	loadedHooks.SetTcsMocks(returnVal.TcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", pid))
 
@@ -279,7 +280,7 @@ func (t *tester) InitialiseRunTestSet(testSet, path, testReportPath, appCmd, app
 	return returnVal
 }
 
-func (t *tester) SimulateRequest(tc *models.TestCase, loadedHooks *hooks.Hook, appCmd string, userIp string, testSet string, apiTimeout uint64, success, failure *int, status *models.TestRunStatus, testReportFS yaml.TestReportFS, testReport *models.TestReport, path string, dIDE bool) {
+func (t *tester) SimulateRequest(tc *models.TestCase, loadedHooks *hooks.Hook, appCmd string, userIp string, testSet string, apiTimeout uint64, success, failure *int, status *models.TestRunStatus, testReportFS yaml.TestReportFS, testReport *models.TestReport, path string, dIDE bool, noiseConfig map[string]interface{}) {
 	switch tc.Kind {
 	case models.HTTP:
 		started := time.Now().UTC()
@@ -299,7 +300,7 @@ func (t *tester) SimulateRequest(tc *models.TestCase, loadedHooks *hooks.Hook, a
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := t.testHttp(*tc, resp)
+		testPass, testResult := t.testHttp(*tc, resp, noiseConfig)
 
 		if !testPass {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
@@ -399,10 +400,10 @@ func (t *tester) FetchTestResults(testReportFS yaml.TestReportFS, testReport *mo
 	return *status
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context) models.TestRunStatus {
-	initalisedValues := t.InitialiseRunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx)
-	if initalisedValues.InitialStatus != "" {
-		return initalisedValues.InitialStatus
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}) models.TestRunStatus {
+	initialisedValues := t.InitialiseRunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx)
+	if initialisedValues.InitialStatus != "" {
+		return initialisedValues.InitialStatus
 	}
 	isApplicationStopped := false
 	// Recover from panic and gracfully shutdown
@@ -423,13 +424,32 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		failure = 0
 		status  = models.TestRunStatusPassed
 	)
-	var err error
-	for _, tc := range initalisedValues.Tcs {
-		// Filter the Tcs Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the Tcs Mocks.
-		// filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
-		// loadedHooks.SetTcsMocks(filteredTcsMocks)
+
+	var userIp string
+
+	//check if the user application is running docker container using IDE
+	dIDE := (appCmd == "" && len(appContainer) != 0)
+
+	ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
+	if ok || dIDE {
+		userIp = loadedHooks.GetUserIP()
+		t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
+		t.logger.Debug("", zap.Any("User Ip", userIp))
+	}
+
+	t.logger.Info("", zap.Any("no of test cases", len(initialisedValues.Tcs)), zap.Any("test-set", testSet))
+	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(delay)*time.Second)))
+
+	// added delay to hold running keploy tests until application starts
+	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(initialisedValues.Tcs)), zap.Any("test-set", testSet))
+	time.Sleep(time.Duration(delay) * time.Second)
+	for _, tc := range initialisedValues.Tcs {
+		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
+		filteredTcsMocks := filterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
+		loadedHooks.SetTcsMocks(filteredTcsMocks)
+
 		select {
-		case err = <-initalisedValues.ErrChan:
+		case err := <-initialisedValues.ErrChan:
 			isApplicationStopped = true
 			switch err {
 			case hooks.ErrInterrupted:
@@ -453,13 +473,13 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if exitLoop {
 			break
 		}
-		t.SimulateRequest(tc, loadedHooks, appCmd, initalisedValues.UserIP, testSet, apiTimeout, &success, &failure, &status, testReportFS, initalisedValues.TestReport, path, initalisedValues.DIDE)
+		t.SimulateRequest(tc, loadedHooks, appCmd, initialisedValues.UserIP, testSet, apiTimeout, &success, &failure, &status, testReportFS, initialisedValues.TestReport, path, initialisedValues.DIDE, noiseConfig)
 	}
-	status = t.FetchTestResults(testReportFS, initalisedValues.TestReport, &status, testSet, &success, &failure, ctx, testReportPath, path)
+	status = t.FetchTestResults(testReportFS, initialisedValues.TestReport, &status, testSet, &success, &failure, ctx, testReportPath, path)
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig map[string]interface{}) (bool, *models.Result) {
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
@@ -483,17 +503,36 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp) (
 	noise := tc.Noise
 
 	var (
-		bodyNoise   []string
-		headerNoise = map[string]string{}
+		bodyNoise   = map[string][]string{}
+		headerNoise = map[string][]string{}
 	)
 
 	for _, n := range noise {
 		a := strings.Split(n, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			bodyNoise = append(bodyNoise, x)
+			bodyNoise[x] = []string{}
 		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = a[len(a)-1]
+			headerNoise[a[len(a)-1]] = []string{}
+		}
+	}
+
+	for k, v := range noiseConfig {
+		if k == "body" {
+			for k1, v1 := range v.(map[string]interface{}) {
+				bodyNoise[k1] = []string{}
+				for _, v2 := range v1.([]interface{}) {
+					bodyNoise[k1] = append(bodyNoise[k1], v2.(string))
+				}
+			}
+		}
+		if k == "header" {
+			for k1, v1 := range v.(map[string]interface{}) {
+				headerNoise[k1] = []string{}
+				for _, v2 := range v1.([]interface{}) {
+					headerNoise[k1] = append(headerNoise[k1], v2.(string))
+				}
+			}
 		}
 	}
 

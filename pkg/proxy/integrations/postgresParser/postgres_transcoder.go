@@ -245,7 +245,7 @@ func (f *FrontendWrapper) TranslateToReadableResponse(msgBody []byte, logger *za
 	bits := msg.Encode([]byte{})
 	// println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
 	if len(bits) != len(msgBody) {
-		fmt.Println("Encoded Data doesn't match the original data ..")
+		logger.Debug("Encoded Data doesn't match the original data ..")
 	}
 
 	return msg, err
@@ -263,16 +263,12 @@ func (f *FrontendWrapper) findAuthenticationMessageType(src []byte) (pgproto3.Ba
 	}
 
 	f.FrontendWrapper.AuthType = authType
-	// fmt.Printf("My int32 value is: %d\n", f.FrontendWrapper.AuthType)
 	switch f.FrontendWrapper.AuthType {
 	case pgproto3.AuthTypeOk:
-		// fmt.Println("AuthTypeOk")
 		return &f.FrontendWrapper.AuthenticationOk, nil
 	case pgproto3.AuthTypeCleartextPassword:
-		// fmt.Println("AuthTypeCleartextPassword")
 		return &f.FrontendWrapper.AuthenticationCleartextPassword, nil
 	case pgproto3.AuthTypeMD5Password:
-		// fmt.Println("AuthTypeMD5Password")
 		return &f.FrontendWrapper.AuthenticationMD5Password, nil
 	case pgproto3.AuthTypeSCMCreds:
 		return nil, errors.New("AuthTypeSCMCreds is unimplemented")

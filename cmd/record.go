@@ -8,8 +8,11 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/record"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func NewCmdRecord(logger *zap.Logger) *Record {
@@ -17,6 +20,54 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 	return &Record{
 		recorder: recorder,
 		Logger:   logger,
+	}
+}
+
+func readRecordConfig() (*models.Record, error) {
+	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	decoder := yamlLib.NewDecoder(file)
+	var doc models.Config
+	err = decoder.Decode(&doc)
+	if err != nil {
+		return nil, err
+	}
+	return &doc.Record, nil
+}
+
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint) {
+	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
+		t.Logger.Info("keploy configuration file not found")
+		return
+	}
+	confRecord, err := readRecordConfig()
+	if err != nil {
+		t.Logger.Error("failed to get the record config from config file")
+		return
+	}
+	if len(*path) == 0 {
+		*path = confRecord.Path
+	}
+	if *proxyPort == 0 {
+		*proxyPort = confRecord.ProxyPort
+	}
+	if *appCmd == "" {
+		*appCmd = confRecord.Command
+	}
+	if *appContainer == "" {
+		*appContainer = confRecord.ContainerName
+	}
+	if *networkName == "" {
+		*networkName = confRecord.NetworkName
+	}
+	if *Delay == 5 {
+		*Delay = confRecord.Delay
+	}
+	if len(*passThorughPorts) == 0 {
+		*passThorughPorts = confRecord.PassThroughPorts
 	}
 }
 
@@ -64,6 +115,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.Logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
+
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
@@ -78,6 +130,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.Logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
+
 			var hasContainerName bool
 			if isDockerCmd {
 				for _, arg := range os.Args {
@@ -111,11 +164,14 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.Logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
+
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				r.Logger.Error("failed to read the proxy port")
 				return err
 			}
+
+			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
 
 			r.Logger.Debug("the ports are", zap.Any("ports", ports))
 			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
