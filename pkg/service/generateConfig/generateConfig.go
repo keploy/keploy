@@ -1,4 +1,4 @@
-package generate
+package generateConfig
 
 import (
 	"sync"
@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 	
 	"gopkg.in/yaml.v3"
 	"go.uber.org/zap"
@@ -13,13 +14,13 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
-type generator struct {
+type generatorConfig struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
 
-func NewGenerator(logger *zap.Logger) Generator {
-	return &generator{
+func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
+	return &generatorConfig {
 		logger: logger,
 		mutex:  sync.Mutex{},
 	}
@@ -39,7 +40,7 @@ var globalNoise = `
 	}
 }`
 
-func (g *generator) Generate(configPath string) {
+func (g *generatorConfig) GenerateConfig(path string) {
 
 	testConfig := models.Test {
 		Path: "",
@@ -74,8 +75,21 @@ func (g *generator) Generate(configPath string) {
 		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
 	}
 
-	err1 := os.WriteFile(filepath.Join(configPath, "keploy-config.yaml"), data, 0644)
-	if err1 != nil {
+	filePath := filepath.Join(path, "keploy-config.yaml")
+
+	if utils.CheckFileExists(filePath) {
+		override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
+		if err != nil {
+			g.logger.Fatal("Failed to ask for confirmation", zap.Error(err))
+			return
+		}
+		if !override {
+			return
+		}
+	}
+
+	err = os.WriteFile(filePath, data, os.ModePerm)
+	if err != nil {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
 

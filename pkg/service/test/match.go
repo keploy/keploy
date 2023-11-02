@@ -87,11 +87,11 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 	}
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
-		regexArr, ok := CheckStringExist(key, noiseMap)
-		if ok && len(regexArr) != 0 {
-			ok, _ = MatchesAnyRegex(InterfaceToString(actual), regexArr)
+		regexArr, isNoisy := CheckStringExist(key, noiseMap)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(InterfaceToString(actual), regexArr)
 		}
-		if expected != actual && !ok {
+		if expected != actual && !isNoisy {
 			return false, nil
 		}
 
@@ -107,9 +107,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 				return false, nil
 			}
 			// remove the noisy key from both expected and actual JSON.
-			if regexArr, ok := CheckStringExist(prefix+k, noiseMap); ok {
-				ok, _ := MatchesAnyRegex(InterfaceToString(val), regexArr)
-				if len(regexArr) != 0 && !ok {
+			if regexArr, isNoisy := CheckStringExist(prefix+k, noiseMap); isNoisy {
+				isNoisy, _ := MatchesAnyRegex(InterfaceToString(val), regexArr)
+				if len(regexArr) != 0 && !isNoisy {
 					continue
 				}
 				delete(expMap, prefix+k)
@@ -126,9 +126,9 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 		}
 
 	case reflect.Slice:
-		if regexArr, ok := CheckStringExist(key, noiseMap); ok {
-			ok, _ := MatchesAnyRegex(InterfaceToString(actual), regexArr)
-			if len(regexArr) != 0 && !ok {
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy {
+			isNoisy, _ := MatchesAnyRegex(InterfaceToString(actual), regexArr)
+			if len(regexArr) != 0 && !isNoisy {
 				return false, nil
 			}
 			return true, nil

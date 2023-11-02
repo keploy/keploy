@@ -41,7 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, globalNoise models.GlobalNoise, noise models.TestsetNoise) bool {
+func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, globalNoise models.GlobalNoise, testSetNoise models.TestsetNoise) bool {
 
 	var ps *proxy.ProxySet
 
@@ -148,7 +148,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 			continue
 		}
 		noiseConfig := globalNoise
-		if tsNoise, ok := noise[sessionIndex]; ok {
+		if tsNoise, ok := testSetNoise[sessionIndex]; ok {
 			noiseConfig = JoinNoises(globalNoise, tsNoise)
 		}
 		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig)
