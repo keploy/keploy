@@ -9,7 +9,7 @@ import (
 )
 
 // unmarshallJson returns unmarshalled JSON object.
-func unmarshallJson(s string, log *zap.Logger) (interface{}, error) {
+func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	var result interface{}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
 		log.Error("cannot convert json string into json object", zap.Error(err))
@@ -27,21 +27,20 @@ func arrayToMap(arr []string) map[string]bool {
 	return res
 }
 
-func Match(exp, act string, noise []string, log *zap.Logger) (string, string, bool, error) {
+func Match(exp, act string, noise map[string][]string, log *zap.Logger) (string, string, bool, error) {
 
-	noiseMap := arrayToMap(noise)
-	expected, err := unmarshallJson(exp, log)
+	expected, err := UnmarshallJson(exp, log)
 	if err != nil {
 		return exp, act, false, err
 	}
-	actual, err := unmarshallJson(act, log)
+	actual, err := UnmarshallJson(act, log)
 	if err != nil {
 		return exp, act, false, err
 	}
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
 		return exp, act, false, nil
 	}
-	match, err := jsonMatch("", expected, actual, noiseMap)
+	match, err := jsonMatch("", expected, actual, noise)
 	if err != nil {
 		return exp, act, false, err
 	}
@@ -57,7 +56,7 @@ func Match(exp, act string, noise []string, log *zap.Logger) (string, string, bo
 }
 
 // jsonMatch returns true if expected and actual JSON objects matches(are equal).
-func jsonMatch(key string, expected, actual interface{}, noiseMap map[string]bool) (bool, error) {
+func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]string) (bool, error) {
 
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
 		return false, errors.New("type not matched ")
@@ -72,7 +71,11 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string]boo
 	}
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
-		if expected != actual && !noiseMap[key] {
+		_, ok := noiseMap[key]
+		if ok && len(noiseMap[key]) != 0 {
+			ok = MatchesAnyRegex(actual.(string), noiseMap[key])
+		}
+		if expected != actual && !ok {
 			return false, nil
 		}
 
@@ -88,7 +91,10 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string]boo
 				return false, nil
 			}
 			// remove the noisy key from both expected and actual JSON.
-			if noiseMap[prefix+k] {
+			if _, ok := noiseMap[prefix+k]; ok {
+				if len(noiseMap[prefix+k]) != 0 && !MatchesAnyRegex(val.(string), noiseMap[prefix+k]) {
+					continue
+				}
 				delete(expMap, prefix+k)
 				delete(actMap, k)
 				continue
@@ -103,7 +109,10 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string]boo
 		}
 
 	case reflect.Slice:
-		if noiseMap[key] {
+		if _, ok := noiseMap[key]; ok {
+			if len(noiseMap[key]) != 0 && !MatchesAnyRegex(actual.(string), noiseMap[key]) {
+				return false, nil
+			}
 			return true, nil
 		}
 		expSlice := reflect.ValueOf(expected)
