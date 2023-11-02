@@ -5,17 +5,15 @@ type BodyType string
 type Version string
 
 var (
-	V1Beta1 Version
-	V1Beta2 Version
+	V1Beta1 = Version("api.keploy.io/v1beta1")
 )
 
-func SetVersion(V1 string, V2 string){
+func SetVersion(V1 string){
 	V1Beta1 = Version(V1)
-	V1Beta2 = Version(V2)
 }
 
-func GetVersion() (V1 Version, V2 Version){
-	return V1Beta1, V1Beta2
+func GetVersion() (V1 Version){
+	return V1Beta1
 }
 
 const (

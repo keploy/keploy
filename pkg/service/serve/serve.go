@@ -51,7 +51,6 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	}
 
 	models.SetMode(models.MODE_TEST)
-	models.SetVersion("api.keploy.io/v1beta1", "api.keploy.io/v1beta2")
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
 	teleFS := fs.NewTeleFS()
