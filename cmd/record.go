@@ -38,16 +38,16 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 	return &doc.Record, nil
 }
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		t.logger.Info("keploy configuration file not found")
-		return
+		return nil
 	}
 	confRecord, err := readRecordConfig(configFilePath)
 	if err != nil {
 		t.logger.Error("failed to get the record config from config file")
-		return
+		return err
 	}
 	if len(*path) == 0 {
 		*path = confRecord.Path
@@ -70,6 +70,7 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if len(*passThorughPorts) == 0 {
 		*passThorughPorts = confRecord.PassThroughPorts
 	}
+	return nil
 }
 
 type Record struct {
@@ -134,7 +135,11 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
-			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
+			if err != nil {
+				r.logger.Error("failed to get the record config")
+				return err
+			}
 
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag or appCmd in config file")

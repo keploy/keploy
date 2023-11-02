@@ -38,16 +38,16 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		t.logger.Info("keploy configuration file not found")
-		return
+		return nil
 	}
 	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
 		t.logger.Error("failed to get the test config from config file")
-		return
+		return err
 	}
 	if len(*path) == 0 {
 		*path = confTest.Path
@@ -79,6 +79,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
 		t.logger.Error("Failed to unmarshall the noise flag")
+		return err
 	}
 
 	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
@@ -124,6 +125,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 			}
 		}
 	}
+	return nil
 }
 
 type Test struct {
@@ -202,7 +204,11 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testSetNoise := make(models.TestsetNoise)
 
-			t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testSetNoise, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testSetNoise, configPath)
+			if err != nil {
+				t.logger.Error("failed to get the test config")
+				return err
+			}
 
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag or appCmd in config file")
