@@ -37,13 +37,13 @@ type TestOptions struct {
 	MongoPassword    string
 	Delay            uint64
 	PassThorughPorts []uint
-	ApiTimeout uint64
-	Testsets []string
-	AppContainer string
-	AppNetwork string
-	ProxyPort uint32
-	GlobalNoise map[string]map[string][]string
-	TestsetNoise map[string]map[string]map[string][]string
+	ApiTimeout       uint64
+	Testsets         []string
+	AppContainer     string
+	AppNetwork       string
+	ProxyPort        uint32
+	GlobalNoise      map[string]map[string][]string
+	TestsetNoise     map[string]map[string]map[string][]string
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -82,7 +82,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, options TestOp
 		return false
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, options.AppContainer, 0, context.Background()); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, options.AppContainer, 0, context.Background(), nil); err != nil {
 			return false
 		}
 	}

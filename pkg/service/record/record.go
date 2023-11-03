@@ -28,7 +28,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint, filters *models.Filters) {
 
 	var ps *proxy.ProxySet
 
@@ -52,7 +52,6 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks := hooks.NewHook(ys, routineId, r.logger)
 
-
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
@@ -66,7 +65,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx, filters); err != nil {
 			return
 		}
 	}
