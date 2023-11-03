@@ -70,7 +70,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background(), nil, nil); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background(), nil); err != nil {
 			return false
 		}
 	}

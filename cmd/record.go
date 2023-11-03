@@ -160,8 +160,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if len(ports) == 0 {
 				ports = confRecord.PassThroughPorts
 			}
-			url := confRecord.PassThroughURL
-			header := confRecord.PassThroughHeader
+			filters := confRecord.Filters
 
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
@@ -170,7 +169,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, url, header)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters)
 			return nil
 		},
 	}

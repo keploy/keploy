@@ -139,13 +139,13 @@ func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 }
 
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
-func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, url []string, header []string) error {
+func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters *models.Filters) error {
 	var bypassTestCase = false
 
-	if containsMatchingUrl(url, tc.HttpReq.URL) {
+	if containsMatchingUrl(filters.URL, tc.HttpReq.URL) {
 		bypassTestCase = true
 	}
-	if hasBannedHeaders(tc.HttpReq.Header, header) {
+	if hasBannedHeaders(tc.HttpReq.Header, filters.Header) {
 		bypassTestCase = true
 	}
 	if !bypassTestCase {

@@ -12,8 +12,13 @@ type Record struct {
 	NetworkName       string   `json:"networkName" yaml:"networkName"`
 	Delay             uint64   `json:"delay" yaml:"delay"`
 	PassThroughPorts  []uint   `json:"passThroughPorts" yaml:"passThroughPorts"`
-	PassThroughURL    []string `json:"passThroughURL" yaml:"passThroughURL"`
+	Filters           Filters  `json:"filters" yaml:"filters"`
 	PassThroughHeader []string `json:"passThroughHeader" yaml:"passThroughHeader"`
+}
+
+type Filters struct {
+	URL    []string `json:"url" yaml:"url"`
+	Header []string `json:"header" yaml:"header"`
 }
 
 type Test struct {

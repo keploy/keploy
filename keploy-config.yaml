@@ -6,8 +6,10 @@ record:
   networkName: ""
   delay: 5
   passThroughPorts: []
-  passThroughURL: []
-  passThroughHeader: []
+  filters: {
+    url : [],
+    header: []
+  }
 
 test:
   path: ""
