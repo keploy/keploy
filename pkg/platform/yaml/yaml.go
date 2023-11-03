@@ -120,46 +120,76 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 
 	return nil
 }
+func containsMatchingUrl(array []string, s string) bool {
+	m := map[string]bool{}
+	for _, element := range array {
+		m[element] = true
+	}
+	return m[s]
+}
+func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
+	for headerName, _ := range object {
+		for _, bannedHeader := range bannedHeaders {
+			if headerName == bannedHeader {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
-func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context) error {
-	ys.tele.RecordedTestAndMocks()
-	testsTotal, ok := ctx.Value("testsTotal").(*int)
-	if !ok{
-		ys.Logger.Debug("failed to get testsTotal from context")
-	}else{
-		*testsTotal++
+func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters *models.Filters) error {
+	var bypassTestCase = false
+	if filters != nil {
+		if containsMatchingUrl(filters.URL, tc.HttpReq.URL) {
+			bypassTestCase = true
+		}
+		if hasBannedHeaders(tc.HttpReq.Header, filters.Header) {
+			bypassTestCase = true
+		}
 	}
-	var tcsName string
-	if ys.TcsName == "" {
-		// finds the recently generated testcase to derive the sequence number for the current testcase
-		lastIndx, err := findLastIndex(ys.TcsPath, ys.Logger)
+
+	if !bypassTestCase {
+		ys.tele.RecordedTestAndMocks()
+		testsTotal, ok := ctx.Value("testsTotal").(*int)
+		if !ok {
+			ys.Logger.Debug("failed to get testsTotal from context")
+		} else {
+			*testsTotal++
+		}
+		var tcsName string
+		if ys.TcsName == "" {
+			// finds the recently generated testcase to derive the sequence number for the current testcase
+			lastIndx, err := findLastIndex(ys.TcsPath, ys.Logger)
+			if err != nil {
+				return err
+			}
+			if tc.Name == "" {
+				tcsName = fmt.Sprintf("test-%v", lastIndx)
+			} else {
+				tcsName = tc.Name
+			}
+		} else {
+			tcsName = ys.TcsName
+		}
+
+		// encode the testcase and its mocks into yaml docs
+		yamlTc, err := EncodeTestcase(*tc, ys.Logger)
 		if err != nil {
 			return err
 		}
-		if tc.Name == "" {
-			tcsName = fmt.Sprintf("test-%v", lastIndx)
-		} else {
-			tcsName = tc.Name
+
+		// write testcase yaml
+		yamlTc.Name = tcsName
+		err = ys.Write(ys.TcsPath, tcsName, *yamlTc)
+		if err != nil {
+			ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
+			return err
 		}
-	} else {
-		tcsName = ys.TcsName
-	}
+		ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", tcsName))
 
-	// encode the testcase and its mocks into yaml docs
-	yamlTc, err := EncodeTestcase(*tc, ys.Logger)
-	if err != nil {
-		return err
 	}
-
-	// write testcase yaml
-	yamlTc.Name = tcsName
-	err = ys.Write(ys.TcsPath, tcsName, *yamlTc)
-	if err != nil {
-		ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
-		return err
-	}
-	ys.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", ys.TcsPath), zap.String("testcase name", tcsName))
 	return nil
 }
 

@@ -38,6 +38,8 @@ func readRecordConfig() (*models.Record, error) {
 	return &doc.Record, nil
 }
 
+var filters = *&models.Filters{}
+
 func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint) {
 	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
 		t.logger.Info("keploy configuration file not found")
@@ -51,6 +53,7 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if len(*path) == 0 {
 		*path = confRecord.Path
 	}
+	filters = confRecord.Filters
 	if *proxyPort == 0 {
 		*proxyPort = confRecord.ProxyPort
 	}
@@ -115,7 +118,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
-			
+
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
 				if isDockerCmd {
@@ -170,11 +173,10 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("failed to read the proxy port")
 				return err
 			}
-
 			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters)
 			return nil
 		},
 	}

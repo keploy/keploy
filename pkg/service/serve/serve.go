@@ -17,10 +17,10 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/yaml"
-	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/service/serve/graph"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
@@ -68,7 +68,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 
 	ctx := context.Background()
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}
 
