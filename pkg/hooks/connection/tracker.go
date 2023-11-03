@@ -300,7 +300,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 
 	case structs2.IngressTraffic:
 		// Capturing the timestamp of request as the request just started to come.
-		conn.reqTimestampTest = append(conn.reqTimestampTest, time.Now())
+		conn.reqTimestampTest = append(conn.reqTimestampTest, ConvertUnixNanoToTime(event.EntryTimestampNano))
 
 		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
@@ -359,4 +359,13 @@ func (conn *Tracker) AddCloseEvent(event structs2.SocketCloseEvent) {
 
 func (conn *Tracker) UpdateTimestamps() {
 	conn.lastActivityTimestamp = uint64(time.Now().UnixNano())
+}
+
+// ConvertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
+func ConvertUnixNanoToTime(unixNano uint64) time.Time {
+	// Unix time is the number of seconds since January 1, 1970 UTC,
+	// so convert nanoseconds to seconds for time.Unix function
+	seconds := int64(unixNano / uint64(time.Second))
+	nanoRemainder := int64(unixNano % uint64(time.Second))
+	return time.Unix(seconds, nanoRemainder)
 }
