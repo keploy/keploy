@@ -1,17 +1,25 @@
 # keploy-config.yaml
-record: 
+record:
   path: ""
   command: ""
+  proxyport: 0
   containerName: "" 
+
   networkName: ""
   delay: 5
   passThroughPorts: []
-test: 
+test:
   path: ""
   command: ""
+  proxyport: 0
   containerName: ""
   networkName: ""
-  testSets: ["test-set-0"]
+  testSets: []
+  noise: |
+    {
+      "body": {},
+      "header": {}
+    }
   delay: 5
   apiTimeout: 5
   passThroughPorts: []

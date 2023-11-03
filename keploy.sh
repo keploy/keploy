@@ -18,7 +18,7 @@ installKeploy (){
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-        
+
         set_alias
     }
 
@@ -26,7 +26,7 @@ installKeploy (){
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-        
+
         set_alias
     }
 
@@ -90,7 +90,7 @@ installKeploy (){
                         echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy docker installation\e]8;;\a"
                         return
                     fi
-                elif [ "$user_input" != "n" ]; then 
+                elif [ "$user_input" != "n" ]; then
                     echo "Please enter a valid command"
                     return
                 else
@@ -104,7 +104,7 @@ installKeploy (){
                 echo -e "\e]8;;https://kumojin.com/en/colima-alternative-docker-desktop\aAlternate is to use colima(lightweight and performant alternative to Docker Desktop)\e]8;;\a"
                 echo -n "Install colima (y/n):"
                 read user_input
-                if [ "$user_input" = "y" ]; then 
+                if [ "$user_input" = "y" ]; then
                     echo "Installing colima via brew"
                     if command -v brew &> /dev/null; then
                         brew install colima
@@ -112,7 +112,7 @@ installKeploy (){
                         echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy colima installation\e]8;;\a"
                         return
                     fi
-                elif [ "$user_input" = "n" ]; then 
+                elif [ "$user_input" = "n" ]; then
                     echo "Please install Colima to install Keploy."
                     return
                 else
@@ -122,15 +122,15 @@ installKeploy (){
             else
                 echo -n "colima found on your system, would you like to proceed with it? (y/n):"
                 read user_input
-                if [ "$user_input" = "n" ]; then 
+                if [ "$user_input" = "n" ]; then
                     echo "Please allow Colima to run Keploy."
                     return
-                elif [ "$user_input" != "y" ]; then 
+                elif [ "$user_input" != "y" ]; then
                     echo "Please enter a valid command"
                     return
                 fi
             fi
-            
+
             if colima status | grep -q "Running"; then
                 echo "colima is already running."
             else
@@ -153,7 +153,7 @@ installKeploy (){
                     echo "Unsupported architecture: $ARCH"
                     return
                 fi
-            elif [ "$user_input" = "docker" ]; then 
+            elif [ "$user_input" = "docker" ]; then
                 install_docker
             else
                 echo "Please enter a valid command"
@@ -181,5 +181,5 @@ installKeploy (){
 installKeploy
 
 if command -v keploy &> /dev/null; then
-    keploy example
+    keploy example --isOneClickInstall true
 fi
