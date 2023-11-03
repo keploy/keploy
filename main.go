@@ -40,6 +40,8 @@ func main() {
 		Dsn:              dsn,
 		TracesSampleRate: 1.0,
 	})
+	//Set the version
+	utils.KeployVersion = version
 	log.Level = 0
 	if err != nil {
 		log.Debug("Could not initialise sentry.", err)

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/record"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -22,7 +23,7 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 	}
 }
 
-func getRecordConfig() (*models.Record, error) {
+func readRecordConfig() (*models.Record, error) {
 	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
@@ -32,9 +33,42 @@ func getRecordConfig() (*models.Record, error) {
 	var doc models.Config
 	err = decoder.Decode(&doc)
 	if err != nil {
-		return nil, fmt.Errorf(Emoji, "failed to decode the keploy-config.yaml. error: %v", err.Error())
+		return nil, err
 	}
 	return &doc.Record, nil
+}
+
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint) {
+	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
+		t.logger.Info("keploy configuration file not found")
+		return
+	}
+	confRecord, err := readRecordConfig()
+	if err != nil {
+		t.logger.Error("failed to get the record config from config file")
+		return
+	}
+	if len(*path) == 0 {
+		*path = confRecord.Path
+	}
+	if *proxyPort == 0 {
+		*proxyPort = confRecord.ProxyPort
+	}
+	if *appCmd == "" {
+		*appCmd = confRecord.Command
+	}
+	if *appContainer == "" {
+		*appContainer = confRecord.ContainerName
+	}
+	if *networkName == "" {
+		*networkName = confRecord.NetworkName
+	}
+	if *Delay == 5 {
+		*Delay = confRecord.Delay
+	}
+	if len(*passThorughPorts) == 0 {
+		*passThorughPorts = confRecord.PassThroughPorts
+	}
 }
 
 type Record struct {
@@ -51,20 +85,10 @@ func (r *Record) GetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 
-			confRecord, err := getRecordConfig()
-			if err != nil {
-				r.logger.Error("failed to get the record config from config file")
-				return err
-			}
-
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				r.logger.Error("failed to read the testcase path input")
 				return err
-			}
-
-			if path == "" {
-				path = confRecord.Path
 			}
 
 			//if user provides relative path
@@ -91,10 +115,6 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
-
-			if appCmd == "" {
-				appCmd = confRecord.Command
-			}
 			
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag\n")
@@ -109,10 +129,6 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			if err != nil {
 				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
-			}
-
-			if appContainer == "" {
-				appContainer = confRecord.ContainerName
 			}
 
 			var hasContainerName bool
@@ -135,18 +151,10 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
-			if networkName == "" {
-				networkName = confRecord.NetworkName
-			}
-
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
 				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
-			}
-
-			if delay == 5 {
-				delay = confRecord.Delay
 			}
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
@@ -157,16 +165,14 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
-			if len(ports) == 0 {
-				ports = confRecord.PassThroughPorts
-			}
-
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				r.logger.Error("failed to read the proxy port")
 				return err
 			}
-			
+
+			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
+
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
 			return nil
