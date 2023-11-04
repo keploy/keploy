@@ -106,16 +106,6 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 			if x, er := jsonMatch(prefix+k, v, val, noiseMap); !x || er != nil {
 				return false, nil
 			}
-			// remove the noisy key from both expected and actual JSON.
-			if regexArr, isNoisy := CheckStringExist(prefix+k, noiseMap); isNoisy {
-				isNoisy, _ := MatchesAnyRegex(InterfaceToString(val), regexArr)
-				if len(regexArr) != 0 && !isNoisy {
-					continue
-				}
-				delete(expMap, prefix+k)
-				delete(actMap, k)
-				continue
-			}
 		}
 		// checks if there is a key which is not present in expMap but present in actMap.
 		for k := range actMap {
@@ -126,12 +116,8 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 		}
 
 	case reflect.Slice:
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy {
-			isNoisy, _ := MatchesAnyRegex(InterfaceToString(actual), regexArr)
-			if len(regexArr) != 0 && !isNoisy {
-				return false, nil
-			}
-			return true, nil
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
+			break;
 		}
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
