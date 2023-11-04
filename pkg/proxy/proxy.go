@@ -348,7 +348,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if opt.Port == 0 {
 		opt.Port = 16789
 	}
-	if !isPortAvailable(opt.Port) {
+	for !isPortAvailable(opt.Port) {
 		opt.Port+=1;
 	}
 
