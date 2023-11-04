@@ -322,6 +322,9 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 		}
 	}
 }
+func (h *Hook) FetchHookAppCmd() *exec.Cmd {
+	return h.userAppCmd
+}
 
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {

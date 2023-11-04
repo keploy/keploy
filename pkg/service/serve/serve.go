@@ -17,10 +17,10 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/yaml"
-	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/service/serve/graph"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
@@ -44,7 +44,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64) {
+func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64, appCmd string) {
 
 	if port == 0 {
 		port = defaultPort
@@ -98,6 +98,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 			Delay:          Delay,
 			AppPid:         pid,
 			ApiTimeout:     apiTimeout,
+			ServeTest:      len(appCmd) != 0,
 		},
 	}))
 
@@ -128,8 +129,56 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
+	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
 
 	// Block until we receive one
+	abortStopHooksForcefully := false
+	select {
+	case <-stopper:
+		loadedHooks.Stop(true)
+		ps.StopProxyServer()
+		return
+	default:
+		go func() {
+			stopApplication := false
+			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay); err != nil {
+				switch err {
+				case hooks.ErrInterrupted:
+					s.logger.Info("keploy terminated user application")
+					return
+				case hooks.ErrCommandError:
+				case hooks.ErrUnExpected:
+					s.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
+				case hooks.ErrDockerError:
+					stopApplication = true
+				default:
+					s.logger.Error("unknown error recieved from application", zap.Error(err))
+				}
+			}
+			if !abortStopHooksForcefully {
+				abortStopHooksInterrupt <- true
+				// stop listening for the eBPF events
+				loadedHooks.Stop(!stopApplication)
+				ps.StopProxyServer()
+				//stop listening for proxy server
+			} else {
+				return
+			}
+
+		}()
+	}
+	go func() {
+		for {
+			if loadedHooks != nil && loadedHooks.FetchHookAppCmd() != nil && loadedHooks.FetchHookAppCmd().ProcessState != nil && loadedHooks.FetchHookAppCmd().ProcessState.Exited() {
+				pid := os.Getpid()
+				process, _ := os.FindProcess(pid)
+				process.Signal(syscall.SIGTERM)
+				return
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
