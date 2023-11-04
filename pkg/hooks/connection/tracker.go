@@ -47,26 +47,26 @@ type Tracker struct {
 	mutex  sync.RWMutex
 	logger *zap.Logger
 
-	reqTimestampTest   []time.Time
-	resTimestampTest   time.Time
-	isNewRequest bool
+	reqTimestampTest []time.Time
+	resTimestampTest time.Time
+	isNewRequest     bool
 }
 
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 	return &Tracker{
-		connID:             connID,
-		RecvBuf:            []byte{},
-		SentBuf:            []byte{},
-		totalSentBytesQ:    []uint64{},
-		totalRecvBytesQ:    []uint64{},
-		currentSentBytesQ:  []uint64{},
-		currentRecvBytesQ:  []uint64{},
-		currentSentBufQ:    [][]byte{},
-		currentRecvBufQ:    [][]byte{},
-		mutex:              sync.RWMutex{},
-		logger:             logger,
-		firstRequest:       true,
-		isNewRequest: true,
+		connID:            connID,
+		RecvBuf:           []byte{},
+		SentBuf:           []byte{},
+		totalSentBytesQ:   []uint64{},
+		totalRecvBytesQ:   []uint64{},
+		currentSentBytesQ: []uint64{},
+		currentRecvBytesQ: []uint64{},
+		currentSentBufQ:   [][]byte{},
+		currentRecvBufQ:   [][]byte{},
+		mutex:             sync.RWMutex{},
+		logger:            logger,
+		firstRequest:      true,
+		isNewRequest:      true,
 	}
 }
 
