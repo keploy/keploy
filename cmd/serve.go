@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -43,9 +43,11 @@ func (s *Serve) GetCmd() *cobra.Command {
 				}
 				path = absPath
 			} else if len(path) == 0 { // if user doesn't provide any path
-				err := fmt.Errorf("could not find the test case path, please provide a valid one")
-				s.logger.Error("", zap.Any("testPath", path), zap.Error(err))
-				return
+				cdirPath, err := os.Getwd()
+				if err != nil {
+					s.logger.Error("failed to get the path of current directory", zap.Error(err))
+				}
+				path = cdirPath
 			} else {
 				// user provided the absolute path
 				s.logger.Debug("", zap.Any("testPath", path))
