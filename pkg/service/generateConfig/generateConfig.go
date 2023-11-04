@@ -1,15 +1,14 @@
 package generateConfig
 
 import (
-	"sync"
 	"os"
 	"path/filepath"
+	"sync"
 
-	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/utils"
-	
-	"gopkg.in/yaml.v3"
+
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -26,51 +25,52 @@ func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
 	}
 }
 
-var globalNoise = `
-{
-	"global": {
-		"body": {},
-		"header": {}
-	},
-	"test-sets": {
-		"test-set-name": {
-			"body": {},
-			"header": {}
-		}
-	}
-}`
+var config = `
+record:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  delay: 5
+  passThroughPorts: []
+test:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  testSets: []
+  globalNoise: |-
+    {
+      "global": {
+        "body": {},
+        "header": {}
+      },
+      "test-sets": {
+        "test-set-name": {
+          "body": {},
+          "header": {}
+        }
+      }
+    }
+  delay: 5
+  apiTimeout: 5
+  passThroughPorts: []
+`
 
 func (g *generatorConfig) GenerateConfig(path string) {
+	var node yaml.Node
 
-	testConfig := models.Test {
-		Path: "",
-		Command: "",
-		ProxyPort: 0,
-		ContainerName: "",
-		NetworkName: "",
-		TestSets: []string{},
-		GlobalNoise: globalNoise,
-		Delay: 5,
-		ApiTimeout: 5,
-		PassThroughPorts: []uint{},
+	data := []byte(config)
+
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))
 	}
 
-	recordConfig := models.Record {
-		Path: "",
-		Command: "",
-		ProxyPort: 0,
-		ContainerName: "",
-		NetworkName: "",
-		Delay: 5,
-		PassThroughPorts: []uint{},
-	}
-
-	config := models.Config{
-		Record: recordConfig,
-		Test: testConfig,
-	}
-
-	data, err := yaml.Marshal(&config)
+	results, err := yaml.Marshal(node.Content[0])
 	if err != nil {
 		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
 	}
@@ -88,7 +88,7 @@ func (g *generatorConfig) GenerateConfig(path string) {
 		}
 	}
 
-	err = os.WriteFile(filePath, data, os.ModePerm)
+	err = os.WriteFile(filePath, results, os.ModePerm)
 	if err != nil {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
