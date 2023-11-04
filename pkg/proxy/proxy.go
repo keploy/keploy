@@ -353,7 +353,6 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		newPort, err := findAvailablePort(opt.Port)
 		if err != nil {
 			logger.Error(Emoji + "Failed to find an available port")
-			// Handle the error appropriately (e.g., exit the program)
 			return nil
 		}
 		opt.Port = newPort
