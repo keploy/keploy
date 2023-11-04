@@ -106,6 +106,12 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 			if x, er := jsonMatch(prefix+k, v, val, noiseMap); !x || er != nil {
 				return false, nil
 			}
+			// remove the noisy key from both expected and actual JSON.
+			if _, ok := CheckStringExist(prefix+k, noiseMap); ok {
+				delete(expMap, prefix+k)
+				delete(actMap, k)
+				continue
+			}			
 		}
 		// checks if there is a key which is not present in expMap but present in actMap.
 		for k := range actMap {
