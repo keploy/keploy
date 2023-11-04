@@ -2,7 +2,6 @@ package serve
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -44,11 +43,16 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64) {
+func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64, appCmd string) {
+	var ps *proxy.ProxySet
 
 	if port == 0 {
 		port = defaultPort
 	}
+
+	// Listen for the interrupt signal
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	models.SetMode(models.MODE_TEST)
 
@@ -67,9 +71,16 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	defer loadedHooks.Recover(routineId)
 
 	ctx := context.Background()
+
 	// load the ebpf hooks into the kernel
-	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
+	select {
+	case <-stopper:
 		return
+	default:
+		// load the ebpf hooks into the kernel
+		if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
+			return
+		}
 	}
 
 	//sending this graphql server port to be filterd in the eBPF program
@@ -77,8 +88,15 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	}
 
-	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
+	select {
+	case <-stopper:
+		loadedHooks.Stop(true)
+		return
+	default:
+		// start the proxy
+		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
+
+	}
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
@@ -98,6 +116,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 			Delay:          Delay,
 			AppPid:         pid,
 			ApiTimeout:     apiTimeout,
+			ServeTest:      len(appCmd) != 0,
 		},
 	}))
 
@@ -111,7 +130,6 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	}
 
 	// Create a shutdown channel
-	shutdown := make(chan struct{})
 
 	// Start your server in a goroutine
 	go func() {
@@ -125,25 +143,65 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		s.logger.Debug("graphql server stopped")
 	}()
 
-	// Listen for the interrupt signal
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
+	defer s.stopGraphqlServer(httpSrv)
+
+	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
+	exitCmd := make(chan bool)                 // channel to exit this command
 
 	// Block until we receive one
-	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
+	abortStopHooksForcefully := false
+	select {
+	case <-stopper:
+		loadedHooks.Stop(true)
+		ps.StopProxyServer()
+		return
+	default:
+		go func() {
+			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay); err != nil {
+				switch err {
+				case hooks.ErrInterrupted:
+					s.logger.Info("keploy terminated user application")
+					return
+				case hooks.ErrCommandError:
+				case hooks.ErrUnExpected:
+					s.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
+				default:
+					s.logger.Error("unknown error recieved from application", zap.Error(err))
+				}
+			}
+			if !abortStopHooksForcefully {
+				abortStopHooksInterrupt <- true
+				// stop listening for the eBPF events
+				loadedHooks.Stop(true)
+				ps.StopProxyServer()
+				exitCmd <- true
+				//stop listening for proxy server
+			} else {
+				return
+			}
 
-	s.logger.Info("Received signal, initiating graceful shutdown...")
+		}()
+	}
+	select {
+	case <-stopper:
+		abortStopHooksForcefully = true
+		loadedHooks.Stop(false)
+		ps.StopProxyServer()
+		return
+	case <-abortStopHooksInterrupt:
+		//telemetry event can be added here
+	}
+	<-exitCmd
+}
 
-	// Gracefully shut down the HTTP server with a timeout
+// Gracefully shut down the HTTP server with a timeout
+func (s *server) stopGraphqlServer(httpSrv *http.Server) {
+	shutdown := make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		s.logger.Error("Graphql server shutdown failed", zap.Error(err))
 	}
-
-	// Shutdown other resources
-	loadedHooks.Stop(true)
-	ps.StopProxyServer()
-
-	close(shutdown) // If you have other goroutines that should listen for this, you can use this channel to notify them.
+	// If you have other goroutines that should listen for this, you can use this channel to notify them.
+	close(shutdown)
 }
