@@ -126,6 +126,8 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().StringP("language", "l", "", "application programming language")
 	serveCmd.Flags().StringP("command", "c", "", "Command to start the user application")
+	serveCmd.MarkFlagRequired("command")
+
 	serveCmd.Hidden = true
 
 	return serveCmd
