@@ -49,7 +49,7 @@ type Tracker struct {
 
 	reqTimestampTest   []time.Time
 	resTimestampTest   time.Time
-	seeingReqFirstTime bool
+	isNewRequest bool
 }
 
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
@@ -66,7 +66,7 @@ func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 		mutex:              sync.RWMutex{},
 		logger:             logger,
 		firstRequest:       true,
-		seeingReqFirstTime: true,
+		isNewRequest: true,
 	}
 }
 
@@ -274,8 +274,8 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 
 	switch event.Direction {
 	case structs2.EgressTraffic:
-		if !conn.seeingReqFirstTime {
-			conn.seeingReqFirstTime = true
+		if !conn.isNewRequest {
+			conn.isNewRequest = true
 		}
 
 		// Assign the size of the message to the variable msgLengt
@@ -306,9 +306,9 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 
 	case structs2.IngressTraffic:
 		// Capturing the timestamp of request as the request just started to come.
-		if conn.seeingReqFirstTime {
+		if conn.isNewRequest {
 			conn.reqTimestampTest = append(conn.reqTimestampTest, ConvertUnixNanoToTime(event.EntryTimestampNano))
-			conn.seeingReqFirstTime = false
+			conn.isNewRequest = false
 		}
 
 		// Assign the size of the message to the variable msgLength
