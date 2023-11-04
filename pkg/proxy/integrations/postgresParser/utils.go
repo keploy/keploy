@@ -59,7 +59,7 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 		case string('D'):
 			msg = &pgproto3.DataRow{
 				RowValues: response.DataRows[dtr].RowValues,
-				Values: response.DataRows[dtr].Values,
+				Values:    response.DataRows[dtr].Values,
 			}
 			dtr++
 		case string('E'):
@@ -195,9 +195,7 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 
 	var reqbuffer []byte
 	// list of packets available in the buffer
-	b := 0
-	p := 0
-	e := 0
+	var b, e, p int = 0, 0, 0
 	packets := request.PacketTypes
 	for _, packet := range packets {
 		// isme se encode ek ek
@@ -402,7 +400,7 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 					},
 					{
 						Name:  "server_version",
-						Value: "10.5 (Debian 10.5-2.pgdg90+1)",
+						Value: "13.12 (Debian 13.12-1.pgdg120+1)",
 					},
 					{
 						Name:  "session_authorization",
@@ -487,10 +485,7 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 			for requestIndex, reqBuff := range requestBuffers {
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
 				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
-	
-				if mock.Spec.PostgresRequests[requestIndex].Payload != "" {
-					encoded, _ = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
-				}
+
 				if bufStr == "AAAACATSFi8=" {
 					ssl := models.Frontend{
 						Payload: "Tg==",
