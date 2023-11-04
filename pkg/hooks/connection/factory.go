@@ -134,6 +134,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Body:       string(respBody),
 			Timestamp:  resTimeTest,
 		},
+		Noise: map[string][]string{},
 		// Mocks: mocks,
 	}, ctx)
 	if err != nil {

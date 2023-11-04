@@ -474,24 +474,20 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		headerNoise = noiseConfig["header"]
 	)
 
-	for _, n := range noise {
-		a := strings.Split(n, ".")
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			if _, ok := bodyNoise[x]; !ok {
-				bodyNoise[x] = []string{}
-			}
+			bodyNoise[x] = regexArr
 		} else if a[0] == "header" {
-			if _, ok := headerNoise[a[len(a)-1]]; !ok {
-				headerNoise[a[len(a)-1]] = []string{}
-			}
+			headerNoise[a[len(a)-1]] = regexArr
 		}
 	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
-	if !Contains(noise, "body") && bodyType == models.BodyTypeJSON {
+	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
@@ -500,7 +496,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
 	} else {
-		if !Contains(noise, "body") && tc.HttpResp.Body != actualResponse.Body {
+		if !Contains(MapToArray(noise), "body") && tc.HttpResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}
