@@ -349,15 +349,15 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		opt.Port = 16789
 	}
 
-	  if !isPortAvailable(opt.Port) {
-        newPort, err := findAvailablePort(opt.Port)
-        if err != nil {
-            logger.Error(Emoji + "Failed to find an available port")
-            // Handle the error appropriately (e.g., exit the program)
-            return nil
-        }
-        opt.Port = newPort
-    }
+	if !isPortAvailable(opt.Port) {
+		newPort, err := findAvailablePort(opt.Port)
+		if err != nil {
+			logger.Error(Emoji + "Failed to find an available port")
+			// Handle the error appropriately (e.g., exit the program)
+			return nil
+		}
+		opt.Port = newPort
+	}
 
 	//IPv4
 	localIp4, err := util.GetLocalIPv4()
@@ -432,14 +432,13 @@ func isPortAvailable(port uint32) bool {
 }
 
 func findAvailablePort(startPort uint32) (uint32, error) {
-    for port := startPort; port < 65536; port++ {
-        if isPortAvailable(port) {
-            return port, nil
-        }
-    }
-    return 0, fmt.Errorf("No available port found in the range of ports from %d to 65535", startPort)
+	for port := startPort; port < 65536; port++ {
+		if isPortAvailable(port) {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("No available port found in the range of ports from %d to 65535", startPort)
 }
-
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
