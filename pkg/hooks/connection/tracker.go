@@ -47,24 +47,26 @@ type Tracker struct {
 	mutex  sync.RWMutex
 	logger *zap.Logger
 
-	reqTimestampTest []time.Time
-	resTimestampTest time.Time
+	reqTimestampTest   []time.Time
+	resTimestampTest   time.Time
+	seeingReqFirstTime bool
 }
 
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 	return &Tracker{
-		connID:            connID,
-		RecvBuf:           []byte{},
-		SentBuf:           []byte{},
-		totalSentBytesQ:   []uint64{},
-		totalRecvBytesQ:   []uint64{},
-		currentSentBytesQ: []uint64{},
-		currentRecvBytesQ: []uint64{},
-		currentSentBufQ:   [][]byte{},
-		currentRecvBufQ:   [][]byte{},
-		mutex:             sync.RWMutex{},
-		logger:            logger,
-		firstRequest:      true,
+		connID:             connID,
+		RecvBuf:            []byte{},
+		SentBuf:            []byte{},
+		totalSentBytesQ:    []uint64{},
+		totalRecvBytesQ:    []uint64{},
+		currentSentBytesQ:  []uint64{},
+		currentRecvBytesQ:  []uint64{},
+		currentSentBufQ:    [][]byte{},
+		currentRecvBufQ:    [][]byte{},
+		mutex:              sync.RWMutex{},
+		logger:             logger,
+		firstRequest:       true,
+		seeingReqFirstTime: true,
 	}
 }
 
@@ -272,6 +274,10 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 
 	switch event.Direction {
 	case structs2.EgressTraffic:
+		if !conn.seeingReqFirstTime {
+			conn.seeingReqFirstTime = true
+		}
+
 		// Assign the size of the message to the variable msgLengt
 		msgLength := event.MsgSize
 		// If the size of the message exceeds the maximum allowed size,
@@ -300,7 +306,10 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 
 	case structs2.IngressTraffic:
 		// Capturing the timestamp of request as the request just started to come.
-		conn.reqTimestampTest = append(conn.reqTimestampTest, ConvertUnixNanoToTime(event.EntryTimestampNano))
+		if conn.seeingReqFirstTime {
+			conn.reqTimestampTest = append(conn.reqTimestampTest, ConvertUnixNanoToTime(event.EntryTimestampNano))
+			conn.seeingReqFirstTime = false
+		}
 
 		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
