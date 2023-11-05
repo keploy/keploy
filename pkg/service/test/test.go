@@ -147,7 +147,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -182,8 +182,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}) models.TestRunStatus {
-
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}, serveTest bool) models.TestRunStatus {
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
@@ -220,7 +219,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
-			if !isApplicationStopped {
+			if !isApplicationStopped && !serveTest {
 				loadedHooks.StopUserApplication()
 			}
 		}
@@ -231,20 +230,22 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	} else {
 		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(testSet)))
 		// start user application
-		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
-				switch err {
-				case hooks.ErrInterrupted:
-					t.logger.Info("keploy terminated user application")
-				case hooks.ErrCommandError:
-				case hooks.ErrUnExpected:
-					t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
-				default:
-					t.logger.Error("unknown error recieved from application", zap.Error(err))
+		if !serveTest {
+			go func() {
+				if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
+					switch err {
+					case hooks.ErrInterrupted:
+						t.logger.Info("keploy terminated user application")
+					case hooks.ErrCommandError:
+					case hooks.ErrUnExpected:
+						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
+					default:
+						t.logger.Error("unknown error recieved from application", zap.Error(err))
+					}
+					errChan <- err
 				}
-				errChan <- err
-			}
-		}()
+			}()
+		}
 	}
 
 	// testReport stores the result of all testruns
@@ -263,7 +264,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	}
 
 	//if running keploy-tests along with unit tests
-	if len(appCmd) == 0 && pid != 0 && testRunChan != nil {
+	if serveTest && testRunChan != nil {
 		testRunChan <- testReport.Name
 	}
 
