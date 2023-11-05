@@ -37,6 +37,7 @@ const (
 // SocketDataEvent is a conversion of the following C-Struct into GO.
 // struct socket_data_event_t
 // {
+//     u64 entry_timestamp_ns;
 //     u64 timestamp_ns;
 //     struct conn_id_t conn_id;
 //     enum traffic_direction_t direction;
@@ -49,6 +50,7 @@ const (
 
 // Socket Data Event .....
 type SocketDataEvent struct {
+	EntryTimestampNano   uint64
 	TimestampNano        uint64
 	ConnID               ConnID
 	Direction            TrafficDirectionEnum

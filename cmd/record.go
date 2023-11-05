@@ -145,9 +145,9 @@ func (r *Record) GetCmd() *cobra.Command {
 				fmt.Println("Error: missing required -c flag or appCmd in config file")
 				if isDockerCmd {
 					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				}else {
+					fmt.Println("Example usage:\n", cmd.Example)
 				}
-				fmt.Println("Example usage:\n", cmd.Example)
-
 				return errors.New("missing required -c flag or appCmd in config file")
 			}
 

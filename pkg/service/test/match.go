@@ -44,7 +44,6 @@ func InterfaceToString(val interface{}) string {
 }
 
 func Match(exp, act string, noise map[string][]string, log *zap.Logger) (string, string, bool, error) {
-
 	expected, err := UnmarshallJson(exp, log)
 	if err != nil {
 		return exp, act, false, err
