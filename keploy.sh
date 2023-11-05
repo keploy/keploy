@@ -181,5 +181,5 @@ installKeploy (){
 installKeploy
 
 if command -v keploy &> /dev/null; then
-    keploy example --customSetup true
+    keploy example
 fi
