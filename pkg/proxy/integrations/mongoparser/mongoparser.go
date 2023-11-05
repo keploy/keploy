@@ -620,7 +620,7 @@ func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest
 	case wiremessage.OpMsg:
 		_, ok := mongoRequest.(*models.MongoOpMessage)
 		if ok {
-			return opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")
+			return (opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")) || opReq.IsIsMaster()
 		}
 	default:
 		return false
