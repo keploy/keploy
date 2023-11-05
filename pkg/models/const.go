@@ -14,7 +14,9 @@ const (
 	String         string = "string"
 )
 
-var HighlightString = color.New(color.FgYellow).SprintFunc()
+var orangeColorSGR = []color.Attribute{38,5,208}
+
+var HighlightString = color.New(orangeColorSGR...).SprintFunc()
 var HighlightPassingString = color.New(color.FgGreen).SprintFunc()
 var HighlightFailingString = color.New(color.FgRed).SprintFunc()
 

@@ -34,6 +34,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	testRunChan := make(chan string, 1)
 	pid := r.Resolver.AppPid
+	serveTest := r.Resolver.ServeTest
 	testCasePath := r.Resolver.Path
 	testReportPath := r.Resolver.TestReportPath
 	delay := r.Resolver.Delay
@@ -59,6 +60,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
 
+
 	noiseJSON, err := test.UnmarshallJson(r.Resolver.Noise, r.Logger)
 	if err != nil {
 		r.Logger.Error("failed to unmarshall noise json")
@@ -66,7 +68,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	}
 
 	globalNoise := make(models.GlobalNoise)
-	noise := make(models.TestsetNoise)
+	testSetNoise := make(models.TestsetNoise)
 
 	for scope, v := range noiseJSON.(map[string]interface{}) {
 		if scope == "global" {
@@ -81,13 +83,13 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 				}
 		} else {
 			for testset, v1 := range v.(map[string]interface{}) {
-				noise[testset] = map[string]map[string][]string{}
+				testSetNoise[testset] = map[string]map[string][]string{}
 				for k2, v2 := range v1.(map[string]interface{}) {
-					noise[testset][k2] = map[string][]string{}
+					testSetNoise[testset][k2] = map[string][]string{}
 					for k3, v3 := range v2.(map[string]interface{}) {
-						noise[testset][k2][k3] = []string{}
+						testSetNoise[testset][k2][k3] = []string{}
 						for _, val := range v3.([]interface{}) {
-							noise[testset][k2][k3] = append(noise[testset][k2][k3], val.(string))
+							testSetNoise[testset][k2][k3] = append(testSetNoise[testset][k2][k3], val.(string))
 						}
 					}
 				}
@@ -95,7 +97,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		}
 	}
 
-	if tsNoise, ok := noise[testSet]; ok {
+	if tsNoise, ok := testSetNoise[testSet]; ok {
 		globalNoise = test.JoinNoises(globalNoise, tsNoise)
 	}
 
@@ -112,8 +114,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, test.ArrayToMap(testcasesArr), globalNoise)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, test.ArrayToMap(testcasesArr), globalNoise, serveTest)
 	}()
 
 	testRunID := <-testRunChan

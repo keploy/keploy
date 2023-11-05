@@ -44,7 +44,6 @@ func InterfaceToString(val interface{}) string {
 }
 
 func Match(exp, act string, noise map[string][]string, log *zap.Logger) (string, string, bool, error) {
-
 	expected, err := UnmarshallJson(exp, log)
 	if err != nil {
 		return exp, act, false, err
@@ -87,11 +86,11 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 	}
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
-		regexArr, ok := CheckStringExist(key, noiseMap)
-		if ok && len(regexArr) != 0 {
-			ok, _ = MatchesAnyRegex(InterfaceToString(actual), regexArr)
+		regexArr, isNoisy := CheckStringExist(key, noiseMap)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(InterfaceToString(actual), regexArr)
 		}
-		if expected != actual && !ok {
+		if expected != actual && !isNoisy {
 			return false, nil
 		}
 
@@ -107,15 +106,11 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 				return false, nil
 			}
 			// remove the noisy key from both expected and actual JSON.
-			if regexArr, ok := CheckStringExist(prefix+k, noiseMap); ok {
-				ok, _ := MatchesAnyRegex(InterfaceToString(val), regexArr)
-				if len(regexArr) != 0 && !ok {
-					continue
-				}
+			if _, ok := CheckStringExist(prefix+k, noiseMap); ok {
 				delete(expMap, prefix+k)
 				delete(actMap, k)
 				continue
-			}
+			}			
 		}
 		// checks if there is a key which is not present in expMap but present in actMap.
 		for k := range actMap {
@@ -126,12 +121,8 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 		}
 
 	case reflect.Slice:
-		if regexArr, ok := CheckStringExist(key, noiseMap); ok {
-			ok, _ := MatchesAnyRegex(InterfaceToString(actual), regexArr)
-			if len(regexArr) != 0 && !ok {
-				return false, nil
-			}
-			return true, nil
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
+			break;
 		}
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)

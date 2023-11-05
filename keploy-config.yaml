@@ -1,20 +1,36 @@
-# keploy-config.yaml
 record:
-  path: ""
-  command: ""
-  containerName: ""
-  networkName: ""
-  delay: 5
-  passThroughPorts: []
+    path: ""
+    # mandatory
+    command: ""
+    proxyport: 0
+    containerName: ""
+    networkName: ""
+    delay: 5
+    passThroughPorts: []
 test:
-  path: ""
-  command: ""
-  containerName: ""
-  networkName: ""
-  tests: |
-    {
-      "test-set-0": ["test-2"]
-    }
-  delay: 5
-  apiTimeout: 5
-  passThroughPorts: []
+    path: ""
+    # mandatory
+    command: ""
+    proxyport: 0
+    containerName: ""
+    networkName: ""
+    tests: |-
+        {
+          "test-set-name": ["test-case-name"]
+        }
+    globalNoise: |-
+        {
+          "global": {
+            "body": {},
+            "header": {}
+          },
+          "test-sets": {
+            "test-set-name": {
+              "body": {},
+              "header": {}
+            }
+          }
+        }
+    delay: 5
+    apiTimeout: 5
+    passThroughPorts: []

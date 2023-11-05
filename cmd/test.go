@@ -38,16 +38,16 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, noise *models.TestsetNoise, configPath string) {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		t.logger.Info("keploy configuration file not found")
-		return
+		return nil
 	}
 	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
 		t.logger.Error("failed to get the test config from config file")
-		return
+		return err
 	}
 	if len(*path) == 0 {
 		*path = confTest.Path
@@ -88,34 +88,54 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
 		t.logger.Error("Failed to unmarshall the noise field")
+		return err
 	}
 
-	for scope, v := range noiseJSON.(map[string]interface{}) {
-		if scope == "global" {
-				for k1, v1 := range v.(map[string]interface{}) {
-					(*globalNoise)[k1] = map[string][]string{}
-					for k2, v2 := range v1.(map[string]interface{}) {
-						(*globalNoise)[k1][k2] = []string{}
-						for _, val := range v2.([]interface{}) {
-							(*globalNoise)[k1][k2] = append((*globalNoise)[k1][k2], val.(string))
-						}
-					}
-				}
-		} else {
-			for testset, v1 := range v.(map[string]interface{}) {
-				(*noise)[testset] = map[string]map[string][]string{}
-				for k2, v2 := range v1.(map[string]interface{}) {
-					(*noise)[testset][k2] = map[string][]string{}
-					for k3, v3 := range v2.(map[string]interface{}) {
-						(*noise)[testset][k2][k3] = []string{}
-						for _, val := range v3.([]interface{}) {
-							(*noise)[testset][k2][k3] = append((*noise)[testset][k2][k3], val.(string))
-						}
-					}
-				}
+	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
+	
+	bodyOrHeaderVal := globalScopeVal.(map[string]interface{})
+
+	(*globalNoise)["body"] = map[string][]string{}
+	for field, regexArr := range bodyOrHeaderVal["body"].(map[string]interface{}) {
+		(*globalNoise)["body"][field] = []string{}
+		for _, val := range regexArr.([]interface{}) {
+			(*globalNoise)["body"][field] = append((*globalNoise)["body"][field], val.(string))
+		}
+	}
+
+	(*globalNoise)["header"] = map[string][]string{}
+	for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) {
+		(*globalNoise)["header"][field] = []string{}
+		for _, val := range regexArr.([]interface{}) {
+			(*globalNoise)["header"][field] = append((*globalNoise)["header"][field], val.(string))
+		}
+	}
+
+	testSetScopeVal := noiseJSON.(map[string]interface{})["test-sets"]
+
+	for testset := range testSetScopeVal.(map[string]interface{}) {
+		(*testSetNoise)[testset] = map[string]map[string][]string{}
+		
+		bodyOrHeaderVal := testSetScopeVal.(map[string]interface{})[testset].(map[string]interface{})
+
+		(*testSetNoise)[testset]["body"] = map[string][]string{}
+		for field, regexArr := range bodyOrHeaderVal["body"].(map[string]interface{}) {
+			(*testSetNoise)[testset]["body"][field] = []string{}
+			for _, val := range regexArr.([]interface{}) {
+				(*testSetNoise)[testset]["body"][field] = append((*testSetNoise)[testset]["body"][field], val.(string))
+			}
+		}
+
+		(*testSetNoise)[testset]["header"] = map[string][]string{}
+		for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) {
+			(*testSetNoise)[testset]["header"][field] = []string{}
+			for _, val := range regexArr.([]interface{}) {
+				(*testSetNoise)[testset]["header"][field] = append((*testSetNoise)[testset]["header"][field], val.(string))
 			}
 		}
 	}
+	t.logger.Info(models.HighlightString("Successfully fetched the test config"))
+	return nil
 }
 
 type Test struct {
@@ -140,26 +160,31 @@ func (t *Test) GetCmd() *cobra.Command {
 			appCmd, err := cmd.Flags().GetString("command")
 			if err != nil {
 				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				return err
 			}
 
 			appContainer, err := cmd.Flags().GetString("containerName")
 			if err != nil {
 				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				return err
 			}
 
 			networkName, err := cmd.Flags().GetString("networkName")
 			if err != nil {
 				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				return err
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
 				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				return err
 			}
 
 			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
 			if err != nil {
 				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
+				return err
 			}
 
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
@@ -200,18 +225,22 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			globalNoise := make(models.GlobalNoise)
-			noise := make(models.TestsetNoise)
+			testSetNoise := make(models.TestsetNoise)
 
-			t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &noise, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testSetNoise, configPath)
+			if err != nil {
+				t.logger.Error("failed to get the test config")
+				return err
+			}
 
 			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag\n")
+				fmt.Println("Error: missing required -c flag or appCmd in config file")
 				if isDockerCmd {
 					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				}
-				fmt.Println("Example usage:\n", cmd.Example, "\n")
+				fmt.Println("Example usage:\n", cmd.Example)
 
-				return errors.New("missing required -c flag")
+				return errors.New("missing required -c flag or appCmd in config file")
 			}
 
 			if delay <= 5 {
@@ -219,7 +248,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				if isDockerCmd {
 					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				} else {
-					fmt.Println("Example usage:\n", cmd.Example, "\n")
+					fmt.Println("Example usage:\n", cmd.Example)
 				}
 			}
 
@@ -255,16 +284,15 @@ func (t *Test) GetCmd() *cobra.Command {
 					}
 				}
 				if !hasContainerName && appContainer == "" {
-					fmt.Println("Error: missing required --containerName flag")
+					fmt.Println("Error: missing required --containerName flag or containerName in config file")
 					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag")
+					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, proxyPort, testReportPath, appCmd, tests, appContainer, networkName, delay, ports, apiTimeout, globalNoise, noise)
-
+			t.tester.Test(path, proxyPort, testReportPath, appCmd, tests, appContainer, networkName, delay, ports, apiTimeout, globalNoise, testSetNoise)
 			return nil
 		},
 	}

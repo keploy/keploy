@@ -9,8 +9,8 @@ import (
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.uber.org/zap"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.uber.org/zap"
 )
 
 func PostgresDecoder(encoded string) ([]byte, error) {
@@ -58,7 +58,8 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 			}
 		case string('D'):
 			msg = &pgproto3.DataRow{
-				Values: response.DataRows[dtr].Values,
+				RowValues: response.DataRows[dtr].RowValues,
+				Values:    response.DataRows[dtr].Values,
 			}
 			dtr++
 		case string('E'):
@@ -194,9 +195,7 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 
 	var reqbuffer []byte
 	// list of packets available in the buffer
-	b := 0
-	p := 0
-	e := 0
+	var b, e, p int = 0, 0, 0
 	packets := request.PacketTypes
 	for _, packet := range packets {
 		// isme se encode ek ek
@@ -304,19 +303,17 @@ func PostgresDecoderBackend(request models.Backend) ([]byte, error) {
 	return reqbuffer, nil
 }
 
-
 func PostgresEncoder(buffer []byte) string {
 	// encode the buffer to base 64 string ..
 	encoded := base64.StdEncoding.EncodeToString(buffer)
 	return encoded
 }
 
-
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
 	mxSim := -1.0
 	mxIdx := -1
-	sameHeader := -1
+	// sameHeader := -1
 	// add condition for header match that if mxIdx = -1 then return just matched header
 	for idx, mock := range tcsMocks {
 
@@ -324,7 +321,9 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
-
+				if mock.Spec.PostgresRequests[requestIndex].Payload != "" {
+					encoded, _ = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
+				}
 				k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := util.CreateShingles(encoded, k)
 				shingles2 := util.CreateShingles(reqBuff, k)
@@ -339,9 +338,9 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 
 	}
 	// println("Max Similarity is ", mxSim)
-	if mxIdx == -1 {
-		return sameHeader
-	}
+	// if mxIdx == -1 {
+	// 	return sameHeader
+	// }
 	return mxIdx
 }
 
@@ -401,7 +400,7 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 					},
 					{
 						Name:  "server_version",
-						Value: "10.5 (Debian 10.5-2.pgdg90+1)",
+						Value: "13.12 (Debian 13.12-1.pgdg120+1)",
 					},
 					{
 						Name:  "session_authorization",
@@ -486,6 +485,7 @@ func matchingReadablePG(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hoo
 			for requestIndex, reqBuff := range requestBuffers {
 				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
 				encoded, _ := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+
 				if bufStr == "AAAACATSFi8=" {
 					ssl := models.Frontend{
 						Payload: "Tg==",

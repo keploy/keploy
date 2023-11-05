@@ -209,7 +209,7 @@ Keploy ensures that redundant test cases are not generated.
 
 🕵️‍️ [Why Keploy](https://docs.keploy.io/docs/keploy-explained/why-keploy)
 
-⚙️ [Installation Guide](https://docs.keploy.io/docs/server/server-installation)
+⚙️ [Installation Guide](https://keploy.io/docs/application-development/)
 
 📖 [Contribution Guide](https://docs.keploy.io/docs/devtools/server-contrib-guide/)
 

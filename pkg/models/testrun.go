@@ -23,7 +23,7 @@ type TestResult struct {
 	Req          HttpReq    `json:"req" yaml:"req,omitempty"`
 	// Mocks        []string     `json:"mocks" yaml:"mocks"`
 	Res    HttpResp `json:"resp" yaml:"resp,omitempty"`
-	Noise  []string `json:"noise" yaml:"noise,omitempty"`
+	Noise  map[string][]string `json:"noise" yaml:"noise,omitempty"`
 	Result Result   `json:"result" yaml:"result"`
 }
 

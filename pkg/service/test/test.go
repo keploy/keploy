@@ -41,8 +41,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, tests map[string][]string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, globalNoise models.GlobalNoise, noise models.TestsetNoise) bool {
-
+func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, tests map[string][]string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, globalNoise models.GlobalNoise, testSetNoise models.TestsetNoise) bool {
 	var ps *proxy.ProxySet
 
 	stopper := make(chan os.Signal, 1)
@@ -139,10 +138,10 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		}
 
 		noiseConfig := globalNoise
-		if tsNoise, ok := noise[sessionIndex]; ok {
+		if tsNoise, ok := testSetNoise[sessionIndex]; ok {
 			noiseConfig = JoinNoises(globalNoise, tsNoise)
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, testcases, noiseConfig)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, testcases, noiseConfig, false)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -178,8 +177,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise) models.TestRunStatus {
-
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
@@ -216,7 +214,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
-			if !isApplicationStopped {
+			if !isApplicationStopped && !serveTest {
 				loadedHooks.StopUserApplication()
 			}
 		}
@@ -227,20 +225,22 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	} else {
 		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(testSet)))
 		// start user application
-		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
-				switch err {
-				case hooks.ErrInterrupted:
-					t.logger.Info("keploy terminated user application")
-				case hooks.ErrCommandError:
-				case hooks.ErrUnExpected:
-					t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
-				default:
-					t.logger.Error("unknown error recieved from application", zap.Error(err))
+		if !serveTest {
+			go func() {
+				if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
+					switch err {
+					case hooks.ErrInterrupted:
+						t.logger.Info("keploy terminated user application")
+					case hooks.ErrCommandError:
+					case hooks.ErrUnExpected:
+						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
+					default:
+						t.logger.Error("unknown error recieved from application", zap.Error(err))
+					}
+					errChan <- err
 				}
-				errChan <- err
-			}
-		}()
+			}()
+		}
 	}
 
 	// testReport stores the result of all testruns
@@ -259,7 +259,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	}
 
 	//if running keploy-tests along with unit tests
-	if len(appCmd) == 0 && pid != 0 && testRunChan != nil {
+	if serveTest && testRunChan != nil {
 		testRunChan <- testReport.Name
 	}
 
@@ -442,6 +442,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 }
 
 func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise) (bool, *models.Result) {
+
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
@@ -469,24 +470,20 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		headerNoise = noiseConfig["header"]
 	)
 
-	for _, n := range noise {
-		a := strings.Split(n, ".")
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			if _, ok := bodyNoise[x]; !ok {
-				bodyNoise[x] = []string{}
-			}
+			bodyNoise[x] = regexArr
 		} else if a[0] == "header" {
-			if _, ok := headerNoise[a[len(a)-1]]; !ok {
-				headerNoise[a[len(a)-1]] = []string{}
-			}
+			headerNoise[a[len(a)-1]] = regexArr
 		}
 	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
-	if !Contains(noise, "body") && bodyType == models.BodyTypeJSON {
+	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
@@ -495,7 +492,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
 	} else {
-		if !Contains(noise, "body") && tc.HttpResp.Body != actualResponse.Body {
+		if !Contains(MapToArray(noise), "body") && tc.HttpResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}
