@@ -26,7 +26,7 @@ type InitialiseRunTestSetReturn struct {
 	DIDE          bool
 	UserIP        string
 	InitialStatus models.TestRunStatus
-	TcsMocks 	 []*models.Mock
+	TcsMocks      []*models.Mock
 }
 
 type InitialiseTestReturn struct {
@@ -131,13 +131,13 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 }
 
 func MatchesAnyRegex(str string, regexArray []string) bool {
-    for _, pattern := range regexArray {
-        re := regexp.MustCompile(pattern)
-        if re.MatchString(str) {
-            return true
-        }
-    }
-    return false
+	for _, pattern := range regexArray {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(str) {
+			return true
+		}
+	}
+	return false
 }
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string][]string) bool {
@@ -284,7 +284,7 @@ func Contains(elems []string, v string) bool {
 }
 
 // Filter the mocks based on req and res timestamp of test
-func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
+func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
 	filteredMocks := make([]*models.Mock, 0)
 
 	if tc.HttpReq.Timestamp == (time.Time{}) {
@@ -298,6 +298,11 @@ func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 	}
 
 	for _, mock := range m {
+		if mock.Version == "api.keploy-enterprise.io/v1beta1" {
+			logger.Info("This mock was recorded using the the enterprise version, may not work properly with the open source version", zap.String("mock kind:", string(mock.Kind)))
+		} else if mock.Version != "api.keploy.io/v1beta1" {
+			logger.Info("This mock was not recorded using Keploy, may not work properly.", zap.String("mock version:", string(mock.Version)))
+		}
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
 			logger.Warn("request or response timestamp of mock is missing for " + tc.Name)

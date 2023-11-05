@@ -230,11 +230,6 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		Kind:    yamlTestcase.Kind,
 		Name:    yamlTestcase.Name,
 	}
-	if tc.Version == "api.keploy-enterprise.io/v1beta1" {
-		logger.Info("This testcase was recorded using the the enterprise version, may not work properly with the open source version", zap.String("tc kind:", string(tc.Kind)))
-	} else if tc.Version != "api.keploy.io/v1beta1" {
-		logger.Info("This testcase was not recorded using Keploy, may not work properly.", zap.String("tc version:", string(tc.Version)))
-	}
 	switch tc.Kind {
 	case models.HTTP:
 		httpSpec := spec.HttpSpec{}
@@ -272,11 +267,6 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			Version: m.Version,
 			Name:    m.Name,
 			Kind:    m.Kind,
-		}
-		if m.Version == "api.keploy-enterprise.io/v1beta1" {
-			logger.Info("This mock was recorded using the the enterprise version, may not work properly with the open source version", zap.String("mock kind:", string(m.Kind)))
-		} else if m.Version != "api.keploy.io/v1beta1" {
-			logger.Info("This mock was not recorded using Keploy, may not work properly.", zap.String("mock version:", string(m.Version)))
 		}
 		mockCheck := strings.Split(string(m.Kind), "-")
 		if len(mockCheck) > 1 {

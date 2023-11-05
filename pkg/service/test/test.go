@@ -445,9 +445,13 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	time.Sleep(time.Duration(delay) * time.Second)
 	for _, tc := range initialisedValues.Tcs {
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		filteredTcsMocks := filterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
+		filteredTcsMocks := FilterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
 		loadedHooks.SetTcsMocks(filteredTcsMocks)
-
+		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
+			t.logger.Info("This testcase was recorded using the the enterprise version, may not work properly with the open source version", zap.String("tc kind:", string(tc.Kind)))
+		} else if tc.Version != "api.keploy.io/v1beta1" {
+			t.logger.Info("This testcase was not recorded using Keploy, may not work properly.", zap.String("tc version:", string(tc.Version)))
+		}
 		select {
 		case err := <-initialisedValues.ErrChan:
 			isApplicationStopped = true
