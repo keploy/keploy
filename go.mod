@@ -78,6 +78,7 @@ require (
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/vektah/gqlparser/v2 v2.5.8
 	github.com/xdg-go/pbkdf2 v1.0.0
+	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
 )
 
@@ -89,7 +90,6 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/urfave/cli/v2 v2.25.5 // indirect
-	github.com/xdg-go/scram v1.1.2
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
