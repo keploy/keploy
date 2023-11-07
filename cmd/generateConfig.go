@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"path/filepath"
+
 	"go.keploy.io/server/pkg/service/generateConfig"
+	"go.keploy.io/server/utils"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -34,12 +37,25 @@ func (g *GenerateConfig) GetCmd() *cobra.Command {
 				return err
 			}
 			
-			g.generatorConfig.GenerateConfig(configPath)
+			filePath := filepath.Join(configPath, "keploy-config.yaml")
+
+			if utils.CheckFileExists(filePath) {
+				override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
+				if err != nil {
+					g.logger.Fatal("Failed to ask for confirmation", zap.Error(err))
+					return err
+				}
+				if !override {
+					return nil
+				}
+			}
+			
+			g.generatorConfig.GenerateConfig(filePath)
 			return nil
 		},
 	}
 
-	generateConfigCmd.Flags().StringP("path", "p", ".", "Path to the local directory where keploy configuration file is stored")
+	generateConfigCmd.Flags().StringP("path", "p", ".", "Path to the local directory where keploy configuration file will be stored")
 
 	return generateConfigCmd
 }
