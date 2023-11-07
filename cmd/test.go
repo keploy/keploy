@@ -125,7 +125,6 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 			}
 		}
 	}
-	t.logger.Info(models.HighlightString("Successfully fetched the test config"))
 	return nil
 }
 

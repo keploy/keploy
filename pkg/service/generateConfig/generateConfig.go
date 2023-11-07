@@ -2,10 +2,7 @@ package generateConfig
 
 import (
 	"os"
-	"path/filepath"
 	"sync"
-
-	"go.keploy.io/server/utils"
 
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -61,7 +58,7 @@ test:
   passThroughPorts: []
 `
 
-func (g *generatorConfig) GenerateConfig(path string) {
+func (g *generatorConfig) GenerateConfig(filePath string) {
 	var node yaml.Node
 
 	data := []byte(config)
@@ -73,19 +70,6 @@ func (g *generatorConfig) GenerateConfig(path string) {
 	results, err := yaml.Marshal(node.Content[0])
 	if err != nil {
 		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
-	}
-
-	filePath := filepath.Join(path, "keploy-config.yaml")
-
-	if utils.CheckFileExists(filePath) {
-		override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
-		if err != nil {
-			g.logger.Fatal("Failed to ask for confirmation", zap.Error(err))
-			return
-		}
-		if !override {
-			return
-		}
 	}
 
 	err = os.WriteFile(filePath, results, os.ModePerm)
