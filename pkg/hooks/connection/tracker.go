@@ -46,6 +46,10 @@ type Tracker struct {
 
 	mutex  sync.RWMutex
 	logger *zap.Logger
+
+	reqTimestampTest []time.Time
+	resTimestampTest time.Time
+	isNewRequest     bool
 }
 
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
@@ -62,6 +66,7 @@ func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
 		mutex:             sync.RWMutex{},
 		logger:            logger,
 		firstRequest:      true,
+		isNewRequest:      true,
 	}
 }
 
@@ -87,7 +92,7 @@ func (conn *Tracker) decRecordTestCount() {
 
 // IsComplete() checks if the current connection has valid request & response info to capture
 // and also returns the request and response data buffer.
-func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
+func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 
@@ -133,6 +138,8 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 
 			if conn.verifyResponseData(expectedSentBytes, actualSentBytes) {
 				validRes = true
+				// Capturing the response timestamp as response is verified
+				conn.resTimestampTest = time.Now()
 			} else {
 				conn.logger.Debug("Malformed response", zap.Any("ExpectedSentBytes", expectedSentBytes), zap.Any("ActualSentBytes", actualSentBytes))
 				recordTraffic = false
@@ -186,6 +193,8 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 				conn.currentRecvBufQ = conn.currentRecvBufQ[1:]
 
 				responseBuf = conn.SentBuf
+
+				conn.resTimestampTest = time.Now()
 			} else {
 				conn.logger.Debug("no data buffer for request", zap.Any("Length of RecvBufQueue", len(conn.currentRecvBufQ)))
 				recordTraffic = false
@@ -203,7 +212,16 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte) {
 		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))
 	}
 
-	return recordTraffic, requestBuf, responseBuf
+	var reqTimestampTest time.Time
+	// Checking if record traffic is recorded and reqeust timestamp is captured or not.
+	if recordTraffic && len(conn.reqTimestampTest) > 0 {
+		// Get the timestamp of current request
+		reqTimestampTest = conn.reqTimestampTest[0]
+		// Pop the timestamp of current request
+		conn.reqTimestampTest = conn.reqTimestampTest[1:]
+	}
+
+	return recordTraffic, requestBuf, responseBuf, reqTimestampTest, conn.resTimestampTest
 	// // Check if other conditions for completeness are met.
 	// return conn.closeTimestamp != 0 &&
 	// 	conn.totalReadBytes == conn.recvBytes &&
@@ -256,6 +274,10 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 
 	switch event.Direction {
 	case structs2.EgressTraffic:
+		if !conn.isNewRequest {
+			conn.isNewRequest = true
+		}
+
 		// Assign the size of the message to the variable msgLengt
 		msgLength := event.MsgSize
 		// If the size of the message exceeds the maximum allowed size,
@@ -283,6 +305,12 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		}
 
 	case structs2.IngressTraffic:
+		// Capturing the timestamp of request as the request just started to come.
+		if conn.isNewRequest {
+			conn.reqTimestampTest = append(conn.reqTimestampTest, ConvertUnixNanoToTime(event.EntryTimestampNano))
+			conn.isNewRequest = false
+		}
+
 		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
 		// If the size of the message exceeds the maximum allowed size,
@@ -340,4 +368,13 @@ func (conn *Tracker) AddCloseEvent(event structs2.SocketCloseEvent) {
 
 func (conn *Tracker) UpdateTimestamps() {
 	conn.lastActivityTimestamp = uint64(time.Now().UnixNano())
+}
+
+// ConvertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
+func ConvertUnixNanoToTime(unixNano uint64) time.Time {
+	// Unix time is the number of seconds since January 1, 1970 UTC,
+	// so convert nanoseconds to seconds for time.Unix function
+	seconds := int64(unixNano / uint64(time.Second))
+	nanoRemainder := int64(unixNano % uint64(time.Second))
+	return time.Unix(seconds, nanoRemainder)
 }

@@ -128,7 +128,9 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 				logger.Error("failed to write request message to the destination server", zap.Error(err))
 				return
 			}
-			if string(requestChunked) == "0\r\n\r\n" {
+
+			//check if the intial request is completed
+			if strings.HasSuffix(string(requestChunked), "0\r\n\r\n") {
 				break
 			}
 		}
@@ -237,6 +239,10 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
 		}
 	} else if transferEncodingHeader != "" {
+		// check if the intial request is the complete request.
+		if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
+			return
+		}
 		chunkedRequest(finalReq, clientConn, destConn, logger, transferEncodingHeader)
 	}
 }
@@ -267,6 +273,10 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 			contentLengthResponse(finalResp, clientConn, destConn, logger, contentLength)
 		}
 	} else if transferEncodingHeader != "" {
+		//check if the intial response is the complete response.
+		if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
+			return
+		}
 		chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
 	}
 }
@@ -517,6 +527,10 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			}
 			finalReq = append(finalReq, request...)
 		}
+
+		// Capture the request timestamp
+		reqTimestampMock := time.Now()
+
 		handleChunkedRequests(&finalReq, clientConn, destConn, logger)
 		// read the response from the actual server
 		resp, err = util.ReadBytes(destConn)
@@ -529,6 +543,9 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 				return err
 			}
 		}
+
+		// Capturing the response timestamp
+		resTimestampcMock := time.Now()
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
@@ -566,7 +583,6 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		//Add the content length to the headers.
 		var respBody []byte
 		//Checking if the body of the response is empty or does not exist.
-
 
 		if respParsed.Body != nil { // Read
 			if respParsed.Header.Get("Content-Encoding") == "gzip" {
@@ -619,7 +635,9 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					Header:     pkg.ToYamlHttpHeader(respParsed.Header),
 					Body:       string(respBody),
 				},
-				Created: time.Now().Unix(),
+				Created:          time.Now().Unix(),
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampcMock,
 			},
 		}, ctx)
 		finalReq = []byte("")

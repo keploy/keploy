@@ -120,7 +120,10 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 			logger.Error("failed to decode the recieve data from ringbuf socketDataEvent reader", zap.Error(err))
 			continue
 		}
+		
 		event.TimestampNano += settings.GetRealTimeOffset()
+		event.EntryTimestampNano += settings.GetRealTimeOffset()
+		
 		connectionFactory.GetOrCreate(event.ConnID).AddDataEvent(event)
 
 	}
