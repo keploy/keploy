@@ -80,7 +80,9 @@ Keploy can be utilized on Linux natively and through WSL on Windows.
   curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
 
+
 ### Capturing Test cases
+
 To initiate the recording of API calls, execute this command in your terminal where you usually run your app, if you
 have to set any environment variables do it like you usually do it:
 
@@ -94,7 +96,9 @@ keploy record -c "go run main.go"
 ```
 
 ### Running Testcases
+
 To run the test cases and generate a test coverage report, use this terminal command where you usually run your app, if
+
 you have to set any environment variables do it like you usually do it:
 
 ```zsh
@@ -121,6 +125,23 @@ Here are a few points to consider before recording!
 - You must run all of the containers on the same network when you're using **docker run command** (you can add your custom **network name** using `--network` flag in **docker run command**).
 - In your **Docker Compose** file, every container should run on the same network.
 - `Docker_CMD_to_run_user_container` refers to the Docker **command for launching** the application.
+- Add the required commands to your DockerFile as stated below.
+
+```Dockerfile
+...
+# Download the ca.crt file
+RUN curl -o ca.crt https://raw.githubusercontent.com/keploy/keploy/main/pkg/proxy/asset/ca.crt
+
+RUN curl -o setup_ca.sh https://raw.githubusercontent.com/keploy/keploy/main/pkg/proxy/asset/setup_ca.sh
+
+# Give execute permission to the setup_ca.sh script
+RUN chmod +x setup_ca.sh
+...
+
+# Run the CA setup script and then run the application server
+CMD ["/bin/bash", "-c", "source ./setup_ca.sh && <your app running command>"]
+```
+Note: Also add **curl** installation command if **curl** is not installed on your image
 
 To capture test cases, **Execute** the following command within your application's **root directory**.
 
@@ -188,7 +209,7 @@ Keploy ensures that redundant test cases are not generated.
 
 🕵️‍️ [Why Keploy](https://docs.keploy.io/docs/keploy-explained/why-keploy)
 
-⚙️ [Installation Guide](https://docs.keploy.io/docs/server/server-installation)
+⚙️ [Installation Guide](https://keploy.io/docs/application-development/)
 
 📖 [Contribution Guide](https://docs.keploy.io/docs/devtools/server-contrib-guide/)
 
