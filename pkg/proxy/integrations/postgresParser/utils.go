@@ -343,27 +343,6 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 	return mxIdx
 }
 
-// func IsCrDBPresent(mocks []*models.Mock) bool {
-// 	// Check if the identifier is "StartupResponse"
-// 	if mocks[0].Spec.PostgresRequests[1].Identfier != "StartupResponse" {
-// 		return false
-// 	}
-
-// 	// Check if the length of postgresResponse is 2
-// 	if len(mocks[0].Spec.PostgresRequests) < 2 {
-// 		return false
-// 	}
-
-// 	// Iterate through ParameterStatus elements
-// 	for _, parameterStatus := range mocks[0].Spec.PostgresRequests[1].ParameterStatusCombined {
-// 		if parameterStatus.Name == "cockroach" && parameterStatus.Value == "ccl" {
-// 			return true
-// 		}
-// 	}
-
-// 	return false
-// }
-
 func IsCrDBPresent(mocks []models.Frontend) bool {
 
 	// Check if the length of postgresResponse is not 2
@@ -384,10 +363,8 @@ func IsCrDBPresent(mocks []models.Frontend) bool {
 var calledOnce = false
 
 func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
-	// isScram := false
 
 	for _, mock := range tcsMocks {
-		// if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 		for requestIndex, reqBuff := range mock.Spec.PostgresRequests {
 			encode, _ := PostgresDecoderBackend(reqBuff)
 			if IsCrDBPresent(mock.Spec.PostgresResponses) && reqBuff.Identfier == "StartupRequest" && !calledOnce {
