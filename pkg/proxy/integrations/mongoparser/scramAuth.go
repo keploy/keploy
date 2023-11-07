@@ -152,7 +152,7 @@ var decodeBase64Str func(s string) ([]byte, error) = base64.StdEncoding.DecodeSt
 //   - A map containing the key-value pairs from the unmarshaled section.
 //   - An error if there's an issue during decoding or unmarshaling.
 func extractMsgFromSection(section string) (map[string]interface{}, error) {
-	sectionStr, err := decodeOpMsgSectionSingle(section)
+	sectionStr, err := extractSectionSingle(section)
 	if err != nil {
 		return nil, err
 	}
