@@ -143,7 +143,7 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 		}
 		event.InstallationID = tel.InstallationID
 		event.OS = runtime.GOOS
-		tel.KeployVersion = "v2-alpha"
+		tel.KeployVersion = utils.KeployVersion
 		event.KeployVersion = tel.KeployVersion
 		event.Arch = runtime.GOARCH
 		bin, err := marshalEvent(event, tel.logger)

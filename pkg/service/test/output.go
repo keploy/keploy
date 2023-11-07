@@ -20,27 +20,27 @@ type DiffsPrinter struct {
 	testCase  string
 	statusExp string
 	statusAct string
-	headerExp string
-	headerAct string
+	headerExp map[string]string
+	headerAct map[string]string
 	bodyExp   string
 	bodyAct   string
-	bodyNoise []string
-	headNoise map[string]string
+	bodyNoise map[string][]string
+	headNoise map[string][]string
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", "", "", "", "", []string{}, map[string]string{}}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}}
 }
 
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 	d.statusExp, d.statusAct = exp, act
 }
 
-func (d *DiffsPrinter) PushHeaderDiff(exp, act string, noise map[string]string) {
-	d.headerExp, d.headerAct, d.headNoise = exp, act, noise
+func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]string) {
+	d.headerExp[key], d.headerAct[key], d.headNoise = exp, act, noise
 }
 
-func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise []string) {
+func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) {
 	d.bodyExp, d.bodyAct, d.bodyNoise = exp, act, noise
 }
 
@@ -52,9 +52,7 @@ func (d *DiffsPrinter) Render() {
 		diffs = append(diffs, sprintDiff(d.statusExp, d.statusAct, "status"))
 	}
 
-	if d.headerExp != d.headerAct {
-		diffs = append(diffs, sprintDiff(fmt.Sprint(d.headerExp), fmt.Sprint(d.headerAct), "header"))
-	}
+	diffs = append(diffs, sprintDiffHeader(d.headerExp, d.headerAct))
 
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
@@ -83,9 +81,35 @@ func (d *DiffsPrinter) Render() {
 
 /*
  * Returns a nice diff table where the left is the expect and the right
- * is the actual. Its generic because it works with whatever string. For
- * JSON-based diffs use SprintJSONDiff
- * field: body, stauts, header...
+ * is the actual. each entry in expect and actual will contain the key
+ * and the corresponding value. 
+ */
+func sprintDiffHeader(expect, actual map[string]string) string {
+	
+	expectAll := ""
+	actualAll := ""
+	for key, expValue := range expect {
+		actValue := key + ": " + actual[key] 
+		expValue = key + ": " + expValue 
+		// Offset will be where the string start to unmatch
+		offset, _ := diffIndex(expValue, actValue)
+
+		// Color of the unmatch, can be changed
+		cE, cA := color.FgHiRed, color.FgHiGreen
+
+		expectAll += breakWithColor(expValue, &cE, offset)
+		actualAll += breakWithColor(actValue, &cA, offset)
+	}
+	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
+		return expectActualTable(expectAll, actualAll, "header", false) // Don't centerize
+	}
+	return expectActualTable(expectAll, actualAll, "header", true)
+}
+
+/*
+ * Returns a nice diff table where the left is the expect and the right
+ * is the actual. For JSON-based diffs use SprintJSONDiff
+ * field: body, status...
  */
 func sprintDiff(expect, actual, field string) string {
 
@@ -110,7 +134,7 @@ func sprintDiff(expect, actual, field string) string {
  * the body isnt in the rest-api formats (what means it is not json-based)
  * its better to use a generic diff output as the SprintDiff.
  */
-func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise []string) (string,error) {
+func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string,error) {
 	diffString,err := calculateJSONDiffs(json1, json2)
 	if err!=nil {
 		return "",err
@@ -169,7 +193,7 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string,error) {
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
-func separateAndColorize(diffStr string, noise []string) (string, string) {
+func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
 	expect, actual := "", ""
 
 	diffLines := strings.Split(diffStr, "\n")
@@ -178,7 +202,7 @@ func separateAndColorize(diffStr string, noise []string) (string, string) {
 		if len(line) > 0 {
 			noised := false
 
-			for _, e := range noise {
+			for e := range noise {
 				// If contains noise remove diff flag
 				if strings.Contains(line, e) {
 

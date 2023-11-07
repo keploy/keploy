@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/pkg/models"
+	"go.uber.org/zap"
 )
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
@@ -100,8 +103,17 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 	return nil
 }
 
+func MatchesAnyRegex(str string, regexArray []string) bool {
+    for _, pattern := range regexArray {
+        re := regexp.MustCompile(pattern)
+        if re.MatchString(str) {
+            return true
+        }
+    }
+    return false
+}
 
-func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
+func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string][]string) bool {
 	if res == nil {
 		return false
 	}
@@ -109,6 +121,9 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
 		_, isNoisy := noise[k]
+		if isNoisy && len(noise[k]) != 0 {
+			isNoisy = MatchesAnyRegex(v[0], noise[k])
+		}
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h2[k]
 		if !isNoisy {
@@ -183,6 +198,9 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	}
 	for k, v := range h2 {
 		_, isNoisy := noise[k]
+		if isNoisy && len(noise[k]) != 0 {
+			isNoisy = MatchesAnyRegex(v[0], noise[k])
+		}
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h1[k]
 		if isNoisy && checkKey(res, k) {
@@ -236,4 +254,35 @@ func Contains(elems []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// Filter the mocks based on req and res timestamp of test
+func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
+	filteredMocks := make([]*models.Mock, 0)
+
+	if tc.HttpReq.Timestamp == (time.Time{}) {
+		logger.Warn("request timestamp is missing for " + tc.Name)
+		return m
+	}
+
+	if tc.HttpResp.Timestamp == (time.Time{}) {
+		logger.Warn("response timestamp is missing for " + tc.Name)
+		return m
+	}
+
+	for _, mock := range m {
+		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
+			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
+			logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
+			filteredMocks = append(filteredMocks, mock)
+			continue
+		}
+
+		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
+		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
+			filteredMocks = append(filteredMocks, mock)
+		}
+	}
+
+	return filteredMocks
 }

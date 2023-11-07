@@ -436,6 +436,9 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			}
 		}
 
+		// Capturing the request's timestamp
+		reqTimestampMock := time.Now()
+
 		// read reply message from the mongo server
 		tmpStr := ""
 		started = time.Now()
@@ -480,7 +483,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
 						defer utils.HandlePanic()
-						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
+						recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx, reqTimestampMock)
 					}()
 				}
 				tmpStr := ""
@@ -537,7 +540,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
 			defer utils.HandlePanic()
-			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx)
+			recordMessage(h, requestBuffer, responseBuffer, logStr, mongoRequests, mongoResponses, opReq, ctx, reqTimestampMock)
 		}()
 		requestBuffer = []byte("read form client connection")
 
@@ -545,7 +548,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 
 }
 
-func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context) {
+func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr string, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context, reqTimestampMock time.Time) {
 	// // capture if the wiremessage is a mongo operation call
 
 	shouldRecordCalls := true
@@ -591,10 +594,12 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 			Kind:    models.Mongo,
 			Name:    name,
 			Spec: models.MockSpec{
-				Metadata:       meta1,
-				MongoRequests:  mongoRequests,
-				MongoResponses: mongoResponses,
-				Created:        time.Now().Unix(),
+				Metadata:         meta1,
+				MongoRequests:    mongoRequests,
+				MongoResponses:   mongoResponses,
+				Created:          time.Now().Unix(),
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: time.Now(),
 			},
 		}
 		h.AppendMocks(mongoMock, ctx)
@@ -624,7 +629,7 @@ func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest
 	case wiremessage.OpMsg:
 		_, ok := mongoRequest.(*models.MongoOpMessage)
 		if ok {
-			return opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")
+			return (opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")) || opReq.IsIsMaster()
 		}
 	default:
 		return false
@@ -693,7 +698,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		return score
 	case strings.HasPrefix(expectedSection, "{ SectionSingle msg:"):
 		var expectedMsgsStr string
-		expectedMsgsStr, err := decodeOpMsgSectionSingle(expectedSection)
+		expectedMsgsStr, err := extractSectionSingle(actualSection)
 		if err != nil {
 			logger.Error("failed to fetch the msgs from the single section of recorded OpMsg", zap.Error(err))
 			return 0
@@ -703,7 +708,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		// // Find submatches using the regular expression
 
 		var actualMsgsStr string
-		actualMsgsStr, err = decodeOpMsgSectionSingle(actualSection)
+		actualMsgsStr, err = extractSectionSingle(actualSection)
 		if err != nil {
 			logger.Error("failed to fetch the msgs from the single section of incoming OpMsg", zap.Error(err))
 			return 0

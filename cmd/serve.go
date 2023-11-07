@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -43,9 +43,11 @@ func (s *Serve) GetCmd() *cobra.Command {
 				}
 				path = absPath
 			} else if len(path) == 0 { // if user doesn't provide any path
-				err := fmt.Errorf("could not find the test case path, please provide a valid one")
-				s.logger.Error("", zap.Any("testPath", path), zap.Error(err))
-				return
+				cdirPath, err := os.Getwd()
+				if err != nil {
+					s.logger.Error("failed to get the path of current directory", zap.Error(err))
+				}
+				path = cdirPath
 			} else {
 				// user provided the absolute path
 				s.logger.Debug("", zap.Any("testPath", path))
@@ -82,31 +84,40 @@ func (s *Serve) GetCmd() *cobra.Command {
 				s.logger.Error("Failed to get the port of keploy server", zap.Error((err)))
 				return
 			}
+			appCmd, err := cmd.Flags().GetString("command")
 
+			if err != nil {
+				s.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+			}
 			language, err := cmd.Flags().GetString("language")
 			if err != nil {
 				s.logger.Error("failed to read the programming language")
 				return
 			}
-
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
 			if err != nil {
 				s.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return
 			}
+
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				s.logger.Error("failed to read the proxy port")
+				return
+			}
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			s.server.Serve(path, testReportPath, delay, pid, port, language, ports, apiTimeout)
+			s.server.Serve(path, proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout, appCmd)
 		},
 	}
 
 	serveCmd.Flags().Uint32("pid", 0, "Process id of your application.")
-	serveCmd.MarkFlagRequired("pid")
+
+	serveCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
 	serveCmd.Flags().Uint32("port", 6789, "Port at which you want to run graphql Server")
 
 	serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
-	serveCmd.MarkFlagRequired("path")
 
 	serveCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	serveCmd.MarkFlagRequired("delay")
@@ -116,7 +127,8 @@ func (s *Serve) GetCmd() *cobra.Command {
 	serveCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	serveCmd.Flags().StringP("language", "l", "", "application programming language")
-	serveCmd.MarkFlagRequired("language")
+	serveCmd.Flags().StringP("command", "c", "", "Command to start the user application")
+	serveCmd.MarkFlagRequired("command")
 
 	serveCmd.Hidden = true
 

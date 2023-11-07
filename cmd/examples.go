@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -24,6 +26,9 @@ var customHelpTemplate = `
 Use "{{.CommandPath}} [command] --help" for more information about a command.
 `
 
+var withoutexampleOneClickInstall = `
+Note: If installed keploy without One Click Install, use "keploy example --customSetup true"
+`
 var examples = `
 Golang Application
 	Record:
@@ -58,16 +63,63 @@ Docker
 	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1
 `
 
+var exampleOneClickInstall = `
+Golang Application
+	Record:
+	keploy record -c "/path/to/user/app/binary"
+	
+	Test:
+	keploy test -c "/path/to/user/app/binary" --delay 2
+
+Node Application
+	Record:
+	keploy record -c “npm start --prefix /path/to/node/app"
+	
+	Test:
+	keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+
+Java 
+	Record:
+	keploy record -c "java -jar /path/to/java-project/target/jar"
+
+	Test:
+	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+
+Docker
+	Record:
+	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage"
+
+	Test:
+	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1
+`
+
 type Example struct {
 	logger *zap.Logger
 }
 
 func (e *Example) GetCmd() *cobra.Command {
+	var customSetup bool
 	var exampleCmd = &cobra.Command{
-		Use:     "example",
-		Short:   "Example to record and test via keploy",
-		Example: examples,
+		Use:   "example",
+		Short: "Example to record and test via keploy",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			customSetup, err := cmd.Flags().GetBool("customSetup")
+			if err != nil {
+				e.logger.Error("failed to read the customSetup flag")
+				return err
+			}
+			if customSetup {
+				fmt.Println(examples)
+			} else {
+				fmt.Println(exampleOneClickInstall)
+				fmt.Println(withoutexampleOneClickInstall)
+			}
+			return nil
+		},
 	}
 	exampleCmd.SetHelpTemplate(customHelpTemplate)
+
+	exampleCmd.Flags().Bool("customSetup", customSetup, "Check if the user is using one click install")
+
 	return exampleCmd
 }
