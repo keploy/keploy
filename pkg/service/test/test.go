@@ -33,6 +33,17 @@ type tester struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
+type TestOptions struct {
+	MongoPassword    string
+	Delay            uint64
+	PassThorughPorts []uint
+	ApiTimeout       uint64
+	Testsets         []string
+	AppContainer     string
+	AppNetwork       string
+	ProxyPort        uint32
+	NoiseConfig      map[string]interface{}
+}
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
@@ -41,7 +52,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, noiseConfig map[string]interface{}) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, options TestOptions) bool {
 
 	var ps *proxy.ProxySet
 
@@ -70,7 +81,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background(), nil); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, options.AppContainer, 0, context.Background(), nil); err != nil {
 			return false
 		}
 	}
@@ -81,7 +92,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
+		ps = proxy.BootProxy(t.logger, proxy.Option{MongoPassword: options.MongoPassword, Port: options.ProxyPort}, appCmd, options.AppContainer, 0, "", options.PassThorughPorts, loadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -130,9 +141,9 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	exitLoop := false
 
-	if len(testsets) == 0 {
+	if len(options.Testsets) == 0 {
 		// by default, run all the recorded test sets
-		testsets = sessions
+		options.Testsets = sessions
 	}
 
 	sessionsMap := map[string]string{}
@@ -141,13 +152,13 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		sessionsMap[sessionIndex] = sessionIndex
 	}
 
-	for _, sessionIndex := range testsets {
+	for _, sessionIndex := range options.Testsets {
 		// checking whether the provided testset match with a recorded testset.
 		if _, ok := sessionsMap[sessionIndex]; !ok {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, ys, loadedHooks, testReportFS, nil, options.ApiTimeout, ctx, options.NoiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
