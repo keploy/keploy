@@ -1,5 +1,4 @@
-// Package mongo provides functionality for working with MongoDB outgoing calls.
-package mongo
+package mongoparser
 
 import (
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
