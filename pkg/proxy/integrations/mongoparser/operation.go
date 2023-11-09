@@ -458,6 +458,35 @@ func decodeOpMsgSectionSingle(section string) (string, error) {
 	return message, nil
 }
 
+func extractSectionSingle(data string) (string, error) {
+	// Look for the prefix before the actual content
+	prefix := "{ SectionSingle msg: "
+	startIndex := strings.Index(data, prefix)
+	if startIndex == -1 {
+		return "", fmt.Errorf("start not found")
+	}
+
+	// Adjust the start index to skip the prefix
+	startIndex += len(prefix)
+
+	// We'll assume the content ends with " }" that closes the sectionSingle
+	endIndex := strings.LastIndex(data[startIndex:], " }")
+	if endIndex == -1 {
+		return "", fmt.Errorf("end not found")
+	}
+
+	// Adjust the end index relative to the entire string
+	endIndex += startIndex
+
+	// Extract the content between the start and end indexes
+	content := data[startIndex:endIndex]
+
+	// Clean up the extracted content
+	content = strings.Trim(content, " ")
+
+	return content, nil
+}
+
 func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
 		flags:    wiremessage.MsgFlag(responseOpMsg.FlagBits),
