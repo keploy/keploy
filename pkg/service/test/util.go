@@ -69,6 +69,7 @@ type RunTestSetConfig struct {
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
+	ServeTest      bool
 }
 
 type SimulateRequestConfig struct {

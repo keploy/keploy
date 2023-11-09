@@ -35,6 +35,18 @@ type tester struct {
 	mutex  sync.Mutex
 }
 
+type TestOptions struct {
+	MongoPassword    string
+	Delay            uint64
+	PassThorughPorts []uint
+	ApiTimeout       uint64
+	Testsets         []string
+	AppContainer     string
+	AppNetwork       string
+	ProxyPort        uint32
+	NoiseConfig      map[string]interface{}
+}
+
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
 		logger: logger,
@@ -164,7 +176,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, apiTimeout, initialisedValues.Ctx, noiseConfig)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, apiTimeout, initialisedValues.Ctx, noiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -233,25 +245,27 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	} else {
 		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(cfg.TestSet)))
 		// start user application
-		go func() {
-			if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay); err != nil {
-				switch err {
-				case hooks.ErrInterrupted:
-					t.logger.Info("keploy terminated user application")
-				case hooks.ErrCommandError:
-				case hooks.ErrUnExpected:
-					t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
-				default:
-					t.logger.Error("unknown error recieved from application", zap.Error(err))
+		if !cfg.ServeTest {
+			go func() {
+				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay); err != nil {
+					switch err {
+					case hooks.ErrInterrupted:
+						t.logger.Info("keploy terminated user application")
+					case hooks.ErrCommandError:
+					case hooks.ErrUnExpected:
+						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
+					default:
+						t.logger.Error("unknown error recieved from application", zap.Error(err))
+					}
+					returnVal.ErrChan <- err
 				}
-				returnVal.ErrChan <- err
-			}
-		}()
+			}()
+		}
 	}
-	V1Beta1 := models.GetVersion()
+	version := models.GetVersion()
 	// testReport stores the result of all testruns
 	returnVal.TestReport = &models.TestReport{
-		Version: V1Beta1,
+		Version: version,
 		// Name:    runId,
 		Total:  len(returnVal.Tcs),
 		Status: string(models.TestRunStatusRunning),
@@ -266,7 +280,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	//if running keploy-tests along with unit tests
-	if len(cfg.AppCmd) == 0 && cfg.Pid != 0 && cfg.TestRunChan != nil {
+	if cfg.ServeTest && cfg.TestRunChan != nil{
 		cfg.TestRunChan <- returnVal.TestReport.Name
 	}
 
@@ -410,7 +424,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}, serveTest bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -426,6 +440,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		TestRunChan:    testRunChan,
 		ApiTimeout:     apiTimeout,
 		Ctx:            ctx,
+		ServeTest:      serveTest,
 	}
 	initialisedValues := t.InitialiseRunTestSet(cfg)
 	if initialisedValues.InitialStatus != "" {
@@ -439,11 +454,12 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
-			if !isApplicationStopped {
+			if !isApplicationStopped && !serveTest {
 				loadedHooks.StopUserApplication()
 			}
 		}
 	}()
+
 	exitLoop := false
 	var (
 		success = 0
@@ -453,22 +469,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	var userIp string
 
-	//check if the user application is running docker container using IDE
-	DockerID := (appCmd == "" && len(appContainer) != 0)
-
-	ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-	if ok || DockerID {
-		userIp = loadedHooks.GetUserIP()
-		t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
-		t.logger.Debug("", zap.Any("User Ip", userIp))
-	}
-
-	t.logger.Info("", zap.Any("no of test cases", len(initialisedValues.Tcs)), zap.Any("test-set", testSet))
-	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(delay)*time.Second)))
-
-	// added delay to hold running keploy tests until application starts
-	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(initialisedValues.Tcs)), zap.Any("test-set", testSet))
-	time.Sleep(time.Duration(delay) * time.Second)
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
