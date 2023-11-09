@@ -26,6 +26,7 @@ func NewMySqlParser(logger *zap.Logger, hooks *hooks.Hook) *MySqlParser {
 }
 
 func (sql *MySqlParser) OutgoingType(buffer []byte) bool {
+	//Returning false here because sql parser is using the ports to check if the packet is mysql or not.
 	return false
 }
 func (sql *MySqlParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
