@@ -42,6 +42,7 @@ import (
 	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"time"
 )
@@ -354,25 +355,25 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 
     if !isPortAvailable(opt.Port) {
+		logger.Info("Port is already in use, switching to next available port",zap.Uint32("port",opt.Port));
 		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
 			if isPortAvailable(uint32(i)) {
 				opt.Port = uint32(i)
-				logger.Info("Port %v is already in use, switching to next available port");
-
+				logger.Info("Found an available port to start proxy server",zap.Uint32("port",opt.Port));             
 				break
 			}
 			attemptsDone++
 		}
 	}
 	
-	if maxAttempts <= attemptsDone{
+	if maxAttempts <= attemptsDone {
 		logger.Error("Failed to find an available port to start proxy server")
 		return nil
 	}
 	//IPv4
 	localIp4, err := util.GetLocalIPv4()
 	if err != nil {
-		log.Fatalln(Emoji + "Failed to get the local Ip4 address", err)
+		log.Fatalln(Emoji+"Failed to get the local Ip4 address", err)
 	}
 
 	proxyAddr4, ok := util.ConvertToIPV4(localIp4)
