@@ -199,9 +199,9 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			globalNoise := make(models.GlobalNoise)
-			testSetNoise := make(models.TestsetNoise)
+			testsetNoise := make(models.TestsetNoise)
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testSetNoise, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
@@ -270,7 +270,26 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, proxyPort, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout, globalNoise, testSetNoise)
+			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
+
+			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+				Testsets: testSets,
+				AppContainer: appContainer,
+				AppNetwork: networkName,
+				MongoPassword: mongoPassword,
+				Delay: delay,
+				PassThorughPorts: ports,
+				ApiTimeout: apiTimeout,
+				ProxyPort: proxyPort,
+				GlobalNoise: globalNoise,
+				TestsetNoise: testsetNoise,
+			})
+
 			return nil
 		},
 	}
@@ -293,6 +312,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	testCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
+
+	testCmd.Flags().String("mongoPassword", "default123", "Authentication password for mocking MongoDB connection")
 
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true

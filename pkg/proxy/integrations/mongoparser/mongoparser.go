@@ -24,6 +24,11 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 var configRequests = []string{""}
+var password string
+
+func SetAuthPassword(p string) {
+	password = p
+}
 
 // IsOutgoingMongo function determines if the outgoing network call is Mongo by comparing the
 // message format with that of a mongo wire message.
@@ -150,12 +155,12 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 							actual := map[string]interface{}{}
 							err = bson.UnmarshalExtJSON([]byte(expectedQuery.Query), true, &expected)
 							if err != nil {
-								logger.Error(fmt.Sprintf("failed to unmarshal the section of recorded request to bson document"), zap.Error(err))
+								logger.Error("failed to unmarshal the section of recorded request to bson document", zap.Error(err))
 								continue
 							}
 							err = bson.UnmarshalExtJSON([]byte(actualQuery.Query), true, &actual)
 							if err != nil {
-								logger.Error(fmt.Sprintf("failed to unmarshal the section of incoming request to bson document"), zap.Error(err))
+								logger.Error("failed to unmarshal the section of incoming request to bson document", zap.Error(err))
 								continue
 							}
 							logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
@@ -201,7 +206,7 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					replySpec := mongoResponse.Message.(*models.MongoOpReply)
 					replyMessage, err := encodeOpReply(replySpec, logger)
 					if err != nil {
-						logger.Error(fmt.Sprintf("failed to encode the recorded OpReply yaml"), zap.Error(err), zap.Any("for request with id", responseTo))
+						logger.Error("failed to encode the recorded OpReply yaml", zap.Error(err), zap.Any("for request with id", responseTo))
 						return
 					}
 					requestId := wiremessage.NextRequestID()
@@ -216,7 +221,11 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 				case wiremessage.OpMsg:
 					respMessage := mongoResponse.Message.(*models.MongoOpMessage)
 
-					message, err := encodeOpMsg(respMessage, logger)
+					expectedRequestSections := []string{}
+					if len(configMocks[bestMatchIndex].Spec.MongoRequests) > 0 {
+						expectedRequestSections = configMocks[bestMatchIndex].Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
+					}
+					message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, logger)
 					if err != nil {
 						logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", responseTo))
 						return
@@ -296,8 +305,11 @@ func decodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 
 			for _, resp := range tcsMocks[bestMatchIndex].Spec.MongoResponses {
 				respMessage := resp.Message.(*models.MongoOpMessage)
-
-				message, err := encodeOpMsg(respMessage, logger)
+				expectedRequestSections := []string{}
+				if len(tcsMocks[bestMatchIndex].Spec.MongoRequests) > 0 {
+					expectedRequestSections = tcsMocks[bestMatchIndex].Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
+				}
+				message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, logger)
 				if err != nil {
 					logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", responseTo))
 					return
@@ -366,6 +378,7 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 			ReadDelay: int64(readRequestDelay),
 		})
 		logStr += fmt.Sprintf("after reading request from client: %v\n", time.Since(started))
+		// write the request message to the mongo server
 		_, err = destConn.Write(requestBuffer)
 		if err != nil {
 			logger.Error("failed to write the request buffer to mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
@@ -395,7 +408,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 				// write the reply to mongo client
 				_, err = destConn.Write(requestBuffer1)
 				if err != nil {
-					// fmt.Println(logStr)
 					logger.Error("failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
@@ -496,7 +508,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 				// write the reply to mongo client
 				_, err = clientConn.Write(responseBuffer)
 				if err != nil {
-					// fmt.Println(logStr)
 					logger.Error("failed to write the reply message to mongo client", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
 					return
 				}
@@ -508,7 +519,6 @@ func encodeOutgoingMongo(clientConnId, destConnId int64, requestBuffer []byte, c
 					logger.Debug("the response from the server is complete")
 					break
 				}
-
 				_, respHeader, mongoResp, err := Decode(responseBuffer, logger)
 				if err != nil {
 					logger.Error("failed to decode the mongo wire message from the destination server", zap.Error(err), zap.Any("client conn id", clientConnId), zap.Any("dest conn id", destConnId))
@@ -552,7 +562,6 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, logStr s
 	if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 		meta1["type"] = "config"
 		for _, v := range configRequests {
-			// requestHeader.
 			for _, req := range mongoRequests {
 
 				switch req.Header.Opcode {
@@ -675,12 +684,12 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 			actual := map[string]interface{}{}
 			err := bson.UnmarshalExtJSON([]byte(expectedMsgs[i]), true, &expected)
 			if err != nil {
-				logger.Error(fmt.Sprintf("failed to unmarshal the section of recorded request to bson document"), zap.Error(err))
+				logger.Error("failed to unmarshal the section of recorded request to bson document", zap.Error(err))
 				return 0
 			}
 			err = bson.UnmarshalExtJSON([]byte(actualMsgs[i]), true, &actual)
 			if err != nil {
-				logger.Error(fmt.Sprintf("failed to unmarshal the section of incoming request to bson document"), zap.Error(err))
+				logger.Error("failed to unmarshal the section of incoming request to bson document", zap.Error(err))
 				return 0
 			}
 			score += calculateMatchingScore(expected, actual)
@@ -712,19 +721,19 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 
 		err = bson.UnmarshalExtJSON([]byte(expectedMsgsStr), true, &expected)
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to unmarshal the section of recorded request to bson document"), zap.Error(err))
+			logger.Error("failed to unmarshal the section of recorded request to bson document", zap.Error(err))
 			return 0
 		}
 		err = bson.UnmarshalExtJSON([]byte(actualMsgsStr), true, &actual)
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to unmarshal the section of incoming request to bson document"), zap.Error(err))
+			logger.Error("failed to unmarshal the section of incoming request to bson document", zap.Error(err))
 			return 0
 		}
 		logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
 		return calculateMatchingScore(expected, actual)
 
 	default:
-		logger.Error(fmt.Sprintf("failed to detect the OpMsg section into mongo request wiremessage due to invalid format"))
+		logger.Error("failed to detect the OpMsg section into mongo request wiremessage due to invalid format")
 		return 0
 	}
 }
