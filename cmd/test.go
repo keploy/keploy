@@ -41,13 +41,11 @@ func readTestConfig(configPath string) (*models.Test, error) {
 func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
-		t.logger.Info("keploy configuration file not found")
-		return nil
+		return errFileNotFound
 	}
 	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
-		t.logger.Error("failed to get the test config from config file")
-		return err
+		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
 	if len(*path) == 0 {
 		*path = confTest.Path
@@ -78,8 +76,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
-		t.logger.Error("Failed to unmarshall the noise flag")
-		return err
+		return fmt.Errorf("failed to unmarshall the noise flag due to error: %s", err)
 	}
 
 	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
@@ -206,8 +203,12 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testSetNoise, configPath)
 			if err != nil {
-				t.logger.Error("failed to get the test config")
-				return err
+				if err == errFileNotFound {
+					t.logger.Info("continuing without configuration file because file not found")
+				} else {
+					t.logger.Error("", zap.Error(err))
+					return err
+				}
 			}
 
 			if appCmd == "" {

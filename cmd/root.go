@@ -6,6 +6,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"time"
+	"errors"
 	"bytes"
 
 	"github.com/TheZeroSlave/zapsentry"
@@ -18,6 +19,8 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+var errFileNotFound = errors.New("fileNotFound")
 
 type Root struct {
 	logger *zap.Logger
