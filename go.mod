@@ -2,7 +2,7 @@ module go.keploy.io/server
 
 go 1.20
 
-replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.1
+replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.2
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
@@ -77,6 +77,9 @@ require (
 	github.com/getsentry/sentry-go v0.17.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/vektah/gqlparser/v2 v2.5.8
+	github.com/xdg-go/pbkdf2 v1.0.0
+	github.com/xdg-go/scram v1.1.1
+	github.com/xdg-go/stringprep v1.0.4
 )
 
 require (

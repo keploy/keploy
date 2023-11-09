@@ -33,6 +33,17 @@ type tester struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
+type TestOptions struct {
+	MongoPassword string
+	Delay uint64
+	PassThorughPorts []uint
+	ApiTimeout uint64
+	Testsets []string
+	AppContainer string
+	AppNetwork string
+	ProxyPort uint32
+	NoiseConfig map[string]interface{}
+}
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
@@ -41,7 +52,7 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, noiseConfig map[string]interface{}) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, options TestOptions) bool {
 
 	var ps *proxy.ProxySet
 
@@ -70,7 +81,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background()); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, options.AppContainer, 0, context.Background()); err != nil {
 			return false
 		}
 	}
@@ -81,7 +92,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
+		ps = proxy.BootProxy(t.logger, proxy.Option{MongoPassword: options.MongoPassword, Port: options.ProxyPort}, appCmd, options.AppContainer, 0, "", options.PassThorughPorts, loadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -130,9 +141,9 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	exitLoop := false
 
-	if len(testsets) == 0 {
+	if len(options.Testsets) == 0 {
 		// by default, run all the recorded test sets
-		testsets = sessions
+		options.Testsets = sessions
 	}
 
 	sessionsMap := map[string]string{}
@@ -141,13 +152,13 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		sessionsMap[sessionIndex] = sessionIndex
 	}
 
-	for _, sessionIndex := range testsets {
+	for _, sessionIndex := range options.Testsets {
 		// checking whether the provided testset match with a recorded testset.
 		if _, ok := sessionsMap[sessionIndex]; !ok {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, ys, loadedHooks, testReportFS, nil, options.ApiTimeout, ctx, options.NoiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -182,8 +193,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}) models.TestRunStatus {
-
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}, serveTest bool) models.TestRunStatus {
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
@@ -220,7 +230,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
-			if !isApplicationStopped {
+			if !isApplicationStopped && !serveTest {
 				loadedHooks.StopUserApplication()
 			}
 		}
@@ -231,20 +241,22 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	} else {
 		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(testSet)))
 		// start user application
-		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
-				switch err {
-				case hooks.ErrInterrupted:
-					t.logger.Info("keploy terminated user application")
-				case hooks.ErrCommandError:
-				case hooks.ErrUnExpected:
-					t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
-				default:
-					t.logger.Error("unknown error recieved from application", zap.Error(err))
+		if !serveTest {
+			go func() {
+				if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
+					switch err {
+					case hooks.ErrInterrupted:
+						t.logger.Info("keploy terminated user application")
+					case hooks.ErrCommandError:
+					case hooks.ErrUnExpected:
+						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
+					default:
+						t.logger.Error("unknown error recieved from application", zap.Error(err))
+					}
+					errChan <- err
 				}
-				errChan <- err
-			}
-		}()
+			}()
+		}
 	}
 
 	// testReport stores the result of all testruns
@@ -263,7 +275,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	}
 
 	//if running keploy-tests along with unit tests
-	if len(appCmd) == 0 && pid != 0 && testRunChan != nil {
+	if serveTest && testRunChan != nil {
 		testRunChan <- testReport.Name
 	}
 
