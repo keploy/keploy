@@ -19,7 +19,7 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 	recorder := record.NewRecorder(logger)
 	return &Record{
 		recorder: recorder,
-		Logger:   logger,
+		logger:   logger,
 	}
 }
 
@@ -40,12 +40,12 @@ func readRecordConfig() (*models.Record, error) {
 
 func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint) {
 	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
-		t.Logger.Info("keploy configuration file not found")
+		t.logger.Info("keploy configuration file not found")
 		return
 	}
 	confRecord, err := readRecordConfig()
 	if err != nil {
-		t.Logger.Error("failed to get the record config from config file")
+		t.logger.Error("failed to get the record config from config file")
 		return
 	}
 	if len(*path) == 0 {
@@ -73,7 +73,7 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 
 type Record struct {
 	recorder record.Recorder
-	Logger   *zap.Logger
+	logger   *zap.Logger
 }
 
 func (r *Record) GetCmd() *cobra.Command {
@@ -87,7 +87,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				r.Logger.Error("failed to read the testcase path input")
+				r.logger.Error("failed to read the testcase path input")
 				return err
 			}
 
@@ -95,13 +95,13 @@ func (r *Record) GetCmd() *cobra.Command {
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
 				if err != nil {
-					r.Logger.Error("failed to get the absolute path from relative path", zap.Error(err))
+					r.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
 				}
 				path = absPath
 			} else if len(path) == 0 { // if user doesn't provide any path
 				cdirPath, err := os.Getwd()
 				if err != nil {
-					r.Logger.Error("failed to get the path of current directory", zap.Error(err))
+					r.logger.Error("failed to get the path of current directory", zap.Error(err))
 				}
 				path = cdirPath
 			} else {
@@ -113,7 +113,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appCmd, err := cmd.Flags().GetString("command")
 
 			if err != nil {
-				r.Logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 			}
 
 			if appCmd == "" {
@@ -128,7 +128,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			appContainer, err := cmd.Flags().GetString("containerName")
 
 			if err != nil {
-				r.Logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 			}
 
 			var hasContainerName bool
@@ -148,32 +148,32 @@ func (r *Record) GetCmd() *cobra.Command {
 			networkName, err := cmd.Flags().GetString("networkName")
 
 			if err != nil {
-				r.Logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 			}
 
 			delay, err := cmd.Flags().GetUint64("delay")
 
 			if err != nil {
-				r.Logger.Error("Failed to get the delay flag", zap.Error((err)))
+				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
 			}
 
-			r.Logger.Info("", zap.Any("keploy test and mock path", path))
+			r.logger.Info("", zap.Any("keploy test and mock path", path))
 
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
 			if err != nil {
-				r.Logger.Error("failed to read the ports of outgoing calls to be ignored")
+				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
 
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
-				r.Logger.Error("failed to read the proxy port")
+				r.logger.Error("failed to read the proxy port")
 				return err
 			}
 
 			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
 
-			r.Logger.Debug("the ports are", zap.Any("ports", ports))
+			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
 			return nil
 		},

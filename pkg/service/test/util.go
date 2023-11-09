@@ -23,7 +23,7 @@ type InitialiseRunTestSetReturn struct {
 	Tcs           []*models.TestCase
 	ErrChan       chan error
 	TestReport    *models.TestReport
-	DIDE          bool
+	DockerID      bool
 	UserIP        string
 	InitialStatus models.TestRunStatus
 	TcsMocks      []*models.Mock
@@ -34,12 +34,70 @@ type InitialiseTestReturn struct {
 	TestReportFS             *yaml.TestReport
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
-	Ps                       *proxy.ProxySet
+	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
-	Ys                       platform.TestCaseDB
+	YamlStore                platform.TestCaseDB
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
-	Ok                       bool
+}
+
+type TestConfig struct {
+	Path             string
+	Proxyport        uint32
+	TestReportPath   string
+	AppCmd           string
+	Testsets         *[]string
+	AppContainer     string
+	AppNetwork       string
+	Delay            uint64
+	PassThorughPorts []uint
+	ApiTimeout       uint64
+}
+
+type RunTestSetConfig struct {
+	TestSet        string
+	Path           string
+	TestReportPath string
+	AppCmd         string
+	AppContainer   string
+	AppNetwork     string
+	Delay          uint64
+	Pid            uint32
+	YamlStore      platform.TestCaseDB
+	LoadedHooks    *hooks.Hook
+	TestReportFS   yaml.TestReportFS
+	TestRunChan    chan string
+	ApiTimeout     uint64
+	Ctx            context.Context
+}
+
+type SimulateRequestConfig struct {
+	Tc           *models.TestCase
+	LoadedHooks  *hooks.Hook
+	AppCmd       string
+	UserIP       string
+	TestSet      string
+	ApiTimeout   uint64
+	Success      *int
+	Failure      *int
+	Status       *models.TestRunStatus
+	TestReportFS yaml.TestReportFS
+	TestReport   *models.TestReport
+	Path         string
+	DockerID     bool
+	NoiseConfig  map[string]interface{}
+}
+
+type FetchTestResultsConfig struct {
+	TestReportFS   yaml.TestReportFS
+	TestReport     *models.TestReport
+	Status         *models.TestRunStatus
+	TestSet        string
+	Success        *int
+	Failure        *int
+	Ctx            context.Context
+	TestReportPath string
+	Path           string
 }
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
@@ -296,12 +354,12 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 		logger.Warn("response timestamp is missing for " + tc.Name)
 		return m
 	}
-
+	var entMocks, nonKeployMocks []string
 	for _, mock := range m {
 		if mock.Version == "api.keploy-enterprise.io/v1beta1" {
-			logger.Info("This mock was recorded using the the enterprise version, may not work properly with the open source version", zap.String("mock kind:", string(mock.Kind)))
+			entMocks = append(entMocks, mock.Name)
 		} else if mock.Version != "api.keploy.io/v1beta1" {
-			logger.Info("This mock was not recorded using Keploy, may not work properly.", zap.String("mock version:", string(mock.Version)))
+			nonKeployMocks = append(nonKeployMocks, mock.Name)
 		}
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
@@ -315,6 +373,11 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 			filteredMocks = append(filteredMocks, mock)
 		}
 	}
-
+	if len(entMocks) > 0 {
+		logger.Warn("These mocks have been recorded with Keploy Enterprise, may not work properly with the open-source version", zap.Strings("enterprise mocks:", entMocks))
+	}
+	if len(nonKeployMocks) > 0 {
+		logger.Warn("These mocks have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployMocks))
+	}
 	return filteredMocks
 }

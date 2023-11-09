@@ -13,19 +13,27 @@ import (
 	"go.uber.org/zap"
 )
 
-func IsOutgoingMySQL(buffer []byte) bool {
-	if len(buffer) < 5 {
-		return false
-	}
-	packetLength := uint32(buffer[0]) | uint32(buffer[1])<<8 | uint32(buffer[2])<<16
-	return int(packetLength) == len(buffer)-4
+type MySqlParser struct {
+	logger *zap.Logger
+	hooks  *hooks.Hook
 }
-func ProcessOutgoingMySql(clientConnId int64, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
+
+func NewMySqlParser(logger *zap.Logger, hooks *hooks.Hook) *MySqlParser {
+	return &MySqlParser{
+		logger: logger,
+		hooks:  hooks,
+	}
+}
+
+func (sql *MySqlParser) OutgoingType(buffer []byte) bool {
+	return false
+}
+func (sql *MySqlParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodeOutgoingMySql(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger, ctx)
+		encodeOutgoingMySql(requestBuffer, clientConn, destConn, sql.hooks, sql.logger, ctx)
 	case models.MODE_TEST:
-		decodeOutgoingMySQL(clientConnId, destConnId, requestBuffer, clientConn, destConn, h, started, readRequestDelay, logger, ctx)
+		decodeOutgoingMySQL(requestBuffer, clientConn, destConn, sql.hooks, sql.logger, ctx)
 	default:
 	}
 }
@@ -43,7 +51,7 @@ var (
 	expectingHandshakeResponse = false
 )
 
-func encodeOutgoingMySql(clientConnId int64, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
+func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	var (
 		mysqlRequests  = []models.MySQLRequest{}
 		mysqlResponses = []models.MySQLResponse{}
@@ -438,7 +446,7 @@ var (
 	mockResponseRead = 0
 )
 
-func decodeOutgoingMySQL(clientConnId int64, destConnId int64, requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, started time.Time, readRequestDelay time.Duration, logger *zap.Logger, ctx context.Context) {
+func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
 	doHandshakeAgain := true
 	configResponseRead := 0

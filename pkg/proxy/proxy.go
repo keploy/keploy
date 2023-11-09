@@ -38,7 +38,8 @@ import (
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
 	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
-	// "go.keploy.io/server/pkg/proxy/integrations/httpparser"
+	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
+	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 
@@ -54,12 +55,12 @@ func getNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
-type DepInterface interface {
+type DependencyHandler interface {
 	OutgoingType(buffer []byte) bool
 	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context)
 }
 
-var ParsersMap = make(map[string]DepInterface)
+var ParsersMap = make(map[string]DependencyHandler)
 
 type ProxySet struct {
 	IP4               uint32
@@ -303,7 +304,7 @@ func containsJava(input string) bool {
 	return strings.Contains(inputLower, searchTermLower)
 }
 
-func Register(parserName string, parser DepInterface) {
+func Register(parserName string, parser DependencyHandler) {
 	ParsersMap[parserName] = parser
 }
 
@@ -312,6 +313,9 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	//Register all the parsers in the map.
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
+	Register("mongo", mongoparser.NewMongoParser(logger, h))
+	Register("http", httpparser.NewHttpParser(logger, h))
+	Register("mysql", mysqlparser.NewMySqlParser(logger, h))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
@@ -784,7 +788,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		} else if destInfo.IpVersion == 6 {
 			actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
 		}
-		destConnId := getNextID()
 		if models.GetMode() != models.MODE_TEST {
 			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil {
@@ -794,10 +797,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				// }
 			}
 		}
-		clientConnId := getNextID()
-		connEstablishedAt := time.Now()
-		readRequestDelay := time.Since(connEstablishedAt)
-		mysqlparser.ProcessOutgoingMySql(clientConnId, destConnId, []byte{}, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger, ctx)
+		ParsersMap["mysql"].ProcessOutgoing([]byte{}, conn, dst, ctx)
 
 	} else {
 		clientConnId := getNextID()
