@@ -98,7 +98,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 }
 
 func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time) {
-	V1Beta1 := models.GetVersion()
+	version := models.GetVersion()
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
@@ -112,7 +112,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		return
 	}
 	err = db.WriteTestcase(&models.TestCase{
-		Version: V1Beta1,
+		Version: version,
 		Name:    pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
 		Created: time.Now().Unix(),

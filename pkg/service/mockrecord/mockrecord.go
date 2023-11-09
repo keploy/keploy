@@ -21,13 +21,13 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type mockRecorder struct {
-	Logger *zap.Logger
+	logger *zap.Logger
 	mutex  sync.Mutex
 }
 
 func NewMockRecorder(logger *zap.Logger) MockRecorder {
 	return &mockRecorder{
-		Logger: logger,
+		logger: logger,
 		mutex:  sync.Mutex{},
 	}
 }
@@ -36,9 +36,9 @@ func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mock
 
 	models.SetMode(models.MODE_RECORD)
 	teleFS := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, teleFS, s.Logger, "", nil)
+	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
-	ys := yaml.NewYamlStore(path, path, "", mockName, s.Logger, tele)
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 
@@ -47,12 +47,12 @@ func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mock
 	//Add the name of the cmd to context.
 	ctx = context.WithValue(ctx, "cmd", "mockrecord")
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(ys, routineId, s.Logger)
+	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
 	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
 		return
 	}
 	// start the proxy
-	ps := proxy.BootProxy(s.Logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
@@ -66,7 +66,7 @@ func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mock
 
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
 
-	s.Logger.Info("Received signal, initiating graceful shutdown...")
+	s.logger.Info("Received signal, initiating graceful shutdown...")
 	//Call the telemetry events.
 	if len(mocksTotal) != 0 {
 		tele.RecordedMocks(mocksTotal)
