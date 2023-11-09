@@ -76,6 +76,7 @@ type ProxySet struct {
 	DnsServerTimeout  time.Duration
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
+	MongoPassword     string // password to mock the mongo connection and pass the authentication requests
 }
 
 type CustomConn struct {
@@ -394,6 +395,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		dockerAppCmd:      (dCmd || dIDE),
 		PassThroughPorts:  passThroughPorts,
 		hook:              h,
+		MongoPassword:     opt.MongoPassword,
 	}
 
 	//setting the proxy port field in hook
