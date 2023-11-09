@@ -42,8 +42,6 @@ import (
 	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-
 	"time"
 )
 
