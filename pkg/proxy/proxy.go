@@ -356,10 +356,17 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
 			if isPortAvailable(uint32(i)) {
 				opt.Port = uint32(i)
+				logger.Info(Emoji+"Port %v is already in use, switching to next available port");
+
 				break
 			}
 			attemptsDone++
 		}
+	}
+	
+	if maxAttempts<=attemptsDone{
+		logger.Error(Emoji+"Failed to find an available port to start proxy server")
+		return nil
 	}
 	//IPv4
 	localIp4, err := util.GetLocalIPv4()
