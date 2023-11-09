@@ -35,18 +35,6 @@ type tester struct {
 	mutex  sync.Mutex
 }
 type TestOptions struct {
-	MongoPassword string
-	Delay uint64
-	PassThorughPorts []uint
-	ApiTimeout uint64
-	Testsets []string
-	AppContainer string
-	AppNetwork string
-	ProxyPort uint32
-	NoiseConfig map[string]interface{}
-}
-
-type TestOptions struct {
 	MongoPassword    string
 	Delay            uint64
 	PassThorughPorts []uint
@@ -156,7 +144,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, noiseConfig map[string]interface{}) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions) bool {
 
 	testRes := false
 	result := true
@@ -164,15 +152,15 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	cfg := &TestConfig{
 		Path:             path,
-		Proxyport:        proxyPort,
+		Proxyport:        options.ProxyPort,
 		TestReportPath:   testReportPath,
 		AppCmd:           appCmd,
-		Testsets:         &testsets,
-		AppContainer:     appContainer,
-		AppNetwork:       appNetwork,
-		Delay:            Delay,
-		PassThorughPorts: passThorughPorts,
-		ApiTimeout:       apiTimeout,
+		Testsets:         &options.Testsets,
+		AppContainer:     options.AppContainer,
+		AppNetwork:       options.AppContainer,
+		Delay:            options.Delay,
+		PassThorughPorts: options.PassThorughPorts,
+		ApiTimeout:       options.ApiTimeout,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracfully shutdown
@@ -181,13 +169,13 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		t.logger.Error("failed to initialise the test", zap.Error(err))
 		return false
 	}
-	for _, sessionIndex := range testsets {
+	for _, sessionIndex := range options.Testsets {
 		// checking whether the provided testset match with a recorded testset.
 		if _, ok := initialisedValues.SessionsMap[sessionIndex]; !ok {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, apiTimeout, initialisedValues.Ctx, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, options.NoiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -291,7 +279,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	//if running keploy-tests along with unit tests
-	if cfg.ServeTest && cfg.TestRunChan != nil{
+	if cfg.ServeTest && cfg.TestRunChan != nil {
 		cfg.TestRunChan <- returnVal.TestReport.Name
 	}
 

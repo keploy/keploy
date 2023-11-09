@@ -10,7 +10,7 @@ import (
 )
 
 type Tester interface {
-	Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, networkName string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, noiseConfig map[string]interface{}) bool
+	Test(path string, testReportPath string, appCmd string, options TestOptions) bool
 	RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHook *hooks.Hook, testReportfs yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}, serveTest bool)models.TestRunStatus
 	InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error)
 	InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn
