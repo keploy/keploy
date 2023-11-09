@@ -41,13 +41,11 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
-		t.logger.Info("keploy configuration file not found")
-		return nil
+		return errFileNotFound
 	}
 	confRecord, err := readRecordConfig(configFilePath)
 	if err != nil {
-		t.logger.Error("failed to get the record config from config file")
-		return err
+		return fmt.Errorf("failed to get the record config from config file due to error: %s", err)
 	}
 	if len(*path) == 0 {
 		*path = confRecord.Path
@@ -137,8 +135,12 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
 			if err != nil {
-				r.logger.Error("failed to get the record config")
-				return err
+				if err == errFileNotFound {
+					r.logger.Info("continuing without configuration file because file not found")
+				} else {
+					r.logger.Error("", zap.Error(err))
+					return err
+				}
 			}
 
 			if appCmd == "" {
