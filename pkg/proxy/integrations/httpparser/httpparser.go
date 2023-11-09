@@ -18,11 +18,11 @@ import (
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/proxy/util"
-	"go.keploy.io/server/pkg"
 	kModels "go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
 
@@ -33,7 +33,7 @@ type HttpParser struct {
 
 // ProcessOutgoing implements proxy.DepInterface.
 func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
-		switch models.GetMode() {
+	switch models.GetMode() {
 	case models.MODE_RECORD:
 		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx)
 		if err != nil {
@@ -159,7 +159,9 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 				logger.Error("failed to write request message to the destination server", zap.Error(err))
 				return
 			}
-			if string(requestChunked) == "0\r\n\r\n" {
+
+			//check if the intial request is completed
+			if strings.HasSuffix(string(requestChunked), "0\r\n\r\n") {
 				break
 			}
 		}
@@ -256,6 +258,10 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
 		}
 	} else if transferEncodingHeader != "" {
+		// check if the intial request is the complete request.
+		if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
+			return
+		}
 		chunkedRequest(finalReq, clientConn, destConn, logger, transferEncodingHeader)
 	}
 }
@@ -286,6 +292,10 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 			contentLengthResponse(finalResp, clientConn, destConn, logger, contentLength)
 		}
 	} else if transferEncodingHeader != "" {
+		//check if the intial response is the complete response.
+		if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
+			return
+		}
 		chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
 	}
 }
@@ -549,6 +559,10 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			}
 			finalReq = append(finalReq, request...)
 		}
+
+		// Capture the request timestamp
+		reqTimestampMock := time.Now()
+
 		handleChunkedRequests(&finalReq, clientConn, destConn, logger)
 		// read the response from the actual server
 		resp, err = util.ReadBytes(destConn)
@@ -561,6 +575,9 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 				return err
 			}
 		}
+
+		// Capturing the response timestamp
+		resTimestampcMock := time.Now()
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
@@ -650,7 +667,9 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					Header:     pkg.ToYamlHttpHeader(respParsed.Header),
 					Body:       string(respBody),
 				},
-				Created: time.Now().Unix(),
+				Created:          time.Now().Unix(),
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampcMock,
 			},
 		}, ctx)
 		finalReq = []byte("")

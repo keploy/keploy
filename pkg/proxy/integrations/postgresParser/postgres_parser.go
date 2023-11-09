@@ -275,11 +275,11 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						AuthType:            pg.BackendWrapper.AuthType,
 					}
 
-					after_encoded, _ := PostgresDecoderBackend(*pg_mock)
-					if len(after_encoded) != len(buffer) {
-						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
-						pg_mock.Payload = bufStr
-					}
+					// after_encoded, _ := PostgresDecoderBackend(*pg_mock)
+					// if len(after_encoded) != len(buffer) {
+					// 	logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
+					// 	pg_mock.Payload = bufStr
+					// }
 					pgRequests = append(pgRequests, *pg_mock)
 
 				}
@@ -396,7 +396,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					}
 
 					after_encoded, _ := PostgresDecoderFrontend(*pg_mock)
-					if len(after_encoded) != len(buffer) {
+					if len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R"{
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
 						pg_mock.Payload = bufStr
 					}
