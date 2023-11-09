@@ -208,7 +208,25 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			t.tester.Test(path, proxyPort, testReportPath, appCmd, testSets, appContainer, networkName, delay, ports, apiTimeout, noiseConfig)
+
+			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
+
+			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+				Testsets: testSets,
+				AppContainer: appContainer,
+				AppNetwork: networkName,
+				MongoPassword: mongoPassword,
+				Delay: delay,
+				PassThorughPorts: ports,
+				ApiTimeout: apiTimeout,
+				ProxyPort: proxyPort,
+				NoiseConfig: noiseConfig,
+			})
 			return nil
 		},
 	}
@@ -229,6 +247,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	testCmd.Flags().String("mongoPassword", "default123", "Authentication password for mocking MongoDB connection")
 
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true

@@ -76,7 +76,7 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		}
 		jsonBytes, err := bson.MarshalExtJSON(op.(*opQuery).query, true, false)
 		if err != nil {
-			return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
+			return nil, messageHeader, &models.MongoOpMessage{}, fmt.Errorf("malformed bson document: %v", err.Error())
 		}
 		jsonString := string(jsonBytes)
 
@@ -89,7 +89,6 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
-
 		op, err = decodeMsg(reqID, wmBody)
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
@@ -112,7 +111,7 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		for _, v := range op.(*opReply).documents {
 			jsonBytes, err := bson.MarshalExtJSON(v, true, false)
 			if err != nil {
-				return nil, messageHeader, &models.MongoOpMessage{}, errors.New(fmt.Sprintf("malformed bson document: %v", err.Error()))
+				return nil, messageHeader, &models.MongoOpMessage{}, fmt.Errorf("malformed bson document: %v", err.Error())
 			}
 			jsonString := string(jsonBytes)
 			replyDocs = append(replyDocs, jsonString)
@@ -355,7 +354,6 @@ func (o *opMsgSectionSingle) commandAndCollection() (Command, string) {
 func (o *opMsgSectionSingle) String() string {
 	jsonBytes, err := bson.MarshalExtJSON(o.msg, true, false)
 	if err != nil {
-		fmt.Println(Emoji + "failed to marshsal the bsoncore.Document")
 		return ""
 	}
 	jsonString := string(jsonBytes)
@@ -413,7 +411,6 @@ func (o *opMsgSectionSequence) String() string {
 	for _, msg := range o.msgs {
 		jsonBytes, err := bson.MarshalExtJSON(msg, true, false)
 		if err != nil {
-			fmt.Println(Emoji + "failed to marshsal the bsoncore.Document")
 			return ""
 		}
 		jsonString := string(jsonBytes)
@@ -461,7 +458,7 @@ func decodeOpMsgSectionSingle(section string) (string, error) {
 	return message, nil
 }
 
-func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opMsg, error) {
+func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
 		flags:    wiremessage.MsgFlag(responseOpMsg.FlagBits),
 		checksum: uint32(responseOpMsg.Checksum),
@@ -497,7 +494,17 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opM
 				return nil, err
 			}
 
+			resultStr, ok, err := handleScramAuth(actualRequestMsgSections, expectedRequestMsgSections, sectionStr, logger)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				logger.Debug("new responses have been generated for the scram authentication", zap.Any("response", resultStr))
+				sectionStr = resultStr
+			}
+
 			var unmarshaledDoc bsoncore.Document
+
 			err = bson.UnmarshalExtJSON([]byte(sectionStr), true, &unmarshaledDoc)
 			if err != nil {
 				logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
@@ -507,7 +514,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, logger *zap.Logger) (*opM
 				msg: unmarshaledDoc,
 			})
 		default:
-			logger.Error(fmt.Sprintf("failed to encode the OpMsg section into mongo wiremessage because of invalid format"), zap.Any("section", messageValue))
+			logger.Error("failed to encode the OpMsg section into mongo wiremessage because of invalid format", zap.Any("section", messageValue))
 		}
 	}
 	return message, nil
@@ -573,7 +580,7 @@ func (m *opMsg) OpCode() wiremessage.OpCode {
 func (m *opMsg) Encode(responseTo, requestId int32) []byte {
 	var buffer []byte
 	lOgger.Debug(fmt.Sprintf("the responseTo for the OpMsg: %v, for requestId: %v", responseTo, wiremessage.NextRequestID()))
-	// fmt.Printf("the responseTo for the OpMsg: %v\n", responseTo)
+
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestId, responseTo, wiremessage.OpMsg)
 	buffer = wiremessage.AppendMsgFlags(buffer, m.flags)
 	for _, section := range m.sections {
@@ -720,7 +727,9 @@ func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, er
 			logger.Error("failed to unmarshal string document of OpReply", zap.Error(err))
 			return nil, err
 		}
+		// set the fields for handshake calls at test mode
 		result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"] = strconv.FormatInt(time.Now().Unix(), 10)
+
 		v, err := json.Marshal(result)
 		if err != nil {
 			logger.Error("failed to marshal the updated string document of OpReply", zap.Error(err))

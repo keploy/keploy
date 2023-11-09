@@ -34,6 +34,17 @@ type tester struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
+type TestOptions struct {
+	MongoPassword string
+	Delay uint64
+	PassThorughPorts []uint
+	ApiTimeout uint64
+	Testsets []string
+	AppContainer string
+	AppNetwork string
+	ProxyPort uint32
+	NoiseConfig map[string]interface{}
+}
 
 type TestOptions struct {
 	MongoPassword    string

@@ -215,6 +215,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						logger.Debug("Inside the if condition")
 						pg.BackendWrapper.MsgType = buffer[i]
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
+						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
+							logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
+							continue
+						} 
 						msg, err = pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
 							logger.Error("failed to translate the request message to readable", zap.Error(err))
