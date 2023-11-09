@@ -372,7 +372,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	//IPv4
 	localIp4, err := util.GetLocalIPv4()
 	if err != nil {
-		log.Fatalln("Failed to get the local Ip4 address", err)
+		log.Fatalln(Emoji + "Failed to get the local Ip4 address", err)
 	}
 
 	proxyAddr4, ok := util.ConvertToIPV4(localIp4)
