@@ -353,7 +353,6 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 
     if !isPortAvailable(opt.Port) {
-		logger.Info("Port is already in use, switching to next available port",zap.Uint32("port",opt.Port));
 		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
 			if isPortAvailable(uint32(i)) {
 				opt.Port = uint32(i)
