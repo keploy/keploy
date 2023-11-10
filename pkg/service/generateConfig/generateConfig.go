@@ -73,8 +73,7 @@ test:
   #     },
   #     # to ignore fields or the corresponding values for a specific test-set,
   #     # pass the test-set-name as a key to the "test-sets" object and
-  #     # populate the corresponding "body" and "header" objects in the value 
-  #     # of that test-set
+  #     # populate the corresponding "body" and "header" objects 
   #     "test-sets": {
   #       "test-set-name": {
   #         "body": {
