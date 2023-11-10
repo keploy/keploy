@@ -75,7 +75,7 @@ test:
   #     # pass the test-set-name as a key to the "test-sets" object and
   #     # populate the corresponding "body" and "header" objects 
   #     "test-sets": {
-  #       "test-set-name": {
+  #       "test-set-1": {
   #         "body": {
   #           # ignore all the values for the "url" field
   #           "url": []
