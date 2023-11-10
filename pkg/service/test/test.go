@@ -34,15 +34,15 @@ type tester struct {
 	mutex  sync.Mutex
 }
 type TestOptions struct {
-	MongoPassword string
-	Delay uint64
+	MongoPassword    string
+	Delay            uint64
 	PassThorughPorts []uint
-	ApiTimeout uint64
-	Testsets []string
-	AppContainer string
-	AppNetwork string
-	ProxyPort uint32
-	NoiseConfig map[string]interface{}
+	ApiTimeout       uint64
+	Testsets         []string
+	AppContainer     string
+	AppNetwork       string
+	ProxyPort        uint32
+	NoiseConfig      map[string]interface{}
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -219,7 +219,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
 
-
 	errChan := make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", pid))
 
@@ -353,15 +352,15 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString("false")))
 				continue
 			}
-      
+
 			testPass, testResult := t.testHttp(*tc, resp, noiseConfig)
-			
+
 			if !testPass {
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
 			} else {
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(tc.Name)), zap.Any("testset id", models.HighlightPassingString(testSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
 			}
-			
+
 			testStatus := models.TestStatusPending
 			if testPass {
 				testStatus = models.TestStatusPassed
@@ -433,14 +432,14 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 
-	t.logger.Info("test report for " + testSet + ": " , zap.Any("name: ", testReport.Name), zap.Any("path: ", path + "/" + testReport.Name))
+	t.logger.Info("test report for "+testSet+": ", zap.Any("name: ", testReport.Name), zap.Any("path: ", path+"/"+testReport.Name))
 
 	if status == models.TestRunStatusFailed {
 		pp.SetColorScheme(models.FailingColorScheme)
 	} else {
 		pp.SetColorScheme(models.PassingColorScheme)
 	}
-	
+
 	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure)
 
 	if err != nil {
