@@ -12,6 +12,31 @@ import (
 	"go.uber.org/zap"
 )
 
+func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool {
+	// Iterate over each section in the actual request sections
+	for _, v := range actualRequestSections {
+		// Extract the message from the section
+		actualMsg, err := extractMsgFromSection(v)
+		if err != nil {
+			logger.Error("failed to extract the section of the recieved mongo request message", zap.Error(err), zap.Any("the section", v))
+			return false
+		}
+
+		// Check if the message is for starting the SASL (authentication) process
+		if _, exists := actualMsg["saslStart"]; exists {
+			logger.Info("the recieved request is saslStart", zap.Any("OpMsg", actualMsg))
+			return true
+		// Check if the message is for final request of the SASL (authentication) process
+		} else if _, exists := actualMsg["saslContinue"]; exists {
+			logger.Info("the recieved request is saslContinue", zap.Any("OpMsg", actualMsg))
+
+			return true
+		}
+		
+	}
+	return false
+}
+
 // authMessageMap stores the auth message from the saslStart request for the converstionIds. So, that
 // it can be used in the saslContinue request to generate the new server proof
 var authMessageMap map[string]string = map[string]string{}
@@ -264,7 +289,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	return string(newAuthResponse), true, nil
 }
 
-// handleSaslContinue processes a SASL continuation message, updates the payload with 
+// handleSaslContinue processes a SASL continuation message, updates the payload with
 // the new verifier, which is prepared by the new auth message.
 //
 // Parameters:
@@ -284,6 +309,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 		logger.Error("failed to unmarshal string document of second auth response for SCRAM", zap.Error(err))
 		return "", false, err
 	}
+	logger.Debug(fmt.Sprintf("the recorded OpMsg section: %v", responseMsg))
 
 	responsePayload, err := extractAuthPayload(responseMsg)
 	if err != nil {
