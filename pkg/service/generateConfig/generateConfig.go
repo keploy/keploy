@@ -71,7 +71,22 @@ test:
   #         "Date: [],
   #       }
   #     },
-  #     "test-sets": {}
+  #     # to ignore fields or the corresponding values for a specific test-set,
+  #     # pass the test-set-name as a key to the "test-sets" object and
+  #     # populate the corresponding "body" and "header" objects in the value 
+  #     # of that test-set
+  #     "test-sets": {
+  #       "test-set-name": {
+  #         "body": {
+  #           # ignore all the values for the "url" field
+  #           "url": []
+  #         },
+  #         "header": { 
+  #           # we can also pass the exact value to ignore for a field
+  #           "User-Agent": ["PostmanRuntime/7.34.0"]
+  #         }
+  #       }
+  #     }
   #  }
 `
 
