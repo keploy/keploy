@@ -23,8 +23,8 @@ func NewCmdTest(logger *zap.Logger) *Test {
 	}
 }
 
-func readTestConfig() (*models.Test, error) {
-	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
+func readTestConfig(configPath string) (*models.Test, error) {
+	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -38,15 +38,14 @@ func readTestConfig() (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, noiseConfig *map[string]interface{}) {
-	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
-		t.logger.Info("keploy configuration file not found")
-		return
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
+	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
+	if isExist := utils.CheckFileExists(configFilePath); !isExist {
+		return errFileNotFound
 	}
-	confTest, err := readTestConfig()
+	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
-		t.logger.Error("failed to get the test config from config file")
-		return
+		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
 	if len(*path) == 0 {
 		*path = confTest.Path
@@ -75,13 +74,55 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *apiTimeout == 5 {
 		*apiTimeout = confTest.ApiTimeout
 	}
-	noiseJSON, err := test.UnmarshallJson(confTest.Noise, t.logger)
+	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
-		t.logger.Error("Failed to unmarshall the noise flag", zap.Error((err)))
+		return fmt.Errorf("failed to unmarshall the noise flag due to error: %s", err)
 	}
-	*noiseConfig = map[string]interface{}{}
-	(*noiseConfig)["body"] = noiseJSON.(map[string]interface{})["body"]
-	(*noiseConfig)["header"] = noiseJSON.(map[string]interface{})["header"]
+
+	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
+	
+	bodyOrHeaderVal := globalScopeVal.(map[string]interface{})
+
+	(*globalNoise)["body"] = map[string][]string{}
+	for field, regexArr := range bodyOrHeaderVal["body"].(map[string]interface{}) {
+		(*globalNoise)["body"][field] = []string{}
+		for _, val := range regexArr.([]interface{}) {
+			(*globalNoise)["body"][field] = append((*globalNoise)["body"][field], val.(string))
+		}
+	}
+
+	(*globalNoise)["header"] = map[string][]string{}
+	for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) {
+		(*globalNoise)["header"][field] = []string{}
+		for _, val := range regexArr.([]interface{}) {
+			(*globalNoise)["header"][field] = append((*globalNoise)["header"][field], val.(string))
+		}
+	}
+
+	testSetScopeVal := noiseJSON.(map[string]interface{})["test-sets"]
+
+	for testset := range testSetScopeVal.(map[string]interface{}) {
+		(*testSetNoise)[testset] = map[string]map[string][]string{}
+		
+		bodyOrHeaderVal := testSetScopeVal.(map[string]interface{})[testset].(map[string]interface{})
+
+		(*testSetNoise)[testset]["body"] = map[string][]string{}
+		for field, regexArr := range bodyOrHeaderVal["body"].(map[string]interface{}) {
+			(*testSetNoise)[testset]["body"][field] = []string{}
+			for _, val := range regexArr.([]interface{}) {
+				(*testSetNoise)[testset]["body"][field] = append((*testSetNoise)[testset]["body"][field], val.(string))
+			}
+		}
+
+		(*testSetNoise)[testset]["header"] = map[string][]string{}
+		for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) {
+			(*testSetNoise)[testset]["header"][field] = []string{}
+			for _, val := range regexArr.([]interface{}) {
+				(*testSetNoise)[testset]["header"][field] = append((*testSetNoise)[testset]["header"][field], val.(string))
+			}
+		}
+	}
+	return nil
 }
 
 type Test struct {
@@ -101,6 +142,92 @@ func (t *Test) GetCmd() *cobra.Command {
 			if err != nil {
 				t.logger.Error("failed to read the testcase path input")
 				return err
+			}
+
+			appCmd, err := cmd.Flags().GetString("command")
+			if err != nil {
+				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				return err
+			}
+
+			appContainer, err := cmd.Flags().GetString("containerName")
+			if err != nil {
+				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				return err
+			}
+
+			networkName, err := cmd.Flags().GetString("networkName")
+			if err != nil {
+				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				return err
+			}
+
+			testSets, err := cmd.Flags().GetStringSlice("testsets")
+			if err != nil {
+				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
+				return err
+			}
+
+			delay, err := cmd.Flags().GetUint64("delay")
+			if err != nil {
+				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				return err
+			}
+
+			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
+			if err != nil {
+				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
+				return err
+			}
+
+			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				t.logger.Error("failed to read the proxyport")
+				return err
+			}
+
+			configPath, err := cmd.Flags().GetString("config-path")
+			if err != nil {
+				t.logger.Error("failed to read the config path")
+				return err
+			}
+
+			globalNoise := make(models.GlobalNoise)
+			testsetNoise := make(models.TestsetNoise)
+
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
+			if err != nil {
+				if err == errFileNotFound {
+					t.logger.Info("continuing without configuration file because file not found")
+				} else {
+					t.logger.Error("", zap.Error(err))
+					return err
+				}
+			}
+
+			if appCmd == "" {
+				fmt.Println("Error: missing required -c flag or appCmd in config file")
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				}
+				fmt.Println("Example usage:\n", cmd.Example)
+
+				return errors.New("missing required -c flag or appCmd in config file")
+			}
+
+			if delay <= 5 {
+				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				} else {
+					fmt.Println("Example usage:\n", cmd.Example)
+				}
 			}
 
 			//if user provides relative path
@@ -124,25 +251,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			testReportPath := path + "/testReports"
 
-			appCmd, err := cmd.Flags().GetString("command")
-			if err != nil {
-				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
-			}
-
-			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag\n")
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				}
-				fmt.Println("Example usage:\n", cmd.Example, "\n")
-
-				return errors.New("missing required -c flag")
-			}
-			appContainer, err := cmd.Flags().GetString("containerName")
-
-			if err != nil {
-				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
-			}
+			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			var hasContainerName bool
 			if isDockerCmd {
@@ -153,61 +262,13 @@ func (t *Test) GetCmd() *cobra.Command {
 					}
 				}
 				if !hasContainerName && appContainer == "" {
-					fmt.Println("Error: missing required --containerName flag")
+					fmt.Println("Error: missing required --containerName flag or containerName in config file")
 					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag")
+					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-			networkName, err := cmd.Flags().GetString("networkName")
-
-			if err != nil {
-				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
-			}
-
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
-
-			if err != nil {
-				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
-			}
-
-			delay, err := cmd.Flags().GetUint64("delay")
-			if err != nil {
-				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
-			}
-
-			if delay <= 5 {
-				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				} else {
-					fmt.Println("Example usage:\n", cmd.Example, "\n")
-				}
-			}
-
-			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
-			if err != nil {
-				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
-			}
-
-			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
-
-			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
-			if err != nil {
-				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
-			proxyPort, err := cmd.Flags().GetUint32("proxyport")
-			if err != nil {
-				t.logger.Error("failed to read the proxyport")
-				return err
-			}
-
-			noiseConfig := map[string]interface{}{}
-			t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &noiseConfig)
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
-
 
 			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
 			if err != nil {
@@ -225,8 +286,10 @@ func (t *Test) GetCmd() *cobra.Command {
 				PassThorughPorts: ports,
 				ApiTimeout: apiTimeout,
 				ProxyPort: proxyPort,
-				NoiseConfig: noiseConfig,
+				GlobalNoise: globalNoise,
+				TestsetNoise: testsetNoise,
 			})
+
 			return nil
 		},
 	}
@@ -247,6 +310,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	testCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
 	testCmd.Flags().String("mongoPassword", "default123", "Authentication password for mocking MongoDB connection")
 
