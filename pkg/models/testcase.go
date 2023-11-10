@@ -36,7 +36,7 @@ type TestCase struct {
 	GrpcResp GrpcResp            `json:"grpcResp"`
 	GrpcReq  GrpcReq             `json:"grpcReq"`
 	Anchors  map[string][]string `json:"anchors"`
-	Noise    []string            `json:"noise"`
+	Noise    map[string][]string `json:"noise"`
 	Mocks    []*Mock             `json:"mocks"`
 	Type     string              `json:"type"`
 }

@@ -8,10 +8,12 @@ import (
 	"context"
 	"fmt"
 
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/serve/graph/model"
+	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -57,11 +59,52 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
-	noiseConfig := map[string]interface{}{}
+
+
+	noiseJSON, err := test.UnmarshallJson(r.Resolver.Noise, r.Logger)
+	if err != nil {
+		r.Logger.Error("failed to unmarshall noise json")
+		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
+	}
+
+	globalNoise := make(models.GlobalNoise)
+	testSetNoise := make(models.TestsetNoise)
+
+	for scope, v := range noiseJSON.(map[string]interface{}) {
+		if scope == "global" {
+				for k1, v1 := range v.(map[string]interface{}) {
+					globalNoise[k1] = map[string][]string{}
+					for k2, v2 := range v1.(map[string]interface{}) {
+						globalNoise[k1][k2] = []string{}
+						for _, val := range v2.([]interface{}) {
+							globalNoise[k1][k2] = append(globalNoise[k1][k2], val.(string))
+						}
+					}
+				}
+		} else {
+			for testset, v1 := range v.(map[string]interface{}) {
+				testSetNoise[testset] = map[string]map[string][]string{}
+				for k2, v2 := range v1.(map[string]interface{}) {
+					testSetNoise[testset][k2] = map[string][]string{}
+					for k3, v3 := range v2.(map[string]interface{}) {
+						testSetNoise[testset][k2][k3] = []string{}
+						for _, val := range v3.([]interface{}) {
+							testSetNoise[testset][k2][k3] = append(testSetNoise[testset][k2][k3], val.(string))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if tsNoise, ok := testSetNoise[testSet]; ok {
+		globalNoise = test.JoinNoises(globalNoise, tsNoise)
+	}
+
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, noiseConfig, serveTest)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, globalNoise, serveTest)
 	}()
 
 	testRunID := <-testRunChan

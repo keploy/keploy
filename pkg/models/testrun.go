@@ -21,10 +21,9 @@ type TestResult struct {
 	MockPath     string     `json:"mockPath" yaml:"mock_path"`
 	TestCaseID   string     `json:"testCaseID" yaml:"test_case_id"`
 	Req          HttpReq    `json:"req" yaml:"req,omitempty"`
-	// Mocks        []string     `json:"mocks" yaml:"mocks"`
-	Res    HttpResp `json:"resp" yaml:"resp,omitempty"`
-	Noise  []string `json:"noise" yaml:"noise,omitempty"`
-	Result Result   `json:"result" yaml:"result"`
+	Res          HttpResp   `json:"resp" yaml:"resp,omitempty"`
+	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
+	Result       Result     `json:"result" yaml:"result"`
 }
 
 type TestRunStatus string
