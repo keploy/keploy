@@ -56,6 +56,23 @@ test:
   delay: 5
   apiTimeout: 5
   passThroughPorts: []
+  #
+  # Example on using globalNoise
+  # globalNoise: |-
+  #  {
+  #    "global": {
+  #      "body": {
+  #         # to ignore some values for a field, 
+  #         # pass regex patterns to the corresponding array value
+  #         "url": ["https?://\S+", "http://\S+"],
+  #      },
+  #      "header": {
+  #         # to ignore the entire field, pass an empty array
+  #         "Date: [],
+  #       }
+  #     },
+  #     "test-sets": {}
+  #  }
 `
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
