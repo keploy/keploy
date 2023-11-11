@@ -33,6 +33,18 @@ type tester struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
+type TestOptions struct {
+	MongoPassword    string
+	Delay            uint64
+	PassThorughPorts []uint
+	ApiTimeout uint64
+	Tests string
+	AppContainer string
+	AppNetwork string
+	ProxyPort uint32
+	GlobalNoise map[string]map[string][]string
+	TestsetNoise map[string]map[string]map[string][]string
+}
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
@@ -41,7 +53,8 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, tests map[string][]string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, globalNoise models.GlobalNoise, testSetNoise models.TestsetNoise) bool {
+func (t *tester) Test(path, testReportPath string, appCmd string, options TestOptions) bool {
+
 	var ps *proxy.ProxySet
 
 	stopper := make(chan os.Signal, 1)
@@ -69,7 +82,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background()); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, options.AppContainer, 0, context.Background()); err != nil {
 			return false
 		}
 	}
@@ -80,7 +93,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		return false
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
+		ps = proxy.BootProxy(t.logger, proxy.Option{MongoPassword: options.MongoPassword, Port: options.ProxyPort}, appCmd, options.AppContainer, 0, "", options.PassThorughPorts, loadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -131,17 +144,16 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	for _, sessionIndex := range sessions {
 		// checking whether the provided testset match with a recorded testset.
-		testcases := ArrayToMap(tests[sessionIndex])
-		if _, ok := tests[sessionIndex]; !ok && len(tests) != 0 {
+		testcases := ArrayToMap(options.Tests[sessionIndex])
+		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-
-		noiseConfig := globalNoise
-		if tsNoise, ok := testSetNoise[sessionIndex]; ok {
-			noiseConfig = JoinNoises(globalNoise, tsNoise)
+		noiseConfig := options.GlobalNoise
+		if tsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
+			noiseConfig = JoinNoises(options.GlobalNoise, tsNoise)
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, testcases, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, ys, loadedHooks, testReportFS, nil, options.ApiTimeout, ctx, testcases, noiseConfig, false)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -177,7 +189,7 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}, serveTest bool) models.TestRunStatus {
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 
@@ -202,7 +214,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, tcsMocks))
 	loadedHooks.SetConfigMocks(configMocks)
 	loadedHooks.SetTcsMocks(tcsMocks)
-
 
 	errChan := make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", pid))
@@ -340,15 +351,15 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString("false")))
 				continue
 			}
-      
+
 			testPass, testResult := t.testHttp(*tc, resp, noiseConfig)
-			
+
 			if !testPass {
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
 			} else {
 				t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(tc.Name)), zap.Any("testset id", models.HighlightPassingString(testSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
 			}
-			
+
 			testStatus := models.TestStatusPending
 			if testPass {
 				testStatus = models.TestStatusPassed
@@ -420,14 +431,14 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	err = testReportFS.Write(context.Background(), testReportPath, testReport)
 
-	t.logger.Info("test report for " + testSet + ": " , zap.Any("name: ", testReport.Name), zap.Any("path: ", path + "/" + testReport.Name))
+	t.logger.Info("test report for "+testSet+": ", zap.Any("name: ", testReport.Name), zap.Any("path: ", path+"/"+testReport.Name))
 
 	if status == models.TestRunStatusFailed {
 		pp.SetColorScheme(models.FailingColorScheme)
 	} else {
 		pp.SetColorScheme(models.PassingColorScheme)
 	}
-	
+
 	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure)
 
 	if err != nil {

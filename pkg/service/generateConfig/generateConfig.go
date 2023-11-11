@@ -2,10 +2,7 @@ package generateConfig
 
 import (
 	"os"
-	"path/filepath"
 	"sync"
-
-	"go.keploy.io/server/utils"
 
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -62,9 +59,40 @@ test:
   delay: 5
   apiTimeout: 5
   passThroughPorts: []
+  #
+  # Example on using globalNoise
+  # globalNoise: |-
+  #  {
+  #    "global": {
+  #      "body": {
+  #         # to ignore some values for a field, 
+  #         # pass regex patterns to the corresponding array value
+  #         "url": ["https?://\S+", "http://\S+"],
+  #      },
+  #      "header": {
+  #         # to ignore the entire field, pass an empty array
+  #         "Date: [],
+  #       }
+  #     },
+  #     # to ignore fields or the corresponding values for a specific test-set,
+  #     # pass the test-set-name as a key to the "test-sets" object and
+  #     # populate the corresponding "body" and "header" objects 
+  #     "test-sets": {
+  #       "test-set-1": {
+  #         "body": {
+  #           # ignore all the values for the "url" field
+  #           "url": []
+  #         },
+  #         "header": { 
+  #           # we can also pass the exact value to ignore for a field
+  #           "User-Agent": ["PostmanRuntime/7.34.0"]
+  #         }
+  #       }
+  #     }
+  #  }
 `
 
-func (g *generatorConfig) GenerateConfig(path string) {
+func (g *generatorConfig) GenerateConfig(filePath string) {
 	var node yaml.Node
 
 	data := []byte(config)
@@ -76,19 +104,6 @@ func (g *generatorConfig) GenerateConfig(path string) {
 	results, err := yaml.Marshal(node.Content[0])
 	if err != nil {
 		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
-	}
-
-	filePath := filepath.Join(path, "keploy-config.yaml")
-
-	if utils.CheckFileExists(filePath) {
-		override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
-		if err != nil {
-			g.logger.Fatal("Failed to ask for confirmation", zap.Error(err))
-			return
-		}
-		if !override {
-			return
-		}
 	}
 
 	err = os.WriteFile(filePath, results, os.ModePerm)

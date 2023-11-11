@@ -42,7 +42,6 @@ import (
 	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
-
 	"time"
 )
 
@@ -69,6 +68,7 @@ type ProxySet struct {
 	DnsServerTimeout  time.Duration
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
+	MongoPassword     string // password to mock the mongo connection and pass the authentication requests
 }
 
 type CustomConn struct {
@@ -348,7 +348,25 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if opt.Port == 0 {
 		opt.Port = 16789
 	}
+	maxAttempts := 1000
+	attemptsDone:=0
 
+
+    if !isPortAvailable(opt.Port) {
+		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
+			if isPortAvailable(uint32(i)) {
+				opt.Port = uint32(i)
+				logger.Info("Found an available port to start proxy server",zap.Uint32("port",opt.Port));             
+				break
+			}
+			attemptsDone++
+		}
+	}
+	
+	if maxAttempts <= attemptsDone {
+		logger.Error("Failed to find an available port to start proxy server")
+		return nil
+	}
 	//IPv4
 	localIp4, err := util.GetLocalIPv4()
 	if err != nil {
@@ -378,6 +396,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		dockerAppCmd:      (dCmd || dIDE),
 		PassThroughPorts:  passThroughPorts,
 		hook:              h,
+		MongoPassword:     opt.MongoPassword,
 	}
 
 	//setting the proxy port field in hook
@@ -887,6 +906,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 			httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger, ctx)
 		case mongoparser.IsOutgoingMongo(buffer):
 			logger.Debug("into mongo parsing mode")
+			mongoparser.SetAuthPassword(ps.MongoPassword)
 			mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger, ctx)
 		case postgresparser.IsOutgoingPSQL(buffer):
 
