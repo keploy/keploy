@@ -221,18 +221,9 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			globalNoise := make(models.GlobalNoise)
-			testSetNoise := make(models.TestsetNoise)
-
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testSetNoise, configPath)
-			if err != nil {
-				t.logger.Error("failed to get the test config")
-				return err
-			}
-
-			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
