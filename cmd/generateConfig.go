@@ -1,14 +1,10 @@
 package cmd
 
 import (
-<<<<<<< HEAD
-	"go.keploy.io/server/pkg/service/generateConfig"
-=======
 	"path/filepath"
 
 	"go.keploy.io/server/pkg/service/generateConfig"
 	"go.keploy.io/server/utils"
->>>>>>> main
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
