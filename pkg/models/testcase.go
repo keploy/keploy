@@ -15,7 +15,7 @@ func SetVersion(V1 string){
 }
 
 func GetVersion() (V1 Version){
-	return V1Beta1
+	return CurrentVersion
 }
 
 const (
