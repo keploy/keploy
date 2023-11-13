@@ -21,7 +21,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	kModels "go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
