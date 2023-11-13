@@ -16,8 +16,8 @@ type Record struct {
 	Filters          Filters `json:"filters" yaml:"filters"`
 }
 type Filters struct {
-	URL    []string `json:"url" yaml:"url"`
-	Header []string `json:"header" yaml:"header"`
+	Header     []string          `json:"header" yaml:"header"`
+	URLMethods map[string]string `json:"urlMethods" yaml:"urlMethods"`
 }
 type Test struct {
 	Path             string   `json:"path" yaml:"path"`

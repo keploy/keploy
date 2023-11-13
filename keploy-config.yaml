@@ -9,8 +9,8 @@ record:
   delay: 5
   passThroughPorts: []
   filters: {
-    url: [],
-    header: []
+    header: [],
+    urlMethods: {}
   }
 test:
   path: ""
