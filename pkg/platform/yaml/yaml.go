@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -120,13 +121,22 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 
 	return nil
 }
-func containsMatchingUrl(array []string, s string) bool {
-	m := map[string]bool{}
-	for _, element := range array {
-		m[element] = true
+
+func containsMatchingUrl(urlMethods map[string]string, urlStr string, requestMethod models.Method) bool {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return false
 	}
-	return m[s]
+
+	// Check for URL path and method
+	path := parsedURL.Path
+	if method, exists := urlMethods[path]; exists {
+		return method == string(requestMethod)
+	}
+
+	return true
 }
+
 func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 	for headerName, _ := range object {
 		for _, bannedHeader := range bannedHeaders {
@@ -142,10 +152,9 @@ func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters *models.Filters) error {
 	var bypassTestCase = false
 	if filters != nil {
-		if containsMatchingUrl(filters.URL, tc.HttpReq.URL) {
+		if containsMatchingUrl(filters.URLMethods, tc.HttpReq.URL, tc.HttpReq.Method) {
 			bypassTestCase = true
-		}
-		if hasBannedHeaders(tc.HttpReq.Header, filters.Header) {
+		} else if hasBannedHeaders(tc.HttpReq.Header, filters.Header) {
 			bypassTestCase = true
 		}
 	}
