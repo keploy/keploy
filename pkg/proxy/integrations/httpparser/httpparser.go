@@ -367,7 +367,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		var eligibleMock []*models.Mock
 
 		for _, mock := range tcsMocks {
-			if mock.Kind == kModels.HTTP {
+			if mock.Kind == models.HTTP {
 				isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
 
 				//the body of mock and request aren't of same type
@@ -389,7 +389,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 				}
 
 				//Check if the method matches
-				if mock.Spec.HttpReq.Method != kModels.Method(req.Method) {
+				if mock.Spec.HttpReq.Method != models.Method(req.Method) {
 					//If it is not the same, continue
 					continue
 				}
@@ -642,18 +642,18 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		// store the request and responses as mocks
 		meta := map[string]string{
 			"name":      "Http",
-			"type":      kModels.HttpClient,
+			"type":      models.HttpClient,
 			"operation": req.Method,
 		}
 
 		h.AppendMocks(&models.Mock{
-			Version: kModels.V1Beta1,
+			Version: models.V1Beta1,
 			Name:    "mocks",
-			Kind:    kModels.HTTP,
+			Kind:    models.HTTP,
 			Spec: models.MockSpec{
 				Metadata: meta,
-				HttpReq: &kModels.HttpReq{
-					Method:     kModels.Method(req.Method),
+				HttpReq: &models.HttpReq{
+					Method:     models.Method(req.Method),
 					ProtoMajor: req.ProtoMajor,
 					ProtoMinor: req.ProtoMinor,
 					URL:        req.URL.String(),
@@ -661,7 +661,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					Body:       string(reqBody),
 					URLParams:  pkg.UrlParams(req),
 				},
-				HttpResp: &kModels.HttpResp{
+				HttpResp: &models.HttpResp{
 					StatusCode: respParsed.StatusCode,
 					Header:     pkg.ToYamlHttpHeader(respParsed.Header),
 					Body:       string(respBody),

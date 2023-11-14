@@ -40,7 +40,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 	}
 	noise := tc.Noise
 
-	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
+	noiseFieldsFound := FindNoisyFields(m, func(k string, vals []string) bool {
 		// check if k is date
 		for _, v := range vals {
 			if pkg.IsTime(v) {
@@ -50,7 +50,11 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 
 		// maybe we need to concatenate the values
 		return pkg.IsTime(strings.Join(vals, ", "))
-	})...)
+	})
+
+	for _, v := range noiseFieldsFound {
+		noise[v] = []string{}
+	}
 
 	switch tc.Kind {
 	case models.HTTP:
@@ -58,7 +62,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			Request:  tc.HttpReq,
 			Response: tc.HttpResp,
 			Created:  tc.Created,
-			Assertions: map[string][]string{
+			Assertions: map[string]map[string][]string{
 				"noise": noise,
 			},
 		})

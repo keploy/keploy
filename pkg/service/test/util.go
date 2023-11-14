@@ -86,7 +86,7 @@ type SimulateRequestConfig struct {
 	TestReport   *models.TestReport
 	Path         string
 	DockerID     bool
-	NoiseConfig  map[string]interface{}
+	NoiseConfig  models.GlobalNoise
 }
 
 type FetchTestResultsConfig struct {
@@ -189,14 +189,44 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 	return nil
 }
 
-func MatchesAnyRegex(str string, regexArray []string) bool {
-	for _, pattern := range regexArray {
-		re := regexp.MustCompile(pattern)
-		if re.MatchString(str) {
-			return true
-		}
+func JoinNoises(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) models.GlobalNoise {
+	noise := globalNoise
+	for field, regexArr := range tsNoise["body"] {
+		noise["body"][field] = regexArr
 	}
-	return false
+	for field, regexArr := range tsNoise["header"] {
+		noise["header"][field] = regexArr
+	}
+	return noise
+}
+
+func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
+    for _, pattern := range regexArray {
+        re := regexp.MustCompile(pattern)
+        if re.MatchString(str) {
+            return true, pattern
+        }
+    }
+    return false, ""
+}
+
+func MapToArray(mp map[string][]string) []string {
+	var result []string
+	for k := range mp {
+		result = append(result, k)
+	}
+	return result
+}
+
+func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
+	if val, ok := mp[s]; ok {
+		return val, ok
+	}
+	ok, val := MatchesAnyRegex(s, MapToArray(mp))
+	if ok {
+		return mp[val], ok
+	}
+	return []string{}, false
 }
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string][]string) bool {
@@ -206,9 +236,9 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
-		_, isNoisy := noise[k]
-		if isNoisy && len(noise[k]) != 0 {
-			isNoisy = MatchesAnyRegex(v[0], noise[k])
+		regexArr, isNoisy := CheckStringExist(k, noise)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h2[k]
@@ -283,9 +313,9 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		_, isNoisy := noise[k]
-		if isNoisy && len(noise[k]) != 0 {
-			isNoisy = MatchesAnyRegex(v[0], noise[k])
+		regexArr, isNoisy := CheckStringExist(k, noise)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
 		isNoisy = isNoisy || isHeaderNoisy
 		val, ok := h1[k]

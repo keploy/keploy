@@ -43,7 +43,8 @@ type TestOptions struct {
 	AppContainer     string
 	AppNetwork       string
 	ProxyPort        uint32
-	NoiseConfig      map[string]interface{}
+	GlobalNoise      map[string]map[string][]string
+	TestsetNoise     map[string]map[string]map[string][]string
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -175,7 +176,12 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, options.NoiseConfig, false)
+		noiseConfig := options.GlobalNoise
+		if tcsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
+			noiseConfig = JoinNoises(options.GlobalNoise, tcsNoise)
+		}
+
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, noiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -423,7 +429,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -542,7 +548,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig map[string]interface{}) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise) (bool, *models.Result) {
+
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
@@ -566,43 +573,26 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	noise := tc.Noise
 
 	var (
-		bodyNoise   = map[string][]string{}
-		headerNoise = map[string][]string{}
+		bodyNoise   = noiseConfig["body"]
+		headerNoise = noiseConfig["header"]
 	)
 
-	for _, n := range noise {
-		a := strings.Split(n, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[x] = []string{}
-		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = []string{}
-		}
-	}
 
-	for k, v := range noiseConfig {
-		if k == "body" {
-			for k1, v1 := range v.(map[string]interface{}) {
-				bodyNoise[k1] = []string{}
-				for _, v2 := range v1.([]interface{}) {
-					bodyNoise[k1] = append(bodyNoise[k1], v2.(string))
-				}
+		for field, regexArr := range noise {
+			a := strings.Split(field, ".")
+			if len(a) > 1 && a[0] == "body" {
+				x := strings.Join(a[1:], ".")
+				bodyNoise[x] = regexArr
+			} else if a[0] == "header" {
+				headerNoise[a[len(a)-1]] = regexArr
 			}
 		}
-		if k == "header" {
-			for k1, v1 := range v.(map[string]interface{}) {
-				headerNoise[k1] = []string{}
-				for _, v2 := range v1.([]interface{}) {
-					headerNoise[k1] = append(headerNoise[k1], v2.(string))
-				}
-			}
-		}
-	}
+	
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
-	if !Contains(noise, "body") && bodyType == models.BodyTypeJSON {
+	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
@@ -611,7 +601,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
 	} else {
-		if !Contains(noise, "body") && tc.HttpResp.Body != actualResponse.Body {
+		if !Contains(MapToArray(noise), "body") && tc.HttpResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}
