@@ -161,7 +161,7 @@ func (t *tester) Test(path, testReportPath string, appCmd string, options TestOp
 		}
 		noiseConfig := options.GlobalNoise
 		if tsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
-			noiseConfig = JoinNoises(options.GlobalNoise, tsNoise)
+			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, ys, loadedHooks, testReportFS, nil, options.ApiTimeout, ctx, noiseConfig, false)
 
@@ -485,9 +485,16 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	noise := tc.Noise
 
 	var (
-		bodyNoise   = noiseConfig["body"]
+		bodyNoise   = noiseConfig["body"] 
 		headerNoise = noiseConfig["header"]
 	)
+
+	if bodyNoise == nil {
+		bodyNoise = map[string][]string{}
+	}
+	if headerNoise == nil {
+		headerNoise = map[string][]string{}
+	}
 
 	for field, regexArr := range noise {
 		a := strings.Split(field, ".")
