@@ -70,8 +70,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	var readRequestDelay time.Duration
 	for {
 		configMocks := h.GetConfigMocks()
-		tcsMocks := h.GetTcsMocks()
-		logger.Debug(fmt.Sprintf("the config mocks are: %v\nthe testcase mocks are: %v", configMocks, tcsMocks))
+		logger.Debug(fmt.Sprintf("the config mocks are: %v", configMocks))
 
 		var (
 			mongoRequests = []models.MongoRequest{}
@@ -106,6 +105,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			Message:   mongoRequest,
 			ReadDelay: int64(readRequestDelay),
 		})
+		tcsMocks := h.GetTcsMocks()
 		if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for {
 				started := time.Now()
@@ -142,7 +142,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				})
 			}
 		}
-		if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
+		if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message, logger) {
 			logger.Debug("recieved a heartbeat request for mongo")
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
@@ -270,17 +270,20 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				}
 			}
 		} else {
+			logger.Debug("recieved a command query call", zap.Any("length of tcsMocks", len(tcsMocks)))
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
 			for tcsIndx, tcsMock := range tcsMocks {
 				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range tcsMock.Spec.MongoRequests {
 						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
+							logger.Debug("the recieved request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
 							continue
 						}
 						switch req.Header.Opcode {
 						case wiremessage.OpMsg:
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
+								logger.Debug("the recieved request is not of same flagbit with the tcmocks", zap.Any("at index", tcsIndx))
 								continue
 							}
 							scoreSum := 0.0
@@ -446,6 +449,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 
 		// read reply message from the mongo server
 		// tmpStr := ""
+		reqTimestampMock := time.Now()
 		started := time.Now()
 		responseBuffer, err := util.ReadBytes(destConn)
 		logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
@@ -482,12 +486,12 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		})
 		if val, ok := mongoResponse.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for i := 0; ; i++ {
-				if i == 0 && isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
+				if i == 0 && isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message, logger) {
 					go func() {
 						// Recover from panic and gracefully shutdown
 						defer h.Recover(pkg.GenerateRandomID())
 						defer utils.HandlePanic()
-						recordMessage(h, requestBuffer, responseBuffer, mongoRequests, mongoResponses, opReq, ctx)
+						recordMessage(h, requestBuffer, responseBuffer, mongoRequests, mongoResponses, opReq, ctx, reqTimestampMock, logger)
 					}()
 				}
 				started = time.Now()
@@ -542,7 +546,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
 			defer utils.HandlePanic()
-			recordMessage(h, requestBuffer, responseBuffer, mongoRequests, mongoResponses, opReq, ctx)
+			recordMessage(h, requestBuffer, responseBuffer, mongoRequests, mongoResponses, opReq, ctx, reqTimestampMock, logger)
 		}()
 		requestBuffer = []byte("read form client connection")
 
@@ -550,7 +554,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 
 }
 
-func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context) {
+func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, ctx context.Context, reqTimestampMock time.Time, logger *zap.Logger) {
 	// // capture if the wiremessage is a mongo operation call
 
 	shouldRecordCalls := true
@@ -561,7 +565,7 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoReq
 
 	// Skip heartbeat from capturing in the global set of mocks. Since, the heartbeat packet always contain the "hello" boolean.
 	// See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
-	if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
+	if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message, logger) {
 		meta1["type"] = "config"
 		for _, v := range configRequests {
 			for _, req := range mongoRequests {
@@ -592,14 +596,16 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoReq
 	}
 	if shouldRecordCalls {
 		mongoMock := &models.Mock{
-			Version: kModels.V1Beta1,
-			Kind:    kModels.Mongo,
+			Version: models.V1Beta1,
+			Kind:    models.Mongo,
 			Name:    name,
 			Spec: models.MockSpec{
 				Metadata:       meta1,
 				MongoRequests:  mongoRequests,
 				MongoResponses: mongoResponses,
 				Created:        time.Now().Unix(),
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: time.Now(),
 			},
 		}
 		h.AppendMocks(mongoMock, ctx)
@@ -618,7 +624,7 @@ func hasSixteenthBit(num int) bool {
 
 // Skip heartbeat from capturing in the global set of mocks. Since, the heartbeat packet always contain the "hello" boolean.
 // See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
-func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest interface{}) bool {
+func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest interface{}, logger *zap.Logger) bool {
 
 	switch requestHeader.Opcode {
 	case wiremessage.OpQuery:
@@ -629,7 +635,7 @@ func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest
 	case wiremessage.OpMsg:
 		_, ok := mongoRequest.(*models.MongoOpMessage)
 		if ok {
-			return (opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")) || opReq.IsIsMaster()
+			return (opReq.IsIsAdminDB() && (strings.Contains(opReq.String(), "hello") || (isScramAuthRequest(mongoRequest.(*models.MongoOpMessage).Sections, logger)))) || opReq.IsIsMaster()
 		}
 	default:
 		return false
@@ -698,7 +704,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		return score
 	case strings.HasPrefix(expectedSection, "{ SectionSingle msg:"):
 		var expectedMsgsStr string
-		expectedMsgsStr, err := decodeOpMsgSectionSingle(actualSection)
+		expectedMsgsStr, err := extractSectionSingle(expectedSection)
 		if err != nil {
 			logger.Error("failed to fetch the msgs from the single section of recorded OpMsg", zap.Error(err))
 			return 0

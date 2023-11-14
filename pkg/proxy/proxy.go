@@ -42,7 +42,6 @@ import (
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
-
 	"time"
 )
 
@@ -365,7 +364,25 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	if opt.Port == 0 {
 		opt.Port = 16789
 	}
+	maxAttempts := 1000
+	attemptsDone:=0
 
+
+    if !isPortAvailable(opt.Port) {
+		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
+			if isPortAvailable(uint32(i)) {
+				opt.Port = uint32(i)
+				logger.Info("Found an available port to start proxy server",zap.Uint32("port",opt.Port));             
+				break
+			}
+			attemptsDone++
+		}
+	}
+	
+	if maxAttempts <= attemptsDone {
+		logger.Error("Failed to find an available port to start proxy server")
+		return nil
+	}
 	//IPv4
 	localIp4, err := util.GetLocalIPv4()
 	if err != nil {
