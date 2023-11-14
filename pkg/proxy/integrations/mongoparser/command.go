@@ -1,7 +1,8 @@
 package mongoparser
 
-import "go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
-
+import (
+	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+)
 
 type Command string
 

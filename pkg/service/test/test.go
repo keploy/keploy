@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -33,6 +34,18 @@ type tester struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
+type TestOptions struct {
+	MongoPassword    string
+	Delay            uint64
+	PassThorughPorts []uint
+	ApiTimeout       uint64
+	Testsets         []string
+	AppContainer     string
+	AppNetwork       string
+	ProxyPort        uint32
+	GlobalNoise      models.GlobalNoise
+	TestsetNoise     models.TestsetNoise
+}
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
@@ -41,9 +54,8 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
-func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appCmd string, testsets []string, appContainer, appNetwork string, Delay uint64, passThorughPorts []uint, apiTimeout uint64, noiseConfig map[string]interface{}) bool {
-
-	var ps *proxy.ProxySet
+func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
+	var returnVal InitialiseTestReturn
 
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
@@ -52,72 +64,66 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
-	tele.Ping(false)
 
-	testReportFS := yaml.NewTestReportFS(t.logger)
+	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
-	ys := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
+	returnVal.YamlStore = yaml.NewYamlStore(cfg.Path+"/tests", cfg.Path, "", "", t.logger, tele)
 
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(ys, routineId, t.logger)
-
-	// Recover from panic and gracfully shutdown
-	defer loadedHooks.Recover(routineId)
+	returnVal.LoadedHooks = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
 
 	select {
 	case <-stopper:
-		return false
+		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, context.Background()); err != nil {
-			return false
+		if err := returnVal.LoadedHooks.LoadHooks(cfg.AppCmd, cfg.AppContainer, 0, context.Background()); err != nil {
+			return returnVal, err
 		}
 	}
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true)
-		return false
+		returnVal.LoadedHooks.Stop(true)
+		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(t.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", passThorughPorts, loadedHooks, context.Background())
+		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThorughPorts, returnVal.LoadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
 	//Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
-		return false
+	if err := returnVal.LoadedHooks.SendProxyInfo(returnVal.ProxySet.IP4, returnVal.ProxySet.Port, returnVal.ProxySet.IP6); err != nil {
+		return returnVal, err
 	}
 
-	sessions, err := yaml.ReadSessionIndices(path, t.logger)
+	sessions, err := yaml.ReadSessionIndices(cfg.Path, t.logger)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
-		return false
+		return returnVal, err
 	}
 	t.logger.Debug(fmt.Sprintf("the session indices are:%v", sessions))
 
-	result := true
-
 	// Channels to communicate between different types of closing keploy
-	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
-	exitCmd := make(chan bool)                 // channel to exit this command
+	returnVal.AbortStopHooksInterrupt = make(chan bool) // channel to stop closing of keploy via interrupt
+	returnVal.AbortStopHooksForcefully = false          // boolen to stop closing of keploy via user app error
+	returnVal.ExitCmd = make(chan bool)                 // channel to exit this command
 	resultForTele := []int{0, 0}
-	ctx := context.WithValue(context.Background(), "resultForTele", &resultForTele)
+	returnVal.Ctx = context.WithValue(context.Background(), "resultForTele", &resultForTele)
 
 	go func() {
 		select {
 		case <-stopper:
-			abortStopHooksForcefully = true
-			loadedHooks.Stop(false)
+			returnVal.AbortStopHooksForcefully = true
+			returnVal.LoadedHooks.Stop(false)
 			//Call the telemetry events.
 			if resultForTele[0] != 0 || resultForTele[1] != 0 {
 				tele.Testrun(resultForTele[0], resultForTele[1])
 			}
-			ps.StopProxyServer()
-			exitCmd <- true
-		case <-abortStopHooksInterrupt:
+			returnVal.ProxySet.StopProxyServer()
+			returnVal.ExitCmd <- true
+		case <-returnVal.AbortStopHooksInterrupt:
 			//Call the telemetry events.
 			if resultForTele[0] != 0 || resultForTele[1] != 0 {
 				tele.Testrun(resultForTele[0], resultForTele[1])
@@ -126,28 +132,56 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 		}
 	}()
 
-	testRes := false
-
-	exitLoop := false
-
-	if len(testsets) == 0 {
+	if len(*cfg.Testsets) == 0 {
 		// by default, run all the recorded test sets
-		testsets = sessions
+		*cfg.Testsets = sessions
 	}
-
-	sessionsMap := map[string]string{}
+	returnVal.SessionsMap = map[string]string{}
 
 	for _, sessionIndex := range sessions {
-		sessionsMap[sessionIndex] = sessionIndex
+		returnVal.SessionsMap[sessionIndex] = sessionIndex
 	}
+	return returnVal, nil
 
-	for _, sessionIndex := range testsets {
+}
+
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions) bool {
+
+	testRes := false
+	result := true
+	exitLoop := false
+
+	cfg := &TestConfig{
+		Path:             path,
+		Proxyport:        options.ProxyPort,
+		TestReportPath:   testReportPath,
+		AppCmd:           appCmd,
+		Testsets:         &options.Testsets,
+		AppContainer:     options.AppContainer,
+		AppNetwork:       options.AppContainer,
+		Delay:            options.Delay,
+		PassThorughPorts: options.PassThorughPorts,
+		ApiTimeout:       options.ApiTimeout,
+	}
+	initialisedValues, err := t.InitialiseTest(cfg)
+	// Recover from panic and gracfully shutdown
+	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
+	if err != nil {
+		t.logger.Error("failed to initialise the test", zap.Error(err))
+		return false
+	}
+	for _, sessionIndex := range options.Testsets {
 		// checking whether the provided testset match with a recorded testset.
-		if _, ok := sessionsMap[sessionIndex]; !ok {
+		if _, ok := initialisedValues.SessionsMap[sessionIndex]; !ok {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, appContainer, appNetwork, Delay, 0, ys, loadedHooks, testReportFS, nil, apiTimeout, ctx, noiseConfig, false)
+		noiseConfig := options.GlobalNoise
+		if tsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
+			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
+		}
+
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, noiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -169,51 +203,256 @@ func (t *tester) Test(path string, proxyPort uint32, testReportPath string, appC
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
-	if !abortStopHooksForcefully {
-		abortStopHooksInterrupt <- true
+	if !initialisedValues.AbortStopHooksForcefully {
+		initialisedValues.AbortStopHooksInterrupt <- true
 		// stop listening for the eBPF events
-		loadedHooks.Stop(true)
+		initialisedValues.LoadedHooks.Stop(true)
 		//stop listening for proxy server
-		ps.StopProxyServer()
+		initialisedValues.ProxySet.StopProxyServer()
 		return true
 	}
 
-	<-exitCmd
+	<-initialisedValues.ExitCmd
 	return false
 }
 
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig map[string]interface{}, serveTest bool) models.TestRunStatus {
-	// Recover from panic and gracfully shutdown
-	defer loadedHooks.Recover(pkg.GenerateRandomID())
-
-	tcs, err := ys.ReadTestcase(filepath.Join(path, testSet, "tests"), nil)
+func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
+	var returnVal InitialiseRunTestSetReturn
+	var err error
+	returnVal.Tcs, err = cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil)
 	if err != nil {
+		t.logger.Error("Error in reading the testcase", zap.Error(err))
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
+	if len(returnVal.Tcs) == 0 {
+		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", cfg.TestSet))
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
+
+	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
+	var configMocks []*models.Mock
+	configMocks, returnVal.TcsMocks, err = cfg.YamlStore.ReadMocks(filepath.Join(cfg.Path, cfg.TestSet))
+	if err != nil {
+		t.logger.Error(err.Error())
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
+	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
+	cfg.LoadedHooks.SetConfigMocks(configMocks)
+	cfg.LoadedHooks.SetTcsMocks(returnVal.TcsMocks)
+	returnVal.ErrChan = make(chan error, 1)
+	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
+
+	if len(cfg.AppCmd) == 0 && cfg.Pid != 0 {
+		t.logger.Debug("running keploy tests along with other unit tests")
+	} else {
+		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(cfg.TestSet)))
+		// start user application
+		if !cfg.ServeTest {
+			go func() {
+				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay); err != nil {
+					switch err {
+					case hooks.ErrInterrupted:
+						t.logger.Info("keploy terminated user application")
+					case hooks.ErrCommandError:
+					case hooks.ErrUnExpected:
+						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
+					default:
+						t.logger.Error("unknown error recieved from application", zap.Error(err))
+					}
+					returnVal.ErrChan <- err
+				}
+			}()
+		}
+	}
+	// testReport stores the result of all testruns
+	returnVal.TestReport = &models.TestReport{
+		Version: models.GetVersion(),
+		// Name:    runId,
+		Total:  len(returnVal.Tcs),
+		Status: string(models.TestRunStatusRunning),
+	}
+
+	// starts the testrun
+	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
+	if err != nil {
+		t.logger.Error(err.Error())
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
+
+	//if running keploy-tests along with unit tests
+	if cfg.ServeTest && cfg.TestRunChan != nil {
+		cfg.TestRunChan <- returnVal.TestReport.Name
+	}
+
+	//check if the user application is running docker container using IDE
+	returnVal.DockerID = (cfg.AppCmd == "" && len(cfg.AppContainer) != 0)
+
+	ok, _ := cfg.LoadedHooks.IsDockerRelatedCmd(cfg.AppCmd)
+	if ok || returnVal.DockerID {
+		returnVal.UserIP = cfg.LoadedHooks.GetUserIP()
+		t.logger.Debug("the userip of the user docker container", zap.Any("", returnVal.UserIP))
+		t.logger.Debug("", zap.Any("User Ip", returnVal.UserIP))
+	}
+
+	t.logger.Info("", zap.Any("no of test cases", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
+	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(cfg.Delay)*time.Second)))
+
+	// added delay to hold running keploy tests until application starts
+	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
+	time.Sleep(time.Duration(cfg.Delay) * time.Second)
+	return returnVal
+}
+
+func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
+	switch cfg.Tc.Kind {
+	case models.HTTP:
+		started := time.Now().UTC()
+		t.logger.Debug("Before simulating the request", zap.Any("Test case", cfg.Tc))
+
+		ok, _ := cfg.LoadedHooks.IsDockerRelatedCmd(cfg.AppCmd)
+		if ok || cfg.DockerID {
+			cfg.Tc.HttpReq.URL = replaceHostToIP(cfg.Tc.HttpReq.URL, cfg.UserIP)
+			t.logger.Debug("", zap.Any("replaced URL in case of docker env", cfg.Tc.HttpReq.URL))
+		}
+		t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", cfg.Tc.HttpReq.URL))
+		resp, err := pkg.SimulateHttp(*cfg.Tc, cfg.TestSet, t.logger, cfg.ApiTimeout)
+		t.logger.Debug("After simulating the request", zap.Any("test case id", cfg.Tc.Name))
+		t.logger.Debug("After GetResp of the request", zap.Any("test case id", cfg.Tc.Name))
+
+		if err != nil {
+			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
+			return
+		}
+		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig)
+
+		if !testPass {
+			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
+		} else {
+			t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightPassingString(cfg.TestSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
+		}
+
+		testStatus := models.TestStatusPending
+		if testPass {
+			testStatus = models.TestStatusPassed
+			*cfg.Success++
+		} else {
+			testStatus = models.TestStatusFailed
+			*cfg.Failure++
+			*cfg.Status = models.TestRunStatusFailed
+		}
+
+		cfg.TestReportFS.Lock()
+		cfg.TestReportFS.SetResult(cfg.TestReport.Name, models.TestResult{
+			Kind:       models.HTTP,
+			Name:       cfg.TestReport.Name,
+			Status:     testStatus,
+			Started:    started.Unix(),
+			Completed:  time.Now().UTC().Unix(),
+			TestCaseID: cfg.Tc.Name,
+			Req: models.HttpReq{
+				Method:     cfg.Tc.HttpReq.Method,
+				ProtoMajor: cfg.Tc.HttpReq.ProtoMajor,
+				ProtoMinor: cfg.Tc.HttpReq.ProtoMinor,
+				URL:        cfg.Tc.HttpReq.URL,
+				URLParams:  cfg.Tc.HttpReq.URLParams,
+				Header:     cfg.Tc.HttpReq.Header,
+				Body:       cfg.Tc.HttpReq.Body,
+			},
+			Res: models.HttpResp{
+				StatusCode:    cfg.Tc.HttpResp.StatusCode,
+				Header:        cfg.Tc.HttpResp.Header,
+				Body:          cfg.Tc.HttpResp.Body,
+				StatusMessage: cfg.Tc.HttpResp.StatusMessage,
+				ProtoMajor:    cfg.Tc.HttpResp.ProtoMajor,
+				ProtoMinor:    cfg.Tc.HttpResp.ProtoMinor,
+			},
+			// Mocks:        httpSpec.Mocks,
+			// TestCasePath: tcsPath,
+			TestCasePath: cfg.Path + "/" + cfg.TestSet,
+			// MockPath:     mockPath,
+			// Noise:        httpSpec.Assertions["noise"],
+			Noise:  cfg.Tc.Noise,
+			Result: *testResult,
+		})
+		cfg.TestReportFS.Lock()
+		cfg.TestReportFS.Unlock()
+
+	}
+}
+
+func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunStatus {
+	// store the result of the testrun as test-report
+	testResults, err := cfg.TestReportFS.GetResults(cfg.TestReport.Name)
+	if err != nil && (*cfg.Status == models.TestRunStatusFailed || *cfg.Status == models.TestRunStatusPassed) && (*cfg.Success+*cfg.Failure == 0) {
+		t.logger.Error("failed to fetch test results", zap.Error(err))
 		return models.TestRunStatusFailed
 	}
+	cfg.TestReport.TestSet = cfg.TestSet
+	cfg.TestReport.Total = len(testResults)
+	cfg.TestReport.Status = string(*cfg.Status)
+	cfg.TestReport.Tests = testResults
+	cfg.TestReport.Success = *cfg.Success
+	cfg.TestReport.Failure = *cfg.Failure
 
-	if len(tcs) == 0 {
-		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", testSet))
-		return models.TestRunStatusPassed
+	resultForTele, ok := cfg.Ctx.Value("resultForTele").(*[]int)
+	if !ok {
+		t.logger.Debug("resultForTele is not of type *[]int")
+	}
+	(*resultForTele)[0] += *cfg.Success
+	(*resultForTele)[1] += *cfg.Failure
+
+	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
+
+	t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
+
+	if *cfg.Status == models.TestRunStatusFailed {
+		pp.SetColorScheme(models.FailingColorScheme)
+	} else {
+		pp.SetColorScheme(models.PassingColorScheme)
 	}
 
-	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", testSet, tcs))
+	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
 
-	configMocks, tcsMocks, err := ys.ReadMocks(filepath.Join(path, testSet))
 	if err != nil {
 		t.logger.Error(err.Error())
 		return models.TestRunStatusFailed
 	}
 
-	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, configMocks, tcsMocks))
-	loadedHooks.SetConfigMocks(configMocks)
-	loadedHooks.SetTcsMocks(tcsMocks)
+	t.logger.Debug("the result before", zap.Any("", cfg.TestReport.Status), zap.Any("testreport name", cfg.TestReport.Name))
+	t.logger.Debug("the result after", zap.Any("", cfg.TestReport.Status), zap.Any("testreport name", cfg.TestReport.Name))
+	return *cfg.Status
+}
 
-
-	errChan := make(chan error, 1)
-	t.logger.Debug("", zap.Any("app pid", pid))
-
+// testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+	cfg := &RunTestSetConfig{
+		TestSet:        testSet,
+		Path:           path,
+		TestReportPath: testReportPath,
+		AppCmd:         appCmd,
+		AppContainer:   appContainer,
+		AppNetwork:     appNetwork,
+		Delay:          delay,
+		Pid:            pid,
+		YamlStore:      ys,
+		LoadedHooks:    loadedHooks,
+		TestReportFS:   testReportFS,
+		TestRunChan:    testRunChan,
+		ApiTimeout:     apiTimeout,
+		Ctx:            ctx,
+		ServeTest:      serveTest,
+	}
+	initialisedValues := t.InitialiseRunTestSet(cfg)
+	if initialisedValues.InitialStatus != "" {
+		return initialisedValues.InitialStatus
+	}
 	isApplicationStopped := false
-
+	// Recover from panic and gracfully shutdown
+	defer loadedHooks.Recover(pkg.GenerateRandomID())
 	defer func() {
 		if len(appCmd) == 0 && pid != 0 {
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
@@ -225,49 +464,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		}
 	}()
 
-	if len(appCmd) == 0 && pid != 0 {
-		t.logger.Debug("running keploy tests along with other unit tests")
-	} else {
-		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(testSet)))
-		// start user application
-		if !serveTest {
-			go func() {
-				if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, delay); err != nil {
-					switch err {
-					case hooks.ErrInterrupted:
-						t.logger.Info("keploy terminated user application")
-					case hooks.ErrCommandError:
-					case hooks.ErrUnExpected:
-						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
-					default:
-						t.logger.Error("unknown error recieved from application", zap.Error(err))
-					}
-					errChan <- err
-				}
-			}()
-		}
-	}
-
-	// testReport stores the result of all testruns
-	testReport := &models.TestReport{
-		Version: models.V1Beta1,
-		// Name:    runId,
-		Total:  len(tcs),
-		Status: string(models.TestRunStatusRunning),
-	}
-
-	// starts the testrun
-	err = testReportFS.Write(context.Background(), testReportPath, testReport)
-	if err != nil {
-		t.logger.Error(err.Error())
-		return models.TestRunStatusPassed
-	}
-
-	//if running keploy-tests along with unit tests
-	if serveTest && testRunChan != nil {
-		testRunChan <- testReport.Name
-	}
-
+	exitLoop := false
 	var (
 		success = 0
 		failure = 0
@@ -276,30 +473,18 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	var userIp string
 
-	//check if the user application is running docker container using IDE
-	dIDE := (appCmd == "" && len(appContainer) != 0)
-
-	ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-	if ok || dIDE {
-		userIp = loadedHooks.GetUserIP()
-		t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
-		t.logger.Debug("", zap.Any("User Ip", userIp))
-	}
-
-	t.logger.Info("", zap.Any("no of test cases", len(tcs)), zap.Any("test-set", testSet))
-	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(delay)*time.Second)))
-
-	// added delay to hold running keploy tests until application starts
-	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(tcs)), zap.Any("test-set", testSet))
-	time.Sleep(time.Duration(delay) * time.Second)
-	exitLoop := false
-	for _, tc := range tcs {
+	var entTcs, nonKeployTcs []string
+	for _, tc := range initialisedValues.Tcs {
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		filteredTcsMocks := filterTcsMocks(tc, tcsMocks, t.logger)
+		filteredTcsMocks := FilterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
 		loadedHooks.SetTcsMocks(filteredTcsMocks)
-
+		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
+			entTcs = append(entTcs, tc.Name)
+		} else if tc.Version != "api.keploy.io/v1beta1" {
+			nonKeployTcs = append(nonKeployTcs, tc.Name)
+		}
 		select {
-		case err = <-errChan:
+		case err := <-initialisedValues.ErrChan:
 			isApplicationStopped = true
 			switch err {
 			case hooks.ErrInterrupted:
@@ -323,127 +508,47 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if exitLoop {
 			break
 		}
-		switch tc.Kind {
-		case models.HTTP:
-			started := time.Now().UTC()
-			t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-
-			ok, _ := loadedHooks.IsDockerRelatedCmd(appCmd)
-			if ok || dIDE {
-				tc.HttpReq.URL = replaceHostToIP(tc.HttpReq.URL, userIp)
-				t.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
-			}
-			t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
-			resp, err := pkg.SimulateHttp(*tc, testSet, t.logger, apiTimeout)
-			t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-			t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
-
-			if err != nil {
-				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString("false")))
-				continue
-			}
-      
-			testPass, testResult := t.testHttp(*tc, resp, noiseConfig)
-			
-			if !testPass {
-				t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(tc.Name)), zap.Any("testset id", models.HighlightFailingString(testSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
-			} else {
-				t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(tc.Name)), zap.Any("testset id", models.HighlightPassingString(testSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
-			}
-			
-			testStatus := models.TestStatusPending
-			if testPass {
-				testStatus = models.TestStatusPassed
-				success++
-			} else {
-				testStatus = models.TestStatusFailed
-				failure++
-				status = models.TestRunStatusFailed
-			}
-
-			testReportFS.Lock()
-			testReportFS.SetResult(testReport.Name, models.TestResult{
-				Kind:       models.HTTP,
-				Name:       testReport.Name,
-				Status:     testStatus,
-				Started:    started.Unix(),
-				Completed:  time.Now().UTC().Unix(),
-				TestCaseID: tc.Name,
-				Req: models.HttpReq{
-					Method:     tc.HttpReq.Method,
-					ProtoMajor: tc.HttpReq.ProtoMajor,
-					ProtoMinor: tc.HttpReq.ProtoMinor,
-					URL:        tc.HttpReq.URL,
-					URLParams:  tc.HttpReq.URLParams,
-					Header:     tc.HttpReq.Header,
-					Body:       tc.HttpReq.Body,
-				},
-				Res: models.HttpResp{
-					StatusCode:    tc.HttpResp.StatusCode,
-					Header:        tc.HttpResp.Header,
-					Body:          tc.HttpResp.Body,
-					StatusMessage: tc.HttpResp.StatusMessage,
-					ProtoMajor:    tc.HttpResp.ProtoMajor,
-					ProtoMinor:    tc.HttpResp.ProtoMinor,
-				},
-				// Mocks:        httpSpec.Mocks,
-				// TestCasePath: tcsPath,
-				TestCasePath: path + "/" + testSet,
-				// MockPath:     mockPath,
-				// Noise:        httpSpec.Assertions["noise"],
-				Noise:  tc.Noise,
-				Result: *testResult,
-			})
-			testReportFS.Lock()
-			testReportFS.Unlock()
-
+		cfg := &SimulateRequestConfig{
+			Tc:           tc,
+			LoadedHooks:  loadedHooks,
+			AppCmd:       appCmd,
+			UserIP:       userIp,
+			TestSet:      testSet,
+			ApiTimeout:   apiTimeout,
+			Success:      &success,
+			Failure:      &failure,
+			Status:       &status,
+			TestReportFS: testReportFS,
+			TestReport:   initialisedValues.TestReport,
+			Path:         path,
+			DockerID:     initialisedValues.DockerID,
+			NoiseConfig:  noiseConfig,
 		}
+		t.SimulateRequest(cfg)
 	}
-
-	// store the result of the testrun as test-report
-	testResults, err := testReportFS.GetResults(testReport.Name)
-	if err != nil && (status == models.TestRunStatusFailed || status == models.TestRunStatusPassed) && (success+failure == 0) {
-		t.logger.Error("failed to fetch test results", zap.Error(err))
-		return models.TestRunStatusFailed
+	if len(entTcs) > 0 {
+		t.logger.Warn("These testcases have been recorded with Keploy Enterprise, may not work properly with the open-source version", zap.Strings("enterprise mocks:", entTcs))
 	}
-	testReport.TestSet = testSet
-	testReport.Total = len(testResults)
-	testReport.Status = string(status)
-	testReport.Tests = testResults
-	testReport.Success = success
-	testReport.Failure = failure
-
-	resultForTele, ok := ctx.Value("resultForTele").(*[]int)
-	if !ok {
-		t.logger.Debug("resultForTele is not of type *[]int")
+	if len(nonKeployTcs) > 0 {
+		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
-	(*resultForTele)[0] += success
-	(*resultForTele)[1] += failure
-
-	err = testReportFS.Write(context.Background(), testReportPath, testReport)
-
-	t.logger.Info("test report for " + testSet + ": " , zap.Any("name: ", testReport.Name), zap.Any("path: ", path + "/" + testReport.Name))
-
-	if status == models.TestRunStatusFailed {
-		pp.SetColorScheme(models.FailingColorScheme)
-	} else {
-		pp.SetColorScheme(models.PassingColorScheme)
+	resultsCfg := &FetchTestResultsConfig{
+		TestReportFS:   testReportFS,
+		TestReport:     initialisedValues.TestReport,
+		Status:         &status,
+		TestSet:        testSet,
+		Success:        &success,
+		Failure:        &failure,
+		Ctx:            ctx,
+		TestReportPath: testReportPath,
+		Path:           path,
 	}
-	
-	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure)
-
-	if err != nil {
-		t.logger.Error(err.Error())
-		return models.TestRunStatusFailed
-	}
-
-	t.logger.Debug("the result before", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
-	t.logger.Debug("the result after", zap.Any("", testReport.Status), zap.Any("testreport name", testReport.Name))
-
+	status = t.FetchTestResults(resultsCfg)
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig map[string]interface{}) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise) (bool, *models.Result) {
+
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
@@ -467,43 +572,31 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	noise := tc.Noise
 
 	var (
-		bodyNoise   = map[string][]string{}
-		headerNoise = map[string][]string{}
+		bodyNoise   = noiseConfig["body"]
+		headerNoise = noiseConfig["header"]
 	)
 
-	for _, n := range noise {
-		a := strings.Split(n, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[x] = []string{}
-		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = []string{}
-		}
+	if bodyNoise == nil {
+		bodyNoise = map[string][]string{}
+	}
+	if headerNoise == nil {
+		headerNoise = map[string][]string{}
 	}
 
-	for k, v := range noiseConfig {
-		if k == "body" {
-			for k1, v1 := range v.(map[string]interface{}) {
-				bodyNoise[k1] = []string{}
-				for _, v2 := range v1.([]interface{}) {
-					bodyNoise[k1] = append(bodyNoise[k1], v2.(string))
-				}
-			}
-		}
-		if k == "header" {
-			for k1, v1 := range v.(map[string]interface{}) {
-				headerNoise[k1] = []string{}
-				for _, v2 := range v1.([]interface{}) {
-					headerNoise[k1] = append(headerNoise[k1], v2.(string))
-				}
-			}
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise[x] = regexArr
+		} else if a[0] == "header" {
+			headerNoise[a[len(a)-1]] = regexArr
 		}
 	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
-	if !Contains(noise, "body") && bodyType == models.BodyTypeJSON {
+	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
@@ -512,7 +605,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
 	} else {
-		if !Contains(noise, "body") && tc.HttpResp.Body != actualResponse.Body {
+		if !Contains(MapToArray(noise), "body") && tc.HttpResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}

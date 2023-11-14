@@ -111,7 +111,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		return
 	}
 	err = db.WriteTestcase(&models.TestCase{
-		Version: models.V1Beta2,
+		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
 		Created: time.Now().Unix(),
@@ -134,6 +134,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Body:       string(respBody),
 			Timestamp:  resTimeTest,
 		},
+		Noise: map[string][]string{},
 		// Mocks: mocks,
 	}, ctx)
 	if err != nil {
