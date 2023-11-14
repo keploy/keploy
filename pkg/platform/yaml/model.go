@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"errors"
+	"reflect"
 
 	"strings"
 
@@ -62,7 +63,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			Request:  tc.HttpReq,
 			Response: tc.HttpResp,
 			Created:  tc.Created,
-			Assertions: map[string]map[string][]string{
+			Assertions: map[string]interface{}{
 				"noise": noise,
 			},
 		})
@@ -245,7 +246,20 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		tc.Created = httpSpec.Created
 		tc.HttpReq = httpSpec.Request
 		tc.HttpResp = httpSpec.Response
-		tc.Noise = httpSpec.Assertions["noise"]
+		tc.Noise = map[string][]string{}
+		switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
+		case reflect.Map:
+			for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
+				tc.Noise[k] = []string{}
+				for _, val := range v.([]interface{}) {
+					tc.Noise[k] = append(tc.Noise[k], val.(string))
+				}
+			}
+		case reflect.Slice:
+			for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
+				tc.Noise[v.(string)] = []string{}
+			}
+		}
 	// unmarshal its mocks from yaml docs to go struct
 	case models.GRPC_EXPORT:
 		grpcSpec := spec.GrpcSpec{}

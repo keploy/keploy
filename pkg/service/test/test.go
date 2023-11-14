@@ -43,8 +43,8 @@ type TestOptions struct {
 	AppContainer     string
 	AppNetwork       string
 	ProxyPort        uint32
-	GlobalNoise      map[string]map[string][]string
-	TestsetNoise     map[string]map[string]map[string][]string
+	GlobalNoise      models.GlobalNoise
+	TestsetNoise     models.TestsetNoise
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -177,8 +177,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			continue
 		}
 		noiseConfig := options.GlobalNoise
-		if tcsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
-			noiseConfig = JoinNoises(options.GlobalNoise, tcsNoise)
+		if tsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
+			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
 		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, noiseConfig, false)
@@ -576,17 +576,22 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		headerNoise = noiseConfig["header"]
 	)
 
+	if bodyNoise == nil {
+		bodyNoise = map[string][]string{}
+	}
+	if headerNoise == nil {
+		headerNoise = map[string][]string{}
+	}
 
-		for field, regexArr := range noise {
-			a := strings.Split(field, ".")
-			if len(a) > 1 && a[0] == "body" {
-				x := strings.Join(a[1:], ".")
-				bodyNoise[x] = regexArr
-			} else if a[0] == "header" {
-				headerNoise[a[len(a)-1]] = regexArr
-			}
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise[x] = regexArr
+		} else if a[0] == "header" {
+			headerNoise[a[len(a)-1]] = regexArr
 		}
-
+	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""

@@ -98,7 +98,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	}
 
 	if tsNoise, ok := testSetNoise[testSet]; ok {
-		globalNoise = test.JoinNoises(globalNoise, tsNoise)
+		globalNoise = test.LeftJoinNoise(globalNoise, tsNoise)
 	}
 
 	go func() {
