@@ -27,7 +27,19 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
-func IsOutgoingPSQL(buffer []byte) bool {
+type PostgresParser struct {
+	logger *zap.Logger
+	hooks  *hooks.Hook
+}
+
+func NewPostgresParser(logger *zap.Logger, h *hooks.Hook) *PostgresParser {
+	return &PostgresParser{
+		logger: logger,
+		hooks:  h,
+	}
+}
+
+func(p *PostgresParser) OutgoingType(buffer []byte) bool {
 	const ProtocolVersion = 0x00030000 // Protocol version 3.0
 
 	if len(buffer) < 8 {
@@ -46,14 +58,14 @@ func IsOutgoingPSQL(buffer []byte) bool {
 	return version == ProtocolVersion
 }
 
-func ProcessOutgoingPSQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
+func(p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
+		encodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger, ctx)
 	case models.MODE_TEST:
-		decodePostgresOutgoing(requestBuffer, clientConn, destConn, h, logger, ctx)
+		decodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger, ctx)
 	default:
-		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
+		p.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
@@ -148,7 +160,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
@@ -177,7 +189,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
@@ -206,7 +218,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
 							logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
 							continue
-						} 
+						}
 						msg, err = pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
 							logger.Error("failed to translate the request message to readable", zap.Error(err))
@@ -626,7 +638,7 @@ func encodePostgresOutgoing2(requestBuffer []byte, clientConn, destConn net.Conn
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
@@ -652,7 +664,7 @@ func encodePostgresOutgoing2(requestBuffer []byte, clientConn, destConn net.Conn
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta2,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
