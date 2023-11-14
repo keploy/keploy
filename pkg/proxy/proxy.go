@@ -37,9 +37,9 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
+	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
-	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 	"time"
@@ -53,6 +53,13 @@ var idCounter int64 = -1
 func getNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
+
+type DependencyHandler interface {
+	OutgoingType(buffer []byte) bool
+	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context)
+}
+
+var ParsersMap = make(map[string]DependencyHandler)
 
 type ProxySet struct {
 	IP4               uint32
@@ -297,9 +304,18 @@ func containsJava(input string) bool {
 	return strings.Contains(inputLower, searchTermLower)
 }
 
+func Register(parserName string, parser DependencyHandler) {
+	ParsersMap[parserName] = parser
+}
+
 // BootProxy starts proxy server on the idle local port, Default:16789
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
-
+	//Register all the parsers in the map.
+	Register("grpc", grpcparser.NewGrpcParser(logger, h))
+	Register("postgres", postgresparser.NewPostgresParser(logger, h))
+	Register("mongo", mongoparser.NewMongoParser(logger, h))
+	Register("http", httpparser.NewHttpParser(logger, h))
+	Register("mysql", mysqlparser.NewMySqlParser(logger, h))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
@@ -798,7 +814,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		} else if destInfo.IpVersion == 6 {
 			actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
 		}
-		destConnId := getNextID()
 		if models.GetMode() != models.MODE_TEST {
 			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil {
@@ -808,10 +823,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				// }
 			}
 		}
-		clientConnId := getNextID()
-		connEstablishedAt := time.Now()
-		readRequestDelay := time.Since(connEstablishedAt)
-		mysqlparser.ProcessOutgoingMySql(clientConnId, destConnId, []byte{}, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, ps.logger, ctx)
+		ParsersMap["mysql"].ProcessOutgoing([]byte{}, conn, dst, ctx)
 
 	} else {
 		clientConnId := getNextID()
@@ -842,7 +854,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				return
 			}
 		}
-		connEstablishedAt := time.Now()
 		// attempt to read the conn until buffer is either filled or connection is closed
 		var buffer []byte
 		buffer, err = util.ReadBytes(conn)
@@ -858,7 +869,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 
 		ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
 		ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
-		readRequestDelay := time.Since(connEstablishedAt)
 		if err != nil {
 			ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
 			return
@@ -906,27 +916,20 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				}
 			}
 		}
-
-		switch {
-		case httpparser.IsOutgoingHTTP(buffer):
-			// capture the otutgoing http text messages
-			httpparser.ProcessOutgoingHttp(buffer, conn, dst, ps.hook, logger, ctx)
-		case mongoparser.IsOutgoingMongo(buffer):
-			logger.Debug("into mongo parsing mode")
-			mongoparser.SetAuthPassword(ps.MongoPassword)
-			mongoparser.ProcessOutgoingMongo(clientConnId, destConnId, buffer, conn, dst, ps.hook, connEstablishedAt, readRequestDelay, logger, ctx)
-		case postgresparser.IsOutgoingPSQL(buffer):
-
-			logger.Debug("into psql desp mode, before passing")
-			postgresparser.ProcessOutgoingPSQL(buffer, conn, dst, ps.hook, logger, ctx)
-
-		case grpcparser.IsOutgoingGRPC(buffer):
-			grpcparser.ProcessOutgoingGRPC(buffer, conn, dst, ps.hook, logger, ctx)
-		default:
-			logger.Debug("the external dependecy call is not supported")
+		genericCheck := true
+		//Checking for all the parsers.
+		for _, parser := range ParsersMap {
+			if parser.OutgoingType(buffer) {
+				parser.ProcessOutgoing(buffer, conn, dst, ctx)
+				genericCheck = false
+			}
+		}
+		if genericCheck {
+			logger.Debug("The external dependency is not supported. Hence using generic parser")
 			genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger, ctx)
 		}
 	}
+
 	// Closing the user client connection
 	conn.Close()
 	duration := time.Since(start)

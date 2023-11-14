@@ -10,7 +10,10 @@ import (
 )
 
 type Tester interface {
-	// Test(path, testReportPath string, appCmd string, testsets []string, appContainer, networkName string, Delay uint64, passThorughPorts []uint, apiTimeout uint64) bool
-	Test(path, testReportPath string, appCmd string, options TestOptions) bool
-	RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHook *hooks.Hook, testReportfs yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus
+	Test(path string, testReportPath string, appCmd string, options TestOptions) bool
+	RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHook *hooks.Hook, testReportfs yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig models.GlobalNoise, serveTest bool)models.TestRunStatus
+	InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error)
+	InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn
+	SimulateRequest(cfg *SimulateRequestConfig)
+	FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunStatus
 }

@@ -234,7 +234,6 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		Kind:    yamlTestcase.Kind,
 		Name:    yamlTestcase.Name,
 	}
-
 	switch tc.Kind {
 	case models.HTTP:
 		httpSpec := spec.HttpSpec{}
@@ -272,6 +271,11 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			Version: m.Version,
 			Name:    m.Name,
 			Kind:    m.Kind,
+		}
+		mockCheck := strings.Split(string(m.Kind), "-")
+		if len(mockCheck) > 1 {
+			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
+			continue
 		}
 		switch m.Kind {
 		case models.HTTP:
@@ -363,7 +367,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			mock.Spec = *mockSpec
 		default:
 			logger.Error("failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
-			return nil, errors.New("yaml doc of unknown type")
+			continue
 		}
 		mocks = append(mocks, &mock)
 	}
