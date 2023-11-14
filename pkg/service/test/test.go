@@ -267,10 +267,9 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 			}()
 		}
 	}
-	version := models.GetVersion()
 	// testReport stores the result of all testruns
 	returnVal.TestReport = &models.TestReport{
-		Version: version,
+		Version: models.GetVersion(),
 		// Name:    runId,
 		Total:  len(returnVal.Tcs),
 		Status: string(models.TestRunStatusRunning),
@@ -587,7 +586,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 				headerNoise[a[len(a)-1]] = regexArr
 			}
 		}
-	
+
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""

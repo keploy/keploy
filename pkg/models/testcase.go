@@ -7,15 +7,15 @@ type Version string
 const V1Beta1 = Version("api.keploy.io/v1beta1")
 
 var (
-	CurrentVersion = V1Beta1
+	currentVersion = V1Beta1
 )
 
 func SetVersion(V1 string){
-	CurrentVersion = Version(V1)
+	currentVersion = Version(V1)
 }
 
 func GetVersion() (V1 Version){
-	return CurrentVersion
+	return currentVersion
 }
 
 const (

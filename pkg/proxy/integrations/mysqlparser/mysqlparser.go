@@ -652,7 +652,7 @@ func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysq
 			"responseOperation": responseOperation,
 		}
 		mysqlMock := &models.Mock{
-			Version: models.V1Beta1,
+			Version: models.GetVersion(),
 			Kind:    models.SQL,
 			Name:    "mocks",
 			Spec: models.MockSpec{

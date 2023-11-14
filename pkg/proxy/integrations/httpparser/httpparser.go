@@ -647,7 +647,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 
 		h.AppendMocks(&models.Mock{
-			Version: models.V1Beta1,
+			Version: models.GetVersion(),
 			Name:    "mocks",
 			Kind:    models.HTTP,
 			Spec: models.MockSpec{

@@ -160,7 +160,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta1,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
@@ -189,7 +189,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta1,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
@@ -218,7 +218,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
 							logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
 							continue
-						} 
+						}
 						msg, err = pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
 							logger.Error("failed to translate the request message to readable", zap.Error(err))
@@ -638,7 +638,7 @@ func encodePostgresOutgoing2(requestBuffer []byte, clientConn, destConn net.Conn
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta1,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{
@@ -664,7 +664,7 @@ func encodePostgresOutgoing2(requestBuffer []byte, clientConn, destConn net.Conn
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta1,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
 					Spec: models.MockSpec{

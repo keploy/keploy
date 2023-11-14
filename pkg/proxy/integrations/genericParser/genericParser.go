@@ -189,7 +189,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta1,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.GENERIC,
 					Spec: models.MockSpec{
@@ -216,7 +216,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				h.AppendMocks(&models.Mock{
-					Version: models.V1Beta1,
+					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.GENERIC,
 					Spec: models.MockSpec{

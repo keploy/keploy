@@ -596,7 +596,7 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoReq
 	}
 	if shouldRecordCalls {
 		mongoMock := &models.Mock{
-			Version: models.V1Beta1,
+			Version: models.GetVersion(),
 			Kind:    models.Mongo,
 			Name:    name,
 			Spec: models.MockSpec{
