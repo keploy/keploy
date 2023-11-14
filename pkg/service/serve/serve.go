@@ -55,7 +55,6 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	models.SetMode(models.MODE_TEST)
-
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
 	teleFS := fs.NewTeleFS()

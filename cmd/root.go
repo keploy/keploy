@@ -6,6 +6,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"time"
+	"errors"
 	"bytes"
 
 	"github.com/TheZeroSlave/zapsentry"
@@ -18,6 +19,8 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+var errFileNotFound = errors.New("fileNotFound")
 
 type Root struct {
 	logger *zap.Logger
@@ -172,6 +175,9 @@ keploy record -c "docker run -p 8080:8080 --name <containerName> --network keplo
 
 Test:
 keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1
+
+Generate-Config: 
+keploy generate-config -p "/path/to/localdir"
 `
 
 func checkForDebugFlag(args []string) bool {
@@ -208,7 +214,7 @@ func (r *Root) execute() {
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
 	defer deleteLogs(r.logger)
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {
