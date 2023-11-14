@@ -37,13 +37,13 @@ type TestOptions struct {
 	MongoPassword    string
 	Delay            uint64
 	PassThorughPorts []uint
-	ApiTimeout uint64
-	Testsets []string
-	AppContainer string
-	AppNetwork string
-	ProxyPort uint32
-	GlobalNoise map[string]map[string][]string
-	TestsetNoise map[string]map[string]map[string][]string
+	ApiTimeout       uint64
+	Testsets         []string
+	AppContainer     string
+	AppNetwork       string
+	ProxyPort        uint32
+	GlobalNoise      models.GlobalNoise
+	TestsetNoise     models.TestsetNoise
 }
 
 func NewTester(logger *zap.Logger) Tester {
