@@ -4,10 +4,19 @@ type Kind string
 type BodyType string
 type Version string
 
-const (
-	V1Beta1 Version = Version("api.keploy.io/v1beta1")
-	V1Beta2 Version = Version("api.keploy.io/v1beta2")
+const V1Beta1 = Version("api.keploy.io/v1beta1")
+
+var (
+	currentVersion = V1Beta1
 )
+
+func SetVersion(V1 string){
+	currentVersion = Version(V1)
+}
+
+func GetVersion() (V1 Version){
+	return currentVersion
+}
 
 const (
 	HTTP           Kind     = "Http"
