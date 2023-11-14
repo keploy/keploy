@@ -96,7 +96,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 				return err
 			}
-			
+
 			appContainer, err := cmd.Flags().GetString("containerName")
 			if err != nil {
 				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
