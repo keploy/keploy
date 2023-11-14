@@ -95,6 +95,12 @@ handle_tls_setup() {
 # Log the NODE_EXTRA_CA_CERTS environment variable
   echo "NODE_EXTRA_CA_CERTS is set to: $NODE_EXTRA_CA_CERTS"
 
+  # Set the REQUESTS_CA_BUNDLE to the same value as NODE_EXTRA_CA_CERTS for python
+  export REQUESTS_CA_BUNDLE=$NODE_EXTRA_CA_CERTS
+
+  # Log the REQUESTS_CA_BUNDLE environment variable
+  echo "REQUESTS_CA_BUNDLE is set to: $REQUESTS_CA_BUNDLE"
+
   echo "Setup successful"
 }
 
