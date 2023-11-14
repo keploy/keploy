@@ -340,9 +340,16 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		logger.Error(Emoji+"Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
 	}
 
+	// for node
 	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
 	if err != nil {
 		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
+	}
+
+	// for python
+	err = os.Setenv("REQUESTS_CA_BUNDLE", tempCertPath)
+	if err != nil {
+		logger.Error(Emoji+"Failed to set environment variable REQUESTS_CA_BUNDLE: %v", zap.Any("failed to certificate path in environment", err))
 	}
 
 	if opt.Port == 0 {
