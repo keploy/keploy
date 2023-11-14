@@ -572,7 +572,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	noise := tc.Noise
 
 	var (
-		bodyNoise   = noiseConfig["body"] 
+		bodyNoise   = noiseConfig["body"]
 		headerNoise = noiseConfig["header"]
 	)
 
@@ -591,7 +591,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		} else if a[0] == "header" {
 			headerNoise[a[len(a)-1]] = regexArr
 		}
-
+	}
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
