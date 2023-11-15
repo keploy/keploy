@@ -60,7 +60,6 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
 
-
 	noiseJSON, err := test.UnmarshallJson(r.Resolver.Noise, r.Logger)
 	if err != nil {
 		r.Logger.Error("failed to unmarshall noise json")
@@ -72,15 +71,15 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	for scope, v := range noiseJSON.(map[string]interface{}) {
 		if scope == "global" {
-				for k1, v1 := range v.(map[string]interface{}) {
-					globalNoise[k1] = map[string][]string{}
-					for k2, v2 := range v1.(map[string]interface{}) {
-						globalNoise[k1][k2] = []string{}
-						for _, val := range v2.([]interface{}) {
-							globalNoise[k1][k2] = append(globalNoise[k1][k2], val.(string))
-						}
+			for k1, v1 := range v.(map[string]interface{}) {
+				globalNoise[k1] = map[string][]string{}
+				for k2, v2 := range v1.(map[string]interface{}) {
+					globalNoise[k1][k2] = []string{}
+					for _, val := range v2.([]interface{}) {
+						globalNoise[k1][k2] = append(globalNoise[k1][k2], val.(string))
 					}
 				}
+			}
 		} else {
 			for testset, v1 := range v.(map[string]interface{}) {
 				testSetNoise[testset] = map[string]map[string][]string{}
@@ -101,10 +100,16 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		globalNoise = test.LeftJoinNoise(globalNoise, tsNoise)
 	}
 
+	initialiseTestReturn := test.InitialiseTestReturn{
+		YamlStore:    ys,
+		LoadedHooks:  loadedHooks,
+		TestReportFS: testReportFS,
+		Ctx:          ctx,
+	}
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, globalNoise, serveTest)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, initialiseTestReturn, testRunChan, r.ApiTimeout, globalNoise, serveTest)
 	}()
 
 	testRunID := <-testRunChan

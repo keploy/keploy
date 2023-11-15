@@ -9,43 +9,46 @@ import (
 
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
 type TestReport struct {
-	tests  map[string][]models.TestResult
-	m      sync.Mutex
-	Logger *zap.Logger
+	Tests           map[string][]models.TestResult
+	M               sync.Mutex
+	Logger          *zap.Logger
+	MongoCollection *mongo.Client
 }
 
 func NewTestReportFS(logger *zap.Logger) *TestReport {
 	return &TestReport{
-		tests:  map[string][]models.TestResult{},
-		m:      sync.Mutex{},
+		Tests:  map[string][]models.TestResult{},
+		M:      sync.Mutex{},
 		Logger: logger,
 	}
 }
 
 func (fe *TestReport) Lock() {
-	fe.m.Lock()
+	fe.M.Lock()
 }
 
 func (fe *TestReport) Unlock() {
-	fe.m.Unlock()
+	fe.M.Unlock()
 }
 
 func (fe *TestReport) SetResult(runId string, test models.TestResult) {
-	tests := fe.tests[runId]
+	fe.M.Lock()
+	tests := fe.Tests[runId]
 	tests = append(tests, test)
-	fe.tests[runId] = tests
-	fe.m.Unlock()
+	fe.Tests[runId] = tests
+	fe.M.Unlock()
 }
 
 func (fe *TestReport) GetResults(runId string) ([]models.TestResult, error) {
-	val, ok := fe.tests[runId]
+	val, ok := fe.Tests[runId]
 	if !ok {
-		return nil, fmt.Errorf(Emoji, "found no test results for test report with id: %v", runId)
+		return nil, fmt.Errorf("%s found no test results for test report with id: %s", Emoji, runId)
 	}
 	return val, nil
 }

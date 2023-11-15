@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -9,10 +10,13 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -28,7 +32,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, mongoUri, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -46,11 +50,21 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	}
 
-	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
+	var tcDB platform.TestCaseDB
+
+	if len(mongoUri) != 0 {
+		client, err := mgo.New(mongoUri)
+		if err != nil {
+			r.Logger.Error("unknown to fetch mongo client", zap.Error(err))
+		}
+		collectionCount := utils.CheckMongoCollectionCount(client, r.Logger)
+		tcDB = mgo.NewMongoStore("test-set-tests-"+fmt.Sprint(collectionCount), "test-set-mocks-"+fmt.Sprint(collectionCount), "", "", r.Logger, tele, client)
+	} else {
+		tcDB = yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
+	}
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(ys, routineId, r.Logger)
-
+	loadedHooks := hooks.NewHook(tcDB, routineId, r.Logger)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
