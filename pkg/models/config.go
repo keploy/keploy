@@ -1,18 +1,19 @@
 package models
 
 type Config struct {
-	Record  Record    `json:"record" yaml:"record"`
-	Test    Test      `json:"test" yaml:"test"`
+	Record Record `json:"record" yaml:"record"`
+	Test   Test   `json:"test" yaml:"test"`
 }
 
 type Record struct {
-	Path             string   `json:"path" yaml:"path"`
-	Command          string   `json:"command" yaml:"command"`
-	ProxyPort        uint32   `json:"proxyport" yaml:"proxyport"`
-	ContainerName    string   `json:"containerName" yaml:"containerName"`
-	NetworkName      string   `json:"networkName" yaml:"networkName"`
-	Delay            uint64   `json:"delay" yaml:"delay"`
-	PassThroughPorts []uint   `json:"passThroughPorts" yaml:"passThroughPorts"`
+	Path             string `json:"path" yaml:"path"`
+	Command          string `json:"command" yaml:"command"`
+	ProxyPort        uint32 `json:"proxyport" yaml:"proxyport"`
+	ContainerName    string `json:"containerName" yaml:"containerName"`
+	NetworkName      string `json:"networkName" yaml:"networkName"`
+	Delay            uint64 `json:"delay" yaml:"delay"`
+	PassThroughPorts []uint `json:"passThroughPorts" yaml:"passThroughPorts"`
+	MongoUri         string `json:"mongoUri" yaml:"mongoUri"`
 }
 
 type Test struct {
@@ -26,10 +27,11 @@ type Test struct {
 	Delay            uint64   `json:"delay" yaml:"delay"`
 	ApiTimeout       uint64   `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts []uint   `json:"passThroughPorts" yaml:"passThroughPorts"`
+	MongoUri         string   `json:"mongoUri" yaml:"mongoUri"`
 }
 
 type (
-	Noise            map[string][]string
-	GlobalNoise      map[string]map[string][]string
-	TestsetNoise     map[string]map[string]map[string][]string
+	Noise        map[string][]string
+	GlobalNoise  map[string]map[string][]string
+	TestsetNoise map[string]map[string]map[string][]string
 )

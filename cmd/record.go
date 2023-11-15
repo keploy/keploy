@@ -38,7 +38,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 	return &doc.Record, nil
 }
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string, mongoUri *string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -67,6 +67,9 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	}
 	if len(*passThorughPorts) == 0 {
 		*passThorughPorts = confRecord.PassThroughPorts
+	}
+	if len(*mongoUri) == 0 {
+		*mongoUri = confRecord.MongoUri
 	}
 	return nil
 }
@@ -127,13 +130,19 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			mongoUri, err := cmd.Flags().GetString("mongoUri")
+
+			if err != nil {
+				r.logger.Error("Failed to get the mongoUri flag", zap.Error((err)))
+			}
+
 			configPath, err := cmd.Flags().GetString("config-path")
 			if err != nil {
 				r.logger.Error("failed to read the config path")
 				return err
 			}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath, &mongoUri)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("continuing without configuration file because file not found")
@@ -147,7 +156,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				fmt.Println("Error: missing required -c flag or appCmd in config file")
 				if isDockerCmd {
 					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				}else {
+				} else {
 					fmt.Println("Example usage:\n", cmd.Example)
 				}
 				return errors.New("missing required -c flag or appCmd in config file")
@@ -190,7 +199,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
+			r.recorder.CaptureTraffic(path, proxyPort, mongoUri, appCmd, appContainer, networkName, delay, ports)
 			return nil
 		},
 	}
@@ -206,6 +215,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+
+	recordCmd.Flags().String("mongoUri", "", "Use MongoDB to store test cases")
 
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 

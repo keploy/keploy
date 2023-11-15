@@ -15,7 +15,7 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 type Resolver struct {
 	Tester         test.Tester
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   *yaml.TestReport
 	YS             platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
 	Logger         *zap.Logger
@@ -24,6 +24,6 @@ type Resolver struct {
 	Delay          uint64
 	AppPid         uint32
 	ApiTimeout     uint64
-	Noise 		   string
+	Noise          string
 	ServeTest      bool
 }

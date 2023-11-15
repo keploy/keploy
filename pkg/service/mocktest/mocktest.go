@@ -50,8 +50,6 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		return
 	}
 
-
-
 	// start the proxy
 	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)
 
@@ -61,7 +59,14 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		return
 	}
 
-	configMocks, tcsMocks, err := ys.ReadMocks("")
+	tcsMocks, err := ys.ReadTcsMocks(&models.TestCase{}, "")
+	if err != nil {
+		loadedHooks.Stop(true)
+		ps.StopProxyServer()
+		return
+	}
+
+	configMocks, err := ys.ReadConfigMocks("")
 
 	if err != nil {
 		loadedHooks.Stop(true)

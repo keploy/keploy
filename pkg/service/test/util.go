@@ -14,8 +14,11 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 )
 
@@ -27,16 +30,20 @@ type InitialiseRunTestSetReturn struct {
 	UserIP        string
 	InitialStatus models.TestRunStatus
 	TcsMocks      []*models.Mock
+	LastSeenId    primitive.ObjectID
 }
 
 type InitialiseTestReturn struct {
 	SessionsMap              map[string]string
 	TestReportFS             *yaml.TestReport
+	MongoTestReportFS        *mgo.TestReport
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
 	YamlStore                platform.TestCaseDB
+	MongoStore               platform.TestCaseDB
+	MongoClient              *mongo.Client
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 }
@@ -52,6 +59,7 @@ type TestConfig struct {
 	Delay            uint64
 	PassThorughPorts []uint
 	ApiTimeout       uint64
+	MongoUri         string
 }
 
 type RunTestSetConfig struct {
@@ -63,9 +71,10 @@ type RunTestSetConfig struct {
 	AppNetwork     string
 	Delay          uint64
 	Pid            uint32
-	YamlStore      platform.TestCaseDB
+	TestStore      platform.TestCaseDB
+	IsMongoDBStore bool
 	LoadedHooks    *hooks.Hook
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
@@ -82,7 +91,7 @@ type SimulateRequestConfig struct {
 	Success      *int
 	Failure      *int
 	Status       *models.TestRunStatus
-	TestReportFS yaml.TestReportFS
+	TestReportFS platform.TestReportDB
 	TestReport   *models.TestReport
 	Path         string
 	DockerID     bool
@@ -90,7 +99,9 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
+	MongoReportFS  platform.TestReportDB
+	IsMongo        bool
 	TestReport     *models.TestReport
 	Status         *models.TestRunStatus
 	TestSet        string
@@ -201,13 +212,13 @@ func LeftJoinNoise(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) m
 }
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
-    for _, pattern := range regexArray {
-        re := regexp.MustCompile(pattern)
-        if re.MatchString(str) {
-            return true, pattern
-        }
-    }
-    return false, ""
+	for _, pattern := range regexArray {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(str) {
+			return true, pattern
+		}
+	}
+	return false, ""
 }
 
 func MapToArray(mp map[string][]string) []string {

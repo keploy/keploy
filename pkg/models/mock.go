@@ -3,10 +3,10 @@ package models
 import "time"
 
 type Mock struct {
-	Version Version  `json:"Version,omitempty"`
-	Name    string   `json:"Name,omitempty"`
-	Kind    Kind     `json:"Kind,omitempty"`
-	Spec    MockSpec `json:"Spec,omitempty"`
+	Version Version  `json:"Version,omitempty" bson:"Version,omitempty"`
+	Name    string   `json:"Name,omitempty" bson:"Name,omitempty"`
+	Kind    Kind     `json:"Kind,omitempty" bson:"Kind,omitempty"`
+	Spec    MockSpec `json:"Spec,omitempty" bson:"Spec,omitempty"`
 }
 
 type MockSpec struct {
@@ -26,8 +26,7 @@ type MockSpec struct {
 	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
 	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
 
-
-	PostgresRequests  []Backend `json:"postgresRequests,omitempty"`
+	PostgresRequests  []Backend  `json:"postgresRequests,omitempty"`
 	PostgresResponses []Frontend `json:"postgresResponses,omitempty"`
 
 	//for grpc

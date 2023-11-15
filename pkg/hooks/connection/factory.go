@@ -36,7 +36,6 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 	}
 }
 
-
 func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, ctx context.Context) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()

@@ -38,7 +38,7 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string, mongoUri *string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -80,7 +80,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 
 	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
-	
+
 	bodyOrHeaderVal := globalScopeVal.(map[string]interface{})
 
 	(*globalNoise)["body"] = map[string][]string{}
@@ -103,7 +103,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 
 	for testset := range testSetScopeVal.(map[string]interface{}) {
 		(*testSetNoise)[testset] = map[string]map[string][]string{}
-		
+
 		bodyOrHeaderVal := testSetScopeVal.(map[string]interface{})[testset].(map[string]interface{})
 
 		(*testSetNoise)[testset]["body"] = map[string][]string{}
@@ -186,6 +186,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			mongoUri, err := cmd.Flags().GetString("mongoUri")
+
+			if err != nil {
+				t.logger.Error("Failed to get the mongoUri flag", zap.Error((err)))
+			}
+
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				t.logger.Error("failed to read the proxyport")
@@ -201,7 +207,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath, &mongoUri)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
@@ -277,17 +283,17 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-				Testsets: testSets,
-				AppContainer: appContainer,
-				AppNetwork: networkName,
-				MongoPassword: mongoPassword,
-				Delay: delay,
+			t.tester.Test(path, testReportPath, appCmd, mongoUri, test.TestOptions{
+				Testsets:         testSets,
+				AppContainer:     appContainer,
+				AppNetwork:       networkName,
+				MongoPassword:    mongoPassword,
+				Delay:            delay,
 				PassThorughPorts: ports,
-				ApiTimeout: apiTimeout,
-				ProxyPort: proxyPort,
-				GlobalNoise: globalNoise,
-				TestsetNoise: testsetNoise,
+				ApiTimeout:       apiTimeout,
+				ProxyPort:        proxyPort,
+				GlobalNoise:      globalNoise,
+				TestsetNoise:     testsetNoise,
 			})
 
 			return nil
@@ -314,6 +320,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
 	testCmd.Flags().String("mongoPassword", "default123", "Authentication password for mocking MongoDB connection")
+	testCmd.Flags().String("mongoUri", "", "Use MongoDB to test stored testcases")
 
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true

@@ -1,8 +1,15 @@
 package models
 
 import (
-	"github.com/k0kubun/pp/v3"
 	"github.com/fatih/color"
+	"github.com/k0kubun/pp/v3"
+)
+
+const (
+	Keploy       string = "keploy"
+	TestSetMocks string = "test-set-mocks"
+	TestSetTests string = "test-set-tests"
+	TestReports  string = "test-report"
 )
 
 const (
