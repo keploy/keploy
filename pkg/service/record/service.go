@@ -1,8 +1,9 @@
 package record
 
 import (
-	"go.keploy.io/server/pkg/models"
 	"time"
+
+	"go.keploy.io/server/pkg/models"
 )
 
 type Recorder interface {

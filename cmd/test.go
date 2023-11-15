@@ -160,6 +160,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			mongoUri, err := cmd.Flags().GetString("mongoUri")
+
+			if err != nil {
+				t.logger.Error("Failed to get the mongoUri flag", zap.Error((err)))
+			}
+
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				t.logger.Error("failed to read the proxyport")
@@ -306,6 +312,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
 	testCmd.Flags().String("mongoPassword", "default123", "Authentication password for mocking MongoDB connection")
+	testCmd.Flags().String("mongoUri", "", "Use MongoDB to test stored testcases")
 
 	testCmd.Flags().String("coverageReportPath", "", "Write a go coverage profile to the file in the given directory.")
 

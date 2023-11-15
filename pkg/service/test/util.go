@@ -16,8 +16,11 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/pkg/platform/mgo"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 )
 
@@ -29,34 +32,38 @@ type InitialiseRunTestSetReturn struct {
 	UserIP        string
 	InitialStatus models.TestRunStatus
 	TcsMocks      []*models.Mock
+	LastSeenId    primitive.ObjectID
 }
 
 type InitialiseTestReturn struct {
 	Sessions                 []string
 	TestReportFS             *yaml.TestReport
+	MongoTestReportFS        *mgo.TestReport
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
 	YamlStore                platform.TestCaseDB
+	MongoStore               platform.TestCaseDB
+	MongoClient              *mongo.Client
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 }
 
 type TestConfig struct {
-	Path             string
-	Proxyport        uint32
-	TestReportPath   string
-	AppCmd           string
-	MongoPassword    string
-	AppContainer     string
-	AppNetwork       string
-	Delay            uint64
-	BuildDelay       time.Duration
-	PassThroughPorts []uint
-	ApiTimeout       uint64
-	WithCoverage  bool
-	CoverageReportPath       string
+	Path               string
+	Proxyport          uint32
+	TestReportPath     string
+	AppCmd             string
+	MongoPassword      string
+	AppContainer       string
+	AppNetwork         string
+	Delay              uint64
+	BuildDelay         time.Duration
+	PassThroughPorts   []uint
+	ApiTimeout         uint64
+	WithCoverage       bool
+	CoverageReportPath string
 }
 
 type RunTestSetConfig struct {
@@ -69,7 +76,8 @@ type RunTestSetConfig struct {
 	Delay          uint64
 	BuildDelay     time.Duration
 	Pid            uint32
-	YamlStore      platform.TestCaseDB
+	TestStore      platform.TestCaseDB
+	IsMongoDBStore bool
 	LoadedHooks    *hooks.Hook
 	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
@@ -408,7 +416,7 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 }
 
 // creates a directory if not exists with all user access
-func makeDirectory (path string) error {
+func makeDirectory(path string) error {
 	oldUmask := syscall.Umask(0)
 	err := os.MkdirAll(path, 0777)
 	if err != nil {

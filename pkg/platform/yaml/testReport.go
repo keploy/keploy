@@ -29,19 +29,19 @@ func NewTestReportFS(logger *zap.Logger) *TestReport {
 }
 
 func (fe *TestReport) Lock() {
-	fe.m.Lock()
+	fe.M.Lock()
 }
 
 func (fe *TestReport) Unlock() {
-	fe.m.Unlock()
+	fe.M.Unlock()
 }
 
 func (fe *TestReport) SetResult(runId string, test platform.KindSpecifier) {
 	fe.m.Lock()
 	tests := fe.tests[runId]
 	tests = append(tests, test)
-	fe.tests[runId] = tests
-	fe.m.Unlock()
+	fe.Tests[runId] = tests
+	fe.M.Unlock()
 }
 
 func (fe *TestReport) GetResults(runId string) ([]platform.KindSpecifier, error) {

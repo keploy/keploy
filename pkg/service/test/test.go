@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 )
 
@@ -113,7 +114,6 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
 
-	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
 	yamlStore := yaml.NewYamlStore(cfg.Path+"/tests", cfg.Path, "", "", t.logger, tele)
 	returnVal.YamlStore = yamlStore
@@ -156,6 +156,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return returnVal, err
 	}
+
 	t.logger.Debug(fmt.Sprintf("the session indices are:%v", sessions))
 	returnVal.Sessions = sessions
 
@@ -189,7 +190,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, mongoUri string, options TestOptions) bool {
 
 	testRes := false
 	result := true
@@ -370,13 +371,14 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	// starts the testrun
-	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
-	if err != nil {
-		t.logger.Error(err.Error())
-		returnVal.InitialStatus = models.TestRunStatusFailed
-		return returnVal
+	if !cfg.IsMongoDBStore {
+		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
+		if err != nil {
+			t.logger.Error(err.Error())
+			returnVal.InitialStatus = models.TestRunStatusFailed
+			return returnVal
+		}
 	}
-
 	//if running keploy-tests along with unit tests
 	if cfg.ServeTest && cfg.TestRunChan != nil {
 		cfg.TestRunChan <- returnVal.TestReport.Name
@@ -481,8 +483,14 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 }
 
 func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunStatus {
-	// store the result of the testrun as test-report
-	testResults, err := cfg.TestReportFS.GetResults(cfg.TestReport.Name)
+	var testResults []models.TestResult
+	var err error
+	if !cfg.IsMongo {
+		fmt.Println(cfg.TestReportFS)
+		testResults, err = cfg.TestReportFS.GetResults(cfg.TestReport.Name)
+	} else if cfg.MongoReportFS != nil {
+		testResults, err = cfg.MongoReportFS.GetResults(cfg.TestReport.Name)
+	}
 	if err != nil && (*cfg.Status == models.TestRunStatusFailed || *cfg.Status == models.TestRunStatusPassed) && (*cfg.Success+*cfg.Failure == 0) {
 		t.logger.Error("failed to fetch test results", zap.Error(err))
 		return models.TestRunStatusFailed
@@ -509,8 +517,11 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	(*resultForTele)[0] += *cfg.Success
 	(*resultForTele)[1] += *cfg.Failure
 
-	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
-
+	if !cfg.IsMongo {
+		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
+	} else if cfg.MongoReportFS != nil {
+		err = cfg.MongoReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
+	}
 	t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
 
 	if *cfg.Status == models.TestRunStatusFailed {
@@ -543,29 +554,36 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		Delay:          delay,
 		BuildDelay:     buildDelay,
 		Pid:            pid,
-		YamlStore:      ys,
-		LoadedHooks:    loadedHooks,
-		TestReportFS:   testReportFS,
+		LoadedHooks:    initialisedValues.LoadedHooks,
+		TestReportFS:   initialisedValues.TestReportFS,
 		TestRunChan:    testRunChan,
 		ApiTimeout:     apiTimeout,
-		Ctx:            ctx,
+		Ctx:            initialisedValues.Ctx,
 		ServeTest:      serveTest,
 	}
-	initialisedValues := t.InitialiseRunTestSet(cfg)
-	if initialisedValues.InitialStatus != "" {
-		return initialisedValues.InitialStatus
+
+	if initialisedValues.YamlStore != nil {
+		cfg.TestStore = initialisedValues.YamlStore
+	} else if initialisedValues.MongoStore != nil {
+		cfg.TestStore = initialisedValues.MongoStore
+		cfg.IsMongoDBStore = true
+	}
+
+	initialisedRunTestSetValues := t.InitialiseRunTestSet(cfg)
+	if initialisedRunTestSetValues.InitialStatus != "" {
+		return initialisedRunTestSetValues.InitialStatus
 	}
 
 	isApplicationStopped := false
 	// Recover from panic and gracfully shutdown
-	defer loadedHooks.Recover(pkg.GenerateRandomID())
+	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
 	defer func() {
 		if len(appCmd) == 0 && pid != 0 {
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
 			if !isApplicationStopped && !serveTest {
-				loadedHooks.StopUserApplication()
+				initialisedValues.LoadedHooks.StopUserApplication()
 			}
 		}
 	}()
@@ -622,10 +640,61 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				status = models.TestRunStatusAppHalted
 				t.logger.Error("stopping testrun for the test set:", zap.Any("test-set", testSet))
 			}
-		default:
-		}
+			initialisedValues.LoadedHooks.SetTcsMocks(filteredTcsMocks)
 
-		if exitLoop {
+			if tc.Version == "api.keploy-enterprise.io/v1beta1" {
+				entTcs = append(entTcs, tc.Name)
+			} else if tc.Version != "api.keploy.io/v1beta1" {
+				nonKeployTcs = append(nonKeployTcs, tc.Name)
+			}
+			select {
+			case err := <-initialisedRunTestSetValues.ErrChan:
+				isApplicationStopped = true
+				switch err {
+				case hooks.ErrInterrupted:
+					exitLoop = true
+					status = models.TestRunStatusUserAbort
+				case hooks.ErrCommandError:
+					exitLoop = true
+					status = models.TestRunStatusFaultUserApp
+				case hooks.ErrUnExpected:
+					exitLoop = true
+					status = models.TestRunStatusAppHalted
+					t.logger.Warn("stopping testrun for the test set:", zap.Any("test-set", testSet))
+				default:
+					exitLoop = true
+					status = models.TestRunStatusAppHalted
+					t.logger.Error("stopping testrun for the test set:", zap.Any("test-set", testSet))
+				}
+			default:
+			}
+
+			if exitLoop {
+				break
+			}
+			cfg := &SimulateRequestConfig{
+				Tc:          tc,
+				LoadedHooks: initialisedValues.LoadedHooks,
+				AppCmd:      appCmd,
+				UserIP:      userIp,
+				TestSet:     testSet,
+				ApiTimeout:  apiTimeout,
+				Success:     &success,
+				Failure:     &failure,
+				Status:      &status,
+				TestReport:  initialisedRunTestSetValues.TestReport,
+				Path:        path,
+				DockerID:    initialisedRunTestSetValues.DockerID,
+				NoiseConfig: noiseConfig,
+			}
+			if initialisedValues.TestReportFS != nil {
+				cfg.TestReportFS = initialisedValues.TestReportFS
+			} else if initialisedValues.MongoStore != nil {
+				cfg.TestReportFS = initialisedValues.MongoTestReportFS
+			}
+			t.SimulateRequest(cfg)
+		}
+		if initialisedRunTestSetValues.LastSeenId == primitive.NilObjectID {
 			break
 		}
 
@@ -645,7 +714,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			DockerID:     initialisedValues.DockerID,
 			NoiseConfig:  noiseConfig,
 		}
-		t.SimulateRequest(cfg)
 	}
 	if len(entTcs) > 0 {
 		t.logger.Warn("These testcases have been recorded with Keploy Enterprise, may not work properly with the open-source version", zap.Strings("enterprise mocks:", entTcs))
@@ -654,15 +722,17 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
 	resultsCfg := &FetchTestResultsConfig{
-		TestReportFS:   testReportFS,
-		TestReport:     initialisedValues.TestReport,
+		TestReportFS:   initialisedValues.TestReportFS,
+		MongoReportFS:  initialisedValues.MongoTestReportFS,
+		TestReport:     initialisedRunTestSetValues.TestReport,
 		Status:         &status,
 		TestSet:        testSet,
 		Success:        &success,
 		Failure:        &failure,
-		Ctx:            ctx,
+		Ctx:            initialisedValues.Ctx,
 		TestReportPath: testReportPath,
 		Path:           path,
+		IsMongo:        cfg.IsMongoDBStore,
 	}
 	status = t.FetchTestResults(resultsCfg)
 	return status

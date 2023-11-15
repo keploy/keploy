@@ -75,6 +75,9 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if len(*passThroughPorts) == 0 {
 		*passThroughPorts = confRecord.PassThroughPorts
 	}
+	if len(*mongoUri) == 0 {
+		*mongoUri = confRecord.MongoUri
+	}
 	return nil
 }
 
@@ -138,6 +141,12 @@ func (r *Record) GetCmd() *cobra.Command {
 			if err != nil {
 				r.logger.Error("failed to read the proxy port")
 				return err
+			}
+
+			mongoUri, err := cmd.Flags().GetString("mongoUri")
+
+			if err != nil {
+				r.logger.Error("Failed to get the mongoUri flag", zap.Error((err)))
 			}
 
 			configPath, err := cmd.Flags().GetString("config-path")

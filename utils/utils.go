@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/pkg/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -72,4 +77,33 @@ func HandlePanic() {
 		log.Error(Emoji+"Recovered from:", r)
 		sentry.Flush(time.Second * 2)
 	}
+}
+
+func CheckMongoCollectionCount(mongoClient *mongo.Client, logger *zap.Logger) int {
+	mocksFilter := bson.M{"name": bson.M{"$regex": models.TestSetMocks + ".*$"}}
+	testFilter := bson.M{"name": bson.M{"$regex": models.TestSetTests + ".*$"}}
+
+	mockCollections, err := mongoClient.Database(models.Keploy).ListCollectionNames(context.Background(), mocksFilter)
+	if err != nil {
+		logger.Error("unknown to fetch mock collection", zap.Error(err))
+	}
+
+	testCollections, err := mongoClient.Database(models.Keploy).ListCollectionNames(context.Background(), testFilter)
+	if err != nil {
+		logger.Error("unknown to fetch test collection", zap.Error(err))
+	}
+
+	collectionCount := len(mockCollections)
+	if len(testCollections) > len(mockCollections) {
+		collectionCount = len(testCollections)
+	}
+	return collectionCount
+}
+
+func ExtractAfterPattern(s, pattern string) string {
+	parts := strings.Split(s, pattern)
+	if len(parts) > 1 {
+		return strings.TrimPrefix(parts[1], "-")
+	}
+	return ""
 }
