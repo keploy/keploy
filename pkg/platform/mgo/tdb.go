@@ -85,7 +85,7 @@ func (mgo *Mongo) ReadTestcase(path string, lastSeenId *primitive.ObjectID, opti
 
 	collection := mgo.MongoCollection.Database(models.Keploy).Collection(path)
 
-	pageSize := 1
+	pageSize := 10000
 	ctx := context.Background()
 
 	filter := bson.M{}
