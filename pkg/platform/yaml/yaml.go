@@ -134,7 +134,7 @@ func containsMatchingUrl(urlMethods map[string]string, urlStr string, requestMet
 		return method == string(requestMethod)
 	}
 
-	return true
+	return false
 }
 
 func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
