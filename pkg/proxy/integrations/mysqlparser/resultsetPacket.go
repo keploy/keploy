@@ -52,11 +52,11 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	}
 
 	// Parse the EOF packet after the columns
-	b = b[9:]
+	// b = b[9:]
 
 	// Parse the rows
-	fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
-	for len(b) > 5 && !bytes.Equal(b[4:], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
+	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
+	for len(b) > 5 && !bytes.Contains(b[4:], []byte{0xfe}) {
 		var row *Row
 		row, b, err = parseRow(b, columns)
 		if err != nil {
@@ -126,17 +126,16 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 		PacketLength: packetLength,
 		SequenceID:   sequenceID,
 	}
-	fmt.Println(rowHeader)
 	b = b[4:]
-	b = b[2:]
+	// b = b[2:]
 	for _, columnDef := range columnDefinitions {
 		var colValue RowColumnDefinition
 		var length int
+		dataLength := int(b[0])
 
 		// Check the column type
 		switch models.FieldType(columnDef.ColumnType) {
 		case models.FieldTypeTimestamp:
-			dataLength := int(b[0])
 			b = b[1:] // Advance the buffer to the start of the encoded timestamp data
 
 			if dataLength < 4 || len(b) < dataLength {
@@ -161,8 +160,10 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 			length = 4
 		case models.FieldTypeLongLong:
 			colValue.Type = models.FieldTypeLongLong
-			colValue.Value = int64(binary.LittleEndian.Uint64(b[:8]))
-			length = 8
+			var longLongBytes []byte = b[1 : dataLength+1]
+			colValue.Value = longLongBytes
+			length = dataLength
+			b = b[1:]
 		case models.FieldTypeFloat:
 			colValue.Type = models.FieldTypeFloat
 			colValue.Value = math.Float32frombits(binary.LittleEndian.Uint32(b[:4]))

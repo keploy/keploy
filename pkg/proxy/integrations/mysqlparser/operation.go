@@ -175,6 +175,29 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetType = "COM_CHANGE_USER"
 		packetData, err = decodeComChangeUser(data)
 		lastCommand = 0x11
+
+	case lastCommand == 0x03:
+		switch {
+		case data[0] == 0x00: // OK Packet
+			packetType = "MySQLOK"
+			packetData, err = decodeMySQLOK(data)
+			lastCommand = 0x00 // Reset the last command
+
+		case data[0] == 0xFF: // Error Packet
+			packetType = "MySQLErr"
+			packetData, err = decodeMySQLErr(data)
+			lastCommand = 0x00 // Reset the last command
+
+		case isLengthEncodedInteger(data[0]): // ResultSet Packet
+			packetType = "RESULT_SET_PACKET"
+			packetData, err = parseResultSet(data)
+			lastCommand = 0x00 // Reset the last command
+
+		default:
+			packetType = "Unknown"
+			packetData = data
+			logger.Warn("unknown packet type after COM_QUERY", zap.Int("unknownPacketTypeInt", int(data[0])))
+		}
 	case data[0] == 0x04: // Result Set Packet
 		packetType = "RESULT_SET_PACKET"
 		packetData, err = parseResultSet(data)
@@ -244,6 +267,10 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	}
 
 	return packetType, header, packetData, nil
+}
+func isLengthEncodedInteger(b byte) bool {
+	// This is a simplified check. You may need a more robust check based on MySQL protocol.
+	return b != 0x00 && b != 0xFF
 }
 
 func (p *MySQLPacket) Encode() ([]byte, error) {
