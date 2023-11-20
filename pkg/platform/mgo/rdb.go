@@ -46,7 +46,7 @@ func (fe *TestReport) SetResult(runId string, test models.TestResult) {
 func (fe *TestReport) GetResults(runId string) ([]models.TestResult, error) {
 	val, ok := fe.Tests[runId]
 	if !ok {
-		return nil, fmt.Errorf(yaml.Emoji, "found no test results for test report with id: %s", runId)
+		return nil, fmt.Errorf("%s found no test results for test report with id: %s", yaml.Emoji, runId)
 	}
 	return val, nil
 }
@@ -61,7 +61,7 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc *models.TestRe
 	doc.Name = path
 	_, err := collection.InsertOne(context.TODO(), doc)
 	if err != nil {
-		return fmt.Errorf(yaml.Emoji, "failed to create the report. error: %s", err.Error())
+		return fmt.Errorf("%s failed to create the report. error: %s", yaml.Emoji, err.Error())
 	}
 	return nil
 }

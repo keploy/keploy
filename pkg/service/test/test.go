@@ -378,6 +378,8 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 			returnVal.InitialStatus = models.TestRunStatusFailed
 			return returnVal
 		}
+	} else {
+		returnVal.TestReport.Name = cfg.TestSet
 	}
 	//if running keploy-tests along with unit tests
 	if cfg.ServeTest && cfg.TestRunChan != nil {
@@ -486,10 +488,9 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	var testResults []models.TestResult
 	var err error
 	if !cfg.IsMongo {
-		fmt.Println(cfg.TestReportFS)
 		testResults, err = cfg.TestReportFS.GetResults(cfg.TestReport.Name)
 	} else if cfg.MongoReportFS != nil {
-		testResults, err = cfg.MongoReportFS.GetResults(cfg.TestReport.Name)
+		testResults, err = cfg.MongoReportFS.GetResults(cfg.TestSet)
 	}
 	if err != nil && (*cfg.Status == models.TestRunStatusFailed || *cfg.Status == models.TestRunStatusPassed) && (*cfg.Success+*cfg.Failure == 0) {
 		t.logger.Error("failed to fetch test results", zap.Error(err))

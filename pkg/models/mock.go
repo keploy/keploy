@@ -14,40 +14,27 @@ func (m *Mock) GetKind() string {
 }
 
 type MockSpec struct {
-	Metadata map[string]string `json:"Metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	// for GenericSpec
-	GenericRequests  []GenericPayload `json:"RequestBin,omitempty"`
-	GenericResponses []GenericPayload `json:"ResponseBin,omitempty"`
-	// for HttpSpec
-	HttpReq  *HttpReq  `json:"Req,omitempty"`
-	HttpResp *HttpResp `json:"Res,omitempty"`
-	Created  int64     `json:"Created,omitempty"`
-	// for MongoSpec
-	// MongoRequestHeader  *MongoHeader    `json:"RequestHeader,omitempty"`
-	// MongoResponseHeader *MongoHeader    `json:"ResponseHeader,omitempty"`
-	// MongoRequest        interface{}     `json:"MongoRequest,omitempty"`
-	// MongoResponse       interface{}     `json:"MongoResponse,omitempty"`
-	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
-	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
-
-	PostgresRequests  []Backend  `json:"postgresRequests,omitempty"`
-	PostgresResponses []Frontend `json:"postgresResponses,omitempty"`
-
-	//for grpc
-	GRPCReq  *GrpcReq  `json:"gRPCRequest,omitempty"`
-	GRPCResp *GrpcResp `json:"grpcResponse,omitempty"`
-	//for MySql
-	MySqlRequests  []MySQLRequest  `json:"MySqlRequests,omitempty"`
-	MySqlResponses []MySQLResponse `json:"MySqlResponses,omitempty"`
-
-	ReqTimestampMock time.Time `json:"ReqTimestampMock,omitempty"`
-	ResTimestampMock time.Time `json:"ResTimestampMock,omitempty"`
+	Metadata          map[string]string `json:"Metadata,omitempty" bson:"Metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	GenericRequests   []GenericPayload  `json:"RequestBin,omitempty" bson:"RequestBin,omitempty"`
+	GenericResponses  []GenericPayload  `json:"ResponseBin,omitempty" bson:"ResponseBin,omitempty"`
+	HttpReq           *HttpReq          `json:"Req,omitempty" bson:"Req,omitempty"`
+	HttpResp          *HttpResp         `json:"Res,omitempty" bson:"Res,omitempty"`
+	Created           int64             `json:"Created,omitempty" bson:"Created,omitempty"`
+	MongoRequests     []MongoRequest    `json:"MongoRequests,omitempty" bson:"MongoRequests,omitempty"`
+	MongoResponses    []MongoResponse   `json:"MongoResponses,omitempty" bson:"MongoResponses,omitempty"`
+	PostgresRequests  []Backend         `json:"postgresRequests,omitempty" bson:"postgresRequests,omitempty"`
+	PostgresResponses []Frontend        `json:"postgresResponses,omitempty" bson:"postgresResponses,omitempty"`
+	GRPCReq           *GrpcReq          `json:"gRPCRequest,omitempty" bson:"gRPCRequest,omitempty"`
+	GRPCResp          *GrpcResp         `json:"grpcResponse,omitempty" bson:"grpcResponse,omitempty"`
+	MySqlRequests     []MySQLRequest    `json:"MySqlRequests,omitempty" bson:"MySqlRequests,omitempty"`
+	MySqlResponses    []MySQLResponse   `json:"MySqlResponses,omitempty" bson:"MySqlResponses,omitempty"`
+	ReqTimestampMock  time.Time         `json:"ReqTimestampMock,omitempty" bson:"ReqTimestampMock,omitempty"`
+	ResTimestampMock  time.Time         `json:"ResTimestampMock,omitempty" bson:"ResTimestampMock,omitempty"`
 }
 
-// OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
 type OutputBinary struct {
-	Type string `json:"type" yaml:"type"`
-	Data string `json:"data" yaml:"data"`
+	Type string `json:"type" bson:"type" yaml:"type"`
+	Data string `json:"data" bson:"data" yaml:"data"`
 }
 
 type OriginType string
@@ -58,6 +45,6 @@ const (
 )
 
 type GenericPayload struct {
-	Origin  OriginType     `json:"Origin,omitempty" yaml:"origin"`
-	Message []OutputBinary `json:"Message,omitempty" yaml:"message"`
+	Origin  OriginType     `json:"Origin,omitempty" bson:"Origin,omitempty" yaml:"origin"`
+	Message []OutputBinary `json:"Message,omitempty" bson:"Message,omitempty" yaml:"message"`
 }

@@ -2,14 +2,19 @@ package mgo
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/yaml"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	mongoClient "go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 )
 
@@ -66,7 +71,29 @@ func (mgo *Mongo) WriteTestcase(tc *models.TestCase, ctx context.Context) error 
 	if tc.Name == "" {
 		tc.Name = mgo.TcsPath
 	}
-	err := mgo.WriteTestData(mgo.TcsPath, tc.Name, tc)
+	// find noisy fields
+	m, err := yaml.FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
+	if err != nil {
+		msg := "error in flattening http response"
+		mgo.Logger.Error(msg, zap.Error(err))
+	}
+	noise := tc.Noise
+
+	noiseFieldsFound := yaml.FindNoisyFields(m, func(k string, vals []string) bool {
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+		return pkg.IsTime(strings.Join(vals, ", "))
+	})
+
+	for _, v := range noiseFieldsFound {
+		noise[v] = []string{}
+	}
+	tc.Noise = noise
+	tc.Name = fmt.Sprint("test-", *testsTotal)
+	err = mgo.WriteTestData(mgo.TcsPath, tc.Name, tc)
 	if err != nil {
 		mgo.Logger.Error("failed to write testcase mongo", zap.Error(err))
 		return err
@@ -142,8 +169,8 @@ func (mgo *Mongo) ReadTcsMocks(tc *models.TestCase, path string) ([]*models.Mock
 		tcsMocks = []*models.Mock{}
 	)
 	filter := bson.M{
-		"Spec.reqtimestampmock": bson.M{"$gt": tc.HttpReq.Timestamp},
-		"Spec.restimestampmock": bson.M{"$lt": tc.HttpResp.Timestamp},
+		"Spec.ReqTimestampMock": bson.M{"$gt": tc.HttpReq.Timestamp},
+		"Spec.ResTimestampMock": bson.M{"$lt": tc.HttpResp.Timestamp},
 	}
 
 	collection := mgo.MongoCollection.Database(models.Keploy).Collection(path)
@@ -156,7 +183,10 @@ func (mgo *Mongo) ReadTcsMocks(tc *models.TestCase, path string) ([]*models.Mock
 	if err != nil {
 		mgo.Logger.Error("failed to fetch tcs mocks mongo", zap.Error(err))
 	}
-
+	err = decodeMocks(tcsMocks, mgo.Logger)
+	if err != nil {
+		mgo.Logger.Error("failed to decode tcs mocks mongo", zap.Error(err))
+	}
 	return tcsMocks, nil
 }
 
@@ -169,7 +199,7 @@ func (mgo *Mongo) ReadConfigMocks(path string) ([]*models.Mock, error) {
 		path = mgo.MockPath
 	}
 
-	filter := bson.M{"Spec.metadata.type": "config"}
+	filter := bson.M{"Spec.Metadata.type": "config"}
 	collection := mgo.MongoCollection.Database(models.Keploy).Collection(path)
 	cursor, err := collection.Find(context.TODO(), filter)
 	if err != nil {
@@ -180,6 +210,10 @@ func (mgo *Mongo) ReadConfigMocks(path string) ([]*models.Mock, error) {
 	if err != nil {
 		mgo.Logger.Error("failed to fetch config mocks mongo", zap.Error(err))
 	}
+	err = decodeMocks(configMocks, mgo.Logger)
+	if err != nil {
+		mgo.Logger.Error("failed to decode config mocks mongo", zap.Error(err))
+	}
 	return configMocks, nil
 }
 
@@ -189,4 +223,289 @@ func (mgo *Mongo) UpdateTest(mock *models.Mock, ctx context.Context) error {
 
 func (mgo *Mongo) DeleteTest(mock *models.Mock, ctx context.Context) error {
 	return nil
+}
+
+func decodeMocks(mockSpecs []*models.Mock, logger *zap.Logger) error {
+	for _, m := range mockSpecs {
+		switch m.Kind {
+		case models.Mongo:
+			mockSpec, err := decodeMongoMessage(&m.Spec, logger)
+			if err != nil {
+				return err
+			}
+			m.Spec = *mockSpec
+		case models.SQL:
+			mockSpec, err := decodeMySqlMessage(&m.Spec, logger)
+			if err != nil {
+				return err
+			}
+			m.Spec = *mockSpec
+		default:
+			continue
+		}
+	}
+
+	return nil
+}
+
+func decodeMySqlMessage(mockSpec *models.MockSpec, logger *zap.Logger) (*models.MockSpec, error) {
+	requests := []models.MySQLRequest{}
+	for _, v := range mockSpec.MySqlRequests {
+		req := models.MySQLRequest{
+			Header:    v.Header,
+			ReadDelay: v.ReadDelay,
+		}
+		bsonData, err := bson.Marshal(v.Message)
+		if err != nil {
+			logger.Error(yaml.Emoji+"failed to marshal mongo request document into decodeMySqlMessage ", zap.Error(err))
+			return nil, err
+		}
+
+		switch v.Header.PacketType {
+		case "HANDSHAKE_RESPONSE":
+			var requestMessage *models.MySQLHandshakeResponse
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLHandshakeResponse ", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "MySQLQuery":
+			var requestMessage *models.MySQLQueryPacket
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLQueryPacket", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "COM_STMT_PREPARE":
+			var requestMessage *models.MySQLComStmtPreparePacket
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLComStmtPreparePacket", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "COM_STMT_EXECUTE":
+			var requestMessage *models.MySQLComStmtExecute
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLComStmtExecute", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "COM_STMT_SEND_LONG_DATA":
+			var requestMessage *models.MySQLCOM_STMT_SEND_LONG_DATA
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLCOM_STMT_SEND_LONG_DATA", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "COM_STMT_RESET":
+			var requestMessage *models.MySQLCOM_STMT_RESET
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLCOM_STMT_RESET", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "COM_STMT_FETCH":
+			var requestMessage *models.MySQLComStmtFetchPacket
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLComStmtFetchPacket", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "COM_STMT_CLOSE":
+			var requestMessage *models.MySQLComStmtClosePacket
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLComStmtClosePacket", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "AUTH_SWITCH_RESPONSE":
+			var requestMessage *models.AuthSwitchRequestPacket
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLComStmtClosePacket", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case "COM_CHANGE_USER":
+			var requestMessage *models.MySQLComChangeUserPacket
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLComChangeUserPacket", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		}
+		requests = append(requests, req)
+	}
+	mockSpec.MySqlRequests = requests
+
+	responses := []models.MySQLResponse{}
+	for _, v := range mockSpec.MySqlResponses {
+		bsonData, err := bson.Marshal(v.Message)
+		if err != nil {
+			logger.Error(yaml.Emoji+"failed to marshal mongo response document into decodeMySqlMessage ", zap.Error(err))
+			return nil, err
+		}
+		resp := models.MySQLResponse{
+			Header:    v.Header,
+			ReadDelay: v.ReadDelay,
+		}
+		// decode the yaml document to mysql structs
+		switch v.Header.PacketType {
+		case "HANDSHAKE_RESPONSE_OK":
+			var responseMessage *models.MySQLHandshakeResponseOk
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLHandshakeResponseOk ", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case "MySQLHandshakeV10":
+			var responseMessage *models.MySQLHandshakeV10Packet
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLHandshakeV10Packet", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case "MySQLOK":
+			var responseMessage *models.MySQLOKPacket
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLOKPacket ", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case "COM_STMT_PREPARE_OK":
+			var responseMessage *models.MySQLStmtPrepareOk
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLStmtPrepareOk ", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case "RESULT_SET_PACKET":
+			var responseMessage *models.MySQLResultSet
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLResultSet ", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case "AUTH_SWITCH_REQUEST":
+			var responseMessage *models.AuthSwitchRequestPacket
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLResultSet ", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case "MySQLErr":
+			var responseMessage *models.MySQLERRPacket
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error(yaml.Emoji+"failed to unmarshal mongo document into MySQLERRPacket ", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		}
+		responses = append(responses, resp)
+	}
+	mockSpec.MySqlResponses = responses
+	return mockSpec, nil
+}
+
+func decodeMongoMessage(mongoSpec *models.MockSpec, logger *zap.Logger) (*models.MockSpec, error) {
+	requests := []models.MongoRequest{}
+	for _, v := range mongoSpec.MongoRequests {
+		req := models.MongoRequest{
+			Header:    v.Header,
+			ReadDelay: v.ReadDelay,
+		}
+		bsonData, err := bson.Marshal(v.Message)
+		if err != nil {
+			logger.Error(yaml.Emoji+"failed to marshal mongo document into decodeMySqlMessage ", zap.Error(err))
+			return nil, err
+		}
+		switch v.Header.Opcode {
+		case wiremessage.OpMsg:
+			var requestMessage *models.MongoOpMessage
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error("failed to unmarshal mongo document into mongo OpMsg request wiremessage", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case wiremessage.OpReply:
+			var requestMessage *models.MongoOpReply
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error("failed to unmarshal mongo document into mongo OpReply wiremessage", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		case wiremessage.OpQuery:
+			var requestMessage *models.MongoOpQuery
+			err = bson.Unmarshal(bsonData, &requestMessage)
+			if err != nil {
+				logger.Error("failed to unmarshal mongo document into mongo OpQuery wiremessage", zap.Error(err))
+				return nil, err
+			}
+			req.Message = requestMessage
+		default:
+		}
+		requests = append(requests, req)
+	}
+	mongoSpec.MongoRequests = requests
+
+	responses := []models.MongoResponse{}
+	for _, v := range mongoSpec.MongoResponses {
+		resp := models.MongoResponse{
+			Header:    v.Header,
+			ReadDelay: v.ReadDelay,
+		}
+		bsonData, err := bson.Marshal(v.Message)
+		if err != nil {
+			logger.Error(yaml.Emoji+"failed to marshal mongo document into decodeMySqlMessage ", zap.Error(err))
+			return nil, err
+		}
+		switch v.Header.Opcode {
+		case wiremessage.OpMsg:
+			var responseMessage *models.MongoOpMessage
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error("failed to unmarshal mongo document into mongo OpMsg response wiremessage", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case wiremessage.OpReply:
+			var responseMessage *models.MongoOpReply
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error("failed to unmarshal mongo document into mongo OpMsg response wiremessage", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		case wiremessage.OpQuery:
+			var responseMessage *models.MongoOpQuery
+			err = bson.Unmarshal(bsonData, &responseMessage)
+			if err != nil {
+				logger.Error("failed to unmarshal mongo document into mongo OpMsg response wiremessage", zap.Error(err))
+				return nil, err
+			}
+			resp.Message = responseMessage
+		default:
+		}
+		responses = append(responses, resp)
+	}
+	mongoSpec.MongoResponses = responses
+	return mongoSpec, nil
 }
