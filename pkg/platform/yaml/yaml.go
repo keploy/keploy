@@ -122,7 +122,7 @@ func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
 	return nil
 }
 
-func containsMatchingUrl(urlMethods map[string]string, urlStr string, requestMethod models.Method) bool {
+func containsMatchingUrl(urlMethods map[string][]string, urlStr string, requestMethod models.Method) bool {
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
 		return false
@@ -130,8 +130,16 @@ func containsMatchingUrl(urlMethods map[string]string, urlStr string, requestMet
 
 	// Check for URL path and method
 	path := parsedURL.Path
-	if method, exists := urlMethods[path]; exists {
-		return method == string(requestMethod)
+	if methods, exists := urlMethods[path]; exists {
+		// Loop through the methods for this path
+		for _, method := range methods {
+			// If the request method matches one of the allowed methods, return true
+			if string(method) == string(requestMethod) {
+				return true
+			}
+		}
+		// If the request method is not in the allowed methods, return false
+		return false
 	}
 
 	return false
