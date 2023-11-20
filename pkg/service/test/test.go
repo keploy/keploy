@@ -282,7 +282,6 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
 	cfg.LoadedHooks.SetConfigMocks(configMocks)
-	cfg.LoadedHooks.SetTcsMocks(returnVal.TcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
 
@@ -324,6 +323,8 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 			returnVal.InitialStatus = models.TestRunStatusFailed
 			return returnVal
 		}
+	} else {
+		returnVal.TestReport.Name = cfg.TestSet
 	}
 	//if running keploy-tests along with unit tests
 	if cfg.ServeTest && cfg.TestRunChan != nil {
@@ -427,10 +428,9 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	var testResults []models.TestResult
 	var err error
 	if !cfg.IsMongo {
-		fmt.Println(cfg.TestReportFS)
 		testResults, err = cfg.TestReportFS.GetResults(cfg.TestReport.Name)
 	} else if cfg.MongoReportFS != nil {
-		testResults, err = cfg.MongoReportFS.GetResults(cfg.TestReport.Name)
+		testResults, err = cfg.MongoReportFS.GetResults(cfg.TestSet)
 	}
 	if err != nil && (*cfg.Status == models.TestRunStatusFailed || *cfg.Status == models.TestRunStatusPassed) && (*cfg.Success+*cfg.Failure == 0) {
 		t.logger.Error("failed to fetch test results", zap.Error(err))
@@ -537,7 +537,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				result := utils.ExtractAfterPattern(cfg.TestSet, models.TestSetTests)
 				filteredTcsMocks, _ = cfg.TestStore.ReadTcsMocks(tc, models.TestSetMocks+"-"+result)
 			} else {
-				filteredTcsMocks, _ = cfg.TestStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet, "tests"))
+				filteredTcsMocks, _ = cfg.TestStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
 			}
 			initialisedValues.LoadedHooks.SetTcsMocks(filteredTcsMocks)
 
