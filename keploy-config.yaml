@@ -9,7 +9,7 @@ record:
   delay: 5
   passThroughPorts: []
   filters: {
-    header: [],
+    ReqHeader: [],
     urlMethods: {}
   }
 test:

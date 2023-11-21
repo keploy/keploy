@@ -162,7 +162,7 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters 
 	if filters != nil {
 		if containsMatchingUrl(filters.URLMethods, tc.HttpReq.URL, tc.HttpReq.Method) {
 			bypassTestCase = true
-		} else if hasBannedHeaders(tc.HttpReq.Header, filters.Header) {
+		} else if hasBannedHeaders(tc.HttpReq.Header, filters.ReqHeader) {
 			bypassTestCase = true
 		}
 	}
