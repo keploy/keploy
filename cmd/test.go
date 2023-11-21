@@ -301,7 +301,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
 	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run")
-	
+
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
