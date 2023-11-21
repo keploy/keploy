@@ -11,7 +11,7 @@ type HttpSpec struct {
 	Request          models.HttpReq         `json:"req" yaml:"req"`
 	Response         models.HttpResp        `json:"resp" yaml:"resp"`
 	Objects          []*models.OutputBinary `json:"objects" yaml:"objects"`
-	Assertions       map[string]map[string][]string   `json:"assertions" yaml:"assertions,omitempty"`
+	Assertions       map[string]interface{} `json:"assertions" yaml:"assertions,omitempty"`
 	Created          int64                  `json:"created" yaml:"created,omitempty"`
 	ReqTimestampMock time.Time              `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
 	ResTimestampMock time.Time              `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`

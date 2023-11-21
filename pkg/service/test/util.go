@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,9 +11,95 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
+
+type InitialiseRunTestSetReturn struct {
+	Tcs           []*models.TestCase
+	ErrChan       chan error
+	TestReport    *models.TestReport
+	DockerID      bool
+	UserIP        string
+	InitialStatus models.TestRunStatus
+	TcsMocks      []*models.Mock
+}
+
+type InitialiseTestReturn struct {
+	SessionsMap              map[string]string
+	TestReportFS             *yaml.TestReport
+	Ctx                      context.Context
+	AbortStopHooksForcefully bool
+	ProxySet                 *proxy.ProxySet
+	ExitCmd                  chan bool
+	YamlStore                platform.TestCaseDB
+	LoadedHooks              *hooks.Hook
+	AbortStopHooksInterrupt  chan bool
+}
+
+type TestConfig struct {
+	Path             string
+	Proxyport        uint32
+	TestReportPath   string
+	AppCmd           string
+	Testsets         *[]string
+	AppContainer     string
+	AppNetwork       string
+	Delay            uint64
+	PassThorughPorts []uint
+	ApiTimeout       uint64
+}
+
+type RunTestSetConfig struct {
+	TestSet        string
+	Path           string
+	TestReportPath string
+	AppCmd         string
+	AppContainer   string
+	AppNetwork     string
+	Delay          uint64
+	Pid            uint32
+	YamlStore      platform.TestCaseDB
+	LoadedHooks    *hooks.Hook
+	TestReportFS   yaml.TestReportFS
+	TestRunChan    chan string
+	ApiTimeout     uint64
+	Ctx            context.Context
+	ServeTest      bool
+}
+
+type SimulateRequestConfig struct {
+	Tc           *models.TestCase
+	LoadedHooks  *hooks.Hook
+	AppCmd       string
+	UserIP       string
+	TestSet      string
+	ApiTimeout   uint64
+	Success      *int
+	Failure      *int
+	Status       *models.TestRunStatus
+	TestReportFS yaml.TestReportFS
+	TestReport   *models.TestReport
+	Path         string
+	DockerID     bool
+	NoiseConfig  models.GlobalNoise
+}
+
+type FetchTestResultsConfig struct {
+	TestReportFS   yaml.TestReportFS
+	TestReport     *models.TestReport
+	Status         *models.TestRunStatus
+	TestSet        string
+	Success        *int
+	Failure        *int
+	Ctx            context.Context
+	TestReportPath string
+	Path           string
+}
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
 	m := map[string][]string{}
@@ -78,7 +165,6 @@ func Flatten(j interface{}) map[string][]string {
 	return o
 }
 
-
 func AddHttpBodyToMap(body string, m map[string][]string) error {
 	// add body
 	if json.Valid([]byte(body)) {
@@ -103,7 +189,7 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 	return nil
 }
 
-func JoinNoises(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) models.GlobalNoise {
+func LeftJoinNoise(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) models.GlobalNoise {
 	noise := globalNoise
 	for field, regexArr := range tsNoise["body"] {
 		noise["body"][field] = regexArr
@@ -287,7 +373,7 @@ func Contains(elems []string, v string) bool {
 }
 
 // Filter the mocks based on req and res timestamp of test
-func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
+func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
 	filteredMocks := make([]*models.Mock, 0)
 
 	if tc.HttpReq.Timestamp == (time.Time{}) {
@@ -299,7 +385,6 @@ func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 		logger.Warn("response timestamp is missing for " + tc.Name)
 		return m
 	}
-
 	for _, mock := range m {
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
@@ -313,6 +398,5 @@ func filterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 			filteredMocks = append(filteredMocks, mock)
 		}
 	}
-
 	return filteredMocks
 }

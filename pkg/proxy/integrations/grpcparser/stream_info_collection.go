@@ -106,11 +106,10 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32, ctx context.Context) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
-
 	grpcReq := sic.StreamInfo[streamID].GrpcReq
 	grpcResp := sic.StreamInfo[streamID].GrpcResp
 	sic.hook.AppendMocks(&models.Mock{
-		Version: models.V1Beta2,
+		Version: models.GetVersion(),
 		Name:    "mocks",
 		Kind:    models.GRPC_EXPORT,
 		Spec: models.MockSpec{
