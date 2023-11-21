@@ -77,7 +77,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
+		if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 			return
 		}
 	}

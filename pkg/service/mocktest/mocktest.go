@@ -46,11 +46,9 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	ctx := context.Background()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
-	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}
-
-
 
 	// start the proxy
 	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)

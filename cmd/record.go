@@ -38,6 +38,8 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 	return &doc.Record, nil
 }
 
+var filters = *&models.Filters{}
+
 func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
@@ -50,6 +52,7 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if len(*path) == 0 {
 		*path = confRecord.Path
 	}
+	filters = confRecord.Filters
 	if *proxyPort == 0 {
 		*proxyPort = confRecord.ProxyPort
 	}
@@ -147,7 +150,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				fmt.Println("Error: missing required -c flag or appCmd in config file")
 				if isDockerCmd {
 					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				}else {
+				} else {
 					fmt.Println("Example usage:\n", cmd.Example)
 				}
 				return errors.New("missing required -c flag or appCmd in config file")
@@ -190,7 +193,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters)
 			return nil
 		},
 	}
