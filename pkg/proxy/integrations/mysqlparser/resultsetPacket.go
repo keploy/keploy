@@ -51,22 +51,29 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 		columns = append(columns, columnPacket)
 	}
 
-	// Parse the EOF packet after the columns
-	// b = b[9:]
+	// Check for EOF packet after columns
+	if len(b) > 4 && bytes.Equal(b[:5], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
+		b = b[9:] // Skip the EOF packet
+		if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
+			b = b[2:] // Skip padding
+		}
+	}
 
 	// Parse the rows
 	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
-	for len(b) > 5 && !bytes.Contains(b[4:], []byte{0xfe}) {
+	for len(b) > 5 {
 		var row *Row
 		row, b, err = parseRow(b, columns)
 		if err != nil {
 			return nil, err
 		}
-		rows = append(rows, row)
+		if row != nil {
+			rows = append(rows, row)
+		}
 	}
 
 	// Remove EOF packet of the rows
-	b = b[9:]
+	// b = b[9:]
 
 	resultSet := &ResultSet{
 		Columns: columns,
@@ -119,7 +126,13 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 
 func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, error) {
 	row := &Row{}
-
+	if bytes.Equal(b[4:9], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
+		b = b[9:]
+		if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
+			b = b[2:] // Skip padding
+		}
+		return nil, nil, nil
+	}
 	packetLength := int(b[0])
 	sequenceID := b[3]
 	rowHeader := RowHeader{
@@ -279,6 +292,13 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 			buf.WriteByte(byte(t.Hour()))   // Hour
 			buf.WriteByte(byte(t.Minute())) // Minute
 			buf.WriteByte(byte(t.Second())) // Second
+		case models.FieldTypeLongLong:
+			longLongBytes, ok := column.Value.([]byte)
+			if !ok {
+				return nil, errors.New("invalid []byte value for FieldTypeLongLong")
+			}
+			buf.Write(longLongBytes)
+
 		default:
 			strValue, ok := value.(string)
 			if !ok {
@@ -292,4 +312,22 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 	}
 
 	return buf.Bytes(), nil
+}
+
+func encodeInt32(val int32) []byte {
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, uint32(val))
+	return buf
+}
+
+func encodeFloat32(val float32) []byte {
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, math.Float32bits(val))
+	return buf
+}
+
+func encodeFloat64(val float64) []byte {
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, math.Float64bits(val))
+	return buf
 }

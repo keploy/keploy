@@ -134,7 +134,7 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn) (string, MySQLPacketHeader, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
-
+	fmt.Println("\n", data, header)
 	var packetData interface{}
 	var packetType string
 	var err error
@@ -265,7 +265,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	if err != nil {
 		return "", MySQLPacketHeader{}, nil, err
 	}
-
+	fmt.Println(packetType+"\n", data, header)
 	return packetType, header, packetData, nil
 }
 func isLengthEncodedInteger(b byte) bool {
