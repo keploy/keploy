@@ -19,39 +19,37 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type recorder struct {
-	logger *zap.Logger
+	Logger *zap.Logger
 }
 
 func NewRecorder(logger *zap.Logger) Recorder {
 	return &recorder{
-		logger: logger,
+		Logger: logger,
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint, filters *models.Filters) {
 
 	var ps *proxy.ProxySet
-
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	models.SetMode(models.MODE_RECORD)
 
 	teleFS := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, teleFS, r.logger, "", nil)
+	tele := telemetry.NewTelemetry(true, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
 
-	dirName, err := yaml.NewSessionIndex(path, r.logger)
+	dirName, err := yaml.NewSessionIndex(path, r.Logger)
 	if err != nil {
-		r.logger.Error("Failed to create the session index file", zap.Error(err))
+		r.Logger.Error("Failed to create the session index file", zap.Error(err))
 		return
 	}
 
-	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.logger, tele)
+	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(ys, routineId, r.logger)
-
+	loadedHooks := hooks.NewHook(ys, routineId, r.Logger)
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
@@ -66,7 +64,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx, filters); err != nil {
 			return
 		}
 	}
@@ -77,7 +75,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// start the BootProxy
-		ps = proxy.BootProxy(r.logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
+		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
 	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
@@ -103,15 +101,15 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
-					r.logger.Info("keploy terminated user application")
+					r.Logger.Info("keploy terminated user application")
 					return
 				case hooks.ErrCommandError:
 				case hooks.ErrUnExpected:
-					r.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
+					r.Logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
 				case hooks.ErrDockerError:
 					stopApplication = true
 				default:
-					r.logger.Error("unknown error recieved from application", zap.Error(err))
+					r.Logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 			}
 			if !abortStopHooksForcefully {
