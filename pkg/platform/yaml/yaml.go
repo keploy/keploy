@@ -12,11 +12,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -32,7 +33,7 @@ type Yaml struct {
 	tele     *telemetry.Telemetry
 }
 
-func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) platform.TestCaseDB {
+func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) interface{} {
 	return &Yaml{
 		TcsPath:  tcsPath,
 		MockPath: mockPath,
@@ -83,8 +84,9 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 }
 
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
-func (ys *Yaml) Write(path, fileName string, doc NetworkTrafficDoc) error {
+func (ys *Yaml) Write(path, fileName string, docRead interface{}) error {
 	//
+	doc, _ := docRead.(NetworkTrafficDoc)
 	isFileEmpty, err := util.CreateYamlFile(path, fileName, ys.Logger)
 	if err != nil {
 		return err
@@ -156,8 +158,25 @@ func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 	return false
 }
 
+// func (ys *Yaml) WriteTestcase(tcRead interface{}, ctx context.Context) error {
+// 	tc, _ := tcRead.(*models.TestCase)
+// 	ys.tele.RecordedTestAndMocks()
+// 	testsTotal, ok := ctx.Value("testsTotal").(*int)
+// 	if !ok {
+// 		ys.Logger.Debug("failed to get testsTotal from context")
+// 	} else {
+// 		*testsTotal++
+
 // func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
-func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters *models.Filters) error {
+func (ys *Yaml) WriteTestcase(tcRead interface{}, ctx context.Context, filtersRead interface{}) error {
+	tc, ok := tcRead.(*models.TestCase)
+	if !ok {
+		return fmt.Errorf(Emoji, "failed to read testcase in WriteTestcase.")
+	}
+	filters, ok := filtersRead.(*models.Filters)
+	if !ok {
+		return fmt.Errorf(Emoji, "failed to read testcase in filter.")
+	}
 	var bypassTestCase = false
 	if filters != nil {
 		if containsMatchingUrl(filters.URLMethods, tc.HttpReq.URL, tc.HttpReq.Method) {
@@ -210,7 +229,7 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters 
 	return nil
 }
 
-func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCase, error) {
+func (ys *Yaml) ReadTestcase(path string, lastSeenId *primitive.ObjectID, options interface{}) ([]interface{}, error) {
 
 	if path == "" {
 		path = ys.TcsPath
@@ -226,7 +245,11 @@ func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCa
 			suitName = dirNames[len(dirNames)-2]
 		}
 		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", suitName))
-		return tcs, nil
+		tcsRead := make([]interface{}, len(tcs))
+		for i, tc := range tcs {
+			tcsRead[i] = tc
+		}
+		return tcsRead, nil
 	}
 
 	dir, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
@@ -263,7 +286,11 @@ func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCa
 	sort.Slice(tcs, func(i, j int) bool {
 		return tcs[i].Created < tcs[j].Created
 	})
-	return tcs, nil
+	tcsRead := make([]interface{}, len(tcs))
+	for i, tc := range tcs {
+		tcsRead[i] = tc
+	}
+	return tcsRead, nil
 }
 
 func read(path, name string) ([]*NetworkTrafficDoc, error) {
@@ -288,7 +315,8 @@ func read(path, name string) ([]*NetworkTrafficDoc, error) {
 	return yamlDocs, nil
 }
 
-func (ys *Yaml) WriteMock(mock *models.Mock, ctx context.Context) error {
+func (ys *Yaml) WriteMock(mockRead interface{}, ctx context.Context) error {
+	mock := mockRead.(*models.Mock)
 	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
 	if !ok {
 		ys.Logger.Debug("failed to get mocksTotal from context")
@@ -318,10 +346,10 @@ func (ys *Yaml) WriteMock(mock *models.Mock, ctx context.Context) error {
 	return nil
 }
 
-func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
+func (ys *Yaml) ReadTcsMocks(tcRead interface{}, path string) ([]interface{}, error) {
+	tc, _ := tcRead.(*models.TestCase)
 	var (
-		configMocks = []*models.Mock{}
-		tcsMocks    = []*models.Mock{}
+		tcsMocks = make([]interface{}, 0)
 	)
 
 	if path == "" {
@@ -335,7 +363,7 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 
 	mockPath, err := util.ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
@@ -343,23 +371,108 @@ func (ys *Yaml) ReadMocks(path string) ([]*models.Mock, []*models.Mock, error) {
 		yamls, err := read(path, mockName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
-			return nil, nil, err
+			return nil, err
 		}
 		mocks, err := decodeMocks(yamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
-			return nil, nil, err
+			return nil, err
+		}
+
+		for _, mock := range mocks {
+			if mock.Spec.Metadata["type"] != "config" {
+				tcsMocks = append(tcsMocks, mock)
+			}
+		}
+	}
+	filteredMocks := make([]interface{}, 0)
+
+	if tc.HttpReq.Timestamp == (time.Time{}) {
+		ys.Logger.Warn("request timestamp is missing for " + tc.Name)
+		return tcsMocks, nil
+	}
+
+	if tc.HttpResp.Timestamp == (time.Time{}) {
+		ys.Logger.Warn("response timestamp is missing for " + tc.Name)
+		return tcsMocks, nil
+	}
+	var entMocks, nonKeployMocks []string
+	for _, readMock := range tcsMocks {
+		mock := readMock.(*models.Mock)
+		if mock.Version == "api.keploy-enterprise.io/v1beta1" {
+			entMocks = append(entMocks, mock.Name)
+		} else if mock.Version != "api.keploy.io/v1beta1" {
+			nonKeployMocks = append(nonKeployMocks, mock.Name)
+		}
+		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
+			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
+			ys.Logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
+			filteredMocks = append(filteredMocks, mock)
+			continue
+		}
+
+		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
+		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
+			filteredMocks = append(filteredMocks, mock)
+		}
+	}
+	if len(entMocks) > 0 {
+		ys.Logger.Warn("These mocks have been recorded with Keploy Enterprise, may not work properly with the open-source version", zap.Strings("enterprise mocks:", entMocks))
+	}
+	if len(nonKeployMocks) > 0 {
+		ys.Logger.Warn("These mocks have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployMocks))
+	}
+
+	return filteredMocks, nil
+
+}
+
+func (ys *Yaml) ReadConfigMocks(path string) ([]interface{}, error) {
+	var (
+		configMocks = make([]interface{}, 0)
+	)
+
+	if path == "" {
+		path = ys.MockPath
+	}
+
+	mockName := "mocks"
+	if ys.MockName != "" {
+		mockName = ys.MockName
+	}
+
+	mockPath, err := util.ValidatePath(path + "/" + mockName + ".yaml")
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := os.Stat(mockPath); err == nil {
+
+		yamls, err := read(path, mockName)
+		if err != nil {
+			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			return nil, err
+		}
+		mocks, err := decodeMocks(yamls, ys.Logger)
+		if err != nil {
+			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			return nil, err
 		}
 
 		for _, mock := range mocks {
 			if mock.Spec.Metadata["type"] == "config" {
 				configMocks = append(configMocks, mock)
-			} else {
-				tcsMocks = append(tcsMocks, mock)
 			}
 		}
 	}
 
-	return configMocks, tcsMocks, nil
+	return configMocks, nil
 
+}
+func (ys *Yaml) UpdateTest(mock *models.Mock, ctx context.Context) error {
+	return nil
+}
+
+func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
+	return nil
 }

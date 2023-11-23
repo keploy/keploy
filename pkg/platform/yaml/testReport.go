@@ -14,14 +14,14 @@ import (
 )
 
 type TestReport struct {
-	tests  map[string][]models.TestResult
+	tests  map[string][]interface{}
 	m      sync.Mutex
 	Logger *zap.Logger
 }
 
 func NewTestReportFS(logger *zap.Logger) *TestReport {
 	return &TestReport{
-		tests:  map[string][]models.TestResult{},
+		tests:  make(map[string][]interface{}), // Correctly initialize the map
 		m:      sync.Mutex{},
 		Logger: logger,
 	}
@@ -35,22 +35,30 @@ func (fe *TestReport) Unlock() {
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) SetResult(runId string, test models.TestResult) {
+func (fe *TestReport) SetResult(runId string, test interface{}) {
+	fe.m.Lock()
 	tests := fe.tests[runId]
 	tests = append(tests, test)
 	fe.tests[runId] = tests
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) GetResults(runId string) ([]models.TestResult, error) {
-	val, ok := fe.tests[runId]
+func (fe *TestReport) GetResults(runId string) ([]interface{}, error) {
+	testResults, ok := fe.tests[runId]
 	if !ok {
-		return nil, fmt.Errorf(Emoji, "found no test results for test report with id: %v", runId)
+		return nil, fmt.Errorf("%s found no test results for test report with id: %s", Emoji, runId)
 	}
+
+	// Assuming testResults is of type []interface{} or can be converted to []interface{}
+	val := make([]interface{}, len(testResults))
+	for i, result := range testResults {
+		val[i] = result
+	}
+
 	return val, nil
 }
 
-func (fe *TestReport) Read(ctx context.Context, path, name string) (models.TestReport, error) {
+func (fe *TestReport) Read(ctx context.Context, path, name string) (interface{}, error) {
 
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -66,17 +74,20 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (models.TestR
 	return doc, nil
 }
 
-func (fe *TestReport) Write(ctx context.Context, path string, doc *models.TestReport) error {
-
-	if doc.Name == "" {
+func (fe *TestReport) Write(ctx context.Context, path string, doc interface{}) error {
+	readDock, ok := doc.(*models.TestReport)
+	if !ok {
+		return fmt.Errorf(Emoji, "failed to read test report in yaml file.")
+	}
+	if readDock.Name == "" {
 		lastIndex, err := findLastIndex(path, fe.Logger)
 		if err != nil {
 			return err
 		}
-		doc.Name = fmt.Sprintf("report-%v", lastIndex)
+		readDock.Name = fmt.Sprintf("report-%v", lastIndex)
 	}
 
-	_, err := util.CreateYamlFile(path, doc.Name, fe.Logger)
+	_, err := util.CreateYamlFile(path, readDock.Name, fe.Logger)
 	if err != nil {
 		return err
 	}
@@ -88,7 +99,7 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc *models.TestRe
 	}
 	data = append(data, d...)
 
-	err = os.WriteFile(filepath.Join(path, doc.Name+".yaml"), data, os.ModePerm)
+	err = os.WriteFile(filepath.Join(path, readDock.Name+".yaml"), data, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf(Emoji, "failed to write test report in yaml file. error: %s", err.Error())
 	}

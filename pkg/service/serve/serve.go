@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -60,8 +61,10 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
-	ys := yaml.NewYamlStore("", "", "", "", s.logger, tele)
-
+	ys, ok := yaml.NewYamlStore("", "", "", "", s.logger, tele).(platform.TestCaseDB)
+	if !ok {
+		return
+	}
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)

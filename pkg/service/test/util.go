@@ -65,7 +65,7 @@ type RunTestSetConfig struct {
 	Pid            uint32
 	YamlStore      platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
@@ -82,7 +82,7 @@ type SimulateRequestConfig struct {
 	Success      *int
 	Failure      *int
 	Status       *models.TestRunStatus
-	TestReportFS yaml.TestReportFS
+	TestReportFS platform.TestReportDB
 	TestReport   *models.TestReport
 	Path         string
 	DockerID     bool
@@ -90,7 +90,7 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestReport     *models.TestReport
 	Status         *models.TestRunStatus
 	TestSet        string
@@ -201,13 +201,13 @@ func LeftJoinNoise(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) m
 }
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
-    for _, pattern := range regexArray {
-        re := regexp.MustCompile(pattern)
-        if re.MatchString(str) {
-            return true, pattern
-        }
-    }
-    return false, ""
+	for _, pattern := range regexArray {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(str) {
+			return true, pattern
+		}
+	}
+	return false, ""
 }
 
 func MapToArray(mp map[string][]string) []string {
