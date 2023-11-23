@@ -142,7 +142,6 @@ func (r *Record) GetCmd() *cobra.Command {
 					r.logger.Info("continuing without configuration file because file not found")
 				} else {
 					r.logger.Error("", zap.Error(err))
-					return err
 				}
 			}
 
