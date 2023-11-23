@@ -82,8 +82,14 @@ type MySQLStmtPrepareOk struct {
 }
 
 type MySQLResultSet struct {
-	Columns []*ColumnDefinition `yaml:"columns"`
-	Rows    []*Row              `yaml:"rows"`
+	Columns             []*ColumnDefinition `yaml:"columns"`
+	Rows                []*Row              `yaml:"rows"`
+	EOFPresent          bool                `yaml:"eofPresent"`
+	PaddingPresent      bool                `yaml:"paddingPresent"`
+	EOFPresentFinal     bool                `yaml:"eofPresentFinal"`
+	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
+	OptionalPadding     bool                `yaml:"optionalPadding"`
+	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
 }
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`

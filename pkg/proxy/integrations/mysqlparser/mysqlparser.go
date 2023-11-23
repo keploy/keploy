@@ -448,7 +448,7 @@ var (
 	mockResponseRead = 0
 )
 
-func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
+func ndecodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
 	doHandshakeAgain := true
 	configResponseRead := 0
@@ -554,7 +554,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		firstLoop = false
 	}
 }
-func ndecodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
+func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
 	doHandshakeAgain := true
 	configResponseRead := 0

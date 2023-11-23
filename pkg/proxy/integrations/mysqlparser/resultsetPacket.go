@@ -13,10 +13,15 @@ import (
 )
 
 type ResultSet struct {
-	Columns []*ColumnDefinition `yaml:"columns"`
-	Rows    []*Row              `yaml:"rows"`
+	Columns             []*ColumnDefinition `yaml:"columns"`
+	Rows                []*Row              `yaml:"rows"`
+	EOFPresent          bool                `yaml:"eofPresent"`
+	PaddingPresent      bool                `yaml:"paddingPresent"`
+	EOFPresentFinal     bool                `yaml:"eofPresentFinal"`
+	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
+	OptionalPadding     bool                `yaml:"optionalPadding"`
+	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
 }
-
 type Row struct {
 	Header  RowHeader             `yaml:"header"`
 	Columns []RowColumnDefinition `yaml:"row_column_definition"`
@@ -34,9 +39,9 @@ type RowHeader struct {
 func parseResultSet(b []byte) (*ResultSet, error) {
 	columns := make([]*ColumnDefinition, 0)
 	rows := make([]*Row, 0)
-
 	var err error
-
+	var eofPresent, paddingPresent, eofFinal, paddingFinal, optionalPadding bool
+	var optionalEOFBytes []byte
 	// Parse the column count packet
 	columnCount, _, n := readLengthEncodedInteger(b)
 	b = b[n:]
@@ -52,9 +57,11 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	}
 
 	// Check for EOF packet after columns
-	if len(b) > 4 && bytes.Equal(b[:5], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
+	if len(b) > 4 && bytes.Equal(b[4:9], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
+		eofPresent = true
 		b = b[9:] // Skip the EOF packet
 		if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
+			paddingPresent = true
 			b = b[2:] // Skip padding
 		}
 	}
@@ -63,7 +70,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
 	for len(b) > 5 {
 		var row *Row
-		row, b, err = parseRow(b, columns)
+		row, b, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, err = parseRow(b, columns)
 		if err != nil {
 			return nil, err
 		}
@@ -76,8 +83,14 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// b = b[9:]
 
 	resultSet := &ResultSet{
-		Columns: columns,
-		Rows:    rows,
+		Columns:             columns,
+		Rows:                rows,
+		EOFPresent:          eofPresent,
+		PaddingPresent:      paddingPresent,
+		EOFPresentFinal:     eofFinal,
+		PaddingPresentFinal: paddingFinal,
+		OptionalPadding:     optionalPadding,
+		OptionalEOFBytes:    optionalEOFBytes,
 	}
 
 	return resultSet, err
@@ -124,14 +137,22 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 	return packet, b, nil
 }
 
-func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, error) {
+var optionalPadding bool
+
+func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bool, bool, bool, []byte, error) {
+	var eofFinal, paddingFinal bool
+	var optionalEOFBytes []byte
+
 	row := &Row{}
-	if bytes.Equal(b[4:9], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
+	if b[4] == 0xfe {
+		eofFinal = true
+		optionalEOFBytes = b[:9]
 		b = b[9:]
 		if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
+			paddingFinal = true
 			b = b[2:] // Skip padding
 		}
-		return nil, nil, nil
+		return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, nil
 	}
 	packetLength := int(b[0])
 	sequenceID := b[3]
@@ -140,6 +161,10 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 		SequenceID:   sequenceID,
 	}
 	b = b[4:]
+	if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
+		optionalPadding = true
+		b = b[2:] // Skip padding
+	}
 	// b = b[2:]
 	for _, columnDef := range columnDefinitions {
 		var colValue RowColumnDefinition
@@ -152,7 +177,7 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 			b = b[1:] // Advance the buffer to the start of the encoded timestamp data
 
 			if dataLength < 4 || len(b) < dataLength {
-				return nil, nil, fmt.Errorf("invalid timestamp data length")
+				return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("invalid timestamp data length")
 			}
 
 			// Decode the year, month, day, hour, minute, second
@@ -206,7 +231,7 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, er
 		b = b[length:]
 	}
 	row.Header = rowHeader
-	return row, b, nil
+	return row, b, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, nil
 }
 
 func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
@@ -240,9 +265,15 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 			buf.Write([]byte{0x00, 0x00}) // Filler
 		}
 	}
-	sequenceID++
+
 	// Write EOF packet header
-	buf.Write([]byte{5, 0, 0, sequenceID, 0xFE, 0x00, 0x00, 0x02, 0x00})
+	if resultSet.EOFPresent {
+		sequenceID++
+		buf.Write([]byte{5, 0, 0, sequenceID, 0xFE, 0x00, 0x00, 0x02, 0x00})
+		if resultSet.PaddingPresent {
+			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
+		}
+	}
 
 	// Write rows
 	for _, row := range resultSet.Rows {
@@ -251,15 +282,20 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 		buf.WriteByte(row.Header.PacketLength)
 		buf.Write([]byte{0x00, 0x00}) // two extra bytes after header
 		buf.WriteByte(sequenceID)
-		buf.Write([]byte{0x00, 0x00}) // two extra bytes after header
-
+		if resultSet.OptionalPadding {
+			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
+		}
 		bytes, _ := encodeRow(row, row.Columns)
 		buf.Write(bytes)
 	}
 	sequenceID++
 	// Write EOF packet header again
-	buf.Write([]byte{5, 0, 0, sequenceID, 0xFE, 0x00, 0x00, 0x02, 0x00})
-
+	// buf.Write([]byte{5, 0, 0, sequenceID})
+	buf.Write(resultSet.OptionalEOFBytes)
+	if resultSet.PaddingPresentFinal {
+		buf.Write([]byte{0x00, 0x00}) // Add padding bytes
+	}
+	fmt.Print(buf.Bytes(), "ResultSEt ", buf)
 	return buf.Bytes(), nil
 }
 
@@ -293,12 +329,27 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 			buf.WriteByte(byte(t.Minute())) // Minute
 			buf.WriteByte(byte(t.Second())) // Second
 		case models.FieldTypeLongLong:
-			longLongBytes, ok := column.Value.([]byte)
+			longLongSlice, ok := column.Value.([]interface{})
+			numElements := len(longLongSlice)
+			buf.WriteByte(byte(numElements))
 			if !ok {
-				return nil, errors.New("invalid []byte value for FieldTypeLongLong")
+				return nil, errors.New("invalid type for FieldTypeLongLong, expected []interface{}")
 			}
-			buf.Write(longLongBytes)
 
+			for _, v := range longLongSlice {
+				intVal, ok := v.(int)
+				if !ok {
+					return nil, errors.New("invalid int value for FieldTypeLongLong in slice")
+				}
+
+				// Check that the int value is within the range of a single byte
+				if intVal < 0 || intVal > 255 {
+					return nil, errors.New("int value for FieldTypeLongLong out of byte range")
+				}
+
+				// Convert int to a single byte
+				buf.WriteByte(byte(intVal))
+			}
 		default:
 			strValue, ok := value.(string)
 			if !ok {
