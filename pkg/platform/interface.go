@@ -3,13 +3,23 @@ package platform
 import (
 	"context"
 
-	"go.keploy.io/server/pkg/models"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type TestCaseDB interface {
-	WriteTestcase(tc *models.TestCase, ctx context.Context, filters *models.Filters) error
-	WriteMock(tc *models.Mock, ctx context.Context) error
+	WriteTestcase(tc interface{}, ctx context.Context, filters interface{}) error
+	WriteMock(tc interface{}, ctx context.Context) error
 
-	ReadTestcase(path string, options interface{}) ([]*models.TestCase, error)
-	ReadMocks(path string) ([]*models.Mock, []*models.Mock, error)
+	ReadTestcase(path string, lastSeenId *primitive.ObjectID, options interface{}) ([]interface{}, error)
+	ReadTcsMocks(tc interface{}, path string) ([]interface{}, error)
+	ReadConfigMocks(path string) ([]interface{}, error)
+}
+
+type TestReportDB interface {
+	Lock()
+	Unlock()
+	SetResult(runId string, test interface{})
+	GetResults(runId string) ([]interface{}, error)
+	Read(ctx context.Context, path, name string) (interface{}, error)
+	Write(ctx context.Context, path string, doc interface{}) error
 }
