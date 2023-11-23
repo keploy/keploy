@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 )
 
@@ -115,8 +116,11 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
-	returnVal.YamlStore = yaml.NewYamlStore(cfg.Path+"/tests", cfg.Path, "", "", t.logger, tele)
-
+	yamlStore, ok := yaml.NewYamlStore(cfg.Path+"/tests", cfg.Path, "", "", t.logger, tele).(platform.TestCaseDB)
+	if !ok {
+		return returnVal, errors.New("Yaml not read")
+	}
+	returnVal.YamlStore = yamlStore
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	returnVal.LoadedHooks = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
@@ -288,12 +292,21 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
 	var returnVal InitialiseRunTestSetReturn
 	var err error
-	returnVal.Tcs, err = cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil)
+	var readTcsMocks []*models.TestCase
+	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), &primitive.ObjectID{}, nil)
+	for _, mock := range tcsMocks {
+		tcsMock, ok := mock.(*models.TestCase)
+		if !ok {
+			continue
+		}
+		readTcsMocks = append(readTcsMocks, tcsMock)
+	}
 	if err != nil {
 		t.logger.Error("Error in reading the testcase", zap.Error(err))
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
+	returnVal.Tcs = readTcsMocks
 	if len(returnVal.Tcs) == 0 {
 		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", cfg.TestSet))
 		returnVal.InitialStatus = models.TestRunStatusFailed
@@ -301,16 +314,22 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
-	var configMocks []*models.Mock
-	configMocks, returnVal.TcsMocks, err = cfg.YamlStore.ReadMocks(filepath.Join(cfg.Path, cfg.TestSet))
+	var readConfigMocks []*models.Mock
+	configMocks, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+	for _, mock := range configMocks {
+		configMock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readConfigMocks = append(readConfigMocks, configMock)
+	}
 	if err != nil {
 		t.logger.Error(err.Error())
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
-	cfg.LoadedHooks.SetConfigMocks(configMocks)
-	cfg.LoadedHooks.SetTcsMocks(returnVal.TcsMocks)
+	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
 
@@ -419,7 +438,6 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			*cfg.Status = models.TestRunStatusFailed
 		}
 
-		cfg.TestReportFS.Lock()
 		cfg.TestReportFS.SetResult(cfg.TestReport.Name, models.TestResult{
 			Kind:       models.HTTP,
 			Name:       cfg.TestReport.Name,
@@ -452,8 +470,6 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			Noise:  cfg.Tc.Noise,
 			Result: *testResult,
 		})
-		cfg.TestReportFS.Lock()
-		cfg.TestReportFS.Unlock()
 
 	}
 }
@@ -465,10 +481,18 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 		t.logger.Error("failed to fetch test results", zap.Error(err))
 		return models.TestRunStatusFailed
 	}
+	readTestResults := []models.TestResult{}
+	for _, mock := range testResults {
+		testResult, ok := mock.(models.TestResult)
+		if !ok {
+			continue
+		}
+		readTestResults = append(readTestResults, testResult)
+	}
 	cfg.TestReport.TestSet = cfg.TestSet
-	cfg.TestReport.Total = len(testResults)
+	cfg.TestReport.Total = len(readTestResults)
 	cfg.TestReport.Status = string(*cfg.Status)
-	cfg.TestReport.Tests = testResults
+	cfg.TestReport.Tests = readTestResults
 	cfg.TestReport.Success = *cfg.Success
 	cfg.TestReport.Failure = *cfg.Failure
 
@@ -502,7 +526,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -557,9 +581,16 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			continue
 		}
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		filteredTcsMocks := FilterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
-		loadedHooks.SetTcsMocks(filteredTcsMocks)
-
+		filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
+		readTcsMocks := []*models.Mock{}
+		for _, mock := range filteredTcsMocks {
+			tcsmock, ok := mock.(*models.Mock)
+			if !ok {
+				continue
+			}
+			readTcsMocks = append(readTcsMocks, tcsmock)
+		}
+		loadedHooks.SetTcsMocks(readTcsMocks)
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {

@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -38,8 +39,10 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	teleFS := fs.NewTeleFS(s.logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
-	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
-
+	ys, ok := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele).(platform.TestCaseDB)
+	if !ok {
+		return
+	}
 	s.logger.Debug("path of mocks : " + path)
 
 	routineId := pkg.GenerateRandomID()
@@ -59,7 +62,22 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		return
 	}
 
-	configMocks, tcsMocks, err := ys.ReadMocks("")
+	tcsMocks, err := ys.ReadTcsMocks(&models.TestCase{}, "")
+	if err != nil {
+		loadedHooks.Stop(true)
+		ps.StopProxyServer()
+		return
+	}
+	readTcsMocks := []*models.Mock{}
+
+	for _, mock := range tcsMocks {
+		tcsmock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readTcsMocks = append(readTcsMocks, tcsmock)
+	}
+	configMocks, err := ys.ReadConfigMocks("")
 
 	if err != nil {
 		loadedHooks.Stop(true)
@@ -67,8 +85,17 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		return
 	}
 
-	loadedHooks.SetConfigMocks(configMocks)
-	loadedHooks.SetTcsMocks(tcsMocks)
+	readConfigMocks := []*models.Mock{}
+	for _, mock := range configMocks {
+		configmock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readConfigMocks = append(readConfigMocks, configmock)
+	}
+
+	loadedHooks.SetConfigMocks(readConfigMocks)
+	loadedHooks.SetTcsMocks(readTcsMocks)
 
 	mocksBefore := len(configMocks) + len(tcsMocks)
 
