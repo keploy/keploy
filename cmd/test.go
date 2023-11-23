@@ -207,7 +207,6 @@ func (t *Test) GetCmd() *cobra.Command {
 					t.logger.Info("continuing without configuration file because file not found")
 				} else {
 					t.logger.Error("", zap.Error(err))
-					return err
 				}
 			}
 
