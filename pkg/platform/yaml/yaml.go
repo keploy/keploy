@@ -160,16 +160,6 @@ func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 	return false
 }
 
-// func (ys *Yaml) WriteTestcase(tcRead interface{}, ctx context.Context) error {
-// 	tc, _ := tcRead.(*models.TestCase)
-// 	ys.tele.RecordedTestAndMocks()
-// 	testsTotal, ok := ctx.Value("testsTotal").(*int)
-// 	if !ok {
-// 		ys.Logger.Debug("failed to get testsTotal from context")
-// 	} else {
-// 		*testsTotal++
-
-// func (ys *yaml) Insert(tc *models.Mock, mocks []*models.Mock) error {
 func (ys *Yaml) WriteTestcase(tcRead interface{}, ctx context.Context, filtersRead interface{}) error {
 	tc, ok := tcRead.(*models.TestCase)
 	if !ok {
