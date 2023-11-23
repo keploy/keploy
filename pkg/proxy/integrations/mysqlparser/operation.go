@@ -265,7 +265,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	if err != nil {
 		return "", MySQLPacketHeader{}, nil, err
 	}
-	fmt.Println(packetType+"\n", data, header)
+	fmt.Println(packetType+"\n", data, "\n", header, "\n")
 	return packetType, header, packetData, nil
 }
 func isLengthEncodedInteger(b byte) bool {
