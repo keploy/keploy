@@ -76,9 +76,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
-		// return fmt.Errorf("failed to unmarshall the noise flag due to error: %s", err)
-		t.logger.Error("failed to unmarshall the noise flag due to error", zap.Error(err))
-		return nil;
+		return fmt.Errorf("failed to unmarshall the noise flag due to error: %s", err)
 	}
 
 	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
@@ -209,7 +207,6 @@ func (t *Test) GetCmd() *cobra.Command {
 					t.logger.Info("continuing without configuration file because file not found")
 				} else {
 					t.logger.Error("", zap.Error(err))
-					return err
 				}
 			}
 
