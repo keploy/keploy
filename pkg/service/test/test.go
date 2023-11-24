@@ -68,10 +68,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
-	yamlStore, ok := yaml.NewYamlStore(cfg.Path+"/tests", cfg.Path, "", "", t.logger, tele).(platform.TestCaseDB)
-	if !ok {
-		return returnVal, errors.New("Yaml not read")
-	}
+	yamlStore := yaml.NewYamlStore(cfg.Path+"/tests", cfg.Path, "", "", t.logger, tele)
 	returnVal.YamlStore = yamlStore
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks

@@ -8,20 +8,21 @@ import (
 	"sync"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
 type TestReport struct {
-	tests  map[string][]interface{}
+	tests  map[string][]platform.Mock
 	m      sync.Mutex
 	Logger *zap.Logger
 }
 
 func NewTestReportFS(logger *zap.Logger) *TestReport {
 	return &TestReport{
-		tests:  make(map[string][]interface{}), // Correctly initialize the map
+		tests:  make(map[string][]platform.Mock), // Correctly initialize the map
 		m:      sync.Mutex{},
 		Logger: logger,
 	}
@@ -35,7 +36,7 @@ func (fe *TestReport) Unlock() {
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) SetResult(runId string, test interface{}) {
+func (fe *TestReport) SetResult(runId string, test platform.Mock) {
 	fe.m.Lock()
 	tests := fe.tests[runId]
 	tests = append(tests, test)
@@ -43,22 +44,16 @@ func (fe *TestReport) SetResult(runId string, test interface{}) {
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) GetResults(runId string) ([]interface{}, error) {
+func (fe *TestReport) GetResults(runId string) ([]platform.Mock, error) {
 	testResults, ok := fe.tests[runId]
 	if !ok {
 		return nil, fmt.Errorf("%s found no test results for test report with id: %s", Emoji, runId)
 	}
 
-	// Assuming testResults is of type []interface{} or can be converted to []interface{}
-	val := make([]interface{}, len(testResults))
-	for i, result := range testResults {
-		val[i] = result
-	}
-
-	return val, nil
+	return testResults, nil
 }
 
-func (fe *TestReport) Read(ctx context.Context, path, name string) (interface{}, error) {
+func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Mock, error) {
 
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -74,7 +69,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (interface{},
 	return doc, nil
 }
 
-func (fe *TestReport) Write(ctx context.Context, path string, doc interface{}) error {
+func (fe *TestReport) Write(ctx context.Context, path string, doc platform.Mock) error {
 	readDock, ok := doc.(*models.TestReport)
 	if !ok {
 		return fmt.Errorf(Emoji, "failed to read test report in yaml file.")

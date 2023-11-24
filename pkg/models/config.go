@@ -19,6 +19,11 @@ type Filters struct {
 	ReqHeader  []string            `json:"req_header" yaml:"req_header"`
 	URLMethods map[string][]string `json:"urlMethods" yaml:"urlMethods"`
 }
+
+func (filter Filters) GetKind() string {
+	return "filter"
+}
+
 type Test struct {
 	Path             string   `json:"path" yaml:"path"`
 	Command          string   `json:"command" yaml:"command"`

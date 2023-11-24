@@ -9,6 +9,10 @@ type Mock struct {
 	Spec    MockSpec `json:"Spec,omitempty"`
 }
 
+func (m Mock) GetKind() string {
+	return string(m.Kind)
+}
+
 type MockSpec struct {
 	Metadata map[string]string `json:"Metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	// for GenericSpec
@@ -26,8 +30,7 @@ type MockSpec struct {
 	MongoRequests  []MongoRequest  `json:"MongoRequests,omitempty"`
 	MongoResponses []MongoResponse `json:"MongoResponses,omitempty"`
 
-
-	PostgresRequests  []Backend `json:"postgresRequests,omitempty"`
+	PostgresRequests  []Backend  `json:"postgresRequests,omitempty"`
 	PostgresResponses []Frontend `json:"postgresResponses,omitempty"`
 
 	//for grpc
