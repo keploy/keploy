@@ -19,7 +19,6 @@ import (
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy/util"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -224,7 +223,7 @@ func (ys *Yaml) WriteTestcase(tcRead platform.Mock, ctx context.Context, filters
 	return nil
 }
 
-func (ys *Yaml) ReadTestcase(path string, lastSeenId *primitive.ObjectID, options platform.Mock) ([]platform.Mock, error) {
+func (ys *Yaml) ReadTestcase(path string, lastSeenId string, options platform.Mock) ([]platform.Mock, error) {
 
 	if path == "" {
 		path = ys.TcsPath
