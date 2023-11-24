@@ -25,7 +25,6 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 )
 
@@ -221,7 +220,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	var returnVal InitialiseRunTestSetReturn
 	var err error
 	var readTcsMocks []*models.TestCase
-	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), &primitive.ObjectID{}, nil)
+	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), "", nil)
 	for _, mock := range tcsMocks {
 		tcsMock, ok := mock.(*models.TestCase)
 		if !ok {
