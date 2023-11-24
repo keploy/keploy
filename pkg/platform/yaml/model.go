@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"errors"
+	"reflect"
 
 	"strings"
 
@@ -40,7 +41,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 	}
 	noise := tc.Noise
 
-	noise = append(noise, FindNoisyFields(m, func(k string, vals []string) bool {
+	noiseFieldsFound := FindNoisyFields(m, func(k string, vals []string) bool {
 		// check if k is date
 		for _, v := range vals {
 			if pkg.IsTime(v) {
@@ -50,7 +51,11 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 
 		// maybe we need to concatenate the values
 		return pkg.IsTime(strings.Join(vals, ", "))
-	})...)
+	})
+
+	for _, v := range noiseFieldsFound {
+		noise[v] = []string{}
+	}
 
 	switch tc.Kind {
 	case models.HTTP:
@@ -58,7 +63,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			Request:  tc.HttpReq,
 			Response: tc.HttpResp,
 			Created:  tc.Created,
-			Assertions: map[string][]string{
+			Assertions: map[string]interface{}{
 				"noise": noise,
 			},
 		})
@@ -230,7 +235,6 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		Kind:    yamlTestcase.Kind,
 		Name:    yamlTestcase.Name,
 	}
-
 	switch tc.Kind {
 	case models.HTTP:
 		httpSpec := spec.HttpSpec{}
@@ -242,7 +246,20 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		tc.Created = httpSpec.Created
 		tc.HttpReq = httpSpec.Request
 		tc.HttpResp = httpSpec.Response
-		tc.Noise = httpSpec.Assertions["noise"]
+		tc.Noise = map[string][]string{}
+		switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
+		case reflect.Map:
+			for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
+				tc.Noise[k] = []string{}
+				for _, val := range v.([]interface{}) {
+					tc.Noise[k] = append(tc.Noise[k], val.(string))
+				}
+			}
+		case reflect.Slice:
+			for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
+				tc.Noise[v.(string)] = []string{}
+			}
+		}
 	// unmarshal its mocks from yaml docs to go struct
 	case models.GRPC_EXPORT:
 		grpcSpec := spec.GrpcSpec{}
@@ -268,6 +285,11 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			Version: m.Version,
 			Name:    m.Name,
 			Kind:    m.Kind,
+		}
+		mockCheck := strings.Split(string(m.Kind), "-")
+		if len(mockCheck) > 1 {
+			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
+			continue
 		}
 		switch m.Kind {
 		case models.HTTP:
@@ -359,7 +381,7 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 			mock.Spec = *mockSpec
 		default:
 			logger.Error("failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
-			return nil, errors.New("yaml doc of unknown type")
+			continue
 		}
 		mocks = append(mocks, &mock)
 	}

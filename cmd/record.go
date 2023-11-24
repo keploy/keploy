@@ -23,8 +23,8 @@ func NewCmdRecord(logger *zap.Logger) *Record {
 	}
 }
 
-func readRecordConfig() (*models.Record, error) {
-	file, err := os.OpenFile(filepath.Join(".", "keploy-config.yaml"), os.O_RDONLY, os.ModePerm)
+func readRecordConfig(configPath string) (*models.Record, error) {
+	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -38,19 +38,21 @@ func readRecordConfig() (*models.Record, error) {
 	return &doc.Record, nil
 }
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint) {
-	if isExist := utils.CheckFileExists(filepath.Join(".", "keploy-config.yaml")); !isExist {
-		t.logger.Info("keploy configuration file not found")
-		return
+var filters = *&models.Filters{}
+
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) error {
+	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
+	if isExist := utils.CheckFileExists(configFilePath); !isExist {
+		return errFileNotFound
 	}
-	confRecord, err := readRecordConfig()
+	confRecord, err := readRecordConfig(configFilePath)
 	if err != nil {
-		t.logger.Error("failed to get the record config from config file")
-		return
+		return fmt.Errorf("failed to get the record config from config file due to error: %s", err)
 	}
 	if len(*path) == 0 {
 		*path = confRecord.Path
 	}
+	filters = confRecord.Filters
 	if *proxyPort == 0 {
 		*proxyPort = confRecord.ProxyPort
 	}
@@ -69,6 +71,7 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if len(*passThorughPorts) == 0 {
 		*passThorughPorts = confRecord.PassThroughPorts
 	}
+	return nil
 }
 
 type Record struct {
@@ -91,6 +94,67 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			appCmd, err := cmd.Flags().GetString("command")
+			if err != nil {
+				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				return err
+			}
+
+			appContainer, err := cmd.Flags().GetString("containerName")
+			if err != nil {
+				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				return err
+			}
+
+			networkName, err := cmd.Flags().GetString("networkName")
+			if err != nil {
+				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				return err
+			}
+
+			delay, err := cmd.Flags().GetUint64("delay")
+			if err != nil {
+				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				return err
+			}
+
+			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+
+			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				r.logger.Error("failed to read the proxy port")
+				return err
+			}
+
+			configPath, err := cmd.Flags().GetString("config-path")
+			if err != nil {
+				r.logger.Error("failed to read the config path")
+				return err
+			}
+
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
+			if err != nil {
+				if err == errFileNotFound {
+					r.logger.Info("continuing without configuration file because file not found")
+				} else {
+					r.logger.Error("", zap.Error(err))
+				}
+			}
+
+			if appCmd == "" {
+				fmt.Println("Error: missing required -c flag or appCmd in config file")
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				} else {
+					fmt.Println("Example usage:\n", cmd.Example)
+				}
+				return errors.New("missing required -c flag or appCmd in config file")
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -110,27 +174,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			path += "/keploy"
 
-			appCmd, err := cmd.Flags().GetString("command")
-
-			if err != nil {
-				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
-			}
-			
-			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag\n")
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				}else{
-					fmt.Println("Example usage:\n", cmd.Example, "\n")
-				}
-
-				return errors.New("missing required -c flag")
-			}
-			appContainer, err := cmd.Flags().GetString("containerName")
-
-			if err != nil {
-				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
-			}
+			r.logger.Info("", zap.Any("keploy test and mock path", path))
 
 			var hasContainerName bool
 			if isDockerCmd {
@@ -141,41 +185,14 @@ func (r *Record) GetCmd() *cobra.Command {
 					}
 				}
 				if !hasContainerName && appContainer == "" {
-					fmt.Println("Error: missing required --containerName flag")
+					fmt.Println("Error: missing required --containerName flag or containerName in config file")
 					fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag")
+					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-			networkName, err := cmd.Flags().GetString("networkName")
-
-			if err != nil {
-				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
-			}
-
-			delay, err := cmd.Flags().GetUint64("delay")
-
-			if err != nil {
-				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
-			}
-
-			r.logger.Info("", zap.Any("keploy test and mock path", path))
-
-			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
-			if err != nil {
-				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
-			proxyPort, err := cmd.Flags().GetUint32("proxyport")
-			if err != nil {
-				r.logger.Error("failed to read the proxy port")
-				return err
-			}
-
-			r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports)
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort,  appCmd, appContainer, networkName, delay, ports)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters)
 			return nil
 		},
 	}
@@ -193,6 +210,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true

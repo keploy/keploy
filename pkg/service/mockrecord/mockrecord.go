@@ -32,7 +32,7 @@ func NewMockRecorder(logger *zap.Logger) MockRecorder {
 	}
 }
 
-func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mockName string) {
+func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_RECORD)
 	teleFS := fs.NewTeleFS()
@@ -48,7 +48,7 @@ func (s *mockRecorder) MockRecord(path string,proxyPort uint32, pid uint32, mock
 	ctx = context.WithValue(ctx, "cmd", "mockrecord")
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
-	if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}
 	// start the proxy
