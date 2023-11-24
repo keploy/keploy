@@ -11,7 +11,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -39,10 +38,7 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	teleFS := fs.NewTeleFS()
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
-	ys, ok := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele).(platform.TestCaseDB)
-	if !ok {
-		return
-	}
+	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
 	s.logger.Debug("path of mocks : " + path)
 
 	routineId := pkg.GenerateRandomID()
