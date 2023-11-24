@@ -369,7 +369,7 @@ func ChangeAuthToMD5(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 		for requestIndex, reqBuff := range mock.Spec.PostgresRequests {
 			encode, _ := PostgresDecoderBackend(reqBuff)
 			if IsCrDBPresent(mock.Spec.PostgresResponses) && reqBuff.Identfier == "StartupRequest" && !calledOnce {
-				fmt.Println("CrDB is present")
+				log.Debug("CockroachDB is present")
 				calledOnce = true
 				return
 			}
