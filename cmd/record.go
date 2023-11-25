@@ -49,25 +49,16 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if err != nil {
 		return fmt.Errorf("failed to get the record config from config file due to error: %s", err)
 	}
-	if len(*path) == 0 {
-		*path = confRecord.Path
-	}
+
 	filters = confRecord.Filters
-	if *proxyPort == 0 {
-		*proxyPort = confRecord.ProxyPort
-	}
-	if *appCmd == "" {
-		*appCmd = confRecord.Command
-	}
-	if *appContainer == "" {
-		*appContainer = confRecord.ContainerName
-	}
-	if *networkName == "" {
-		*networkName = confRecord.NetworkName
-	}
-	if *Delay == 5 {
-		*Delay = confRecord.Delay
-	}
+
+	*path = confRecord.Path
+	*proxyPort = confRecord.ProxyPort
+	*appCmd = confRecord.Command
+	*appContainer = confRecord.ContainerName
+	*networkName = confRecord.NetworkName
+	*Delay = confRecord.Delay
+	
 	if len(*passThorughPorts) == 0 {
 		*passThorughPorts = confRecord.PassThroughPorts
 	}
@@ -88,49 +79,61 @@ func (r *Record) GetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 
-			path, err := cmd.Flags().GetString("path")
+			var (
+				path string
+				appCmd string
+				appContainer string
+				networkName string
+				delay uint64
+				ports []uint
+				proxyPort uint32
+				configPath string
+				err error
+			)
+
+			path, err = cmd.Flags().GetString("path")
 			if err != nil {
 				r.logger.Error("failed to read the testcase path input")
 				return err
 			}
 
-			appCmd, err := cmd.Flags().GetString("command")
+			appCmd, err = cmd.Flags().GetString("command")
 			if err != nil {
 				r.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
 				return err
 			}
 
-			appContainer, err := cmd.Flags().GetString("containerName")
+			appContainer, err = cmd.Flags().GetString("containerName")
 			if err != nil {
 				r.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
 				return err
 			}
 
-			networkName, err := cmd.Flags().GetString("networkName")
+			networkName, err = cmd.Flags().GetString("networkName")
 			if err != nil {
 				r.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
 				return err
 			}
 
-			delay, err := cmd.Flags().GetUint64("delay")
+			delay, err = cmd.Flags().GetUint64("delay")
 			if err != nil {
 				r.logger.Error("Failed to get the delay flag", zap.Error((err)))
 				return err
 			}
 
-			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			ports, err = cmd.Flags().GetUintSlice("passThroughPorts")
 			if err != nil {
 				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
 
-			proxyPort, err := cmd.Flags().GetUint32("proxyport")
+			proxyPort, err = cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				r.logger.Error("failed to read the proxy port")
 				return err
 			}
 
-			configPath, err := cmd.Flags().GetString("config-path")
+			configPath, err = cmd.Flags().GetString("config-path")
 			if err != nil {
 				r.logger.Error("failed to read the config path")
 				return err

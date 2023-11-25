@@ -47,36 +47,20 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if err != nil {
 		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
-	if len(*path) == 0 {
-		*path = confTest.Path
-	}
-	if *proxyPort == 0 {
-		*proxyPort = confTest.ProxyPort
-	}
-	if *appCmd == "" {
-		*appCmd = confTest.Command
-	}
-	if len(*testsets) == 0 {
-		*testsets = confTest.TestSets
-	}
-	if *appContainer == "" {
-		*appContainer = confTest.ContainerName
-	}
-	if *networkName == "" {
-		*networkName = confTest.NetworkName
-	}
-	if *Delay == 5 {
-		*Delay = confTest.Delay
-	}
-	if len(*passThorughPorts) == 0 {
-		*passThorughPorts = confTest.PassThroughPorts
-	}
-	if *apiTimeout == 5 {
-		*apiTimeout = confTest.ApiTimeout
-	}
+
+	*path = confTest.Path
+	*proxyPort = confTest.ProxyPort
+	*appCmd = confTest.Command
+	*testsets = confTest.TestSets
+	*appContainer = confTest.ContainerName
+	*networkName = confTest.NetworkName
+	*Delay = confTest.Delay
+	*passThorughPorts = confTest.PassThroughPorts
+	*apiTimeout = confTest.ApiTimeout
+
 	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
 	if err != nil {
-		return fmt.Errorf("failed to unmarshall the noise flag due to error: %s", err)
+		return 	fmt.Errorf("failed to unmarshall the noise flag due to error: %s", err)
 	}
 
 	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
@@ -92,7 +76,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 
 	(*globalNoise)["header"] = map[string][]string{}
-	for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) {
+	for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) { // key [string] value [interface{}]
 		(*globalNoise)["header"][field] = []string{}
 		for _, val := range regexArr.([]interface{}) {
 			(*globalNoise)["header"][field] = append((*globalNoise)["header"][field], val.(string))
@@ -138,61 +122,21 @@ func (t *Test) GetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 
-			path, err := cmd.Flags().GetString("path")
-			if err != nil {
-				t.logger.Error("failed to read the testcase path input")
-				return err
-			}
+			var (
+				path string
+				appCmd string
+				appContainer string
+				networkName string
+				testSets []string 
+				delay uint64
+				apiTimeout uint64
+				ports []uint
+				proxyPort uint32
+				configPath string 
+				err error
+			)
 
-			appCmd, err := cmd.Flags().GetString("command")
-			if err != nil {
-				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
-				return err
-			}
-
-			appContainer, err := cmd.Flags().GetString("containerName")
-			if err != nil {
-				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
-				return err
-			}
-
-			networkName, err := cmd.Flags().GetString("networkName")
-			if err != nil {
-				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
-				return err
-			}
-
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
-			if err != nil {
-				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
-				return err
-			}
-
-			delay, err := cmd.Flags().GetUint64("delay")
-			if err != nil {
-				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
-				return err
-			}
-
-			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
-			if err != nil {
-				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
-				return err
-			}
-
-			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
-			if err != nil {
-				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
-			proxyPort, err := cmd.Flags().GetUint32("proxyport")
-			if err != nil {
-				t.logger.Error("failed to read the proxyport")
-				return err
-			}
-
-			configPath, err := cmd.Flags().GetString("config-path")
+			configPath, err = cmd.Flags().GetString("config-path")
 			if err != nil {
 				t.logger.Error("failed to read the config path")
 				return err
@@ -208,6 +152,60 @@ func (t *Test) GetCmd() *cobra.Command {
 				} else {
 					t.logger.Error("", zap.Error(err))
 				}
+			}
+
+			path, err = cmd.Flags().GetString("path")
+			if err != nil {
+				t.logger.Error("failed to read the testcase path input")
+				return err
+			}
+
+			appCmd, err = cmd.Flags().GetString("command")
+			if err != nil {
+				t.logger.Error("Failed to get the command to run the user application", zap.Error((err)))
+				return err
+			}
+
+			appContainer, err = cmd.Flags().GetString("containerName")
+			if err != nil {
+				t.logger.Error("Failed to get the application's docker container name", zap.Error((err)))
+				return err
+			}
+
+			networkName, err = cmd.Flags().GetString("networkName")
+			if err != nil {
+				t.logger.Error("Failed to get the application's docker network name", zap.Error((err)))
+				return err
+			}
+
+			testSets, err = cmd.Flags().GetStringSlice("testsets")
+			if err != nil {
+				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
+				return err
+			}
+
+			delay, err = cmd.Flags().GetUint64("delay")
+			if err != nil {
+				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
+				return err
+			}
+
+			apiTimeout, err = cmd.Flags().GetUint64("apiTimeout")
+			if err != nil {
+				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
+				return err
+			}
+
+			ports, err = cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+
+			proxyPort, err = cmd.Flags().GetUint32("proxyport")
+			if err != nil {
+				t.logger.Error("failed to read the proxyport")
+				return err
 			}
 
 			if appCmd == "" {
