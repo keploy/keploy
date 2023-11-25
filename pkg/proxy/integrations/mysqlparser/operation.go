@@ -134,7 +134,6 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn) (string, MySQLPacketHeader, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
-	fmt.Println("\n", data, header)
 	var packetData interface{}
 	var packetType string
 	var err error
@@ -249,7 +248,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetType = "COM_STMT_RESET"
 		packetData, err = decodeComStmtReset(data)
 		lastCommand = 0x1a
-	case data[0] == 0x8d || expectingHandshakeResponse: // Handshake Response packet
+	case data[0] == 0x8d || expectingHandshakeResponse || expectingHandshakeResponseTest: // Handshake Response packet
 		packetType = "HANDSHAKE_RESPONSE"
 		packetData, err = decodeHandshakeResponse(data)
 		lastCommand = 0x8d // This value may differ depending on the handshake response protocol version
@@ -265,8 +264,10 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	if err != nil {
 		return "", MySQLPacketHeader{}, nil, err
 	}
-	fmt.Println(packetType+"\n", data, "\n", header, "\n")
-	if (models.MODE_TEST) == "test" {
+	if models.GetMode() != "test" {
+		fmt.Println(packetType+"\n", data, "\n", header, "\n")
+	}
+	if (models.GetMode()) == "test" {
 		lastCommand = 0x00
 	}
 	return packetType, header, packetData, nil

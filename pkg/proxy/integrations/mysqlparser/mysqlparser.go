@@ -554,6 +554,11 @@ func ndecodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h
 		firstLoop = false
 	}
 }
+
+var (
+	expectingHandshakeResponseTest = false
+)
+
 func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
 	doHandshakeAgain := true
@@ -617,7 +622,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				return
 			}
 			if prevRequest == "MYSQLHANDSHAKE" {
-				expectingHandshakeResponse = true
+				expectingHandshakeResponseTest = true
 			}
 
 			oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
@@ -625,14 +630,14 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				logger.Error("Failed to decode MySQL packet", zap.Error(err))
 				return
 			}
-			if expectingHandshakeResponse {
+			if expectingHandshakeResponseTest {
 				// configMocks = configMocks[1:]
 				// h.SetConfigMocks(configMocks)
-				expectingHandshakeResponse = false
+				expectingHandshakeResponseTest = false
 			}
 
 			prevRequest = ""
-			fmt.Println("REQUEST PACKET===>>>>", requestBuffer, "/n", oprRequest)
+			fmt.Println(requestBuffer, "\n", oprRequest)
 
 			mysqlRequest := models.MySQLRequest{
 				Header: &models.MySQLPacketHeader{
@@ -653,7 +658,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			}
 
 			responseBinary, err := encodeToBinary(&matchedResponse.Message, matchedResponse.Header, matchedResponse.Header.PacketType, 1)
-			fmt.Println("RESPONSE BINARY SENT===>>>", "\n", responseBinary, "/n", matchedResponse.Header.PacketType)
+			fmt.Println(responseBinary, "\n", matchedResponse.Header.PacketType, "\n")
 
 			if err != nil {
 				logger.Error("Failed to encode response to binary", zap.Error(err))
@@ -669,9 +674,6 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				if mockType == "config" && matchedIndex < len(configMocks) {
 					configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
 					h.SetConfigMocks(configMocks)
-				} else if mockType == "mocks" && matchedIndex < len(tcsMocks) {
-					tcsMocks = append(tcsMocks[:matchedIndex], tcsMocks[matchedIndex+1:]...)
-					h.SetTcsMocks(tcsMocks)
 				}
 			}
 		}
@@ -746,6 +748,26 @@ func compareMySQLRequests(req1, req2 models.MySQLRequest) int {
 	matchCount := 0
 
 	// Compare Header fields
+	if req1.Header.PacketType == "MySQLQuery" && req2.Header.PacketType == "MySQLQuery" {
+		packet1 := req1.Message
+		packet, ok := packet1.(*QueryPacket)
+		if !ok {
+			fmt.Println("Type assertion failed")
+			return 0
+		}
+		packet2 := req2.Message
+
+		packet3, ok := packet2.(*models.MySQLQueryPacket)
+		if !ok {
+			fmt.Println("Type assertion failed")
+			return 0
+		}
+		if packet.Query == packet3.Query {
+			matchCount += 5
+		} else {
+			return 0
+		}
+	}
 	if req1.Header.PacketLength == req2.Header.PacketLength {
 		matchCount++
 	}
