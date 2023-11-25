@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-
-	"go.keploy.io/server/pkg/models"
 )
 
 type HandshakeResponse struct {
@@ -69,59 +67,4 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 	}
 
 	return packet, nil
-}
-func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, error) {
-	buf := new(bytes.Buffer)
-
-	// Protocol version
-	buf.WriteByte(packet.ProtocolVersion)
-
-	// Server version
-	buf.WriteString(packet.ServerVersion)
-	buf.WriteByte(0x00) // Null terminator
-
-	// Connection ID
-	binary.Write(buf, binary.LittleEndian, packet.ConnectionID)
-
-	// Auth-plugin-data-part-1 (first 8 bytes)
-	if len(packet.AuthPluginData) < 8 {
-		return nil, errors.New("auth plugin data too short")
-	}
-	buf.Write(packet.AuthPluginData[:8])
-
-	// Filler
-	buf.WriteByte(0x00)
-
-	// Lower 2 bytes of CapabilityFlags
-	binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags))
-
-	// Character set
-	buf.WriteByte(packet.CharacterSet)
-
-	// Status flags
-	binary.Write(buf, binary.LittleEndian, packet.StatusFlags)
-
-	// Upper 2 bytes of CapabilityFlags
-	binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags>>16))
-
-	// Length of auth-plugin-data (always 0x15 for the current version of the MySQL protocol)
-	buf.WriteByte(0x15)
-
-	// Reserved (10 zero bytes)
-	buf.Write(make([]byte, 10))
-
-	// Auth-plugin-data-part-2 (remaining auth data, 13 bytes, without the last byte)
-	if len(packet.AuthPluginData) < 21 {
-		return nil, errors.New("auth plugin data too short")
-	}
-	buf.Write(packet.AuthPluginData[8:20])
-
-	// Null terminator for auth-plugin-data
-	buf.WriteByte(0x00)
-
-	// Auth-plugin name
-	buf.WriteString(packet.AuthPluginName)
-	buf.WriteByte(0x00) // Null terminator
-
-	return buf.Bytes(), nil
 }
