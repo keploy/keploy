@@ -557,37 +557,67 @@ func ndecodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h
 func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
 	doHandshakeAgain := true
-	configResponseRead := 0
+	prevRequest := ""
 	for {
 		configMocks := h.GetConfigMocks()
 		tcsMocks := h.GetTcsMocks()
-		logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
-
+		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
-			header := configMocks[configResponseRead].Spec.MySqlResponses[0].Header
-			packet := configMocks[configResponseRead].Spec.MySqlResponses[0].Message
-			opr := configMocks[configResponseRead].Spec.MySqlResponses[0].Header.PacketType
+			if len(configMocks) == 0 {
+				logger.Error("No more config mocks available")
+				return
+			}
+
+			header := configMocks[0].Spec.MySqlResponses[0].Header
+			packet := configMocks[0].Spec.MySqlResponses[0].Message
+			opr := configMocks[0].Spec.MySqlResponses[0].Header.PacketType
+
 			binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
 			if err != nil {
 				logger.Error("Failed to encode to binary", zap.Error(err))
 				return
 			}
-			_, err = clientConn.Write(binaryPacket)
-			// Handle handshake logic
-			// ... existing handshake logic ...
-			fmt.Print(opr + "\n")
 
+			_, err = clientConn.Write(binaryPacket)
+			if err != nil {
+				logger.Error("Failed to write binary packet", zap.Error(err))
+				return
+			}
 			firstLoop = false
 			doHandshakeAgain = false
-			configResponseRead++
+			fmt.Println("BINARY PACKET SENT HANDSHAKE", binaryPacket, "/n")
+			prevRequest = "MYSQLHANDSHAKE"
 		} else {
-			requestBuffer, err := util.ReadBytes(clientConn)
+			timeoutDuration := 6 * time.Second // 2-second timeout
+			err := clientConn.SetReadDeadline(time.Now().Add(timeoutDuration))
 			if err != nil {
-				logger.Error("Failed to read bytes from clientConn", zap.Error(err))
+				logger.Error("Failed to set read deadline", zap.Error(err))
 				return
+			}
+
+			// Attempt to read from the client
+			requestBuffer, err := util.ReadBytes(clientConn)
+
+			// Reset the read deadline
+			clientConn.SetReadDeadline(time.Time{})
+
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// Timeout occurred, no data received from client
+					// Re-initiate handshake without logging an error
+					doHandshakeAgain = true
+					continue
+				} else {
+					// Handle other errors
+					logger.Error("Failed to read bytes from clientConn", zap.Error(err))
+					return
+				}
 			}
 			if len(requestBuffer) == 0 {
 				return
+			}
+			if prevRequest == "MYSQLHANDSHAKE" {
+				expectingHandshakeResponse = true
 			}
 
 			oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
@@ -595,7 +625,14 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				logger.Error("Failed to decode MySQL packet", zap.Error(err))
 				return
 			}
-			fmt.Print(oprRequest, requestHeader)
+			if expectingHandshakeResponse {
+				// configMocks = configMocks[1:]
+				// h.SetConfigMocks(configMocks)
+				expectingHandshakeResponse = false
+			}
+
+			prevRequest = ""
+			fmt.Println("REQUEST PACKET===>>>>", requestBuffer, "/n", oprRequest)
 
 			mysqlRequest := models.MySQLRequest{
 				Header: &models.MySQLPacketHeader{
@@ -609,14 +646,15 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				doHandshakeAgain = true
 				continue
 			}
-			matchedResponse, err := matchRequestWithMock(mysqlRequest, configMocks, tcsMocks)
+			matchedResponse, matchedIndex, mockType, err := matchRequestWithMock(mysqlRequest, configMocks, tcsMocks)
 			if err != nil {
 				logger.Error("Failed to match request with mock", zap.Error(err))
 				return
 			}
-			fmt.Print(matchedResponse.Header.PacketType)
 
 			responseBinary, err := encodeToBinary(&matchedResponse.Message, matchedResponse.Header, matchedResponse.Header.PacketType, 1)
+			fmt.Println("RESPONSE BINARY SENT===>>>", "\n", responseBinary, "/n", matchedResponse.Header.PacketType)
+
 			if err != nil {
 				logger.Error("Failed to encode response to binary", zap.Error(err))
 				return
@@ -627,10 +665,19 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				logger.Error("Failed to write response to clientConn", zap.Error(err))
 				return
 			}
+			if matchedIndex >= 0 {
+				if mockType == "config" && matchedIndex < len(configMocks) {
+					configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
+					h.SetConfigMocks(configMocks)
+				} else if mockType == "mocks" && matchedIndex < len(tcsMocks) {
+					tcsMocks = append(tcsMocks[:matchedIndex], tcsMocks[matchedIndex+1:]...)
+					h.SetTcsMocks(tcsMocks)
+				}
+			}
 		}
 	}
 }
-func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, error) {
+func bmatchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, error) {
 	// Combine configMocks and tcsMocks for simplicity
 	allMocks := append(configMocks, tcsMocks...)
 
@@ -661,6 +708,39 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 	}
 
 	return bestMatch, nil
+}
+func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, int, string, error) {
+	allMocks := append(configMocks, tcsMocks...)
+	var bestMatch *models.MySQLResponse
+	var matchedIndex int
+	var mockType string
+	maxMatchCount := 0
+
+	for i, mock := range allMocks {
+		for j, mockReq := range mock.Spec.MySqlRequests {
+			matchCount := compareMySQLRequests(mysqlRequest, mockReq)
+			if matchCount > maxMatchCount {
+				maxMatchCount = matchCount
+				matchedIndex = i
+				mockType = allMocks[i].Spec.Metadata["type"]
+				if len(mock.Spec.MySqlResponses) > 0 {
+					if allMocks[i].Spec.Metadata["type"] == "config" {
+						bestMatch = &allMocks[i].Spec.MySqlResponses[j+1]
+
+					} else {
+						bestMatch = &allMocks[i].Spec.MySqlResponses[j]
+
+					}
+				}
+			}
+		}
+	}
+
+	if bestMatch == nil {
+		return nil, -1, "", fmt.Errorf("no matching mock found")
+	}
+
+	return bestMatch, matchedIndex, mockType, nil
 }
 func compareMySQLRequests(req1, req2 models.MySQLRequest) int {
 	matchCount := 0
