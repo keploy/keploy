@@ -208,6 +208,7 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 					logger.Debug("failed to read the response message from the destination server", zap.Error(err))
 					return
 				} else {
+					logger.Debug("recieved EOF, exiting loop as response is complete", zap.Error(err))
 					break
 				}
 			}
