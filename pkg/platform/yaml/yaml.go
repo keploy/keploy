@@ -223,7 +223,7 @@ func (ys *Yaml) WriteTestcase(tcRead platform.Interface, ctx context.Context, fi
 	return nil
 }
 
-func (ys *Yaml) ReadTestcase(path string, lastSeenId string, options platform.Interface) ([]platform.Interface, error) {
+func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.Interface, options platform.Interface) ([]platform.Interface, error) {
 
 	if path == "" {
 		path = ys.TcsPath

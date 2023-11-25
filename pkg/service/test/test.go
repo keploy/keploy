@@ -289,7 +289,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	var returnVal InitialiseRunTestSetReturn
 	var err error
 	var readTcsMocks []*models.TestCase
-	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), "", nil)
+	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil, nil)
 	for _, mock := range tcsMocks {
 		tcsMock, ok := mock.(*models.TestCase)
 		if !ok {

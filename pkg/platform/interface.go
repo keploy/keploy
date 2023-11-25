@@ -8,7 +8,7 @@ type TestCaseDB interface {
 	WriteTestcase(tc Interface, ctx context.Context, filters Interface) error
 	WriteMock(tc Interface, ctx context.Context) error
 
-	ReadTestcase(path string, lastSeenId string, options Interface) ([]Interface, error)
+	ReadTestcase(path string, lastSeenId Interface, options Interface) ([]Interface, error)
 	ReadTcsMocks(tc Interface, path string) ([]Interface, error)
 	ReadConfigMocks(path string) ([]Interface, error)
 }
