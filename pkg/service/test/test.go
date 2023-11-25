@@ -323,7 +323,11 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 
 		ok, _ := cfg.LoadedHooks.IsDockerRelatedCmd(cfg.AppCmd)
 		if ok || cfg.DockerID {
-			cfg.Tc.HttpReq.URL = replaceHostToIP(cfg.Tc.HttpReq.URL, cfg.UserIP)
+			var err error
+			cfg.Tc.HttpReq.URL, err = replaceHostToIP(cfg.Tc.HttpReq.URL, cfg.UserIP)
+			if err != nil {
+				t.logger.Error("failed to replace host to docker container's IP", zap.Error(err))
+			}
 			t.logger.Debug("", zap.Any("replaced URL in case of docker env", cfg.Tc.HttpReq.URL))
 		}
 		t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", cfg.Tc.HttpReq.URL))
@@ -477,6 +481,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	if initialisedValues.InitialStatus != "" {
 		return initialisedValues.InitialStatus
 	}
+
 	isApplicationStopped := false
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -499,6 +504,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	)
 
 	var userIp string
+	userIp = initialisedValues.UserIP
+	t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
 
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
@@ -543,6 +550,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if exitLoop {
 			break
 		}
+
 		cfg := &SimulateRequestConfig{
 			Tc:           tc,
 			LoadedHooks:  loadedHooks,
@@ -734,22 +742,21 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	return pass, res
 }
 
-func replaceHostToIP(currentURL string, ipAddress string) string {
+func replaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
+
 	if err != nil {
 		// Return the original URL if parsing fails
-		return currentURL
+		return currentURL, err
 	}
 
 	if ipAddress == "" {
-		fmt.Errorf(Emoji, "failed to replace url in case of docker env")
-		return currentURL
+		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
 	}
 
 	// Replace hostname with the IP address
 	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-
 	// Return the modified URL
-	return parsedURL.String()
+	return parsedURL.String(), nil
 }
