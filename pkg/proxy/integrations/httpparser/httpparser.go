@@ -202,18 +202,13 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
 	if transferEncodingHeader == "chunked" {
 		for {
-			//Set deadline of 5 seconds
-			destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			resp, err := util.ReadBytes(destConn)
-			if err != nil && err != io.EOF {
-				//Check if the connection closed.
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					//Check if the deadline is reached.
-					logger.Debug("Stopped getting buffer from the destination server")
-					break
-				} else {
+			if err != nil {
+				if err != io.EOF {
 					logger.Debug("failed to read the response message from the destination server", zap.Error(err))
 					return
+				} else {
+					break
 				}
 			}
 			*finalResp = append(*finalResp, resp...)
