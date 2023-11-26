@@ -21,6 +21,7 @@ type ResultSet struct {
 	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
 	OptionalPadding     bool                `yaml:"optionalPadding"`
 	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
+	EOFAfterColumns     []byte              `yaml:"eofAfterColumns"`
 }
 type Row struct {
 	Header  RowHeader             `yaml:"header"`
@@ -42,6 +43,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	var err error
 	var eofPresent, paddingPresent, eofFinal, paddingFinal, optionalPadding bool
 	var optionalEOFBytes []byte
+	var eofAfterColumns []byte
 	// Parse the column count packet
 	columnCount, _, n := readLengthEncodedInteger(b)
 	b = b[n:]
@@ -59,6 +61,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// Check for EOF packet after columns
 	if len(b) > 4 && bytes.Equal(b[4:9], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
 		eofPresent = true
+		eofAfterColumns = b[:9]
 		b = b[9:] // Skip the EOF packet
 		if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
 			paddingPresent = true
@@ -91,6 +94,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 		PaddingPresentFinal: paddingFinal,
 		OptionalPadding:     optionalPadding,
 		OptionalEOFBytes:    optionalEOFBytes,
+		EOFAfterColumns:     eofAfterColumns,
 	}
 
 	return resultSet, err
@@ -269,7 +273,7 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	// Write EOF packet header
 	if resultSet.EOFPresent {
 		sequenceID++
-		buf.Write([]byte{5, 0, 0, sequenceID, 0xFE, 0x00, 0x00, 0x02, 0x00})
+		buf.Write(resultSet.EOFAfterColumns)
 		if resultSet.PaddingPresent {
 			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 		}

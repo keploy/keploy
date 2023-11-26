@@ -90,6 +90,7 @@ type MySQLResultSet struct {
 	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
 	OptionalPadding     bool                `yaml:"optionalPadding"`
 	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
+	EOFAfterColumns     []byte              `yaml:"eofAfterColumns"`
 }
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
