@@ -588,6 +588,13 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				logger.Error("Failed to write binary packet", zap.Error(err))
 				return
 			}
+			matchedIndex := 0
+			matchedReqIndex := 0
+			configMocks[matchedIndex].Spec.MySqlResponses = append(configMocks[matchedIndex].Spec.MySqlResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
+			if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
+				configMocks = (append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...))
+			}
+			h.SetConfigMocks(configMocks)
 			firstLoop = false
 			doHandshakeAgain = false
 			fmt.Println("BINARY PACKET SENT HANDSHAKE", binaryPacket, "/n")
@@ -651,7 +658,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				doHandshakeAgain = true
 				continue
 			}
-			matchedResponse, matchedIndex, mockType, err := matchRequestWithMock(mysqlRequest, configMocks, tcsMocks)
+			matchedResponse, _, _, err := matchRequestWithMock(mysqlRequest, configMocks, tcsMocks, h)
 			if err != nil {
 				logger.Error("Failed to match request with mock", zap.Error(err))
 				return
@@ -669,12 +676,6 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			if err != nil {
 				logger.Error("Failed to write response to clientConn", zap.Error(err))
 				return
-			}
-			if matchedIndex >= 0 {
-				if mockType == "config" && matchedIndex < len(configMocks) {
-					configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
-					h.SetConfigMocks(configMocks)
-				}
 			}
 		}
 	}
@@ -711,10 +712,11 @@ func bmatchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMoc
 
 	return bestMatch, nil
 }
-func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, int, string, error) {
+func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock, h *hooks.Hook) (*models.MySQLResponse, int, string, error) {
 	allMocks := append(configMocks, tcsMocks...)
 	var bestMatch *models.MySQLResponse
 	var matchedIndex int
+	var matchedReqIndex int
 	var mockType string
 	maxMatchCount := 0
 
@@ -724,10 +726,12 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 			if matchCount > maxMatchCount {
 				maxMatchCount = matchCount
 				matchedIndex = i
+				matchedReqIndex = j
 				mockType = allMocks[i].Spec.Metadata["type"]
 				if len(mock.Spec.MySqlResponses) > 0 {
 					if allMocks[i].Spec.Metadata["type"] == "config" {
-						bestMatch = &allMocks[i].Spec.MySqlResponses[j+1]
+						responseCopy := mock.Spec.MySqlResponses[j]
+						bestMatch = &responseCopy
 
 					} else {
 						bestMatch = &allMocks[i].Spec.MySqlResponses[j]
@@ -740,6 +744,26 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 
 	if bestMatch == nil {
 		return nil, -1, "", fmt.Errorf("no matching mock found")
+	}
+	if mockType == "config" {
+		configMocks[matchedIndex].Spec.MySqlRequests = append(configMocks[matchedIndex].Spec.MySqlRequests[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlRequests[matchedReqIndex+1:]...)
+		configMocks[matchedIndex].Spec.MySqlResponses = append(configMocks[matchedIndex].Spec.MySqlResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
+
+		// Remove the entire mock if no responses are left
+		if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
+			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
+		}
+		h.SetConfigMocks(configMocks) // Update configMocks using the handler method
+	} else {
+		realIndex := matchedIndex - len(configMocks)
+		tcsMocks[realIndex].Spec.MySqlRequests = append(tcsMocks[realIndex].Spec.MySqlRequests[:matchedReqIndex], tcsMocks[realIndex].Spec.MySqlRequests[matchedReqIndex+1:]...)
+		tcsMocks[realIndex].Spec.MySqlResponses = append(tcsMocks[realIndex].Spec.MySqlResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
+
+		// Remove the entire mock if no responses are left
+		if len(tcsMocks[realIndex].Spec.MySqlResponses) == 0 {
+			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
+		}
+		h.SetTcsMocks(tcsMocks) // Update tcsMocks using the handler method
 	}
 
 	return bestMatch, matchedIndex, mockType, nil
