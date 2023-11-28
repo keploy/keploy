@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Checkout a different branch
+git fetch origin
 git checkout fix-gosdk-version
 
 # Start mongo before starting keploy.
