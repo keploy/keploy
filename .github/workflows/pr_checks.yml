@@ -1,0 +1,21 @@
+name: PR Checks
+on: [pull_request]
+jobs:
+  pr_checks:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Build binary
+      run: |
+        go build -o keploy
+    - name: Checkout the samples-go repository
+      uses: actions/checkout@v2
+      with:
+        repository: keploy/samples-go
+        path: samples-go
+    - name: Run samples-go application
+      run: |
+        source .github/workflows/gin-mongo.sh
+
