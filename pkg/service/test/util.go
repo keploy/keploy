@@ -51,7 +51,7 @@ type TestConfig struct {
 	AppContainer     string
 	AppNetwork       string
 	Delay            uint64
-	PassThorughPorts []uint
+	PassThroughPorts []uint
 	ApiTimeout       uint64
 }
 
@@ -202,13 +202,13 @@ func LeftJoinNoise(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) m
 }
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
-    for _, pattern := range regexArray {
-        re := regexp.MustCompile(pattern)
-        if re.MatchString(str) {
-            return true, pattern
-        }
-    }
-    return false, ""
+	for _, pattern := range regexArray {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(str) {
+			return true, pattern
+		}
+	}
+	return false, ""
 }
 
 func MapToArray(mp map[string][]string) []string {
