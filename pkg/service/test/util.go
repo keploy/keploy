@@ -53,7 +53,7 @@ type TestConfig struct {
 	AppContainer     string
 	AppNetwork       string
 	Delay            uint64
-	PassThorughPorts []uint
+	PassThroughPorts []uint
 	ApiTimeout       uint64
 	Session          []string
 	TestReport       platform.TestReportDB
