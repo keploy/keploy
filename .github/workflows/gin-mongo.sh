@@ -3,6 +3,9 @@
 # Check the current directory
 pwd
 
+# Start mongo before starting keploy.
+sudo docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+
 # Start the gin-mongo app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../keployv2 record -c "go run main.go handler.go" &
 
@@ -36,7 +39,7 @@ sleep 5
 sudo kill $pid
 
 # Start the gin-mongo app in test omde.
-sudo -E env PATH="$PATH" ./../../keploy test -c "go run main.go handler.go" --delay 7
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "go run main.go handler.go" --delay 7
 
 # Wait for 7 seconds for the app to start.
 sleep 7
