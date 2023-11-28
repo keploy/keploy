@@ -313,7 +313,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	//Register all the parsers in the map.
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
-	Register("mongo", mongoparser.NewMongoParser(logger, h))
+	Register("mongo", mongoparser.NewMongoParser(logger, h, opt.MongoPassword))
 	Register("http", httpparser.NewHttpParser(logger, h))
 	Register("mysql", mysqlparser.NewMySqlParser(logger, h))
 	// assign default values if not provided
