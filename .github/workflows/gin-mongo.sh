@@ -7,7 +7,7 @@ pwd
 sudo -E env PATH="$PATH" ./../../keployv2 record -c "go run main.go handler.go" &
 
 # Wait for 5 seconds for the app to start.
-sleep 8
+sleep 20
 
 # Get the pid of the application.
 pid=$(pgrep keploy)
