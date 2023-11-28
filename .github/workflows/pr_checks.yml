@@ -17,6 +17,6 @@ jobs:
         path: samples-go
     - name: Run samples-go application
       run: |
-        cd samples-go
+        cd samples-go/gin-mongo
         source ./../.github/workflows/gin-mongo.sh
 
