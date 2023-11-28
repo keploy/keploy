@@ -37,7 +37,7 @@ type tester struct {
 type TestOptions struct {
 	MongoPassword    string
 	Delay            uint64
-	PassThorughPorts []uint
+	PassThroughPorts []uint
 	ApiTimeout       uint64
 	Testsets         []string
 	AppContainer     string
@@ -85,12 +85,15 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// start the proxy
-		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThorughPorts, returnVal.LoadedHooks, context.Background())
+		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
 	//Sending Proxy Ip & Port to the ebpf program
 	if err := returnVal.LoadedHooks.SendProxyInfo(returnVal.ProxySet.IP4, returnVal.ProxySet.Port, returnVal.ProxySet.IP6); err != nil {
+		return returnVal, err
+	}
+	if err := returnVal.LoadedHooks.SendPassThroughPorts(cfg.PassThroughPorts); err != nil {
 		return returnVal, err
 	}
 	t.logger.Debug(fmt.Sprintf("the session indices are:%v", cfg.Session))
@@ -157,7 +160,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		AppContainer:     options.AppContainer,
 		AppNetwork:       options.AppContainer,
 		Delay:            options.Delay,
-		PassThorughPorts: options.PassThorughPorts,
+		PassThroughPorts: options.PassThroughPorts,
 		ApiTimeout:       options.ApiTimeout,
 		Session:          sessions,
 		TestReport:       yaml.NewTestReportFS(t.logger),
