@@ -10,7 +10,7 @@ sudo -E env PATH="$PATH" ./../../keploy record -c "go run main.go handler.go"
 sleep 5
 
 # Get the pid of the application.
-pid=$(ps -ef | grep "go run main.go handler.go" | grep -v grep | awk '{print $2}')
+pid=$(pgrep keploy)
 
 # Start making curl calls to record the testcases and mocks.
 curl --request POST \
@@ -33,16 +33,13 @@ curl -X GET http://localhost:8080/CJBKJd92
 sleep 5
 
 # Stop the gin-mongo app.
-kill -SIGINT $pid
+sudo kill -9 $pid
 
 # Start the gin-mongo app in test omde.
 sudo -E env PATH="$PATH" ./../../keploy test -c "go run main.go handler.go" --delay 7
 
 # Wait for 7 seconds for the app to start.
 sleep 7
-
-# Get the pid of the application.
-pid=$(ps -ef | grep "go run main.go handler.go" | grep -v grep | awk '{print $2}')
 
 # Wait for around 20 seconds for the test to complete.
 sleep 20
