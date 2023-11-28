@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Start the gin-mongo app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../keploy/keploy -record -c "go run main.go handler.go"
+sudo -E env PATH="$PATH" ./../keploy -record -c "go run main.go handler.go"
 
 # Wait for 5 seconds for the app to start.
 sleep 5
