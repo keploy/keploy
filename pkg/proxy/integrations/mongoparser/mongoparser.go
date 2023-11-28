@@ -26,16 +26,13 @@ var Emoji = "\U0001F430" + " Keploy:"
 var configRequests = []string{""}
 var password string
 
-func SetAuthPassword(p string) {
-	password = p
-}
-
 type MongoParser struct {
 	logger *zap.Logger
 	hooks  *hooks.Hook
 }
 
-func NewMongoParser(logger *zap.Logger, h *hooks.Hook) *MongoParser {
+func NewMongoParser(logger *zap.Logger, h *hooks.Hook, authPassword string) *MongoParser {
+	password = authPassword
 	return &MongoParser{
 		logger: logger,
 		hooks:  h,
