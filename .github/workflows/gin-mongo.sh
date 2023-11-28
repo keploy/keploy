@@ -10,8 +10,13 @@ sudo docker run --name mongoDb --rm  -p 27017:27017 -d mongo
 # Start the gin-mongo app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../keployv2 record -c "go run main.go handler.go" &
 
-# Wait for 20 seconds for the app to start.
-sleep 35
+# Wait for the application to start.
+app_started=false
+while [ "$app_started" = false ]; do
+    if curl -X GET http://localhost:8080/CJBKJd92; then
+        app_started=true
+    fi
+done
 
 # Get the pid of the application.
 pid=$(pgrep keploy)
