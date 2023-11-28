@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Check the current directory
-pwd
+# Checkout a different branch
+git checkout fix-gosdk-version
 
 # Start mongo before starting keploy.
 sudo docker run --name mongoDb --rm  -p 27017:27017 -d mongo
