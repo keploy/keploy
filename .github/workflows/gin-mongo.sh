@@ -62,10 +62,11 @@ sleep 7
 sleep 20
 
 # Get the test results from the testReport file.
-status = $(cat ./keploy/testReports/report-1.yaml | grep "status" | awk '{print $1}')
+report_file="./keploy/testReports/report-1.yaml"
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
-if [ "$status" == "status: PASSED" ]; then
+if [echo "$test_status"] == "PASSED"; then
     exit 0
 else
     exit 1

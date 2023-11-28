@@ -18,12 +18,12 @@ test:
     globalNoise: |-
         {
           "global": {
-            "body": {},
+            "body": {"ts":[]},
         "body": {"ts":[]},
           },
           "test-sets": {
             "test-set-name": {
-              "body": {},
+              "body": {"ts":[]},
         "body": {"ts":[]},
             }
           }
