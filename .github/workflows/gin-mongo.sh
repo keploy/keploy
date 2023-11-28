@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Check the current directory
-eec
+pwd
 
 # Start the gin-mongo app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../keploy record -c "go run main.go handler.go"
