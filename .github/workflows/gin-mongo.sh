@@ -7,7 +7,7 @@ pwd
 sudo -E env PATH="$PATH" ./../../keploy record -c "go run main.go handler.go"
 
 # Wait for 5 seconds for the app to start.
-sleep 5
+sleep 8
 
 # Get the pid of the application.
 pid=$(pgrep keploy)
@@ -33,7 +33,7 @@ curl -X GET http://localhost:8080/CJBKJd92
 sleep 5
 
 # Stop the gin-mongo app.
-sudo kill -9 $pid
+sudo kill $pid
 
 # Start the gin-mongo app in test omde.
 sudo -E env PATH="$PATH" ./../../keploy test -c "go run main.go handler.go" --delay 7
