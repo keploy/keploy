@@ -48,6 +48,7 @@ type TestConfig struct {
 	Proxyport        uint32
 	TestReportPath   string
 	AppCmd           string
+	MongoPassword    string
 	Testsets         *[]string
 	AppContainer     string
 	AppNetwork       string
