@@ -4,7 +4,7 @@
 pwd
 
 # Start mongo before starting keploy.
-sudo docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+sudo docker run --name mongoDb --rm  -p 27017:27017 -d mongo
 
 # Start the gin-mongo app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../keployv2 record -c "go run main.go handler.go" &
