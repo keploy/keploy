@@ -106,7 +106,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		// start user application
 		go func() {
 			stopApplication := false
-			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay, false); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					r.Logger.Info("keploy terminated user application")
