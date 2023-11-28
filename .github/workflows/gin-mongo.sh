@@ -1,7 +1,10 @@
 #!/bin/bash
 
+#Output the current directory.
+pwd
+
 # Change to the directory where the gin-mongo app is present.
-cd ./../../samples-go/gin-mongo
+cd ./../samples-go/gin-mongo
 
 # Start the gin-mongo app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../keploy/keploy -record -c "go run main.go handler.go"
