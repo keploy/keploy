@@ -37,7 +37,7 @@ var (
 	ErrCommandError   = errors.New("exited due to command error")
 	ErrUnExpected     = errors.New("an unexpected error occurred")
 	ErrDockerError    = errors.New("an error occurred while using docker client")
-	ErrFailedUnitTest = errors.New("any test failure occured when running keploy tests along with unit tests")
+	ErrFailedUnitTest = errors.New("test failure occured when running keploy tests along with unit tests")
 )
 
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, isUnitTestIntegration bool) error {
@@ -524,9 +524,9 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 			h.logger.Warn("userApplication might not have shut down correctly. Please verify if it has been closed", zap.Error(err))
 			return ErrInterrupted
 		}
-		
+
 		// This is done for non-server running commands like "mvn test", "npm test", "go test" etc
-		if isUnitTestIntegration{
+		if isUnitTestIntegration {
 			return ErrFailedUnitTest
 		}
 		h.logger.Error("userApplication failed to run with the following error. Please check application logs", zap.Error(err))
