@@ -103,6 +103,8 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	}
 
+	s.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
+	passThroughPorts = append(passThroughPorts, 36320)
 	// filter the required destination ports
 	if err := loadedHooks.SendPassThroughPorts(passThroughPorts); err != nil {
 		return
@@ -161,14 +163,15 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, true); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					s.logger.Info("keploy terminated user application")
 					return
-				case hooks.ErrCommandError:
+				case hooks.ErrFailedUnitTest:
+					s.logger.Debug("unit tests failed hence stopping keploy")
 				case hooks.ErrUnExpected:
-					s.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
+					s.logger.Debug("unit tests ran successfully hence stopping keploy")
 				default:
 					s.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
