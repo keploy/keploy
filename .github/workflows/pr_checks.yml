@@ -9,7 +9,7 @@ jobs:
 
     - name: Build binary
       run: |
-        go build -o keploy
+        go build -o keployv2
     - name: Checkout the samples-go repository
       uses: actions/checkout@v2
       with:
