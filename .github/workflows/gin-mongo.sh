@@ -55,12 +55,6 @@ sudo kill $pid
 # Start the gin-mongo app in test omde.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "go run main.go handler.go" --delay 7
 
-# Wait for 7 seconds for the app to start.
-sleep 7
-
-# Wait for around 20 seconds for the test to complete.
-sleep 20
-
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
 test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
