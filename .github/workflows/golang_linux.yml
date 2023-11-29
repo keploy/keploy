@@ -1,7 +1,7 @@
-name: PR Checks
+name: Golang On Linux
 on: [pull_request]
 jobs:
-  pr_checks:
+  golang_linux:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository

@@ -1,0 +1,21 @@
+name: Python On Linux
+on: [pull_request]
+jobs:
+  python_linux:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Build binary
+      run: |
+        go build -o keployv2
+    - name: Checkout the samples-python repository
+      uses: actions/checkout@v2
+      with:
+        repository: keploy/samples-python
+        path: samples-python
+    - name: Run the sample python application
+      run: |
+        cd samples-python/django-postgres/django_postgres
+        source ../../../.github/workflows/django-postgres.sh
