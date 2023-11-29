@@ -19,7 +19,7 @@ export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
 
 # Update the global noise to ignore the Allow header.
 config_file="./keploy-config.yaml"
-sed -i 's/"header": {}/"header": {"Allow":[]}/'
+sed -i 's/"header": {}/"header": {"Allow":[]}/'"$config_file"
 
 # Start the django-postgres app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../../testing/keploy/keploy record -c "python3 manage.py runserver" &
