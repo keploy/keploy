@@ -22,7 +22,7 @@ config_file="./keploy-config.yaml"
 sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 
 # Start the django-postgres app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../../testing/keploy/keploy record -c "python3 manage.py runserver" &
+sudo -E env PATH="$PATH" ./../../..//keployv2 record -c "python3 manage.py runserver" &
 
 # Wait for the application to start.
 app_started=false
@@ -71,3 +71,4 @@ sleep 5
 
 # Stop the gin-mongo app.
 sudo kill $pid
+
