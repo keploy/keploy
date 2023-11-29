@@ -21,6 +21,10 @@ export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
 config_file="./keploy-config.yaml"
 sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 
+# Make migrations
+python3 manage.py makemigrations
+python3 manage.py migrate
+
 # Start the django-postgres app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" &
 
