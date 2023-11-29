@@ -487,8 +487,12 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
 
 		if !matched {
-			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
-			return errors.New("failed to match the dependency call from user application")
+			requestBuffer, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)  
+			  
+			if err != nil {
+				logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
+				return err
+			}
 		}
 
 		for _, pgResponse := range pgResponses {
