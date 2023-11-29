@@ -3,11 +3,6 @@
 # Start the postgres database.
 sudo docker-compose up -d
 
-# Start a virtual env for the app.
-pip3 install virtualenv
-python3 -m virtualenv venv
-source venv/bin/activate
-
 # Install the dependencies.
 pip3 install -r requirements.txt
 
