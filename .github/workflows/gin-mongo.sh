@@ -10,7 +10,7 @@ sudo docker run --name mongoDb --rm  -p 27017:27017 -d mongo
 # Generate the keploy-config file.
 ./../../keployv2 generate-config
 
-# Updated the global noise to ts.
+# Update the global noise to ts.
 config_file="./keploy-config.yaml"
 sed -i 's/"body": {}/"body": {"ts":[]}/' "$config_file"
 
