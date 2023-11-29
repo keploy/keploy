@@ -25,6 +25,9 @@ sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 python3 manage.py makemigrations
 python3 manage.py migrate
 
+# Wait for 5 seconds for it to complete
+sleep 5
+
 # Start the django-postgres app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" &
 
