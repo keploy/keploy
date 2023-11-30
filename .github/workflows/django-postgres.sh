@@ -77,3 +77,17 @@ sleep 5
 # Stop the gin-mongo app.
 sudo kill $pid
 
+# Start the app in test mode.
+sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10
+
+# Get the test results from the testReport file.
+report_file="./keploy/testReports/report-1.yaml"
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+# Return the exit code according to the status.
+if [ "$test_status" = "PASSED" ]; then
+    exit 0
+else
+    exit 1
+fi
+
