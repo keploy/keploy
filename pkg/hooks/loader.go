@@ -43,6 +43,7 @@ type Hook struct {
 	keployPid        *ebpf.Map
 	appPidMap        *ebpf.Map
 	keployServerPort *ebpf.Map
+	passthroughPorts *ebpf.Map
 
 	platform.TestCaseDB
 
@@ -183,6 +184,37 @@ func (h *Hook) ResetDeps() int {
 	h.tcsMocks = []*models.Mock{}
 	defer h.mu.Unlock()
 	return 1
+}
+
+// SendPassThroughPorts sends the destination ports of the server which should not be intercepted by keploy proxy.
+func (h *Hook) SendPassThroughPorts(filterPorts []uint) error {
+	portsSize := len(filterPorts)
+	if portsSize > 10 {
+		h.logger.Error("can not send more than 10 ports to be filtered to the ebpf program")
+		return fmt.Errorf("passthrough ports limit exceeded")
+	}
+
+	var ports [10]int32
+
+	for i := 0; i < 10; i++ {
+		if i < portsSize {
+			// Convert uint to int32
+			ports[i] = int32(filterPorts[i])
+		} else {
+			// Fill the remaining elements with -1
+			ports[i] = -1
+		}
+	}
+
+	for i, v := range ports {
+		h.logger.Debug(fmt.Sprintf("PassthroughPort(%v):[%v]", i, v))
+		err := h.passthroughPorts.Update(uint32(i), &v, ebpf.UpdateAny)
+		if err != nil {
+			h.logger.Error("failed to send the passthrough ports to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
+			return err
+		}
+	}
+	return nil
 }
 
 // SendKeployServerPort sends the keploy graphql server port to be filtered in the eBPF program.
@@ -441,7 +473,7 @@ func (h *Hook) Stop(forceStop bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context, filters *models.Filters) error {
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err
@@ -471,6 +503,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 	h.keployPid = objs.KeployNamespacePidMap
 	h.appPidMap = objs.AppNsPidMap
 	h.keployServerPort = objs.KeployServerPort
+	h.passthroughPorts = objs.PassThroughPorts
 
 	h.stopper = stopper
 	h.objects = objs
@@ -481,7 +514,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 		defer h.Recover(pkg.GenerateRandomID())
 		defer utils.HandlePanic()
 		for {
-			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx)
+			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx, filters)
 			time.Sleep(1 * time.Second)
 		}
 	}()

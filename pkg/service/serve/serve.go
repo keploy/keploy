@@ -43,7 +43,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThorughPorts []uint, apiTimeout uint64, appCmd string) {
+func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string) {
 	var ps *proxy.ProxySet
 
 	if port == 0 {
@@ -77,7 +77,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks("", "", pid, ctx); err != nil {
+		if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 			return
 		}
 	}
@@ -93,13 +93,20 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThorughPorts, loadedHooks, ctx)
+		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx)
 
 	}
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
+		return
+	}
+
+	s.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
+	passThroughPorts = append(passThroughPorts, 36320)
+	// filter the required destination ports
+	if err := loadedHooks.SendPassThroughPorts(passThroughPorts); err != nil {
 		return
 	}
 
@@ -156,14 +163,15 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, true); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					s.logger.Info("keploy terminated user application")
 					return
-				case hooks.ErrCommandError:
+				case hooks.ErrFailedUnitTest:
+					s.logger.Debug("unit tests failed hence stopping keploy")
 				case hooks.ErrUnExpected:
-					s.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
+					s.logger.Debug("unit tests ran successfully hence stopping keploy")
 				default:
 					s.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
