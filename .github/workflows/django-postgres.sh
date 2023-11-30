@@ -3,9 +3,6 @@
 # Start the postgres database.
 sudo docker-compose up -d
 
-# Check the containers
-sudo docker ps
-
 # Install the dependencies.
 pip3 install -r requirements.txt
 
@@ -21,8 +18,8 @@ sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 
 
 # Make migrations
-python3 manage.py makemigrations
-python3 manage.py migrate
+# python3 manage.py makemigrations
+# python3 manage.py migrate
 
 # Wait for 5 seconds for it to complete
 sleep 5
