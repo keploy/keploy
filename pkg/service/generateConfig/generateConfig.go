@@ -97,7 +97,7 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 
 	if err := yaml.Unmarshal(data, &node); err != nil {
 		g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))
-    return
+		return
 	}
 
 	results, err := yaml.Marshal(node.Content[0])
@@ -117,7 +117,7 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
   err = cmd.Run()
   if err != nil {
     g.logger.Error("failed to set the permission of config file", zap.Error(err))
-    return
+		return
   }
 
 	g.logger.Info("Config file generated successfully")
