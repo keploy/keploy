@@ -131,7 +131,7 @@ installKeploy (){
                 fi
             fi
 
-            if colima status | grep -q "Running"; then
+            if timeout 5s colima status | grep -q "Running"; then
                 echo "colima is already running."
             else
                 colima start
