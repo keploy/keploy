@@ -711,7 +711,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		// // Find submatches using the regular expression
 
 		var actualMsgsStr string
-		actualMsgsStr, err = decodeOpMsgSectionSingle(actualSection)
+		actualMsgsStr, err = extractSectionSingle(actualSection)
 		if err != nil {
 			logger.Error("failed to fetch the msgs from the single section of incoming OpMsg", zap.Error(err))
 			return 0
