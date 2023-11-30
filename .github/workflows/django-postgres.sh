@@ -38,7 +38,6 @@ while [ "$app_started" = false ]; do
         app_started=true
     fi
     echo $app_started
-    telnet localhost 8000
     sleep 3 # wait for 3 seconds before checking again.
 done
 
