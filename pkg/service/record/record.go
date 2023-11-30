@@ -28,7 +28,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint, filters *models.Filters) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -51,7 +51,6 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks := hooks.NewHook(ys, routineId, r.Logger)
 
-
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
 
@@ -65,7 +64,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx, filters); err != nil {
 			return
 		}
 	}
@@ -99,7 +98,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		// start user application
 		go func() {
 			stopApplication := false
-			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay, false); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					r.Logger.Info("keploy terminated user application")

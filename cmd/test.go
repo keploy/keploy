@@ -80,7 +80,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 
 	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
-	
+
 	bodyOrHeaderVal := globalScopeVal.(map[string]interface{})
 
 	(*globalNoise)["body"] = map[string][]string{}
@@ -103,7 +103,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 
 	for testset := range testSetScopeVal.(map[string]interface{}) {
 		(*testSetNoise)[testset] = map[string]map[string][]string{}
-		
+
 		bodyOrHeaderVal := testSetScopeVal.(map[string]interface{})[testset].(map[string]interface{})
 
 		(*testSetNoise)[testset]["body"] = map[string][]string{}
@@ -207,7 +207,6 @@ func (t *Test) GetCmd() *cobra.Command {
 					t.logger.Info("continuing without configuration file because file not found")
 				} else {
 					t.logger.Error("", zap.Error(err))
-					return err
 				}
 			}
 
@@ -278,16 +277,16 @@ func (t *Test) GetCmd() *cobra.Command {
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
 			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-				Testsets: testSets,
-				AppContainer: appContainer,
-				AppNetwork: networkName,
-				MongoPassword: mongoPassword,
-				Delay: delay,
-				PassThorughPorts: ports,
-				ApiTimeout: apiTimeout,
-				ProxyPort: proxyPort,
-				GlobalNoise: globalNoise,
-				TestsetNoise: testsetNoise,
+				Testsets:         testSets,
+				AppContainer:     appContainer,
+				AppNetwork:       networkName,
+				MongoPassword:    mongoPassword,
+				Delay:            delay,
+				PassThroughPorts: ports,
+				ApiTimeout:       apiTimeout,
+				ProxyPort:        proxyPort,
+				GlobalNoise:      globalNoise,
+				TestsetNoise:     testsetNoise,
 			})
 
 			return nil
