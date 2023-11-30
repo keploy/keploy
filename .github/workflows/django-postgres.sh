@@ -41,6 +41,9 @@ done
 # Start the postgres database.
 sudo docker-compose up -d
 
+# Check if postgres is running
+sudo docker ps
+
 # Start making curl calls to record the testcases and mocks.
 curl --location 'http://127.0.0.1:8000/user/' \
 --header 'Content-Type: application/json' \
