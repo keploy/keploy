@@ -1,5 +1,7 @@
 #! /bin/bash
 
+# Start the postgres database.
+sudo docker-compose up -d
 
 # Install the dependencies.
 pip3 install -r requirements.txt
