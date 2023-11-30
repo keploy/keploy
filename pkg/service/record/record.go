@@ -28,8 +28,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint, filters *models.Filters) {
-
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint, filters *models.Filters, mtlsCertPath, mtlsKeyPath, mtlsHostName string) {
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
@@ -75,7 +74,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// start the BootProxy
-		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
+		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: proxyPort, MtlsCertPath: mtlsCertPath, MtlsKeyPath: mtlsKeyPath, MtlsHostName: mtlsHostName}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx)
 	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
