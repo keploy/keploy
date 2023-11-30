@@ -1,7 +1,5 @@
 #! /bin/bash
 
-# Start the postgres database.
-sudo docker-compose up -d
 
 # Install the dependencies.
 pip3 install -r requirements.txt
@@ -37,6 +35,9 @@ while [ "$app_started" = false ]; do
     echo $app_started
     sleep 3 # wait for 3 seconds before checking again.
 done
+
+# Start the postgres database.
+sudo docker-compose up -d
 
 # Start making curl calls to record the testcases and mocks.
 curl --location 'http://127.0.0.1:8000/user/' \
