@@ -7,7 +7,7 @@ sudo docker run --name mongoDb --rm -p 27017:27017 -d mongo
 npm install
 
 # Edit the connection.js file to connect to local mongodb.
-file_path="express-mongoose/src/db/connection.js"
+file_path="src/db/connection.js"
 sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
 
 # Remove any preexisting keploy tests.
