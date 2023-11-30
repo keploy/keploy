@@ -1,7 +1,7 @@
 #! /bin/bash
 
 # Start the postgres database.
-sudo docker-compose up -d
+docker-compose up -d
 
 # Install the dependencies.
 pip3 install -r requirements.txt
@@ -9,17 +9,19 @@ pip3 install -r requirements.txt
 # Set the environment variable for the app to run correctly.
 export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
 
+# Make the required migrations.
+python3 manage.py makemigrations
+python3 manage.py migrate
+
 # Generate the keploy-config file.
 ./../../../keployv2 generate-config
+
+#Clean any keploy folders.
+sudo rm -rf keploy/
 
 # Update the global noise to ignore the Allow header.
 config_file="./keploy-config.yaml"
 sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
-
-
-# Make migrations
-# python3 manage.py makemigrations
-# python3 manage.py migrate
 
 # Wait for 5 seconds for it to complete
 sleep 5

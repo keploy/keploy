@@ -538,9 +538,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	if len(entTcs) > 0 {
 		t.logger.Warn("These testcases have been recorded with Keploy Enterprise, may not work properly with the open-source version", zap.Strings("enterprise mocks:", entTcs))
 	}
-	if len(nonKeployTcs) > 0 {
-		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
-	}
+	// if len(nonKeployTcs) > 0 {
+	// }
 	resultsCfg := &FetchTestResultsConfig{
 		TestReportFS:   testReportFS,
 		TestReport:     initialisedValues.TestReport,
