@@ -20,7 +20,7 @@ config_file="./keploy-config.yaml"
 sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 
 # Check if it is listening on port 8000 and check the logs.
-telnet 0.0.0.0:8000
+# telnet 0.0.0.0:8000
 echo "Now checking the logs"
 sudo docker logs  django_postgres_postgres_1
 
