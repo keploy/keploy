@@ -37,7 +37,7 @@ type tester struct {
 type TestOptions struct {
 	MongoPassword    string
 	Delay            uint64
-	PassThorughPorts []uint
+	PassThroughPorts []uint
 	ApiTimeout       uint64
 	Testsets         []string
 	AppContainer     string
@@ -89,12 +89,17 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// start the proxy
-		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThorughPorts, returnVal.LoadedHooks, context.Background())
+		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background())
 	}
 
 	// proxy update its state in the ProxyPorts map
 	//Sending Proxy Ip & Port to the ebpf program
 	if err := returnVal.LoadedHooks.SendProxyInfo(returnVal.ProxySet.IP4, returnVal.ProxySet.Port, returnVal.ProxySet.IP6); err != nil {
+		return returnVal, err
+	}
+
+	// filter the required destination ports
+	if err := returnVal.LoadedHooks.SendPassThroughPorts(cfg.PassThroughPorts); err != nil {
 		return returnVal, err
 	}
 
@@ -160,8 +165,9 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		AppContainer:     options.AppContainer,
 		AppNetwork:       options.AppContainer,
 		Delay:            options.Delay,
-		PassThorughPorts: options.PassThorughPorts,
+		PassThroughPorts: options.PassThroughPorts,
 		ApiTimeout:       options.ApiTimeout,
+		MongoPassword:    options.MongoPassword,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracfully shutdown
@@ -252,7 +258,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		// start user application
 		if !cfg.ServeTest {
 			go func() {
-				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay); err != nil {
+				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay, false); err != nil {
 					switch err {
 					case hooks.ErrInterrupted:
 						t.logger.Info("keploy terminated user application")
@@ -454,7 +460,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	if initialisedValues.InitialStatus != "" {
 		return initialisedValues.InitialStatus
 	}
-	
+
 	isApplicationStopped := false
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -479,7 +485,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	var userIp string
 	userIp = initialisedValues.UserIP
 	t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
-	
+
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
@@ -711,7 +717,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 func replaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
-	
+
 	if err != nil {
 		// Return the original URL if parsing fails
 		return currentURL, err
