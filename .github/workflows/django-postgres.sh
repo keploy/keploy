@@ -36,7 +36,7 @@ while [ "$app_started" = false ]; do
     if curl --location 'http://127.0.0.1:8000/user/'; then
         app_started=true
     fi
-    echo "the app has still not started"
+    echo $app_started
     sleep 3 # wait for 3 seconds before checking again.
 done
 
