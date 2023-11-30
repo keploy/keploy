@@ -41,12 +41,6 @@ while [ "$app_started" = false ]; do
     sleep 3 # wait for 3 seconds before checking again.
 done
 
-
-
-# Checking with telnet.
-echo "checking with telnet"
-telnet localhost 8000
-
 # Start making curl calls to record the testcases and mocks.
 curl --location 'http://127.0.0.1:8000/user/' \
 --header 'Content-Type: application/json' \
