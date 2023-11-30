@@ -33,7 +33,7 @@ sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runser
 # Wait for the application to start.
 app_started=false
 while [ "$app_started" = false ]; do
-    if curl --location 'http://127.0.0.1:8000/user/'; then
+    if curl --location 'http://127.0.0.1:8000/'; then
         echo "we are in the if block right now"
         app_started=true
     fi
