@@ -40,8 +40,7 @@ while [ "$app_started" = false ]; do
     sleep 3 # wait for 3 seconds before checking again.
 done
 
-# Get the pid of the application.
-pid=$(pgrep keploy)
+
 
 # Checking with telnet.
 echo "checking with telnet"
