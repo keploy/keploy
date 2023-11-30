@@ -1,7 +1,7 @@
 #! /bin/bash
 
 # Start the docker container.
-docker compose up -d
+sudo docker run --name mongoDb --rm -p 27017:27017 -d mongo
 
 # Install the required node dependencies.
 npm install
