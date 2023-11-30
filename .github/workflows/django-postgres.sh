@@ -43,6 +43,7 @@ done
 pid=$(pgrep keploy)
 
 # Checking with telnet.
+echo "checking with telnet"
 telnet localhost 8000
 
 # Start making curl calls to record the testcases and mocks.
