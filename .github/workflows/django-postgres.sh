@@ -38,11 +38,8 @@ while [ "$app_started" = false ]; do
     sleep 3 # wait for 3 seconds before checking again.
 done
 
-# Start the postgres database.
-sudo docker-compose up -d
-
-# Check if postgres is running
-sudo docker ps
+# Get the pid of keploy.
+pid=$(pgrep keploy)
 
 # Start making curl calls to record the testcases and mocks.
 curl --location 'http://127.0.0.1:8000/user/' \
