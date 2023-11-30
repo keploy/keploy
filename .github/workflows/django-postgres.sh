@@ -19,9 +19,6 @@ export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
 config_file="./keploy-config.yaml"
 sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 
-# Check if it is listening on port 8000 and check the logs.
-echo "Now checking the logs"
-sudo docker logs  django_postgres_postgres_1
 
 # Make migrations
 python3 manage.py makemigrations
