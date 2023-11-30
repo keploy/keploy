@@ -105,6 +105,7 @@ type bpfMapSpecs struct {
 	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.MapSpec `ebpf:"keploy_namespace_pid_map"`
 	KeployServerPort          *ebpf.MapSpec `ebpf:"keploy_server_port"`
+	PassThroughPorts          *ebpf.MapSpec `ebpf:"pass_through_ports"`
 	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
@@ -149,6 +150,7 @@ type bpfMaps struct {
 	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.Map `ebpf:"keploy_namespace_pid_map"`
 	KeployServerPort          *ebpf.Map `ebpf:"keploy_server_port"`
+	PassThroughPorts          *ebpf.Map `ebpf:"pass_through_ports"`
 	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
@@ -176,6 +178,7 @@ func (m *bpfMaps) Close() error {
 		m.KeployModeMap,
 		m.KeployNamespacePidMap,
 		m.KeployServerPort,
+		m.PassThroughPorts,
 		m.ProxyInfoMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
