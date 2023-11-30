@@ -74,54 +74,8 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *apiTimeout == 5 {
 		*apiTimeout = confTest.ApiTimeout
 	}
-	noiseJSON, err := test.UnmarshallJson(confTest.GlobalNoise, t.logger)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshall the noise flag due to error: %s", err)
-	}
-
-	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
-
-	bodyOrHeaderVal := globalScopeVal.(map[string]interface{})
-
-	(*globalNoise)["body"] = map[string][]string{}
-	for field, regexArr := range bodyOrHeaderVal["body"].(map[string]interface{}) {
-		(*globalNoise)["body"][field] = []string{}
-		for _, val := range regexArr.([]interface{}) {
-			(*globalNoise)["body"][field] = append((*globalNoise)["body"][field], val.(string))
-		}
-	}
-
-	(*globalNoise)["header"] = map[string][]string{}
-	for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) {
-		(*globalNoise)["header"][field] = []string{}
-		for _, val := range regexArr.([]interface{}) {
-			(*globalNoise)["header"][field] = append((*globalNoise)["header"][field], val.(string))
-		}
-	}
-
-	testSetScopeVal := noiseJSON.(map[string]interface{})["test-sets"]
-
-	for testset := range testSetScopeVal.(map[string]interface{}) {
-		(*testSetNoise)[testset] = map[string]map[string][]string{}
-
-		bodyOrHeaderVal := testSetScopeVal.(map[string]interface{})[testset].(map[string]interface{})
-
-		(*testSetNoise)[testset]["body"] = map[string][]string{}
-		for field, regexArr := range bodyOrHeaderVal["body"].(map[string]interface{}) {
-			(*testSetNoise)[testset]["body"][field] = []string{}
-			for _, val := range regexArr.([]interface{}) {
-				(*testSetNoise)[testset]["body"][field] = append((*testSetNoise)[testset]["body"][field], val.(string))
-			}
-		}
-
-		(*testSetNoise)[testset]["header"] = map[string][]string{}
-		for field, regexArr := range bodyOrHeaderVal["header"].(map[string]interface{}) {
-			(*testSetNoise)[testset]["header"][field] = []string{}
-			for _, val := range regexArr.([]interface{}) {
-				(*testSetNoise)[testset]["header"][field] = append((*testSetNoise)[testset]["header"][field], val.(string))
-			}
-		}
-	}
+	*globalNoise = confTest.GlobalNoise.Global
+	*testSetNoise = confTest.GlobalNoise.Testsets
 	return nil
 }
 
