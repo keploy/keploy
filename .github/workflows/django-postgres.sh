@@ -27,7 +27,7 @@ python3 manage.py migrate
 sleep 5
 
 # Start the django-postgres app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" &
+python3 manage.py runserver
 
 # Wait for the application to start.
 app_started=false
