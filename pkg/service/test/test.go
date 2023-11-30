@@ -454,7 +454,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	if initialisedValues.InitialStatus != "" {
 		return initialisedValues.InitialStatus
 	}
-	
+
 	isApplicationStopped := false
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
@@ -479,7 +479,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	var userIp string
 	userIp = initialisedValues.UserIP
 	t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
-	
+
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
@@ -488,7 +488,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
-		} else if tc.Version != "api.keploy.io/v1beta1" {
+		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
 			nonKeployTcs = append(nonKeployTcs, tc.Name)
 		}
 		select {
@@ -711,7 +711,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 func replaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
-	
+
 	if err != nil {
 		// Return the original URL if parsing fails
 		return currentURL, err
