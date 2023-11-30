@@ -42,6 +42,9 @@ done
 # Get the pid of the application.
 pid=$(pgrep keploy)
 
+# Checking with telnet.
+telnet localhost 8000
+
 # Start making curl calls to record the testcases and mocks.
 curl --location 'http://127.0.0.1:8000/user/' \
 --header 'Content-Type: application/json' \
