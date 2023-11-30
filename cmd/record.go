@@ -130,13 +130,31 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			//add flag for mtls cert path
+			mtlsCertPath, err := cmd.Flags().GetString("mtls-cert-path")
+			if err != nil {
+				r.logger.Error("failed to read the mtls cert path")
+				return err
+			}
+			//add flag for mtls key path
+			mtlsKeyPath, err := cmd.Flags().GetString("mtls-key-path")
+			if err != nil {
+				r.logger.Error("failed to read the mtls key path")
+				return err
+			}
+			mtlsHostName, err := cmd.Flags().GetString("mtls-host-name")
+			if err != nil {
+				r.logger.Error("failed to read the mtls host name")
+				return err
+			}
+
 			configPath, err := cmd.Flags().GetString("config-path")
 			if err != nil {
 				r.logger.Error("failed to read the config path")
 				return err
 			}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath,)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("continuing without configuration file because file not found")
@@ -192,7 +210,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters, mtlsCertPath, mtlsKeyPath, mtlsHostName)
 			return nil
 		},
 	}
@@ -212,6 +230,12 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
+
+	recordCmd.Flags().String("mtls-cert-path", "", "Path to the local directory where mtls cert file is stored")
+	
+	recordCmd.Flags().String("mtls-key-path", "", "Path to the local directory where mtls key file is stored")
+	
+	recordCmd.Flags().String("mtls-host-name", "", "Host name for mtls")
 
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true

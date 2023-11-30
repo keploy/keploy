@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -23,6 +24,7 @@ import (
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
+	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 	"go.keploy.io/server/utils"
 
@@ -33,16 +35,18 @@ import (
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 
+	"time"
+
 	"github.com/miekg/dns"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
-	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
-	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
+
+	// "go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
-	"time"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -76,6 +80,9 @@ type ProxySet struct {
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
 	MongoPassword     string // password to mock the mongo connection and pass the authentication requests
+	MtlsKeyPath       string
+	MtlsCertPath      string
+	MtlsHostName      string
 }
 
 type CustomConn struct {
@@ -372,20 +379,19 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		opt.Port = 16789
 	}
 	maxAttempts := 1000
-	attemptsDone:=0
+	attemptsDone := 0
 
-
-    if !isPortAvailable(opt.Port) {
+	if !isPortAvailable(opt.Port) {
 		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
 			if isPortAvailable(uint32(i)) {
 				opt.Port = uint32(i)
-				logger.Info("Found an available port to start proxy server",zap.Uint32("port",opt.Port));             
+				logger.Info("Found an available port to start proxy server", zap.Uint32("port", opt.Port))
 				break
 			}
 			attemptsDone++
 		}
 	}
-	
+
 	if maxAttempts <= attemptsDone {
 		logger.Error("Failed to find an available port to start proxy server")
 		return nil
@@ -420,6 +426,9 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		PassThroughPorts:  passThroughPorts,
 		hook:              h,
 		MongoPassword:     opt.MongoPassword,
+		MtlsCertPath:      opt.MtlsCertPath,
+		MtlsKeyPath:       opt.MtlsKeyPath,
+		MtlsHostName:      opt.MtlsHostName,
 	}
 
 	//setting the proxy port field in hook
@@ -798,6 +807,9 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 	}
 
 	if destInfo.IpVersion == 4 {
+		// fmt.Println("destInfo--->", destInfo.DestIp4)
+		// ipStr := uint32ToIP(destInfo.DestIp4)
+		// fmt.Println("ipStr--->", ipStr)
 		ps.logger.Debug("", zap.Any("DestIp4", destInfo.DestIp4), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
 	} else if destInfo.IpVersion == 6 {
 		ps.logger.Debug("", zap.Any("DestIp6", destInfo.DestIp6), zap.Any("DestPort", destInfo.DestPort), zap.Any("KernelPid", destInfo.KernelPid))
@@ -817,6 +829,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		if models.GetMode() != models.MODE_TEST {
 			dst, err = net.Dial("tcp", actualAddress)
 			if err != nil {
+				// fmt.Println("error in dialing the connection 1::::", err)
 				ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
@@ -882,17 +895,36 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		} else if destInfo.IpVersion == 6 {
 			actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
 		}
-
+		// also add a host name as well to filter out if it's tha same IP
+		certFile := ps.MtlsCertPath
+		keyFile := ps.MtlsKeyPath
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			log.Fatalf("failed to load client certificate: %v", err)
+		}
 		//Dialing for tls connection
 		destConnId := getNextID()
 		logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 		if isTLS {
 			logger.Debug("", zap.Any("isTLS", isTLS))
 			config := &tls.Config{
-				InsecureSkipVerify: false,
+				InsecureSkipVerify: true,
 				ServerName:         destinationUrl,
+				Certificates:       []tls.Certificate{cert},
 			}
-			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+
+			if ps.MtlsHostName != "" {
+				// ip, _, err := net.SplitHostPort(ps.MtlsHostName)
+				// if err != nil {
+				// 	logger.Error("failed to split the host and port", zap.Error(err))
+				// 	return
+				// }
+				// ps.MtlsHostName =net.ParseIP(ip).String()
+				dst, err = tls.Dial("tcp", ps.MtlsHostName , config)
+			} else {
+				dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			}
+
 			if err != nil && models.GetMode() != models.MODE_TEST {
 				logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
@@ -1023,4 +1055,16 @@ func (ps *ProxySet) StopProxyServer() {
 		ps.logger.Info("Dns server stopped")
 	}
 	ps.logger.Info("proxy stopped...")
+}
+
+func uint32ToIP(ipUint32 uint32) string {
+	// Convert uint32 to a byte slice
+	ipBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(ipBytes, ipUint32)
+
+	// Convert byte slice to net.IP
+	ip := net.IP(ipBytes)
+
+	// Return the string representation of the IP
+	return ip.String()
 }

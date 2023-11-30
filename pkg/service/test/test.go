@@ -201,6 +201,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			break
 		}
 	}
+	
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
 	if !initialisedValues.AbortStopHooksForcefully {
@@ -225,11 +226,12 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
-	if len(returnVal.Tcs) == 0 {
-		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", cfg.TestSet))
-		returnVal.InitialStatus = models.TestRunStatusFailed
-		return returnVal
-	}
+
+	// if len(returnVal.Tcs) == 0 {
+	// 	t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", cfg.TestSet))
+	// 	returnVal.InitialStatus = models.TestRunStatusFailed
+	// 	return returnVal
+	// }
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
 	var configMocks []*models.Mock
