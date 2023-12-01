@@ -9,7 +9,7 @@ sudo apt install openjdk-21-jre -y
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 
 # Start keploy in record mode.
-./mvnw spring-boot:run
+sudo -E env PATH=$PATH ./../../keployv2 record -c './mvnw spring-boot:run' &
 
 # Wait for the application to start.
 app_started=false
