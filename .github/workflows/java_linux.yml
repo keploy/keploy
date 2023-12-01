@@ -1,0 +1,23 @@
+name: Java on Linux
+on: [pull_request]
+jobs:
+  java_linux:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Build Keploy binary
+      run: |
+        go build -o keployv2
+
+    - name: Checkout samples-java repository
+      uses: actions/checkout@v2
+      with:
+        repository: slayerjain/spring-petclinic-rest
+        path: spring-petclinic-rest
+
+    - name: Run the spring-petclinic-rest app
+      run: |
+        cd spring-petclinic-rest
+        source ./../../.github/workflows/java-linux.sh
