@@ -7,6 +7,7 @@ java --version
 sudo apt update
 sudo apt install openjdk-21-jre -y
 cd /usr/lib/jvm
+echo "checking the directory"
 ls
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
 
