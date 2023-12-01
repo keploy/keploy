@@ -1,5 +1,8 @@
 #! /bin/bash
 
+# Checking the java version
+java --version
+
 # Start keploy in record mode.
 sudo -E env PATH=$PATH ./../keployv2 record -c './mvnw spring-boot:run' &
 
