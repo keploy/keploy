@@ -1,9 +1,7 @@
 #! /bin/bash
 
 # Update the java version
-echo "checking where we are"
-ls
-source update-java.sh
+source ./../.github/workflows/update-java.sh
 
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
