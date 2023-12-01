@@ -39,7 +39,7 @@ type TestOptions struct {
 	Delay            uint64
 	PassThroughPorts []uint
 	ApiTimeout       uint64
-	Testsets         []string
+	Tests            map[string][]string
 	AppContainer     string
 	AppNetwork       string
 	ProxyPort        uint32
@@ -109,6 +109,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		return returnVal, err
 	}
 	t.logger.Debug(fmt.Sprintf("the session indices are:%v", sessions))
+	returnVal.Sessions = sessions
 
 	// Channels to communicate between different types of closing keploy
 	returnVal.AbortStopHooksInterrupt = make(chan bool) // channel to stop closing of keploy via interrupt
@@ -137,17 +138,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		}
 	}()
 
-	if len(*cfg.Testsets) == 0 {
-		// by default, run all the recorded test sets
-		*cfg.Testsets = sessions
-	}
-	returnVal.SessionsMap = map[string]string{}
-
-	for _, sessionIndex := range sessions {
-		returnVal.SessionsMap[sessionIndex] = sessionIndex
-	}
 	return returnVal, nil
-
 }
 
 func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions) bool {
@@ -161,7 +152,6 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		Proxyport:        options.ProxyPort,
 		TestReportPath:   testReportPath,
 		AppCmd:           appCmd,
-		Testsets:         &options.Testsets,
 		AppContainer:     options.AppContainer,
 		AppNetwork:       options.AppContainer,
 		Delay:            options.Delay,
@@ -176,9 +166,10 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		t.logger.Error("failed to initialise the test", zap.Error(err))
 		return false
 	}
-	for _, sessionIndex := range options.Testsets {
+	for _, sessionIndex := range initialisedValues.Sessions {
 		// checking whether the provided testset match with a recorded testset.
-		if _, ok := initialisedValues.SessionsMap[sessionIndex]; !ok {
+		testcases := ArrayToMap(options.Tests[sessionIndex])
+		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
 			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
@@ -187,7 +178,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -438,7 +429,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -488,6 +479,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
+		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
+			continue
+		}
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
 		filteredTcsMocks := FilterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
 		loadedHooks.SetTcsMocks(filteredTcsMocks)
