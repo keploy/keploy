@@ -17,7 +17,15 @@ jobs:
         repository: slayerjain/spring-petclinic-rest
         path: spring-petclinic-rest
 
-    - name: Run the spring-petclinic-rest app
+    - name: Installing the necessary dependencies
       run: |
         cd spring-petclinic-rest
+        ./mvnw dependency:resolve
+
+    - name: Compile the project
+        run: |
+          ./mvnw compile
+
+    - name: Run the spring-petclinic-rest app
+      run: |
         source ./../.github/workflows/java-linux.sh
