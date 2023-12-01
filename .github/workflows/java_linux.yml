@@ -23,8 +23,8 @@ jobs:
         ./mvnw dependency:resolve
 
     - name: Compile the project
-        run: |
-          ./mvnw compile
+      run: |
+        ./mvnw compile
 
     - name: Run the spring-petclinic-rest app
       run: |
