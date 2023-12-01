@@ -1,12 +1,10 @@
 #! /bin/bash
 
-# Checking the java version
-java --version
-
 # Update the java version
-sudo apt update
-sudo apt install openjdk-21-jre -y
-export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+source update-java.sh
+
+# Remove any existing test and mocks by keploy.
+sudo rm -rf keploy/
 
 # Start keploy in record mode.
 sudo -E env PATH=$PATH ./../keployv2 record -c './mvnw spring-boot:run' &
@@ -53,5 +51,16 @@ sleep 5
 # Stop keploy.
 sudo kill $pid
 
+# Start keploy in test mode.
+sudo -E env PATH=$PATH ./../keployv2 test -c './mvnw spring-boot:run' --delay 10
 
+# Get the test results from the testReport file.
+report_file="./keploy/testReports/report-1.yaml"
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
+# Return the exit code according to the status.
+if [ "$test_status" = "PASSED" ]; then
+    exit 0
+else
+    exit 1
+fi
