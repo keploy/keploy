@@ -88,7 +88,7 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 	case reflect.Float64, reflect.String, reflect.Bool:
 		regexArr, isNoisy := CheckStringExist(key, noiseMap)
 		if isNoisy && len(regexArr) != 0 {
-			isNoisy, _ = MatchesAnyRegex(InterfaceToString(actual), regexArr)
+			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
 		}
 		if expected != actual && !isNoisy {
 			return false, nil
