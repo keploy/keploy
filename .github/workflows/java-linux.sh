@@ -6,6 +6,8 @@ java --version
 # Update the java version
 sudo apt update
 sudo apt install openjdk-21-jre -y
+cd /usr/lib/jvm
+ls
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
 
 # Start keploy in record mode.
