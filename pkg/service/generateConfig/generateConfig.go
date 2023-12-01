@@ -40,7 +40,10 @@ test:
   proxyport: 0
   containerName: ""
   networkName: ""
-  testSets: []
+  tests: |-
+    {
+      "test-set-name": ["test-case-name"]
+    }
   globalNoise: |-
     {
       "global": {

@@ -30,7 +30,7 @@ type InitialiseRunTestSetReturn struct {
 }
 
 type InitialiseTestReturn struct {
-	SessionsMap              map[string]string
+	Sessions                 []string
 	TestReportFS             *yaml.TestReport
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
@@ -47,7 +47,6 @@ type TestConfig struct {
 	TestReportPath   string
 	AppCmd           string
 	MongoPassword    string
-	Testsets         *[]string
 	AppContainer     string
 	AppNetwork       string
 	Delay            uint64
