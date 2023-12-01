@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net/http"
 	"runtime"
-	"sync"
 	"time"
 
 	"go.keploy.io/server/pkg/models"
@@ -23,7 +22,6 @@ type Telemetry struct {
 	KeployVersion  string
 	GlobalMap      map[string]interface{}
 	client         *http.Client
-	mutex          *sync.RWMutex
 }
 
 func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, KeployVersion string, GlobalMap map[string]interface{}) *Telemetry {
@@ -36,7 +34,6 @@ func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, KeployVer
 		KeployVersion: KeployVersion,
 		GlobalMap:     GlobalMap,
 		client:        &http.Client{Timeout: 10 * time.Second},
-		mutex:         &sync.RWMutex{},
 	}
 	return &tele
 }
@@ -122,8 +119,6 @@ func (tel *Telemetry) RecordedMock(mockType string) {
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
 	go func() {
-		tel.mutex.Lock()
-		defer tel.mutex.Unlock()
 
 		if tel.Enabled {
 			event := models.TeleEvent{
