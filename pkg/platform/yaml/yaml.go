@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
@@ -30,6 +31,7 @@ type Yaml struct {
 	TcsName  string
 	Logger   *zap.Logger
 	tele     *telemetry.Telemetry
+	mutex    sync.RWMutex
 }
 
 func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) platform.TestCaseDB {
@@ -40,6 +42,7 @@ func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName stri
 		TcsName:  tcsName,
 		Logger:   Logger,
 		tele:     tele,
+		mutex:    sync.RWMutex{},
 	}
 }
 
@@ -169,12 +172,14 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters 
 
 	if !bypassTestCase {
 		ys.tele.RecordedTestAndMocks()
+		ys.mutex.Lock()
 		testsTotal, ok := ctx.Value("testsTotal").(*int)
 		if !ok {
 			ys.Logger.Debug("failed to get testsTotal from context")
 		} else {
 			*testsTotal++
 		}
+		ys.mutex.Unlock()
 		var tcsName string
 		if ys.TcsName == "" {
 			// finds the recently generated testcase to derive the sequence number for the current testcase
