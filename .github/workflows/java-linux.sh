@@ -52,7 +52,7 @@ sleep 5
 sudo kill $pid
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../keployv2 test -c './mvnw spring-boot:run' --delay 10
+sudo -E env PATH=$PATH ./../keployv2 test -c './mvnw spring-boot:run' --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
