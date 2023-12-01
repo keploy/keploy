@@ -52,7 +52,7 @@ sleep 5
 sudo kill $pid
 
 # Check all the testcases and mocks recorded by keploy.
-cat ./keploy/test-set-0/test-1.yaml ./keploy/test-set-0/test-2.yaml ./keploy/test-set-0/test-3.yaml ./keploy/test-set-0/test-4.yaml ./keploy/test-set-0/test-5.yaml ./keploy/test-set-0/test-6.yaml 
+cat ./keploy/test-set-0/tests/test-1.yaml ./keploy/test-set-0/tests/test-2.yaml ./keploy/test-set-0/tests/test-3.yaml ./keploy/test-set-0/tests/test-4.yaml ./keploy/test-set-0/tests/test-5.yaml ./keploy/test-set-0/tests/test-6.yaml
 
 # Start keploy in test mode.
 sudo -E env PATH=$PATH ./../keployv2 test -c './mvnw spring-boot:run' --delay 20
