@@ -118,59 +118,49 @@ func (tel *Telemetry) RecordedMock(mockType string) {
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
+	go func() {
 
-	if tel.Enabled {
-		event := models.TeleEvent{
-			EventType: eventType,
-			CreatedAt: time.Now().Unix(),
-		}
-		event.Meta = make(map[string]interface{})
-		if len(output) != 0 {
-			event.Meta = output[0]
-		}
-
-		if tel.GlobalMap != nil {
-			event.Meta["global-map"] = tel.GlobalMap
-		}
-
-		if tel.InstallationID == "" {
-			id := ""
-			id, _ = tel.store.Get(true)
-			if id == "" {
-				id, _ = tel.store.Get(false)
+		if tel.Enabled {
+			event := models.TeleEvent{
+				EventType: eventType,
+				CreatedAt: time.Now().Unix(),
 			}
-			tel.InstallationID = id
-		}
-		event.InstallationID = tel.InstallationID
-		event.OS = runtime.GOOS
-		tel.KeployVersion = utils.KeployVersion
-		event.KeployVersion = tel.KeployVersion
-		event.Arch = runtime.GOARCH
-		bin, err := marshalEvent(event, tel.logger)
-		if err != nil {
-			tel.logger.Debug("failed to marshal event", zap.Error(err))
-			return
-		}
+			event.Meta = make(map[string]interface{})
+			if len(output) != 0 {
+				event.Meta = output[0]
+			}
 
-		req, err := http.NewRequest(http.MethodPost, teleUrl, bytes.NewBuffer(bin))
-		if err != nil {
-			tel.logger.Debug("failed to create request for analytics", zap.Error(err))
-			return
-		}
+			if tel.GlobalMap != nil {
+				event.Meta["global-map"] = tel.GlobalMap
+			}
 
-		req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
-		if !tel.OffMode {
-			resp, err := tel.client.Do(req)
+			if tel.InstallationID == "" {
+				id := ""
+				id, _ = tel.store.Get(true)
+				if id == "" {
+					id, _ = tel.store.Get(false)
+				}
+				tel.InstallationID = id
+			}
+			event.InstallationID = tel.InstallationID
+			event.OS = runtime.GOOS
+			tel.KeployVersion = utils.KeployVersion
+			event.KeployVersion = tel.KeployVersion
+			event.Arch = runtime.GOARCH
+			bin, err := marshalEvent(event, tel.logger)
 			if err != nil {
-				tel.logger.Debug("failed to send request for analytics", zap.Error(err))
+				tel.logger.Debug("failed to marshal event", zap.Error(err))
 				return
 			}
-			// tel.logger.Debug("Sent the event to the telemetry server.")
-			unmarshalResp(resp, tel.logger)
-			return
-		}
-		go func() {
+
+			req, err := http.NewRequest(http.MethodPost, teleUrl, bytes.NewBuffer(bin))
+			if err != nil {
+				tel.logger.Debug("failed to create request for analytics", zap.Error(err))
+				return
+			}
+
+			req.Header.Set("Content-Type", "application/json; charset=utf-8")
+
 			defer utils.HandlePanic()
 			resp, err := tel.client.Do(req)
 			if err != nil {
@@ -178,6 +168,6 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 				return
 			}
 			unmarshalResp(resp, tel.logger)
-		}()
-	}
+		}
+	}()
 }
