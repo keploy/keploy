@@ -33,10 +33,11 @@ record:
   networkName: ""
   delay: 5
   passThroughPorts: []
-  filters: {
-    ReqHeader: [],
-    urlMethods: {}
-  }
+  filters: |-
+    {
+      "ReqHeader": []
+      "urlMethods": {}
+    }
 test:
   path: ""
   # mandatory
