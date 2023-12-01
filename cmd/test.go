@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -38,7 +39,7 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, buildDelay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -67,6 +68,9 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	if *Delay == 5 {
 		*Delay = confTest.Delay
+	}
+	if *buildDelay == 30 {
+		*buildDelay = confTest.BuildDelay
 	}
 	if len(*passThorughPorts) == 0 {
 		*passThorughPorts = confTest.PassThroughPorts
@@ -174,6 +178,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			buildDelay, err := cmd.Flags().GetUint64("buildDelay")
+			if err != nil {
+				t.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
+				return err
+			}
+
 			apiTimeout, err := cmd.Flags().GetUint64("apiTimeout")
 			if err != nil {
 				t.logger.Error("Failed to get the apiTimeout flag", zap.Error((err)))
@@ -201,7 +211,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
@@ -226,6 +236,20 @@ func (t *Test) GetCmd() *cobra.Command {
 					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				} else {
 					fmt.Println("Example usage:\n", cmd.Example)
+				}
+			}
+
+			if buildDelay <= 30 {
+				fmt.Printf("Warning: buildDelay is set to %d seconds, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --buildDelay 35\n`)
+				} else {
+					fmt.Println("Example usage:\n", cmd.Example)
+				}
+
+				if buildDelay == 0 {
+					buildDelay, _ = strconv.ParseUint(cmd.Flags().Lookup("buildDelay").DefValue, 10, 64)
+					t.logger.Debug("the buildDelay set to default value", zap.Any("buildDelay", buildDelay))
 				}
 			}
 
@@ -282,6 +306,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				AppNetwork:       networkName,
 				MongoPassword:    mongoPassword,
 				Delay:            delay,
+				BuildDelay:       buildDelay,
 				PassThroughPorts: ports,
 				ApiTimeout:       apiTimeout,
 				ProxyPort:        proxyPort,
@@ -305,6 +330,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+
+	testCmd.Flags().Uint64P("buildDelay", "", 30, "User provided time to wait docker container build")
 
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 

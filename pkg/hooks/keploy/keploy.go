@@ -94,6 +94,7 @@ package keploy
 // 	Host     string        `default:"0.0.0.0"`
 // 	Port     string        `validate:"required"`
 // 	Delay    time.Duration `default:"5s"`
+// 	BuildDelay    time.Duration `default:"30s"`
 // 	Timeout  time.Duration `default:"60s"`
 // 	Filter   Filter
 // 	TestPath string `default:""`

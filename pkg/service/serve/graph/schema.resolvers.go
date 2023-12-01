@@ -36,6 +36,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	testCasePath := r.Resolver.Path
 	testReportPath := r.Resolver.TestReportPath
 	delay := r.Resolver.Delay
+	buildDelay := r.Resolver.BuildDelay
 
 	testReportFS := r.Resolver.TestReportFS
 	if tester == nil {
@@ -61,7 +62,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, serveTest)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, buildDelay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, serveTest)
 	}()
 
 	testRunID := <-testRunChan

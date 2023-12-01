@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/serve"
@@ -66,6 +67,18 @@ func (s *Serve) GetCmd() *cobra.Command {
 				return
 			}
 
+			buildDelay, err := cmd.Flags().GetUint64("buildDelay")
+
+			if err != nil {
+				s.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
+				return
+			}
+
+			if buildDelay == 0 {
+				buildDelay, _ = strconv.ParseUint(cmd.Flags().Lookup("buildDelay").DefValue, 10, 64)
+				s.logger.Debug("the buildDelay set to default value", zap.Any("buildDelay", buildDelay))
+			}
+
 			pid, err := cmd.Flags().GetUint32("pid")
 
 			if err != nil {
@@ -107,7 +120,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 			}
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			s.server.Serve(path, proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout, appCmd)
+			s.server.Serve(path, proxyPort, testReportPath, delay, buildDelay, pid, port, language, ports, apiTimeout, appCmd)
 		},
 	}
 
@@ -121,6 +134,8 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	serveCmd.MarkFlagRequired("delay")
+
+	serveCmd.Flags().Uint64P("buildDelay", "", 30, "User provided time to wait docker container build")
 
 	serveCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 

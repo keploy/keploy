@@ -40,7 +40,7 @@ var (
 	ErrFailedUnitTest = errors.New("test failure occured when running keploy tests along with unit tests")
 )
 
-func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, isUnitTestIntegration bool) error {
+func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, buildDelay uint64, isUnitTestIntegration bool) error {
 	// Supports Native-Linux, Windows (WSL), Lima, Colima
 
 	if appCmd == "" {
@@ -56,7 +56,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		h.logger.Debug("User Application is running inside docker in isolation", zap.Any("Container", appContainer), zap.Any("Network", appNetwork))
 		//search for the container and process it
-		err := h.processDockerEnv("", appContainer, appNetwork)
+		err := h.processDockerEnv("", appContainer, appNetwork, buildDelay)
 		if err != nil {
 			return err
 		}
@@ -220,7 +220,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				}
 			}
 
-			err := h.processDockerEnv(appCmd, appContainer, appNetwork)
+			err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay)
 			if err != nil {
 				return err
 			}
@@ -243,7 +243,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	}
 }
 
-func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
+func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay uint64) error {
 	// to notify the kernel hooks that the user application is related to Docker.
 	key := 0
 	value := true
@@ -282,7 +282,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			h.logger.Debug("exiting from goroutine of docker daemon event listener")
 		}()
 
-		endTime := time.Now().Add(30 * time.Second)
+		endTime := time.Now().Add(time.Duration(buildDelay) * time.Second)
 		logTicker := time.NewTicker(1 * time.Second)
 		defer logTicker.Stop()
 

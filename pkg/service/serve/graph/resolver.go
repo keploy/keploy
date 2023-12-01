@@ -22,6 +22,7 @@ type Resolver struct {
 	Path           string
 	TestReportPath string
 	Delay          uint64
+	BuildDelay     uint64
 	AppPid         uint32
 	ApiTimeout     uint64
 	ServeTest      bool

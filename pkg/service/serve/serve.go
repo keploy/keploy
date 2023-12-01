@@ -43,7 +43,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string) {
+func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, BuildDelay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string) {
 	var ps *proxy.ProxySet
 
 	if port == 0 {
@@ -120,6 +120,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 			Path:           path,
 			TestReportPath: testReportPath,
 			Delay:          Delay,
+			BuildDelay:     BuildDelay,
 			AppPid:         pid,
 			ApiTimeout:     apiTimeout,
 			ServeTest:      len(appCmd) != 0,
@@ -163,7 +164,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, true); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, BuildDelay, true); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					s.logger.Info("keploy terminated user application")

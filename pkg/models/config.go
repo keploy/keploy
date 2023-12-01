@@ -12,6 +12,7 @@ type Record struct {
 	ContainerName    string  `json:"containerName" yaml:"containerName"`
 	NetworkName      string  `json:"networkName" yaml:"networkName"`
 	Delay            uint64  `json:"delay" yaml:"delay"`
+	BuildDelay       uint64  `json:"buildDelay" yaml:"buildDelay"`
 	PassThroughPorts []uint  `json:"passThroughPorts" yaml:"passThroughPorts"`
 	Filters          Filters `json:"filters" yaml:"filters"`
 }
@@ -28,6 +29,7 @@ type Test struct {
 	TestSets         []string `json:"testSets" yaml:"testSets"`
 	GlobalNoise      string   `json:"globalNoise" yaml:"globalNoise"`
 	Delay            uint64   `json:"delay" yaml:"delay"`
+	BuildDelay       uint64   `json:"buildDelay" yaml:"buildDelay"`
 	ApiTimeout       uint64   `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts []uint   `json:"passThroughPorts" yaml:"passThroughPorts"`
 }

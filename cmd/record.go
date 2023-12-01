@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -40,7 +41,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = *&models.Filters{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThroughPorts *[]uint, configPath string) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *uint64, passThroughPorts *[]uint, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -67,6 +68,9 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	}
 	if *Delay == 5 {
 		*Delay = confRecord.Delay
+	}
+	if *buildDelay == 30 {
+		*buildDelay = confRecord.BuildDelay
 	}
 	if len(*passThroughPorts) == 0 {
 		*passThroughPorts = confRecord.PassThroughPorts
@@ -118,6 +122,12 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			buildDelay, err := cmd.Flags().GetUint64("buildDelay")
+			if err != nil {
+				r.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
+				return err
+			}
+
 			ports, err := cmd.Flags().GetUintSlice("passThroughPorts")
 			if err != nil {
 				r.logger.Error("failed to read the ports of outgoing calls to be ignored")
@@ -136,7 +146,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &ports, configPath)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("continuing without configuration file because file not found")
@@ -176,6 +186,11 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
 
+			if buildDelay == 0 {
+				buildDelay, _ = strconv.ParseUint(cmd.Flags().Lookup("buildDelay").DefValue, 10, 64)
+				r.logger.Debug("the buildDelay set to default value", zap.Any("buildDelay", buildDelay))
+			}
+
 			var hasContainerName bool
 			if isDockerCmd {
 				for _, arg := range os.Args {
@@ -192,7 +207,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters)
 			return nil
 		},
 	}
@@ -208,6 +223,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+
+	recordCmd.Flags().Uint64P("buildDelay", "", 30, "User provided time to wait docker container build")
 
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 

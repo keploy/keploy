@@ -57,10 +57,10 @@ Docker
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage"
+	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --buildDelay 35
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1
+	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1 --buildDelay 35
 `
 
 var exampleOneClickInstall = `
@@ -90,7 +90,7 @@ Docker
 	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage"
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1
+	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1 --buildDelay 35
 `
 
 type Example struct {
