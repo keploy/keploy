@@ -40,7 +40,7 @@ var (
 	ErrFailedUnitTest = errors.New("test failure occured when running keploy tests along with unit tests")
 )
 
-func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, buildDelay uint64, isUnitTestIntegration bool) error {
+func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, isUnitTestIntegration bool) error {
 	// Supports Native-Linux, Windows (WSL), Lima, Colima
 
 	if appCmd == "" {
@@ -243,7 +243,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	}
 }
 
-func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay uint64) error {
+func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration) error {
 	// to notify the kernel hooks that the user application is related to Docker.
 	key := 0
 	value := true
@@ -282,7 +282,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			h.logger.Debug("exiting from goroutine of docker daemon event listener")
 		}()
 
-		endTime := time.Now().Add(time.Duration(buildDelay) * time.Second)
+		endTime := time.Now().Add(buildDelay)
 		logTicker := time.NewTicker(1 * time.Second)
 		defer logTicker.Stop()
 

@@ -6,6 +6,7 @@ import (
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/test"
 	"go.uber.org/zap"
+	"time"
 )
 
 // This file will not be regenerated automatically.
@@ -22,7 +23,7 @@ type Resolver struct {
 	Path           string
 	TestReportPath string
 	Delay          uint64
-	BuildDelay     uint64
+	BuildDelay     time.Duration
 	AppPid         uint32
 	ApiTimeout     uint64
 	ServeTest      bool
