@@ -26,16 +26,13 @@ var Emoji = "\U0001F430" + " Keploy:"
 var configRequests = []string{""}
 var password string
 
-func SetAuthPassword(p string) {
-	password = p
-}
-
 type MongoParser struct {
 	logger *zap.Logger
 	hooks  *hooks.Hook
 }
 
-func NewMongoParser(logger *zap.Logger, h *hooks.Hook) *MongoParser {
+func NewMongoParser(logger *zap.Logger, h *hooks.Hook, authPassword string) *MongoParser {
+	password = authPassword
 	return &MongoParser{
 		logger: logger,
 		hooks:  h,
@@ -714,7 +711,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		// // Find submatches using the regular expression
 
 		var actualMsgsStr string
-		actualMsgsStr, err = decodeOpMsgSectionSingle(actualSection)
+		actualMsgsStr, err = extractSectionSingle(actualSection)
 		if err != nil {
 			logger.Error("failed to fetch the msgs from the single section of incoming OpMsg", zap.Error(err))
 			return 0

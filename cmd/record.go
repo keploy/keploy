@@ -40,7 +40,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = *&models.Filters{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, configPath string) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, passThroughPorts *[]uint, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -68,8 +68,8 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if *Delay == 5 {
 		*Delay = confRecord.Delay
 	}
-	if len(*passThorughPorts) == 0 {
-		*passThorughPorts = confRecord.PassThroughPorts
+	if len(*passThroughPorts) == 0 {
+		*passThroughPorts = confRecord.PassThroughPorts
 	}
 	return nil
 }
@@ -178,11 +178,8 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			var hasContainerName bool
 			if isDockerCmd {
-				for _, arg := range os.Args {
-					if strings.Contains(arg, "--name") {
-						hasContainerName = true
-						break
-					}
+				if strings.Contains(appCmd, "--name") {
+					hasContainerName = true
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag or containerName in config file")

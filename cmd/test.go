@@ -80,7 +80,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 
 	globalScopeVal := noiseJSON.(map[string]interface{})["global"]
-	
+
 	bodyOrHeaderVal := globalScopeVal.(map[string]interface{})
 
 	(*globalNoise)["body"] = map[string][]string{}
@@ -103,7 +103,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 
 	for testset := range testSetScopeVal.(map[string]interface{}) {
 		(*testSetNoise)[testset] = map[string]map[string][]string{}
-		
+
 		bodyOrHeaderVal := testSetScopeVal.(map[string]interface{})[testset].(map[string]interface{})
 
 		(*testSetNoise)[testset]["body"] = map[string][]string{}
@@ -254,11 +254,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			var hasContainerName bool
 			if isDockerCmd {
-				for _, arg := range os.Args {
-					if strings.Contains(arg, "--name") {
-						hasContainerName = true
-						break
-					}
+				if strings.Contains(appCmd, "--name") {
+					hasContainerName = true
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag or containerName in config file")
@@ -277,16 +274,16 @@ func (t *Test) GetCmd() *cobra.Command {
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
 			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-				Testsets: testSets,
-				AppContainer: appContainer,
-				AppNetwork: networkName,
-				MongoPassword: mongoPassword,
-				Delay: delay,
-				PassThorughPorts: ports,
-				ApiTimeout: apiTimeout,
-				ProxyPort: proxyPort,
-				GlobalNoise: globalNoise,
-				TestsetNoise: testsetNoise,
+				Testsets:         testSets,
+				AppContainer:     appContainer,
+				AppNetwork:       networkName,
+				MongoPassword:    mongoPassword,
+				Delay:            delay,
+				PassThroughPorts: ports,
+				ApiTimeout:       apiTimeout,
+				ProxyPort:        proxyPort,
+				GlobalNoise:      globalNoise,
+				TestsetNoise:     testsetNoise,
 			})
 
 			return nil
