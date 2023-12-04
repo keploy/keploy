@@ -240,9 +240,9 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			if buildDelay <= time.Duration(30)*time.Second {
-				fmt.Printf("Warning: buildDelay is set to %d seconds, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
+				fmt.Printf("Warning: buildDelay is set to %d, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --buildDelay 35\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --buildDelay 35s\n`, "\nor\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --buildDelay 1m\n`)
 				} else {
 					fmt.Println("Example usage:\n", cmd.Example)
 				}
@@ -323,7 +323,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
-	testCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build (The unit is seconds)")
+	testCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build")
 
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 

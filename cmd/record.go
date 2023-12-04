@@ -216,7 +216,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
-	recordCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build (The unit is seconds)")
+	recordCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build")
 
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
