@@ -14,7 +14,9 @@ source ./../.github/workflows/update-java.sh
 sudo rm -rf keploy/
 
 # Start keploy in record mode.
-sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy:/root/.keploy  --rm keployv2 record -c './mvnw spring-boot:run' &
+docker network create keploy-network
+echo "Starting keploy now"
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy:/root/.keploy  --rm keployv2 record -c './mvnw spring-boot:run' &
 
 # Wait for the application to start.
 app_started=false
