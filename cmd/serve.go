@@ -1,13 +1,12 @@
 package cmd
 
 import (
-	"os"
-	"path/filepath"
-	"time"
-
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/serve"
 	"go.uber.org/zap"
+	"os"
+	"path/filepath"
+	"time"
 )
 
 func NewCmdServe(logger *zap.Logger) *Serve {
@@ -67,7 +66,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 				return
 			}
 
-			buildDelay, err := cmd.Flags().GetDuration("buildDelay")
+			buildDelay := 30 * time.Second
 
 			if err != nil {
 				s.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
@@ -129,8 +128,6 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 	serveCmd.MarkFlagRequired("delay")
-
-	serveCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build (The unit is seconds)")
 
 	serveCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
