@@ -39,7 +39,7 @@ func NewPostgresParser(logger *zap.Logger, h *hooks.Hook) *PostgresParser {
 	}
 }
 
-func(p *PostgresParser) OutgoingType(buffer []byte) bool {
+func (p *PostgresParser) OutgoingType(buffer []byte) bool {
 	const ProtocolVersion = 0x00030000 // Protocol version 3.0
 
 	if len(buffer) < 8 {
@@ -58,7 +58,7 @@ func(p *PostgresParser) OutgoingType(buffer []byte) bool {
 	return version == ProtocolVersion
 }
 
-func(p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
+func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		encodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger, ctx)
@@ -400,7 +400,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					}
 
 					after_encoded, _ := PostgresDecoderFrontend(*pg_mock)
-					if len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R"{
+					if (len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R") || len(pg_mock.DataRows) > 0 {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
 						pg_mock.Payload = bufStr
 					}
