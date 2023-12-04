@@ -5,7 +5,7 @@ git fetch origin
 git checkout add_keploy
 
 # Start postgres instance.
-docker run -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2 -d
+docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
 
 # Update the java version
 source ./../.github/workflows/update-java.sh
