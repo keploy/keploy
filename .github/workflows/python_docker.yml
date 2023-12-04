@@ -1,7 +1,7 @@
-name: Python On Linux
+name: Python On Docker
 on: [pull_request]
 jobs:
-  python_linux:
+  python_docker:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -9,7 +9,7 @@ jobs:
 
     - name: Build binary
       run: |
-        go build -o keployv2
+        docker build -t keployv2 .
     - name: Checkout the samples-python repository
       uses: actions/checkout@v2
       with:
@@ -18,4 +18,4 @@ jobs:
     - name: Run the sample python application
       run: |
         cd samples-python/django-postgres/django_postgres
-        source ../../../.github/workflows/python-linux.sh
+        source ../../../.github/workflows/python-docker.sh
