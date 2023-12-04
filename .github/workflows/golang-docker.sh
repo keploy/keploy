@@ -52,7 +52,7 @@ sleep 5
 docker rm -f keploy-v2
 
 # Start the keploy in test mode.
-docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo'
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' --delay 10
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
