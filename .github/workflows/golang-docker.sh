@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# Checkout a different branch
-git fetch origin
-git checkout fix-gosdk-version
-
 # Start mongo before starting keploy.
 docker network create keploy-network
 sudo docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
