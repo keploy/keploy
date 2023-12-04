@@ -14,6 +14,7 @@ source ./../.github/workflows/update-java.sh
 sudo rm -rf keploy/
 
 # Set keploy alias.
+shopt -s expand_aliases
 alias keployv2='sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy:/root/.keploy  --rm keployv2'
 
 # Start keploy in record mode.
