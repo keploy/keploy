@@ -7,9 +7,9 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v2
 
-    - name: Build docker image
+    - name: Build binary
       run: |
-        docker build -t keployv2 .
+        go build -o keployv2
     - name: Checkout the samples-go repository
       uses: actions/checkout@v2
       with:
