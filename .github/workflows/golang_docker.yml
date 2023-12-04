@@ -1,7 +1,7 @@
-name: Golang On Linux
+name: Golang On Docker
 on: [pull_request]
 jobs:
-  golang_linux:
+  golang_docker:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -9,7 +9,7 @@ jobs:
 
     - name: Build binary
       run: |
-        go build -o keployv2
+        docker build -t keployv2 .
     - name: Checkout the samples-go repository
       uses: actions/checkout@v2
       with:
@@ -18,5 +18,5 @@ jobs:
     - name: Run samples-go application
       run: |
         cd samples-go/gin-mongo
-        source ./../../.github/workflows/golang-linux.sh
+        source ./../../.github/workflows/golang-docker.sh
 
