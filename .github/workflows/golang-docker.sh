@@ -15,7 +15,6 @@ sed -i 's/"body": {}/"body": {"ts":[]}/' "$config_file"
 sudo rm -rf keploy/
 
 # Start keploy in record mode.
-ls
 sudo docker build -t gin-mongo .
 echo "Starting keploy now."
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' &
@@ -28,9 +27,6 @@ while [ "$app_started" = false ]; do
     fi
     sleep 3 # wait for 3 seconds before checking again.
 done
-
-# Get the pid of the application.
-pid=$(pgrep keploy)
 
 # Start making curl calls to record the testcases and mocks.
 curl --request POST \
@@ -53,7 +49,7 @@ curl -X GET http://localhost:8080/CJBKJd92
 sleep 5
 
 # Stop keploy.
-sudo kill $pid
+docker rm -f keploy-v2
 
 # Start the keploy in test mode.
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo'
