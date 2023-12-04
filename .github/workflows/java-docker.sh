@@ -13,8 +13,11 @@ source ./../.github/workflows/update-java.sh
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
 
+# Set keploy alias.
+alias keployv2='sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy:/root/.keploy  --rm keployv2'
+
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../keployv2 record -c './mvnw spring-boot:run' &
+keployv2 record -c './mvnw spring-boot:run' &
 
 # Wait for the application to start.
 app_started=false
@@ -59,7 +62,7 @@ sleep 5
 sudo kill $pid
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../keployv2 test -c './mvnw spring-boot:run' --delay 20
+keployv2 test -c './mvnw spring-boot:run' --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
