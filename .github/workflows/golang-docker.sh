@@ -9,9 +9,8 @@ docker network create keploy-network
 sudo docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
+rm keploy-config.yaml
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 generate-config
-expect "Config file already exists. Do you want to override it? [y/n]:"
-send "y"
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"
