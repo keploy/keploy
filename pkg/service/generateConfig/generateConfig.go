@@ -16,7 +16,7 @@ type generatorConfig struct {
 }
 
 func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
-	return &generatorConfig {
+	return &generatorConfig{
 		logger: logger,
 		mutex:  sync.Mutex{},
 	}

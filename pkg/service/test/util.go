@@ -14,7 +14,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -31,14 +31,16 @@ type InitialiseRunTestSetReturn struct {
 
 type InitialiseTestReturn struct {
 	SessionsMap              map[string]string
-	TestReportFS             *yaml.TestReport
+	TestReportFS             platform.TestReportDB
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
-	YamlStore                platform.TestCaseDB
+	Store                    platform.TestCaseDB
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
+	Path                     string
+	TestPath                 string
 }
 
 type TestConfig struct {
@@ -52,6 +54,10 @@ type TestConfig struct {
 	Delay            uint64
 	PassThorughPorts []uint
 	ApiTimeout       uint64
+	Session          []string
+	TestReport       platform.TestReportDB
+	Storage          platform.TestCaseDB
+	Tele             *telemetry.Telemetry
 }
 
 type RunTestSetConfig struct {
@@ -63,13 +69,18 @@ type RunTestSetConfig struct {
 	AppNetwork     string
 	Delay          uint64
 	Pid            uint32
-	YamlStore      platform.TestCaseDB
+	Storage        platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
 	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
 	ServeTest      bool
+	TestPath       string
+}
+
+func (tc RunTestSetConfig) GetKind() string {
+	return "TestTestSetConfig"
 }
 
 type SimulateRequestConfig struct {
