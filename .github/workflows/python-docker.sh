@@ -68,9 +68,8 @@ curl --location 'http://127.0.0.1:8000/user/' \
 sleep 5
 
 # Stop the keploy container and the application container.
-docker stop keploy-v2
-docker rm keploy-v2
-docker stop DjangoApp
+docker rm -f keploy-v2
+docker rm -f DjangoApp
 
 # Start the app in test mode.
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 10
