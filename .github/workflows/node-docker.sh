@@ -10,7 +10,7 @@ sudo rm -rf keploy/
 file_path="src/db/connection.js"
 sed -i "s/localhost:27017/mongoDb:27017/" "$file_path"
 echo "checking the file now"
-cat src/db/connection.js
+docker ps
 
 # Build the docker image.
 docker build -t node-app:1.0 .
