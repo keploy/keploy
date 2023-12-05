@@ -6,6 +6,10 @@ sudo docker run --name mongoDb --rm -p 27017:27017 -d mongo
 # Remove any preexisting keploy tests.
 sudo rm -rf keploy/
 
+# Edit the connection.js file to connect to local mongodb.
+file_path="src/db/connection.js"
+sed -i "s/localhost:27017/mongoDb:27017/" "$file_path"
+
 # Build the docker image.
 docker build -t node-app:1.0 .
 
