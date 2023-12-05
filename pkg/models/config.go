@@ -15,10 +15,12 @@ type Record struct {
 	PassThroughPorts []uint  `json:"passThroughPorts" yaml:"passThroughPorts"`
 	Filters          Filters `json:"filters" yaml:"filters"`
 }
+
 type Filters struct {
 	ReqHeader  []string            `json:"req_header" yaml:"req_header"`
 	URLMethods map[string][]string `json:"urlMethods" yaml:"urlMethods"`
 }
+
 type Test struct {
 	Path             string        `json:"path" yaml:"path"`
 	Command          string        `json:"command" yaml:"command"`
@@ -30,6 +32,8 @@ type Test struct {
 	Delay            uint64        `json:"delay" yaml:"delay"`
 	ApiTimeout       uint64        `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts []uint        `json:"passThroughPorts" yaml:"passThroughPorts"`
+  WithCoverage       bool     `json:"withCoverage" yaml:"withCoverage"` // boolean to capture the coverage in test
+	CoverageReportPath string   `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 }
 
 type Globalnoise struct {
