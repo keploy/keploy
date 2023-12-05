@@ -7,6 +7,11 @@ git checkout fix-gosdk-version
 # Start mongo before starting keploy.
 sudo docker run --name mongoDb --rm  -p 27017:27017 -d mongo
 
+# Check if there is a keploy-config file, if there is, delete it.
+if [ -f "./keploy-config.yaml" ]; then
+    rm ./keploy-config.yaml
+fi
+
 # Generate the keploy-config file.
 ./../../keployv2 generate-config
 
@@ -17,6 +22,7 @@ sed -i 's/"body": {}/"body": {"ts":[]}/' "$config_file"
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 
+for i in {1..2}; do
 # Start the gin-mongo app in record mode and record testcases and mocks.
 sudo -E env PATH="$PATH" ./../../keployv2 record -c "go run main.go handler.go" &
 
@@ -54,6 +60,7 @@ sleep 5
 
 # Stop the gin-mongo app.
 sudo kill $pid
+done
 
 # Start the gin-mongo app in test omde.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "go run main.go handler.go" --delay 7

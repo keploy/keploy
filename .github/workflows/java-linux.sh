@@ -13,6 +13,7 @@ source ./../.github/workflows/update-java.sh
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
 
+for i in {1..2}; do
 # Start keploy in record mode.
 sudo -E env PATH=$PATH ./../keployv2 record -c './mvnw spring-boot:run' &
 
@@ -57,6 +58,7 @@ sleep 5
 
 # Stop keploy.
 sudo kill $pid
+done
 
 # Start keploy in test mode.
 sudo -E env PATH=$PATH ./../keployv2 test -c './mvnw spring-boot:run' --delay 20

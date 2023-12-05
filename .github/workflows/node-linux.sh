@@ -13,6 +13,7 @@ sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
 # Remove any preexisting keploy tests.
 sudo rm -rf keploy/
 
+for i in {1..2}; do
 # Start keploy in record mode.
 sudo -E env PATH=$PATH ./../../keployv2 record -c 'node src/app.js' &
 
@@ -54,6 +55,7 @@ sleep 5
 
 # Stop keploy.
 sudo kill $pid
+done
 
 # Start keploy in test mode.
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'node src/app.js' --delay 10
