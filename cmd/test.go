@@ -38,7 +38,7 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, configPath string) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -72,7 +72,11 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	if len(*passThorughPorts) == 0 {
 		*passThorughPorts = confTest.PassThroughPorts
+	} 
+	if len(*coverageReportPath) == 0 {
+		*coverageReportPath = confTest.CoverageReportPath
 	}
+	*withCoverage = *withCoverage || confTest.WithCoverage
 	if *apiTimeout == 5 {
 		*apiTimeout = confTest.ApiTimeout
 	}
@@ -145,6 +149,16 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to read the testcase path input")
 				return err
 			}
+			withCoverage, err := cmd.Flags().GetBool("withCoverage")
+			if err != nil {
+				t.logger.Error("failed to read the go coverage binary", zap.Error(err))
+				return err
+			}
+			coverageReportPath, err := cmd.Flags().GetString("coverageReportPath")
+			if err != nil {
+				t.logger.Error("failed to read the go coverage directory path", zap.Error(err))
+				return err
+			}
 
 			appCmd, err := cmd.Flags().GetString("command")
 			if err != nil {
@@ -208,8 +222,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
-
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, configPath)
+      
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
@@ -292,6 +306,8 @@ func (t *Test) GetCmd() *cobra.Command {
 				ProxyPort:        proxyPort,
 				GlobalNoise:      globalNoise,
 				TestsetNoise:     testsetNoise,
+        WithCoverage:       withCoverage,
+				CoverageReportPath: coverageReportPath,
 			})
 
 			return nil
@@ -319,6 +335,10 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().String("mongoPassword", "default123", "Authentication password for mocking MongoDB connection")
 
+	testCmd.Flags().String("coverageReportPath", "", "Write a go coverage profile to the file in the given directory.")
+
+	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
+	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
 
