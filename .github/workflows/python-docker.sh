@@ -5,7 +5,7 @@ docker network create keploy-network
 docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres -d --network keploy-network --name mypostgres postgres
 
 # Create the database
-docker logs
+docker logs mypostgres
 docker exec mypostgres psql -h localhost -U postgres -c "CREATE DATABASE usersdb"
 
 # Install the dependencies.
