@@ -158,7 +158,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag or appCmd in config file")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				} else {
 					fmt.Println("Example usage:\n", cmd.Example)
 				}
@@ -182,6 +182,15 @@ func (r *Record) GetCmd() *cobra.Command {
 				// user provided the absolute path
 			}
 
+			if buildDelay <= 30*time.Second {
+				fmt.Printf("Warning: buildDelay is set to %d, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy record -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy record -c "docker-compose up --build" --buildDelay 1m\n`)
+				} else {
+					fmt.Println("Example usage:\n", cmd.Example)
+				}
+			}
+
 			path += "/keploy"
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
@@ -193,7 +202,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag or containerName in config file")
-					fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
+					fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}

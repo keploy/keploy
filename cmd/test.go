@@ -223,7 +223,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			if appCmd == "" {
 				fmt.Println("Error: missing required -c flag or appCmd in config file")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				}
 				fmt.Println("Example usage:\n", cmd.Example)
 
@@ -233,16 +233,16 @@ func (t *Test) GetCmd() *cobra.Command {
 			if delay <= 5 {
 				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
 				} else {
 					fmt.Println("Example usage:\n", cmd.Example)
 				}
 			}
 
-			if buildDelay <= time.Duration(30)*time.Second {
+			if buildDelay <= 30*time.Second {
 				fmt.Printf("Warning: buildDelay is set to %d, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --buildDelay 35s\n`, "\nor\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --buildDelay 1m\n`)
+					fmt.Println("Example usage:\n", `keploy test -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy test -c "docker-compose up --build" --buildDelay 1m\n`)
 				} else {
 					fmt.Println("Example usage:\n", cmd.Example)
 				}
@@ -278,7 +278,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag or containerName in config file")
-					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:808 --network myNetworkName myApplicationImageName" --delay 6`)
+					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
