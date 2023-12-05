@@ -9,7 +9,6 @@ sed -i "s/'HOST': '.*'/'HOST': 'mypostgres'/g" django_postgres/settings.py
 sed -i "s/'PORT': '.*'/'PORT': '5432'/g" django_postgres/settings.py
 
 # Generate the keploy-config file.
-docker ps
 echo "Generating keploy config"
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 generate-config
 
@@ -22,6 +21,7 @@ sleep 5
 
 # Start the django-postgres app in record mode and record testcases and mocks.
 docker build -t django-app:1.0 .
+docker ps
 docker network inspect django-postgres-network
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" &
 
