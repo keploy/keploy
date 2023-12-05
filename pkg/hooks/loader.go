@@ -321,7 +321,7 @@ func (h *Hook) killProcessesAndTheirChildren(parentPID int) {
 
 	for _, childPID := range pids {
 		if h.userAppCmd.ProcessState == nil {
-			err := syscall.Kill(childPID, syscall.SIGKILL)
+			err := syscall.Kill(childPID, syscall.SIGTERM)
 			if err != nil {
 				h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
 			}
