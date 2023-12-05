@@ -68,6 +68,7 @@ curl --location 'http://127.0.0.1:8000/user/' \
 sleep 5
 
 # Stop the keploy container and the application container.
+docker stop keploy-v2
 docker rm keploy-v2
 docker stop DjangoApp
 
