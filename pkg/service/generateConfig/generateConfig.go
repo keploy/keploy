@@ -17,7 +17,7 @@ type generatorConfig struct {
 }
 
 func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
-	return &generatorConfig {
+	return &generatorConfig{
 		logger: logger,
 		mutex:  sync.Mutex{},
 	}
@@ -32,6 +32,7 @@ record:
   containerName: ""
   networkName: ""
   delay: 5
+  buildDelay: 30s
   passThroughPorts: []
 test:
   path: ""
@@ -55,6 +56,7 @@ test:
       }
     }
   delay: 5
+  buildDelay: 30s
   apiTimeout: 5
   passThroughPorts: []
   #
@@ -109,12 +111,11 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
 
-
-  cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
-  err = cmd.Run()
-  if err != nil {
-    g.logger.Error("failed to set the permission of config file", zap.Error(err))
-  }
+	cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
+	err = cmd.Run()
+	if err != nil {
+		g.logger.Error("failed to set the permission of config file", zap.Error(err))
+	}
 
 	g.logger.Info("Config file generated successfully")
 }
