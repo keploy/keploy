@@ -22,9 +22,12 @@ sed -i 's/"body": {}/"body": {"ts":[]}/' "$config_file"
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 
+# Build the binary.
+go build -o ginApp
+
 for i in {1..2}; do
 # Start the gin-mongo app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../keployv2 record -c "go run main.go handler.go" &
+sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &
 
 # Wait for the application to start.
 app_started=false
@@ -63,7 +66,7 @@ sudo kill $pid
 done
 
 # Start the gin-mongo app in test omde.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "go run main.go handler.go" --delay 7
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
