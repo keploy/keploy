@@ -6,7 +6,6 @@ import (
 	"go.uber.org/zap"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 func NewCmdServe(logger *zap.Logger) *Serve {
@@ -66,8 +65,6 @@ func (s *Serve) GetCmd() *cobra.Command {
 				return
 			}
 
-			buildDelay := 30 * time.Second
-
 			if err != nil {
 				s.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
 				return
@@ -114,7 +111,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 			}
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			s.server.Serve(path, proxyPort, testReportPath, delay, buildDelay, pid, port, language, ports, apiTimeout, appCmd)
+			s.server.Serve(path, proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout, appCmd)
 		},
 	}
 
