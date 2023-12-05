@@ -11,7 +11,7 @@ docker build -t node-app:1.0 .
 
 # Start keploy in record mode.
 docker network create keploy-network
-keploy record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" &
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" &
 
 # Wait for the application to start.
 app_started=false
@@ -51,7 +51,7 @@ docker rm -f keploy-v2
 docker rm -f nodeMongoApp
 
 # Start keploy in test mode.
-keploy test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --delay 10
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --delay 10
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
