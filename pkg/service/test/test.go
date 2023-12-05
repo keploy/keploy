@@ -170,7 +170,6 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		// checking whether the provided testset match with a recorded testset.
 		testcases := ArrayToMap(options.Tests[sessionIndex])
 		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
-			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
 			continue
 		}
 		noiseConfig := options.GlobalNoise
