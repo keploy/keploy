@@ -30,7 +30,7 @@ type Test struct {
 	Delay            uint64               `json:"delay" yaml:"delay"`
 	ApiTimeout       uint64               `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts []uint               `json:"passThroughPorts" yaml:"passThroughPorts"`
-  WithCoverage       bool               `json:"withCoverage" yaml:"withCoverage"` // boolean to capture the coverage in test
+    WithCoverage       bool               `json:"withCoverage" yaml:"withCoverage"` // boolean to capture the coverage in test
 	CoverageReportPath string             `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 }
 

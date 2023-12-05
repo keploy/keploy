@@ -46,7 +46,7 @@ type TestOptions struct {
 	ProxyPort        uint32
 	GlobalNoise      models.GlobalNoise
 	TestsetNoise     models.TestsetNoise
-  WithCoverage       bool
+    WithCoverage       bool
 	CoverageReportPath string
 }
 
@@ -205,7 +205,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		PassThroughPorts: options.PassThroughPorts,
 		ApiTimeout:       options.ApiTimeout,
 		MongoPassword:    options.MongoPassword,
-    WithCoverage:       options.WithCoverage,
+        WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
