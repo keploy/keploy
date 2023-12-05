@@ -192,7 +192,9 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, ports, &filters)
+			tele := r.recorder.NewTelemetry()
+			tcDB, dirName := r.recorder.NewStorage(path, tele)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, dirName, delay, ports, &filters, tcDB, tele)
 			return nil
 		},
 	}

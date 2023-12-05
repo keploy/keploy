@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
-	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -600,10 +600,10 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoReq
 			Kind:    models.Mongo,
 			Name:    name,
 			Spec: models.MockSpec{
-				Metadata:       meta1,
-				MongoRequests:  mongoRequests,
-				MongoResponses: mongoResponses,
-				Created:        time.Now().Unix(),
+				Metadata:         meta1,
+				MongoRequests:    mongoRequests,
+				MongoResponses:   mongoResponses,
+				Created:          time.Now().Unix(),
 				ReqTimestampMock: reqTimestampMock,
 				ResTimestampMock: time.Now(),
 			},
