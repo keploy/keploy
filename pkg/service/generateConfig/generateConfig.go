@@ -61,6 +61,8 @@ test:
   delay: 5
   apiTimeout: 5
   passThroughPorts: []
+  withCoverage: false
+  coverageReportPath: ""
   #
   # Example on using globalNoise
   # globalNoise: |-

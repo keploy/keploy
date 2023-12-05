@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,8 @@ type TestOptions struct {
 	ProxyPort        uint32
 	GlobalNoise      models.GlobalNoise
 	TestsetNoise     models.TestsetNoise
+  WithCoverage       bool
+	CoverageReportPath string
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -56,6 +59,50 @@ func NewTester(logger *zap.Logger) Tester {
 
 func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	var returnVal InitialiseTestReturn
+
+	// capturing the code coverage for go bianries built by go-version 1.20^
+	if cfg.WithCoverage {
+
+		// report path is provided via cmd flag by user
+		if cfg.CoverageReportPath != "" {
+
+			// handle relative path
+			if !strings.HasPrefix(cfg.CoverageReportPath, "/") {
+				absPath, err := filepath.Abs(cfg.CoverageReportPath)
+				if err != nil {
+					t.logger.Error("failed to resolve the relative path for go coverage directory", zap.Error(err), zap.Any("relative path", cfg.CoverageReportPath))
+				}
+				cfg.CoverageReportPath = absPath
+			}
+			cfg.CoverageReportPath = cfg.CoverageReportPath + "/coverage-reports"
+
+			// validate the path is to directory or not. And create a directory if not exists
+			dirInfo, err := os.Stat(cfg.CoverageReportPath)
+			if err != nil && !os.IsNotExist(err) {
+				t.logger.Error("failed to check that the goCoverDir path is a directory", zap.Error(err))
+				return returnVal, err
+			} else if err == nil && !dirInfo.IsDir() {
+				t.logger.Error("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries.")
+				return returnVal, fmt.Errorf("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries.")
+			} else if err != nil && os.IsNotExist(err) {
+				err := makeDirectory(cfg.CoverageReportPath)
+				if err != nil {
+					t.logger.Error("failed to create coverage directory to collect the go coverage", zap.Error(err), zap.Any("path", cfg.CoverageReportPath))
+					return returnVal, err
+				}
+			}
+		} else {
+			// reports at the current directory
+			cfg.CoverageReportPath = cfg.Path + "/coverage-reports"
+			err := makeDirectory(cfg.CoverageReportPath)
+			if err != nil {
+				t.logger.Error("failed to create coverage directory to collect the go coverage", zap.Error(err), zap.Any("path", cfg.CoverageReportPath))
+				return returnVal, err
+			}
+		}
+		// set the go env variable to export the coverage-path of the runnable binaries
+		os.Setenv("GOCOVERDIR", cfg.CoverageReportPath)
+	}
 
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
@@ -158,6 +205,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		PassThroughPorts: options.PassThroughPorts,
 		ApiTimeout:       options.ApiTimeout,
 		MongoPassword:    options.MongoPassword,
+    WithCoverage:       options.WithCoverage,
+		CoverageReportPath: options.CoverageReportPath,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracfully shutdown
@@ -198,7 +247,28 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		}
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
-
+	// log the overall code coverage for the test run of go binaries
+	if options.WithCoverage {
+		t.logger.Info("there is a opportunity to get the coverage here")
+		// logs the coverage using covdata 
+		coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
+		output, err := coverCmd.Output()
+		if err != nil {
+			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+		}
+		t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
+		
+		// merges the coverage files into a single txt file which can be merged with the go-test coverage
+		generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+		output, err = generateCovTxtCmd.Output()
+		if err != nil {
+			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+		}
+		if len(output) > 0 {
+			t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
+		}
+	}
+	
 	if !initialisedValues.AbortStopHooksForcefully {
 		initialisedValues.AbortStopHooksInterrupt <- true
 		// stop listening for the eBPF events
