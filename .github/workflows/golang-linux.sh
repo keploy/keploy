@@ -5,7 +5,7 @@ git fetch origin
 git checkout fix-gosdk-version
 
 # Start mongo before starting keploy.
-sudo docker run --name mongoDb --rm  -p 27017:27017 -d mongo
+docker run --rm -d -p27017:27017 --name mongoDb mongo
 
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy-config.yaml" ]; then
@@ -75,7 +75,7 @@ report_file2="./keploy/testReports/report-2.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
-if [ "$test_status1" = "PASSED"] && ["$test_status2" = "PASSED"]; then
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
     exit 0
 else
     exit 1
