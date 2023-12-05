@@ -21,6 +21,7 @@ sleep 5
 
 # Start the django-postgres app in record mode and record testcases and mocks.
 docker build -t django-app:1.0 .
+docker network inspect django-postgres-network
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" &
 
 # Wait for the application to start.
