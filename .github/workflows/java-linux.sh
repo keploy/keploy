@@ -58,6 +58,10 @@ sleep 5
 
 # Stop keploy.
 sudo kill $pid
+
+# Wait for 5 seconds for keploy to stop.
+sleep 5
+
 done
 
 # Start keploy in test mode.

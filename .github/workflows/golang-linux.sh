@@ -63,6 +63,9 @@ sleep 5
 
 # Stop the gin-mongo app.
 sudo kill $pid
+
+# Wait for 5 seconds for keploy to stop.
+sleep 5
 done
 
 # Start the gin-mongo app in test omde.
