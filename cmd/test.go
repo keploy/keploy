@@ -306,7 +306,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				ProxyPort:        proxyPort,
 				GlobalNoise:      globalNoise,
 				TestsetNoise:     testsetNoise,
-        WithCoverage:       withCoverage,
+        		WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
 			})
 
