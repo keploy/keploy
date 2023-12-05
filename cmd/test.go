@@ -56,16 +56,9 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *appCmd == "" {
 		*appCmd = confTest.Command
 	}
-	if len(*tests) == 0 {
-		testsJSON, err := test.UnmarshallJson(confTest.Tests, t.logger)
-		if err != nil {
-			t.logger.Error("Failed to unmarshall the tests field")
-		}
-		for ts, tc := range testsJSON.(map[string]interface{}) {
-			(*tests)[ts] = []string{}
-			for _, tc := range tc.([]interface{}) {
-				(*tests)[ts] = append((*tests)[ts], tc.(string))
-			}
+	for testset, testcases := range confTest.Tests {
+		if _, ok := (*tests)[testset]; !ok {
+			(*tests)[testset] = testcases
 		}
 	}
 	if *appContainer == "" {
@@ -203,6 +196,16 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			tests := map[string][]string{}
 
+			testsets, err := cmd.Flags().GetStringSlice("testsets")
+			if err != nil {
+				t.logger.Error("Failed to read the testsets")
+				return err
+			}
+
+			for _, testset := range testsets {
+				tests[testset] = []string{}
+			}
+
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
@@ -301,7 +304,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
-	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run")
+	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
