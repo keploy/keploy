@@ -9,6 +9,7 @@ sudo rm -rf keploy/
 # Edit the connection.js file to connect to local mongodb.
 file_path="src/db/connection.js"
 sed -i "s/localhost:27017/mongoDb:27017/" "$file_path"
+echo "checking the file now"
 cat src/db/connection.js
 
 # Build the docker image.

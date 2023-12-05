@@ -1,7 +1,7 @@
 name: Node on Docker
 on: [pull_request]
 jobs:
-  node_linux:
+  node_docker:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository

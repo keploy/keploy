@@ -11,6 +11,9 @@ docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":
 config_file="./keploy-config.yaml"
 sed -i 's/"body": {}/"body": {"ts":[]}/' "$config_file"
 
+# Remove any preexisting keploy tests and mocks.
+sudo rm -rf keploy/
+
 # Start keploy in record mode.
 sudo docker build -t gin-mongo .
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' &
