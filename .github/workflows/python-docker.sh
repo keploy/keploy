@@ -21,6 +21,7 @@ sed -i "s/'HOST': '.*'/'HOST': 'mypostgres'/g" django_postgres/settings.py
 sed -i "s/'PORT': '.*'/'PORT': '5432'/g" django_postgres/settings.py
 
 # Generate the keploy-config file.
+echo "Generating keploy config"
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 generate-config
 
 # Update the global noise to ignore the Allow header.
