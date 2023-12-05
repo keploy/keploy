@@ -4,6 +4,9 @@
 docker network create django-postgres-network
 docker run -p 5432:5432 -d -e POSTGRES_PASSWORD=postgres  --network django-postgres-network --name mypostgres -v $(pwd)/sql:/docker-entrypoint-initdb.d postgres
 
+# Remove old keploy tests and mocks.
+sudo rm -rf keploy/
+
 # Change the database configuration.
 sed -i "s/'HOST': '.*'/'HOST': 'mypostgres'/g" django_postgres/settings.py
 sed -i "s/'PORT': '.*'/'PORT': '5432'/g" django_postgres/settings.py
