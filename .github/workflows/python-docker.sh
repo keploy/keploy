@@ -2,8 +2,7 @@
 
 # Start the postgres database.
 docker network create django-postgres-network
-docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres -d --network django-postgres-network --name mypostgres -v $(pwd)/sql:/docker-entrypoint-initdb.d postgres
-docker logs mypostgres
+docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres  --network django-postgres-network --name mypostgres -v $(pwd)/sql:/docker-entrypoint-initdb.d postgres
 
 # Change the database configuration.
 sed -i "s/'HOST': '.*'/'HOST': 'mypostgres'/g" django_postgres/settings.py
