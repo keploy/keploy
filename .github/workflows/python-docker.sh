@@ -4,18 +4,6 @@
 docker network create django-postgres-network
 docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres -d --network django-postgres-network --name mypostgres postgres
 
-
-
-# Install the dependencies.
-pip3 install -r requirements.txt
-
-# Set the environment variable for the app to run correctly.
-export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
-
-# Make the required migrations.
-python3 manage.py makemigrations
-python3 manage.py migrate
-
 # Change the database configuration.
 sed -i "s/'HOST': '.*'/'HOST': 'mypostgres'/g" django_postgres/settings.py
 sed -i "s/'PORT': '.*'/'PORT': '5432'/g" django_postgres/settings.py
