@@ -17,7 +17,7 @@ type generatorConfig struct {
 }
 
 func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
-	return &generatorConfig {
+	return &generatorConfig{
 		logger: logger,
 		mutex:  sync.Mutex{},
 	}
@@ -33,6 +33,9 @@ record:
   networkName: ""
   delay: 5
   passThroughPorts: []
+  filters:
+    ReqHeader: []
+    urlMethods: {}
 test:
   path: ""
   # mandatory
@@ -57,6 +60,8 @@ test:
   delay: 5
   apiTimeout: 5
   passThroughPorts: []
+  withCoverage: false
+  coverageReportPath: ""
   #
   # Example on using globalNoise
   # globalNoise: |-
@@ -109,12 +114,11 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
 
-
-  cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
-  err = cmd.Run()
-  if err != nil {
-    g.logger.Error("failed to set the permission of config file", zap.Error(err))
-  }
+	cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
+	err = cmd.Run()
+	if err != nil {
+		g.logger.Error("failed to set the permission of config file", zap.Error(err))
+	}
 
 	g.logger.Info("Config file generated successfully")
 }
