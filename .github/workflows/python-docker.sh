@@ -4,8 +4,7 @@
 docker network create django-postgres-network
 docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres -d --network django-postgres-network --name mypostgres postgres
 
-# Create the database
-docker exec mypostgres psql -U postgres -c "CREATE DATABASE usersdb"
+
 
 # Install the dependencies.
 pip3 install -r requirements.txt
