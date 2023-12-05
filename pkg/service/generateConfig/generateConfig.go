@@ -33,6 +33,9 @@ record:
   networkName: ""
   delay: 5
   passThroughPorts: []
+  filters:
+    ReqHeader: []
+    urlMethods: {}
 test:
   path: ""
   # mandatory
@@ -109,12 +112,11 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
 
-
-  cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
-  err = cmd.Run()
-  if err != nil {
-    g.logger.Error("failed to set the permission of config file", zap.Error(err))
-  }
+	cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
+	err = cmd.Run()
+	if err != nil {
+		g.logger.Error("failed to set the permission of config file", zap.Error(err))
+	}
 
 	g.logger.Info("Config file generated successfully")
 }
