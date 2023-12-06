@@ -1,21 +1,17 @@
 #! /bin/bash
 
-# Checkout a different branch
-git fetch origin
-git checkout add_keploy
-
 # Start postgres instance.
 docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
 
 # Update the java version
-source ./../.github/workflows/update-java.sh
+source ./../../../.github/workflows/update-java.sh
 
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
 
 for i in {1..2}; do
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../keployv2 record -c './mvnw spring-boot:run' &
+sudo -E env PATH=$PATH ./../../../keployv2 record -c './mvnw spring-boot:run' &
 
 # Wait for the application to start.
 app_started=false
@@ -65,7 +61,7 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../keployv2 test -c './mvnw spring-boot:run' --delay 20
+sudo -E env PATH=$PATH ./../../../keployv2 test -c './mvnw spring-boot:run' --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"

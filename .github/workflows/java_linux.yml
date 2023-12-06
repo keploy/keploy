@@ -14,21 +14,21 @@ jobs:
     - name: Checkout samples-java repository
       uses: actions/checkout@v2
       with:
-        repository: slayerjain/spring-petclinic-rest
+        repository: keploy/samples-java
         path: spring-petclinic-rest
 
     - name: Installing the necessary dependencies
       run: |
-        cd spring-petclinic-rest
+        cd samples-java/spring-petclinic/spring-petclinic-rest
         ./mvnw dependency:resolve
 
     - name: Compile the project
       run: |
-        cd spring-petclinic-rest
+       cd samples-java/spring-petclinic/spring-petclinic-rest
         source ./../.github/workflows/update-java.sh
         ./mvnw compile
 
     - name: Run the spring-petclinic-rest app
       run: |
-        cd spring-petclinic-rest
+        cd samples-java/spring-petclinic/spring-petclinic-rest
         source ./../.github/workflows/java-linux.sh
