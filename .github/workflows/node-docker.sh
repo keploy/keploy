@@ -2,19 +2,16 @@
 
 # Start the docker container.
 docker network create keploy-network
+sudo docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Remove any preexisting keploy tests.
 sudo rm -rf keploy/
 
-# Edit the connection.js file to connect to local mongodb.
-file_path="src/db/connection.js"
-sed -i "s/localhost:27017/mongoDb:27017/" "$file_path"
-
-# Remove any existing keploy tests and mocks.
-sudo rm -rf keploy/
+# Build the image of the application.
+sudo docker build -t node-app:1.0 .
 
 # Start keploy in record mode.
-docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker compose up" --containerName nodeMongoApp &
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp &
 
 # Wait for the application to start.
 app_started=false
