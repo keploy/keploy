@@ -15,7 +15,7 @@ jobs:
       uses: actions/checkout@v2
       with:
         repository: keploy/samples-java
-        path: spring-petclinic-rest
+        path: samples-java
 
     - name: Installing the necessary dependencies
       run: |

@@ -2,7 +2,7 @@
 
 # Checkout a different branch
 git fetch origin
-git checkout fix-gosdk-version
+git checkout native-linux
 
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
