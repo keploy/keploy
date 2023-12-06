@@ -31,4 +31,4 @@ jobs:
     - name: Run the spring-petclinic-rest app
       run: |
         cd samples-java/spring-petclinic/spring-petclinic-rest
-        source ./../.github/workflows/java-linux.sh
+        source ./../../../.github/workflows/java-linux.sh
