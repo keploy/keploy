@@ -1,5 +1,9 @@
 #! /bin/bash
 
+# Checkout a different branch
+git fetch origin
+git checkout native-linux
+
 # Start the postgres database.
 docker-compose up -d
 
