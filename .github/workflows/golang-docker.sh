@@ -13,7 +13,7 @@ sed -i 's/"body": {}/"body": {"ts":[]}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
-docker logs &
+docker logs mongoDb &
 
 # Start keploy in record mode.
 sudo docker build -t gin-mongo .
