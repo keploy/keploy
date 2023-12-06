@@ -45,7 +45,7 @@ func (fe *TestReport) SetResult(runId string, test models.TestResult) {
 func (fe *TestReport) GetResults(runId string) ([]models.TestResult, error) {
 	val, ok := fe.tests[runId]
 	if !ok {
-		return nil, fmt.Errorf(Emoji, "found no test results for test report with id: %v", runId)
+		return nil, fmt.Errorf("%s found no test results for test report with id: %v", Emoji, runId)
 	}
 	return val, nil
 }
@@ -61,7 +61,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (models.TestR
 	var doc models.TestReport
 	err = decoder.Decode(&doc)
 	if err != nil {
-		return models.TestReport{}, fmt.Errorf(Emoji, "failed to decode the yaml file documents. error: %v", err.Error())
+		return models.TestReport{}, fmt.Errorf("%s failed to decode the yaml file documents. error: %v", Emoji, err.Error())
 	}
 	return doc, nil
 }
@@ -84,13 +84,13 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc *models.TestRe
 	data := []byte{}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {
-		return fmt.Errorf(Emoji, "failed to marshal document to yaml. error: %s", err.Error())
+		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", Emoji, err.Error())
 	}
 	data = append(data, d...)
 
 	err = os.WriteFile(filepath.Join(path, doc.Name+".yaml"), data, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf(Emoji, "failed to write test report in yaml file. error: %s", err.Error())
+		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
 	}
 	return nil
 }
