@@ -1,7 +1,7 @@
 #! /bin/bash
 
 # Start the docker container.
-sudo docker run --name mongoDb --rm -p 27017:27017 -d mongo
+docker-compose up -d
 
 # Remove any preexisting keploy tests.
 sudo rm -rf keploy/
