@@ -17,6 +17,7 @@ docker logs mongoDb &
 
 # Start keploy in record mode.
 sudo docker build -t gin-mongo .
+for i in {1..2}; do
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' &
 
 # Wait for the application to start.
@@ -51,6 +52,7 @@ sleep 5
 # Stop keploy.
 docker stop keploy-v2
 docker stop ginApp
+done
 
 # Start the keploy in test mode.
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --delay 10
