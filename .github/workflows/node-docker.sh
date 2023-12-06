@@ -2,8 +2,6 @@
 
 # Start the docker container.
 docker network create keploy-network
-docker-compose up -d
-docker ps
 
 # Remove any preexisting keploy tests.
 sudo rm -rf keploy/
