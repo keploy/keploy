@@ -45,13 +45,13 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 		for {
 			buffer, err := util.ReadBytes(clientConn)
-			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF"  {
 				logger.Error("failed to read the request message in proxy for generic dependency", zap.Error(err))
 				// errChannel <- err
 				return err
 			}
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Debug("the timeout for the client read in generic")
+			if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err!=nil && err.Error() == "EOF") {
+				logger.Debug("the timeout for the client read in generic or EOF")
 				break
 			}
 			genericRequests = append(genericRequests, buffer)
