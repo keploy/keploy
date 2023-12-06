@@ -1,7 +1,9 @@
 #! /bin/bash
 
 # Start the docker container.
+docker network create keploy-network
 docker-compose up -d
+docker ps
 
 # Remove any preexisting keploy tests.
 sudo rm -rf keploy/
@@ -17,7 +19,6 @@ docker build -t node-app:1.0 .
 sudo rm -rf keploy/
 
 # Start keploy in record mode.
-docker network create keploy-network
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" &
 
 # Wait for the application to start.
