@@ -1,0 +1,23 @@
+name: Node on Docker
+on: [pull_request]
+jobs:
+  node_docker:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Build docker image
+      run: |
+        docker build -t keployv2 .
+
+    - name: Checkout samples-typescript repository
+      uses: actions/checkout@v2
+      with:
+        repository: keploy/samples-typescript
+        path: samples-typescript
+
+    - name: Run the express-mongoose app
+      run: |
+        cd samples-typescript/express-mongoose
+        source ./../../.github/workflows/node-docker.sh
