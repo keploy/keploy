@@ -597,7 +597,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		loadedHooks.SetTcsMocks(readTcsMocks)
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
-		} else if tc.Version != "api.keploy.io/v1beta1" {
+		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
 			nonKeployTcs = append(nonKeployTcs, tc.Name)
 		}
 		select {
