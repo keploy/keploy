@@ -44,14 +44,12 @@ test:
   containerName: ""
   networkName: ""
   testSets: []
+  # to use globalNoise, please follow the guide at the end of this file.
   globalNoise:
     global:
       body: {}
       header: {}
     test-sets:
-      test-set-name:
-        body: {}
-        header: {}
   delay: 5
   apiTimeout: 5
   passThroughPorts: []
