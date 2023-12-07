@@ -1,0 +1,76 @@
+version: api.keploy.io/v1beta1
+name: report-1
+status: PASSED
+success: 1
+failure: 0
+total: 1
+tests:
+    - kind: Http
+      name: report-1
+      status: PASSED
+      started: 1701796844
+      completed: 1701796845
+      test_case_path: /home/akash/Desktop/keploy/keploy/test-set-1
+      mock_path: ""
+      test_case_id: test-1
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1:3000/control/install/configure
+        header:
+            Accept: application/json, text/plain, */*
+            Content-Length: "172"
+            Content-Type: application/json
+            Host: 127.0.0.1:3000
+            User-Agent: curl/7.81.0
+        body: '{"web":{"ip":"0.0.0.0","port":80,"status":"","can_autofix":false},"dns":{"ip":"0.0.0.0","port":54,"status":"","can_autofix":false},"username":"admin","password":"password"}'
+        body_type: ""
+        timestamp: 0001-01-01T00:00:00Z
+      resp:
+        status_code: 200
+        header:
+            Content-Type: text/plain; charset=utf-8
+            Date: Tue, 05 Dec 2023 16:16:40 GMT
+        body: |
+            OK
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 0001-01-01T00:00:00Z
+      noise:
+        header.Date: []
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result:
+            - normal: true
+              expected:
+                key: Content-Type
+                value:
+                    - text/plain; charset=utf-8
+              actual:
+                key: Content-Type
+                value:
+                    - text/plain; charset=utf-8
+            - normal: true
+              expected:
+                key: Date
+                value:
+                    - Tue, 05 Dec 2023 16:16:40 GMT
+              actual:
+                key: Date
+                value:
+                    - Tue, 05 Dec 2023 17:20:45 GMT
+        body_result:
+            - normal: true
+              type: PLAIN
+              expected: |
+                OK
+              actual: |
+                OK
+        dep_result: []
+test_set: test-set-1

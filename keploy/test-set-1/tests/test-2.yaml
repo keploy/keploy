@@ -1,0 +1,44 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-2
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://172.17.0.1:3000/control/install/get_addresses
+        header:
+            Accept: application/json, text/plain, */*
+            Content-Type: application/json
+            Host: 172.17.0.1:3000
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-05T22:27:11.400853934+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "739"
+            Content-Type: application/json
+            Date: Tue, 05 Dec 2023 16:57:11 GMT
+            Server: AdGuardHome/
+        body: |
+            {"interfaces":{"br-b72be3286c5a":{"hardware_address":"02:42:46:0b:93:38","flags":"up|broadcast|multicast","ip_addresses":["172.18.0.1"],"name":"br-b72be3286c5a","mtu":1500},"docker0":{"hardware_address":"02:42:06:74:7f:a7","flags":"up|broadcast|multicast","ip_addresses":["172.17.0.1"],"name":"docker0","mtu":1500},"lo":{"hardware_address":"","flags":"up|loopback|running","ip_addresses":["127.0.0.1","::1"],"name":"lo","mtu":65536},"wlo1":{"hardware_address":"f8:89:d2:ae:a2:53","flags":"up|broadcast|multicast|running","ip_addresses":["192.168.19.246","2405:204:3309:ed24:7bb8:1288:1625:43c6","2405:204:3309:ed24:8808:1324:1d1c:c066","fe80::18fe:91ca:724e:3e70%wlo1"],"name":"wlo1","mtu":1500}},"version":"","web_port":80,"dns_port":53}
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-05T22:27:13.403743827+05:30
+    objects: []
+    assertions:
+        noise:
+            body.dns_port: []
+            body.interfaces: []
+            header.Date: []
+    created: 1701795433
+curl: |
+    curl --request GET \
+      --url http://172.17.0.1:3000/control/install/get_addresses \
+      --header 'Content-Type: application/json' \
+      --header 'Accept: application/json, text/plain, */*' \
+      --header 'Host: 172.17.0.1:3000'

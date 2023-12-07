@@ -1,0 +1,51 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-2
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/rewrite/add
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Content-Length: "66"
+            Content-Type: application/json
+            Host: 127.0.0.1
+        body: |-
+            {
+                  "domain": "example.org",
+                  "answer": "127.0.0.1"
+                }
+        body_type: ""
+        timestamp: 2023-12-06T08:06:13.300394059+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Wed, 06 Dec 2023 02:36:13 GMT
+            Vary: Accept-Encoding
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T08:06:15.41104036+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1701830175
+curl: |-
+    curl --request POST \
+      --url http://127.0.0.1/control/rewrite/add \
+      --header 'Host: 127.0.0.1' \
+      --header 'Accept: */*' \
+      --header 'Content-Type: application/json' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ=' \
+      --data '{
+          "domain": "example.org",
+          "answer": "127.0.0.1"
+        }'

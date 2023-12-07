@@ -1,0 +1,53 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-4
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/filtering/remove_url
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Content-Length: "97"
+            Content-Type: application/json
+            Host: 127.0.0.1
+        body: |-
+            {
+                  "url": "https://filters.adtidy.org/windows/filters/15.txt",
+                  "whitelist": true
+                }
+        body_type: ""
+        timestamp: 2023-12-06T23:07:07.692836337+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "15"
+            Content-Type: text/plain; charset=utf-8
+            Date: Wed, 06 Dec 2023 17:37:07 GMT
+            Vary: Accept-Encoding
+        body: |
+            OK 57734 rules
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T23:07:09.771722966+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1701884229
+curl: |-
+    curl --request POST \
+      --url http://127.0.0.1/control/filtering/remove_url \
+      --header 'Host: 127.0.0.1' \
+      --header 'Accept: */*' \
+      --header 'Content-Type: application/json' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ=' \
+      --data '{
+          "url": "https://filters.adtidy.org/windows/filters/15.txt",
+          "whitelist": true
+        }'

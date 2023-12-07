@@ -1,0 +1,63 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: PUT
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/safesearch/settings
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Content-Length: "165"
+            Content-Type: application/json
+            Host: 127.0.0.1
+        body: |-
+            {
+                  "enabled": true,
+                  "bing": true,
+                  "duckduckgo": true,
+                  "google": true,
+                  "pixabay": true,
+                  "yandex": true,
+                  "youtube": true
+                }
+        body_type: ""
+        timestamp: 2023-12-06T07:07:38.122637195+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "3"
+            Content-Type: text/plain; charset=utf-8
+            Date: Wed, 06 Dec 2023 01:37:38 GMT
+            Vary: Accept-Encoding
+        body: |
+            OK
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T07:07:40.205737206+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1701826660
+curl: |-
+    curl --request PUT \
+      --url http://127.0.0.1/control/safesearch/settings \
+      --header 'Host: 127.0.0.1' \
+      --header 'Accept: */*' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ=' \
+      --header 'Content-Type: application/json' \
+      --data '{
+          "enabled": true,
+          "bing": true,
+          "duckduckgo": true,
+          "google": true,
+          "pixabay": true,
+          "yandex": true,
+          "youtube": true
+        }'

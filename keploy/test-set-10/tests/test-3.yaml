@@ -1,0 +1,65 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-3
+spec:
+    metadata: {}
+    req:
+        method: PUT
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/rewrite/update
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Content-Length: "223"
+            Content-Type: application/json
+            Host: 127.0.0.1
+            Postman-Token: 62a3499f-6944-43dd-b374-07c987f45c8c
+        body: |-
+            {
+                      "target": {
+                        "domain": "example.org",
+                        "answer": "127.0.0.1"
+                      },
+                      "update": {
+                        "domain": "examples.org",
+                        "answer": "127.5.0.1"
+                      }
+                    }
+        body_type: ""
+        timestamp: 2023-12-06T08:11:42.168856711+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Wed, 06 Dec 2023 02:41:42 GMT
+            Vary: Accept-Encoding
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T08:11:44.276953837+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1701830504
+curl: |-
+    curl --request PUT \
+      --url http://127.0.0.1/control/rewrite/update \
+      --header 'Content-Type: application/json' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ=' \
+      --header 'Accept: */*' \
+      --header 'Postman-Token: 62a3499f-6944-43dd-b374-07c987f45c8c' \
+      --header 'Host: 127.0.0.1' \
+      --data '{
+              "target": {
+                "domain": "example.org",
+                "answer": "127.0.0.1"
+              },
+              "update": {
+                "domain": "examples.org",
+                "answer": "127.5.0.1"
+              }
+            }'

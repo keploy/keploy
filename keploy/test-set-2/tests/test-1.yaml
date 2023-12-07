@@ -1,0 +1,42 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1:3000/control/install/configure
+        header:
+            Accept: application/json, text/plain, */*
+            Content-Length: "172"
+            Content-Type: application/json
+            Host: 127.0.0.1:3000
+        body: '{"web":{"ip":"0.0.0.0","port":80,"status":"","can_autofix":false},"dns":{"ip":"0.0.0.0","port":54,"status":"","can_autofix":false},"username":"admin","password":"password"}'
+        body_type: ""
+        timestamp: 2023-12-05T21:46:40.794169809+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Type: text/plain; charset=utf-8
+            Date: Tue, 05 Dec 2023 16:16:40 GMT
+        body: |
+            OK
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-05T21:46:43.000678296+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1701793003
+curl: |-
+    curl --request POST \
+      --url http://127.0.0.1:3000/control/install/configure \
+      --header 'Accept: application/json, text/plain, */*' \
+      --header 'Content-Type: application/json' \
+      --header 'Host: 127.0.0.1:3000' \
+      --data '{"web":{"ip":"0.0.0.0","port":80,"status":"","can_autofix":false},"dns":{"ip":"0.0.0.0","port":54,"status":"","can_autofix":false},"username":"admin","password":"password"}'

@@ -1,0 +1,45 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/rewrite/list
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Host: 127.0.0.1
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-06T08:07:19.504474462+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "48"
+            Content-Type: application/json
+            Date: Wed, 06 Dec 2023 02:37:19 GMT
+            Server: AdGuardHome/
+            Vary: Accept-Encoding
+        body: |
+            [{"domain":"example.org","answer":"127.0.0.1"}]
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T08:07:21.597123337+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+            body.domain: []
+            body.answer: []
+    created: 1701830241
+curl: |
+    curl --request GET \
+      --url http://127.0.0.1/control/rewrite/list \
+      --header 'Host: 127.0.0.1' \
+      --header 'Accept: */*' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ='

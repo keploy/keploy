@@ -1,0 +1,80 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-3
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/tls/config
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Content-Length: "463"
+            Content-Type: application/json
+            Host: 127.0.0.1
+            User-Agent: curl/7.81.0
+        body: |-
+            {
+                  "enabled": true,
+                  "server_name": "example.org",
+                  "force_https": true,
+                  "port_https": 443,
+                  "port_dns_over_tls": 853,
+                  "port_dns_over_quic": 784,
+                  "certificate_chain": "string",
+                  "private_key": "string",
+                  "private_key_saved": true,
+                  "certificate_path": "string",
+                  "private_key_path": "string",
+                  "valid_cert": true,
+                  "valid_chain": true,
+                  "subject": "CN=example.org",
+                  "issuer": "CN=Lets
+        body_type: ""
+        timestamp: 2023-12-06T07:30:21.881708979+05:30
+    resp:
+        status_code: 404
+        header:
+            Content-Length: "19"
+            Content-Type: text/plain; charset=utf-8
+            Date: Wed, 06 Dec 2023 02:00:21 GMT
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+        body: |
+            404 page not found
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T07:30:23.961089325+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1701828023
+curl: |-
+    curl --request POST \
+      --url http://127.0.0.1/control/tls/config \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ=' \
+      --header 'Host: 127.0.0.1' \
+      --header 'User-Agent: curl/7.81.0' \
+      --header 'Content-Type: application/json' \
+      --header 'Accept: */*' \
+      --data '{
+          "enabled": true,
+          "server_name": "example.org",
+          "force_https": true,
+          "port_https": 443,
+          "port_dns_over_tls": 853,
+          "port_dns_over_quic": 784,
+          "certificate_chain": "string",
+          "private_key": "string",
+          "private_key_saved": true,
+          "certificate_path": "string",
+          "private_key_path": "string",
+          "valid_cert": true,
+          "valid_chain": true,
+          "subject": "CN=example.org",
+          "issuer": "CN=Lets'

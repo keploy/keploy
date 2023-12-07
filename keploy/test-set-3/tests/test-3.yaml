@@ -1,0 +1,53 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-3
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://172.17.0.1/control/querylog/config
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Host: 172.17.0.1
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-05T23:58:12.469271031+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "80"
+            Content-Type: application/json
+            Date: Tue, 05 Dec 2023 18:28:12 GMT
+            Server: AdGuardHome/
+            Vary: Accept-Encoding
+        body: |
+            {"ignored":[],"interval":7776000000,"enabled":true,"anonymize_client_ip":false}
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-05T23:58:14.54245948+05:30
+    objects: []
+    assertions:
+        noise:
+            body.interval: []
+            header.Date: []
+            header.ignored: []
+            header.enabled: []
+            header.anonymize_client_ip: []
+    created: 1701800894
+curl: |
+    curl --request GET \
+      --url http://172.17.0.1/control/querylog/config \
+      --header 'Host: 172.17.0.1' \
+      --header 'Accept: */*' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ='
+
+curl --request POST \
+      --url http://172.17.0.1/control/parental/enable \
+      --header 'Accept: application/json, text/plain, */*' \
+      --header 'Content-Type: application/json' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ='

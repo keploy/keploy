@@ -1,0 +1,59 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/stats
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Host: 127.0.0.1
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-06T07:11:36.994174227+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "579"
+            Content-Type: application/json
+            Date: Wed, 06 Dec 2023 01:41:37 GMT
+            Server: AdGuardHome/
+            Vary: Accept-Encoding
+        body: |
+            {"time_units":"hours","top_queried_domains":[],"top_clients":[],"top_blocked_domains":[],"top_upstreams_responses":[],"top_upstreams_avg_time":[],"dns_queries":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"blocked_filtering":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"replaced_safebrowsing":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"replaced_parental":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"num_dns_queries":0,"num_blocked_filtering":0,"num_replaced_safebrowsing":0,"num_replaced_safesearch":0,"num_replaced_parental":0,"avg_processing_time":0}
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T07:11:39.070299475+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+            body.time_units: []
+            body.num_dns_queries: []
+            body.num_blocked_filtering: []
+            body.num_replaced_safebrowsing: []
+            body.num_replaced_safesearch: []
+            body.num_replaced_parental: []
+            body.avg_processing_time: []
+            body.top_queried_domains: []
+            body.top_clients: []
+            body.top_blocked_domains: []
+            body.top_upstreams_responses: []
+            body.top_upstreams_avg_time: []
+            body.dns_queries: []
+            body.blocked_filtering: []
+            body.replaced_safebrowsing: []
+            body.replaced_parental: []
+    created: 1701826899
+curl: |
+    curl --request GET \
+      --url http://127.0.0.1/control/stats \
+      --header 'Host: 127.0.0.1' \
+      --header 'Accept: */*' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ='

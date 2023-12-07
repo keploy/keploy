@@ -1,0 +1,49 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-5
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/clients/delete
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Content-Length: "35"
+            Content-Type: application/json
+            Host: 127.0.0.1
+        body: |-
+            {
+                    "name": "localhost"
+                }
+        body_type: ""
+        timestamp: 2023-12-06T22:43:42.837264219+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "0"
+            Date: Wed, 06 Dec 2023 17:13:42 GMT
+            Vary: Accept-Encoding
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T22:43:44.924609118+05:30
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1701882824
+curl: |-
+    curl --request POST \
+      --url http://127.0.0.1/control/clients/delete \
+      --header 'Content-Type: application/json' \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ=' \
+      --header 'Host: 127.0.0.1' \
+      --header 'Accept: */*' \
+      --data '{
+            "name": "localhost"
+        }'

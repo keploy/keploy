@@ -1,0 +1,46 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://127.0.0.1/control/filtering/status
+        header:
+            Accept: '*/*'
+            Authorization: Basic YWRtaW46cGFzc3dvcmQ=
+            Host: 127.0.0.1
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-06T23:03:10.021433105+05:30
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "426"
+            Content-Type: application/json
+            Date: Wed, 06 Dec 2023 17:33:10 GMT
+            Server: AdGuardHome/
+            Vary: Accept-Encoding
+        body: |
+            {"filters":[{"url":"https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt","name":"AdGuard DNS filter","last_updated":"2023-12-06T06:38:41+05:30","id":1,"rules_count":57722,"enabled":true},{"url":"https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt","name":"AdAway Default Blocklist","id":2,"rules_count":0,"enabled":false}],"whitelist_filters":null,"user_rules":[],"interval":24,"enabled":true}
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-06T23:03:12.096015501+05:30
+    objects: []
+    assertions:
+        noise:
+            body.filters.enabled: []
+            body.filters.last_updated: []
+            body.interval: []
+            header.Date: []
+    created: 1701883992
+curl: |
+    curl --request GET \
+      --url http://127.0.0.1/control/filtering/status \
+      --header 'Authorization: Basic YWRtaW46cGFzc3dvcmQ=' \
+      --header 'Host: 127.0.0.1' \
+      --header 'Accept: */*'
