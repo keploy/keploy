@@ -7,6 +7,9 @@ git checkout native-linux
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
+# Check docker logs continuously.
+docker logs -f mongoDb &
+
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy-config.yaml" ]; then
     rm ./keploy-config.yaml
@@ -83,3 +86,5 @@ if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
 else
     exit 1
 fi
+
+docker stop mongoDb
