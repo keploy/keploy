@@ -43,8 +43,8 @@ test:
   proxyport: 0
   containerName: ""
   networkName: ""
-  tests: 
   # example: "test-set-1": ["test-1", "test-2", "test-3"]
+  tests:
   globalNoise: |-
     {
       "global": {
