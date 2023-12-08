@@ -4,7 +4,8 @@
 docker network create django-postgres-network
 docker build -t django-app:1.0 .
 docker run -p 5432:5432 -d -e POSTGRES_PASSWORD=postgres  --network django-postgres-network --name mypostgres -v $(pwd)/sql:/docker-entrypoint-initdb.d postgres
-docker logs mypostgres &
+# CHECK the logs of the postgres container.
+docker logs -f mypostgres &
 docker network inspect django-postgres-network
 
 # Remove old keploy tests and mocks.
