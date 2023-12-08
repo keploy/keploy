@@ -72,7 +72,7 @@ docker rm -f keploy-v2
 docker rm -f DjangoApp
 
 # Checking the testcases and mocks before starting the test.
-cat ./keploy/test-set-0/tests/test-1.yaml ./keploy/test-set-0/tests/test-2.yaml ./keploy/test-est-1/tests/test-3.yaml ./keploy/test-set-0/tests/test-4.yaml ./keploy/test-set-0/tests/test-5.yaml
+cat ./keploy/test-set-0/tests/test-1.yaml ./keploy/test-set-0/tests/test-2.yaml ./keploy/test-est-1/tests/test-3.yaml ./keploy/test-set-0/tests/test-4.yaml 
 echo "now the mocks"
 cat ./keploy/test-set-0/mocks.yaml
 
