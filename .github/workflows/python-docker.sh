@@ -3,9 +3,6 @@
 # Start the postgres database.
 docker network create django-postgres-network
 docker run -p 5432:5432 -d -e POSTGRES_PASSWORD=postgres  --network django-postgres-network --name mypostgres -v $(pwd)/sql:/docker-entrypoint-initdb.d postgres
-# CHECK the logs of the postgres container.
-docker logs -f mypostgres &
-docker network inspect django-postgres-network
 
 # Remove old keploy tests and mocks.
 sudo rm -rf keploy/
@@ -25,8 +22,6 @@ sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 sleep 5
 
 # Start the django-postgres app in record mode and record testcases and mocks.
-docker ps
-docker network inspect django-postgres-network
 docker build -t django-app:1.0 .
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" &
 
@@ -77,7 +72,7 @@ docker rm -f keploy-v2
 docker rm -f DjangoApp
 
 # Start the app in test mode.
-docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 20
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 30
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
