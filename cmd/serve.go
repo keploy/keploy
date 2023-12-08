@@ -65,11 +65,6 @@ func (s *Serve) GetCmd() *cobra.Command {
 				return
 			}
 
-			if err != nil {
-				s.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
-				return
-			}
-
 			pid, err := cmd.Flags().GetUint32("pid")
 
 			if err != nil {
