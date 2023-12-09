@@ -40,7 +40,7 @@ type TestOptions struct {
 	Delay              uint64
 	PassThroughPorts   []uint
 	ApiTimeout         uint64
-	Testsets           []string
+	Tests              map[string][]string
 	AppContainer       string
 	AppNetwork         string
 	ProxyPort          uint32
@@ -183,7 +183,6 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		returnVal.SessionsMap[sessionIndex] = sessionIndex
 	}
 	return returnVal, nil
-
 }
 
 func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions) bool {
@@ -229,8 +228,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		initialisedValues.Path = filepath.Join(path, sessionIndex)
 		initialisedValues.TestPath = filepath.Join(path, sessionIndex, "tests")
 		// checking whether the provided testset match with a recorded testset.
-		if _, ok := initialisedValues.SessionsMap[sessionIndex]; !ok {
-			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
+		testcases := ArrayToMap(options.Tests[sessionIndex])
+		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
 			continue
 		}
 		noiseConfig := options.GlobalNoise
@@ -584,6 +583,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
+		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
+			continue
+		}
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
 		filteredTcsMocks, _ := cfg.Storage.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
 		readTcsMocks := []*models.Mock{}
