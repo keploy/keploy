@@ -20,18 +20,18 @@ type Filters struct {
 	URLMethods map[string][]string `json:"urlMethods" yaml:"urlMethods"`
 }
 type Test struct {
-	Path               string   `json:"path" yaml:"path"`
-	Command            string   `json:"command" yaml:"command"`
-	ProxyPort          uint32   `json:"proxyport" yaml:"proxyport"`
-	ContainerName      string   `json:"containerName" yaml:"containerName"`
-	NetworkName        string   `json:"networkName" yaml:"networkName"`
-	TestSets           []string `json:"testSets" yaml:"testSets"`
-	GlobalNoise        string   `json:"globalNoise" yaml:"globalNoise"`
-	Delay              uint64   `json:"delay" yaml:"delay"`
-	ApiTimeout         uint64   `json:"apiTimeout" yaml:"apiTimeout"`
-	PassThroughPorts   []uint   `json:"passThroughPorts" yaml:"passThroughPorts"`
-	WithCoverage       bool     `json:"withCoverage" yaml:"withCoverage"` // boolean to capture the coverage in test
-	CoverageReportPath string   `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
+	Path             string               `json:"path" yaml:"path"`
+	Command          string               `json:"command" yaml:"command"`
+	ProxyPort        uint32               `json:"proxyport" yaml:"proxyport"`
+	ContainerName    string               `json:"containerName" yaml:"containerName"`
+	NetworkName      string               `json:"networkName" yaml:"networkName"`
+	Tests            map[string][]string  `json:"tests" yaml:"tests"`
+	GlobalNoise      string               `json:"globalNoise" yaml:"globalNoise"`
+	Delay            uint64               `json:"delay" yaml:"delay"`
+	ApiTimeout       uint64               `json:"apiTimeout" yaml:"apiTimeout"`
+	PassThroughPorts []uint               `json:"passThroughPorts" yaml:"passThroughPorts"`
+    WithCoverage       bool               `json:"withCoverage" yaml:"withCoverage"` // boolean to capture the coverage in test
+	CoverageReportPath string             `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 }
 
 type (
