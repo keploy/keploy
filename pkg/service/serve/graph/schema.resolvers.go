@@ -19,7 +19,7 @@ import (
 // RunTestSet is the resolver for the runTestSet field.
 func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*model.RunTestSetResponse, error) {
 	if r.Resolver == nil {
-		err := fmt.Errorf(Emoji + "failed to get Resolver")
+		err := fmt.Errorf("%s failed to get Resolver", Emoji)
 		return nil, err
 	}
 
@@ -73,7 +73,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 // TestSets is the resolver for the testSets field.
 func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	if r.Resolver == nil {
-		err := fmt.Errorf(Emoji + "failed to get Resolver")
+		err := fmt.Errorf("%s failed to get Resolver", Emoji)
 		return nil, err
 	}
 	testPath := r.Resolver.Path
@@ -100,7 +100,7 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 	var store = fs.NewTeleFS()
 	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
 	if r.Resolver == nil {
-		err := fmt.Errorf(Emoji + "failed to get Resolver")
+		err := fmt.Errorf("%s failed to get Resolver", Emoji)
 		return nil, err
 	}
 	testReportFs := r.Resolver.TestReportFS
