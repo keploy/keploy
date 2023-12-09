@@ -19,7 +19,7 @@ import (
 // RunTestSet is the resolver for the runTestSet field.
 func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*model.RunTestSetResponse, error) {
 	if r.Resolver == nil {
-		err := fmt.Errorf("%s failed to get Resolver", Emoji)
+		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err
 	}
 
@@ -27,7 +27,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	if tester == nil {
 		r.Logger.Error("failed to get tester from resolver")
-		return nil, fmt.Errorf("%s failed to run testSet:%v", Emoji, testSet)
+		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
 	testRunChan := make(chan string, 1)
@@ -40,19 +40,19 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	testReportFS := r.Resolver.TestReportFS
 	if tester == nil {
 		r.Logger.Error("failed to get testReportFS from resolver")
-		return nil, fmt.Errorf("%s failed to run testSet:%v", Emoji, testSet)
+		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
 	ys := r.Resolver.YS
 	if ys == nil {
 		r.Logger.Error("failed to get ys from resolver")
-		return nil, fmt.Errorf("%s failed to run testSet:%v", Emoji, testSet)
+		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
 	loadedHooks := r.LoadedHooks
 	if loadedHooks == nil {
 		r.Logger.Error("failed to get loadedHooks from resolver")
-		return nil, fmt.Errorf("%s failed to run testSet:%v", Emoji, testSet)
+		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
 	resultForTele := make([]int, 2)
@@ -73,7 +73,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 // TestSets is the resolver for the testSets field.
 func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	if r.Resolver == nil {
-		err := fmt.Errorf("%s failed to get Resolver", Emoji)
+		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err
 	}
 	testPath := r.Resolver.Path
@@ -100,14 +100,14 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 	var store = fs.NewTeleFS()
 	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
 	if r.Resolver == nil {
-		err := fmt.Errorf("%s failed to get Resolver", Emoji)
+		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err
 	}
 	testReportFs := r.Resolver.TestReportFS
 
 	if testReportFs == nil {
 		r.Logger.Error("failed to get testReportFS from resolver")
-		return nil, fmt.Errorf("%s failed to get the status for testRunID:%v", Emoji, testRunID)
+		return nil, fmt.Errorf(Emoji+"failed to get the status for testRunID:%v", testRunID)
 	}
 	testReport, err := testReportFs.Read(ctx, r.Resolver.TestReportPath, testRunID)
 	if err != nil {

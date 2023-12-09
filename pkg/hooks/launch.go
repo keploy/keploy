@@ -45,10 +45,10 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 	if appCmd == "" {
 		if len(appContainer) == 0 {
-			return fmt.Errorf("%s please provide container name when running application container in isolation", Emoji)
+			return fmt.Errorf(Emoji + "please provide container name when running application container in isolation")
 		}
 		if len(appNetwork) == 0 {
-			return fmt.Errorf("%s please provide network name when running application container in isolation", Emoji)
+			return fmt.Errorf(Emoji + "please provide network name when running application container in isolation")
 		}
 	}
 
@@ -70,7 +70,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			if cmd == "docker-compose" {
 				if len(appContainer) == 0 {
 					h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
-					return fmt.Errorf("%s container name not found", Emoji)
+					return fmt.Errorf(Emoji + "container name not found")
 				}
 
 				//finding the user docker-compose file in the current directory.

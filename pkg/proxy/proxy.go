@@ -509,7 +509,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 
 	serverCsr, serverKey, err := csr.ParseRequest(serverReq)
 	if err != nil {
-		return nil, fmt.Errorf("%v failed to create server CSR: %v", Emoji, err)
+		return nil, fmt.Errorf(Emoji+"failed to create server CSR: %v", err)
 	}
 	cryptoSigner, ok := caPrivKey.(crypto.Signer)
 	if !ok {
@@ -517,7 +517,7 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	}
 	signerd, err := local.NewSigner(cryptoSigner, caCertParsed, signer.DefaultSigAlgo(cryptoSigner), nil)
 	if err != nil {
-		return nil, fmt.Errorf("%s failed to create signer: %v", Emoji, err)
+		return nil, fmt.Errorf(Emoji+"failed to create signer: %v", err)
 	}
 
 	serverCert, err := signerd.Sign(signer.SignRequest{
@@ -526,13 +526,13 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		Profile: "web",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%s failed to sign server certificate: %v", Emoji, err)
+		return nil, fmt.Errorf(Emoji+"failed to sign server certificate: %v", err)
 	}
 
 	// Load the server certificate and private key
 	serverTlsCert, err := tls.X509KeyPair(serverCert, serverKey)
 	if err != nil {
-		return nil, fmt.Errorf("%s failed to load server certificate and key: %v", Emoji, err)
+		return nil, fmt.Errorf(Emoji+"failed to load server certificate and key: %v", err)
 	}
 
 	return &serverTlsCert, nil
