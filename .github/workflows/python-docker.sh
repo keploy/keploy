@@ -12,7 +12,7 @@ sed -i "s/'HOST': '.*'/'HOST': 'mypostgres'/g" django_postgres/settings.py
 sed -i "s/'PORT': '.*'/'PORT': '5432'/g" django_postgres/settings.py
 
 # Generate the keploy-config file.
-sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy generate-config
+sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy generate-config
 
 # Update the global noise to ignore the Allow header.
 config_file="./keploy-config.yaml"
@@ -24,7 +24,7 @@ sleep 5
 # Start the django-postgres app in record mode and record testcases and mocks.
 docker build -t django-app:1.0 .
 for i in {1..2}; do
-sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keployrecord -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" &
+sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keployrecord -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" &
 
 # Wait for the application to start.
 app_started=false
@@ -80,7 +80,7 @@ echo "checking one of the tests"
 cat ./keploy/test-set-0/tests/test-1.yaml
 
 # Start the app in test mode.
-sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 20 &
+sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 20 &
 for i in {1..20}; do
   # Check port 8000.
     if sudo lsof -i: 8000; then
