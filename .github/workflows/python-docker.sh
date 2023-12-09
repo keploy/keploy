@@ -80,7 +80,15 @@ echo "checking one of the tests"
 cat ./keploy/test-set-0/tests/test-1.yaml
 
 # Start the app in test mode.
-docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 20
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 20 &
+for i in {1..20}; do
+  # Check port 8000.
+    if sudo lsof -i: 8000; then
+        break
+    fi
+    echo "waiting for the app to start"
+    sleep 3 # wait for 3 seconds before checking again.
+done
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
