@@ -215,37 +215,16 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters 
 	return nil
 }
 
-func isValidPath(fp string) bool {
-	// Check if file already exists
-	if _, err := os.Stat(fp); err == nil {
-		return true
-	}
-
-	// Attempt to create it
-	var d []byte
-	if err := os.WriteFile(fp, d, 0644); err == nil {
-		os.Remove(fp) // And delete it
-		return true
-	}
-
-	return false
-}
-
 func (ys *Yaml) ReadTestcase(path string, options interface{}) ([]*models.TestCase, error) {
 
 	if path == "" {
 		path = ys.TcsPath
 	}
 
-	// Check if the path is absolute
-	if !isValidPath(path) {
-		return nil, errors.New("invalid path provided by the user")
-	}
+	_, pathError := util.ValidatePath(path)
 
-	tcsPath := filepath.Join(path)
-
-	if !filepath.IsAbs(tcsPath) {
-		return nil, errors.New("provided path is not absolute")
+	if pathError != nil {
+		return nil, pathError
 	}
 
 	tcs := []*models.TestCase{}
