@@ -32,7 +32,7 @@ type InitialiseRunTestSetReturn struct {
 }
 
 type InitialiseTestReturn struct {
-	SessionsMap              map[string]string
+	Sessions                 []string
 	TestReportFS             platform.TestReportDB
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool

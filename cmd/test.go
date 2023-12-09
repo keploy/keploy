@@ -38,7 +38,7 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testsets *[]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -56,8 +56,10 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *appCmd == "" {
 		*appCmd = confTest.Command
 	}
-	if len(*testsets) == 0 {
-		*testsets = confTest.TestSets
+	for testset, testcases := range confTest.Tests {
+		if _, ok := (*tests)[testset]; !ok {
+			(*tests)[testset] = testcases
+		}
 	}
 	if *appContainer == "" {
 		*appContainer = confTest.ContainerName
@@ -176,12 +178,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
-			if err != nil {
-				t.logger.Error("Failed to get the testsets flag", zap.Error((err)))
-				return err
-			}
-
 			delay, err := cmd.Flags().GetUint64("delay")
 			if err != nil {
 				t.logger.Error("Failed to get the delay flag", zap.Error((err)))
@@ -212,10 +208,22 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			tests := map[string][]string{}
+
+			testsets, err := cmd.Flags().GetStringSlice("testsets")
+			if err != nil {
+				t.logger.Error("Failed to read the testsets")
+				return err
+			}
+
+			for _, testset := range testsets {
+				tests[testset] = []string{}
+			}
+
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
-
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
+      
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
@@ -288,17 +296,17 @@ func (t *Test) GetCmd() *cobra.Command {
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
 			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-				Testsets:           testSets,
-				AppContainer:       appContainer,
-				AppNetwork:         networkName,
-				MongoPassword:      mongoPassword,
-				Delay:              delay,
-				PassThroughPorts:   ports,
-				ApiTimeout:         apiTimeout,
-				ProxyPort:          proxyPort,
-				GlobalNoise:        globalNoise,
-				TestsetNoise:       testsetNoise,
-				WithCoverage:       withCoverage,
+				Tests:            tests,
+				AppContainer:     appContainer,
+				AppNetwork:       networkName,
+				MongoPassword:    mongoPassword,
+				Delay:            delay,
+				PassThroughPorts: ports,
+				ApiTimeout:       apiTimeout,
+				ProxyPort:        proxyPort,
+				GlobalNoise:      globalNoise,
+				TestsetNoise:     testsetNoise,
+        		WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
 			})
 
@@ -312,7 +320,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
-	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run")
+	testCmd.Flags().StringSliceP("testsets", "t", []string{}, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 
 	testCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
