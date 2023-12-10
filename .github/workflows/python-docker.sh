@@ -83,10 +83,9 @@ cat ./keploy/test-set-0/tests/test-1.yaml
 sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy test -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" --delay 20 &
 for i in {1..20}; do
   # Check port 8000.
-    if sudo lsof -i:8000; then
+    if curl --location 'http://127.0.0.1:8000/user/'; then
         break
     fi
-    echo "waiting for the app to start"
     sleep 3 # wait for 3 seconds before checking again.
 done
 
