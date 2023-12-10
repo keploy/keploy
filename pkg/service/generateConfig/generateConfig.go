@@ -32,6 +32,7 @@ record:
   containerName: ""
   networkName: ""
   delay: 5
+  buildDelay: 30s
   passThroughPorts: []
   filters:
     ReqHeader: []
@@ -59,6 +60,7 @@ test:
       }
     }
   delay: 5
+  buildDelay: 30s
   apiTimeout: 5
   passThroughPorts: []
   withCoverage: false
