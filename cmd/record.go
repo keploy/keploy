@@ -178,11 +178,8 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			var hasContainerName bool
 			if isDockerCmd {
-				for _, arg := range os.Args {
-					if strings.Contains(arg, "--name") {
-						hasContainerName = true
-						break
-					}
+				if strings.Contains(appCmd, "--name") {
+					hasContainerName = true
 				}
 				if !hasContainerName && appContainer == "" {
 					fmt.Println("Error: missing required --containerName flag or containerName in config file")
