@@ -74,7 +74,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	if len(*passThorughPorts) == 0 {
 		*passThorughPorts = confTest.PassThroughPorts
-	} 
+	}
 	if len(*coverageReportPath) == 0 {
 		*coverageReportPath = confTest.CoverageReportPath
 	}
@@ -225,7 +225,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-      err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testSets, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
@@ -255,11 +255,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if isDockerCmd && buildDelay <= 30*time.Second {
 				fmt.Printf("Warning: buildDelay is set to %d, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy test -c "docker-compose up --build" --buildDelay 1m\n`)
-				} else {
-					fmt.Println("Example usage:\n", cmd.Example)
-				}
+				fmt.Println("Example usage:\n", `keploy test -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy test -c "docker-compose up --build" --buildDelay 1m\n`)
 			}
 
 			//if user provides relative path
@@ -312,7 +308,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				AppNetwork:         networkName,
 				MongoPassword:      mongoPassword,
 				Delay:              delay,
-        BuildDelay:         buildDelay,
+				BuildDelay:         buildDelay,
 				PassThroughPorts:   ports,
 				ApiTimeout:         apiTimeout,
 				ProxyPort:          proxyPort,
