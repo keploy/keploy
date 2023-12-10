@@ -18,13 +18,13 @@ sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid
 config_file="./keploy-config.yaml"
 sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
 
-# Wait for 5 seconds for it to complete
+# Wait for 5 seconds for it to complete.
 sleep 5
 
 # Start the django-postgres app in record mode and record testcases and mocks.
 docker build -t django-app:1.0 .
 for i in {1..2}; do
-sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keployrecord -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" &
+sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy record -c "docker run -p 8000:8000 --name DjangoApp --network django-postgres-network django-app:1.0" &
 
 # Wait for the application to start.
 app_started=false
