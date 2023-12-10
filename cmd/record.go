@@ -182,13 +182,9 @@ func (r *Record) GetCmd() *cobra.Command {
 				// user provided the absolute path
 			}
 
-			if buildDelay <= 30*time.Second {
+			if isDockerCmd && buildDelay <= 30*time.Second {
 				fmt.Printf("Warning: buildDelay is set to %d, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy record -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy record -c "docker-compose up --build" --buildDelay 1m\n`)
-				} else {
-					fmt.Println("Example usage:\n", cmd.Example)
-				}
+				fmt.Println("Example usage:\n", `keploy record -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy record -c "docker-compose up --build" --buildDelay 1m\n`)
 			}
 
 			path += "/keploy"
