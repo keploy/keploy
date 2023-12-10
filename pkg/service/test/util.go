@@ -52,6 +52,7 @@ type TestConfig struct {
 	AppContainer     string
 	AppNetwork       string
 	Delay            uint64
+	BuildDelay       time.Duration
 	PassThroughPorts []uint
 	ApiTimeout       uint64
 	WithCoverage  bool
@@ -66,6 +67,7 @@ type RunTestSetConfig struct {
 	AppContainer   string
 	AppNetwork     string
 	Delay          uint64
+	BuildDelay     time.Duration
 	Pid            uint32
 	YamlStore      platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
