@@ -73,6 +73,7 @@ type RunTestSetConfig struct {
 	AppContainer   string
 	AppNetwork     string
 	Delay          uint64
+	BuildDelay     time.Duration
 	Pid            uint32
 	Storage        platform.TestCaseDB
 	LoadedHooks    *hooks.Hook

@@ -38,6 +38,7 @@ type tester struct {
 type TestOptions struct {
 	MongoPassword      string
 	Delay              uint64
+	BuildDelay         time.Duration
 	PassThroughPorts   []uint
 	ApiTimeout         uint64
 	Tests              map[string][]string
@@ -237,7 +238,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.Store, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, noiseConfig, false, initialisedValues.TestPath)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, initialisedValues.TestPath)
+
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -335,7 +337,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		// start user application
 		if !cfg.ServeTest {
 			go func() {
-				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay, false); err != nil {
+				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay, cfg.BuildDelay, false); err != nil {
 					switch err {
 					case hooks.ErrInterrupted:
 						t.logger.Info("keploy terminated user application")
@@ -382,6 +384,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 
 	t.logger.Info("", zap.Any("no of test cases", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
 	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(cfg.Delay)*time.Second)))
+	t.logger.Debug(fmt.Sprintf("the buildDelay is %v", time.Duration(time.Duration(cfg.BuildDelay)*time.Second)))
 
 	// added delay to hold running keploy tests until application starts
 	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
@@ -540,6 +543,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		AppContainer:   appContainer,
 		AppNetwork:     appNetwork,
 		Delay:          delay,
+		BuildDelay:     buildDelay,
 		Pid:            pid,
 		Storage:        ys,
 		LoadedHooks:    loadedHooks,
