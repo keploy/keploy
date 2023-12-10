@@ -41,7 +41,7 @@ type TestOptions struct {
 	BuildDelay         time.Duration
 	PassThroughPorts   []uint
 	ApiTimeout         uint64
-	Testsets           []string
+	Tests              map[string][]string
 	AppContainer       string
 	AppNetwork         string
 	ProxyPort          uint32
@@ -200,7 +200,6 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
 		AppCmd:             appCmd,
-		Testsets:           &options.Testsets,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
 		Delay:              options.Delay,
@@ -231,7 +230,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 
 		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
 
-    switch testRunStatus {
+		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
 			exitLoop = true
@@ -254,14 +253,14 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {
 		t.logger.Info("there is a opportunity to get the coverage here")
-		// logs the coverage using covdata 
+		// logs the coverage using covdata
 		coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 		output, err := coverCmd.Output()
 		if err != nil {
 			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
 		}
 		t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
-		
+
 		// merges the coverage files into a single txt file which can be merged with the go-test coverage
 		generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
 		output, err = generateCovTxtCmd.Output()
@@ -272,7 +271,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
 		}
 	}
-	
+
 	if !initialisedValues.AbortStopHooksForcefully {
 		initialisedValues.AbortStopHooksInterrupt <- true
 		// stop listening for the eBPF events
