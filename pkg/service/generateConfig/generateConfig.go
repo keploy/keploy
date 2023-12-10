@@ -97,19 +97,16 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 
   if err := yaml.Unmarshal(data, &node); err != nil {
     g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))
-    return
   }
 
   results, err := yaml.Marshal(node.Content[0])
   if err != nil {
     g.logger.Fatal("Failed to marshal the config", zap.Error(err))
-    return
   }
 
   err = os.WriteFile(filePath, results, os.ModePerm)
   if err != nil {
     g.logger.Fatal("Failed to write config file", zap.Error(err))
-    return
   }
 
 
