@@ -180,7 +180,7 @@ keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy
 or
 keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1 --buildDelay 1m
 
-Generate-Config: 
+Generate-Config:
 keploy generate-config -p "/path/to/localdir"
 `
 
@@ -194,7 +194,13 @@ func checkForDebugFlag(args []string) bool {
 }
 
 func deleteLogs(logger *zap.Logger) {
-	err := os.Remove("keploy-logs.txt")
+	//Check if keploy-log.txt exists
+	_, err := os.Stat("keploy-logs.txt")
+	if os.IsNotExist(err) {
+		return
+	}
+	//If it does, remove it.
+	err = os.Remove("keploy-logs.txt")
 	if err != nil {
 		logger.Error("Error removing log file: %v\n", zap.String("error", err.Error()))
 		return
