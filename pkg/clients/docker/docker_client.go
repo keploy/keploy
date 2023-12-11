@@ -213,6 +213,51 @@ type Compose struct {
 	Secrets  yaml.Node `yaml:"secrets,omitempty"`
 }
 
+// CheckBindMounts returns information about whether bind mounts if they are being used contain relative file names or not
+func (idc *internalDockerClient) CheckBindMounts(filePath string) bool {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		idc.logger.Error("error reading file", zap.Any("filePath", filePath), zap.Error(err))
+		return false
+	}
+
+	var compose Compose
+	err = yaml.Unmarshal(data, &compose)
+	if err != nil {
+		idc.logger.Error("error unmarshalling YAML into compose struct", zap.Error(err))
+		return false
+	}
+
+	if compose.Services.Content == nil {
+		return false
+	}
+
+	for _, service := range compose.Services.Content {
+		for i, item := range service.Content {
+
+			if i+1 >= len(service.Content) {
+				break
+			}
+
+			if item.Value == "volumes" {
+				// volumeKeyNode := service.Content[i] or item
+				volumeValueNode := service.Content[i+1]
+
+				// Loop over all the volume mounts
+				for _, volumeMount := range volumeValueNode.Content {
+					// If volume mount starts with ./ or ../ then it as a relative path so return true
+					if volumeMount.Kind == yaml.ScalarNode && (volumeMount.Value[:2] == "./" || volumeMount.Value[:3] == "../") {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
+
+}
+
 // CheckNetworkInfo returns information about network name and also about whether the network is external or not in a docker-compose file.
 func (idc *internalDockerClient) CheckNetworkInfo(filePath string) (bool, bool, string) {
 	data, err := ioutil.ReadFile(filePath)
@@ -289,6 +334,97 @@ func (idc *internalDockerClient) CheckNetworkInfo(filePath string) (bool, bool, 
 	}
 
 	return false, false, ""
+}
+
+// Inspect Keploy docker container to get bind mount for /files
+func (idc *internalDockerClient) GetHostWorkingDirectory() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
+	defer cancel()
+
+	container, err := idc.ContainerInspect(ctx, "keploy-v2")
+	if err != nil {
+		idc.logger.Error("error inspecting keploy-v2 container", zap.Error(err))
+		return "", err
+	}
+	containerMounts := container.Mounts
+	// Loop through container mounts and find the mount for /files in the container
+	for _, mount := range containerMounts {
+		if mount.Destination == "/files" {
+			idc.logger.Debug("found mount for /files in keploy-v2 container", zap.Any("mount", mount))
+			return mount.Source, nil
+		}
+	}
+	return "", fmt.Errorf("could not find mount for /files in keploy-v2 container")
+}
+
+// ReplaceRelativePaths replaces relative paths in bind mounts with absolute paths
+func (idc *internalDockerClient) ReplaceRelativePaths(dockerComposefilePath, newComposeFile string) error {
+	data, err := ioutil.ReadFile(dockerComposefilePath)
+	if err != nil {
+		return err
+	}
+
+	var compose Compose
+	err = yaml.Unmarshal(data, &compose)
+	if err != nil {
+		return err
+	}
+
+	hostWorkingDirectory, err := idc.GetHostWorkingDirectory()
+	if err != nil {
+		return err
+	}
+
+	dockerComposeContext, err := filepath.Abs(filepath.Join(hostWorkingDirectory, dockerComposefilePath))
+	if err != nil {
+		idc.logger.Error("error getting absolute path for docker compose file", zap.Error(err))
+		return err
+	}
+	dockerComposeContext = filepath.Dir(dockerComposeContext)
+	idc.logger.Debug("docker compose file location in host filesystem", zap.Any("dockerComposeContext", dockerComposeContext))
+
+	// Loop through all services in compose file
+	for _, service := range compose.Services.Content {
+
+		for i, item := range service.Content {
+
+			if i+1 >= len(service.Content) {
+				break
+			}
+
+			if item.Value == "volumes" {
+				// volumeKeyNode := service.Content[i] or item
+				volumeValueNode := service.Content[i+1]
+
+				// Loop over all the volume mounts
+				for _, volumeMount := range volumeValueNode.Content {
+					// If volume mount starts with ./ or ../ then it is a relative path
+					if volumeMount.Kind == yaml.ScalarNode && (volumeMount.Value[:2] == "./" || volumeMount.Value[:3] == "../") {
+
+						// Replace the relative path with absolute path
+						absPath, err := filepath.Abs(filepath.Join(dockerComposeContext, volumeMount.Value))
+						if err != nil {
+							return err
+						}
+						volumeMount.Value = absPath
+					}
+				}
+			}
+		}
+	}
+
+	newData, err := yaml.Marshal(&compose)
+	if err != nil {
+		return err
+	}
+
+	newFilePath := filepath.Join(filepath.Dir(dockerComposefilePath), newComposeFile)
+	err = ioutil.WriteFile(newFilePath, newData, 0644)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // MakeNetworkExternal makes the existing network of the user docker compose file external and save it to a new file
