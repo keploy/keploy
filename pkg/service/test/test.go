@@ -38,9 +38,10 @@ type tester struct {
 type TestOptions struct {
 	MongoPassword      string
 	Delay              uint64
+	BuildDelay         time.Duration
 	PassThroughPorts   []uint
 	ApiTimeout         uint64
-	Testsets           []string
+	Tests              map[string][]string
 	AppContainer       string
 	AppNetwork         string
 	ProxyPort          uint32
@@ -156,6 +157,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		return returnVal, err
 	}
 	t.logger.Debug(fmt.Sprintf("the session indices are:%v", sessions))
+	returnVal.Sessions = sessions
 
 	// Channels to communicate between different types of closing keploy
 	returnVal.AbortStopHooksInterrupt = make(chan bool) // channel to stop closing of keploy via interrupt
@@ -184,17 +186,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		}
 	}()
 
-	if len(*cfg.Testsets) == 0 {
-		// by default, run all the recorded test sets
-		*cfg.Testsets = sessions
-	}
-	returnVal.SessionsMap = map[string]string{}
-
-	for _, sessionIndex := range sessions {
-		returnVal.SessionsMap[sessionIndex] = sessionIndex
-	}
 	return returnVal, nil
-
 }
 
 func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions) bool {
@@ -208,10 +200,10 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
 		AppCmd:             appCmd,
-		Testsets:           &options.Testsets,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
 		Delay:              options.Delay,
+		BuildDelay:         options.BuildDelay,
 		PassThroughPorts:   options.PassThroughPorts,
 		ApiTimeout:         options.ApiTimeout,
 		MongoPassword:      options.MongoPassword,
@@ -225,10 +217,10 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		t.logger.Error("failed to initialise the test", zap.Error(err))
 		return false
 	}
-	for _, sessionIndex := range options.Testsets {
+	for _, sessionIndex := range initialisedValues.Sessions {
 		// checking whether the provided testset match with a recorded testset.
-		if _, ok := initialisedValues.SessionsMap[sessionIndex]; !ok {
-			t.logger.Info("no testset found with: ", zap.Any("name", sessionIndex))
+		testcases := ArrayToMap(options.Tests[sessionIndex])
+		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
 			continue
 		}
 		noiseConfig := options.GlobalNoise
@@ -236,7 +228,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
+
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
 			testRes = false
@@ -260,14 +253,14 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {
 		t.logger.Info("there is a opportunity to get the coverage here")
-		// logs the coverage using covdata 
+		// logs the coverage using covdata
 		coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 		output, err := coverCmd.Output()
 		if err != nil {
 			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
 		}
 		t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
-		
+
 		// merges the coverage files into a single txt file which can be merged with the go-test coverage
 		generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
 		output, err = generateCovTxtCmd.Output()
@@ -278,7 +271,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
 		}
 	}
-	
+
 	if !initialisedValues.AbortStopHooksForcefully {
 		initialisedValues.AbortStopHooksInterrupt <- true
 		// stop listening for the eBPF events
@@ -328,7 +321,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		// start user application
 		if !cfg.ServeTest {
 			go func() {
-				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay, false); err != nil {
+				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay, cfg.BuildDelay, false); err != nil {
 					switch err {
 					case hooks.ErrInterrupted:
 						t.logger.Info("keploy terminated user application")
@@ -376,6 +369,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 
 	t.logger.Info("", zap.Any("no of test cases", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
 	t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(cfg.Delay)*time.Second)))
+	t.logger.Debug(fmt.Sprintf("the buildDelay is %v", time.Duration(time.Duration(cfg.BuildDelay)*time.Second)))
 
 	// added delay to hold running keploy tests until application starts
 	t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
@@ -508,7 +502,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS yaml.TestReportFS, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -517,6 +511,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		AppContainer:   appContainer,
 		AppNetwork:     appNetwork,
 		Delay:          delay,
+		BuildDelay:     buildDelay,
 		Pid:            pid,
 		YamlStore:      ys,
 		LoadedHooks:    loadedHooks,
@@ -558,6 +553,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
+		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
+			continue
+		}
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
 		filteredTcsMocks := FilterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
 		loadedHooks.SetTcsMocks(filteredTcsMocks)
