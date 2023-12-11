@@ -37,34 +37,7 @@ while [ "$app_started" = false ]; do
 done
 
 # Start making curl calls to record the testcases and mocks.
-curl --location 'http://127.0.0.1:8000/user/' \
---header 'Content-Type: application/json' \
---data-raw '    {
-        "name": "Jane Smith",
-        "email": "jane.smith@example.com",
-        "password": "smith567",
-        "website": "www.janesmith.com"
-    }'
-
-curl --location 'http://127.0.0.1:8000/user/' \
---header 'Content-Type: application/json' \
---data-raw '    {
-        "name": "John Doe",
-        "email": "john.doe@example.com",
-        "password": "john567",
-        "website": "www.johndoe.com"
-    }'
-
 curl --location 'http://127.0.0.1:8000/user/'
-
-curl --location 'http://127.0.0.1:8000/user/' \
---header 'Content-Type: application/json' \
---data-raw '    {
-        "name": "John Doe",
-        "email": "john.doe@example.com",
-        "password": "john567",
-        "website": "www.johndoe.com"
-    }'
 
 # Wait for 5 seconds for keploy to record the tcs and mocks.
 sleep 5
