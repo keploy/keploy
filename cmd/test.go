@@ -232,7 +232,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
-      
+
 			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
 			if err != nil {
 				if err == errFileNotFound {
@@ -262,7 +262,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			if isDockerCmd && buildDelay <= 30*time.Second {
-				fmt.Printf("Warning: buildDelay is set to %d, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
+				fmt.Printf("Warning: buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
 				fmt.Println("Example usage:\n", `keploy test -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy test -c "docker-compose up --build" --buildDelay 1m\n`)
 			}
 
@@ -311,17 +311,17 @@ func (t *Test) GetCmd() *cobra.Command {
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
 			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-				Tests:            tests,
-				AppContainer:     appContainer,
-				AppNetwork:       networkName,
-				MongoPassword:    mongoPassword,
-				Delay:            delay,
-				BuildDelay:       buildDelay,
-				PassThroughPorts: ports,
-				ApiTimeout:       apiTimeout,
-				ProxyPort:        proxyPort,
-				GlobalNoise:      globalNoise,
-				TestsetNoise:     testsetNoise,
+				Tests:              tests,
+				AppContainer:       appContainer,
+				AppNetwork:         networkName,
+				MongoPassword:      mongoPassword,
+				Delay:              delay,
+				BuildDelay:         buildDelay,
+				PassThroughPorts:   ports,
+				ApiTimeout:         apiTimeout,
+				ProxyPort:          proxyPort,
+				GlobalNoise:        globalNoise,
+				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
 			})
