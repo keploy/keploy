@@ -1,7 +1,7 @@
-name: Java on Linux
+name: Java on Docker
 on: [pull_request]
 jobs:
-  java_linux:
+  java_docker:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -9,26 +9,26 @@ jobs:
 
     - name: Build Keploy binary
       run: |
-        go build -o keployv2
+        docker build -t keployv2 .
 
     - name: Checkout samples-java repository
       uses: actions/checkout@v2
       with:
-        repository: keploy/samples-java
-        path: samples-java
+        repository: slayerjain/spring-petclinic-rest
+        path: spring-petclinic-rest
 
     - name: Installing the necessary dependencies
       run: |
-        cd samples-java/spring-petclinic/spring-petclinic-rest
+        cd spring-petclinic-rest
         ./mvnw dependency:resolve
 
     - name: Compile the project
       run: |
-       cd samples-java/spring-petclinic/spring-petclinic-rest
-        source ./../../../.github/workflows/update-java.sh
+        cd spring-petclinic-rest
+        source ./../.github/workflows/update-java.sh
         ./mvnw compile
 
     - name: Run the spring-petclinic-rest app
       run: |
-        cd samples-java/spring-petclinic/spring-petclinic-rest
-        source ./../../../.github/workflows/java-linux.sh
+        cd spring-petclinic-rest
+        source ./../.github/workflows/java-docker.sh
