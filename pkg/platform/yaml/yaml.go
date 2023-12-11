@@ -182,12 +182,12 @@ func (ys *Yaml) WriteTestcase(tc *models.TestCase, ctx context.Context, filters 
 		ys.mutex.Unlock()
 		var tcsName string
 		if ys.TcsName == "" {
-			// finds the recently generated testcase to derive the sequence number for the current testcase
-			lastIndx, err := findLastIndex(ys.TcsPath, ys.Logger)
-			if err != nil {
-				return err
-			}
 			if tc.Name == "" {
+				// finds the recently generated testcase to derive the sequence number for the current testcase
+				lastIndx, err := findLastIndex(ys.TcsPath, ys.Logger)
+				if err != nil {
+					return err
+				}
 				tcsName = fmt.Sprintf("test-%v", lastIndx)
 			} else {
 				tcsName = tc.Name
