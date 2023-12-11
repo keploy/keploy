@@ -44,6 +44,7 @@ sleep 5
 
 # Stop the keploy container and the application container.
 docker rm -f keploy-v2
+docker rm -f DjangoApp
 done
 
 # Checking the testcases and mocks before starting the test.
