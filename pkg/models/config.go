@@ -31,7 +31,7 @@ type Test struct {
 	ContainerName    string               `json:"containerName" yaml:"containerName"`
 	NetworkName      string               `json:"networkName" yaml:"networkName"`
 	Tests            map[string][]string  `json:"tests" yaml:"tests"`
-	GlobalNoise      string               `json:"globalNoise" yaml:"globalNoise"`
+	GlobalNoise      GlobalNoise          `json:"globalNoise" yaml:"globalNoise"`
 	Delay            uint64               `json:"delay" yaml:"delay"`
 	BuildDelay       time.Duration        `json:"buildDelay" yaml:"buildDelay"`
 	ApiTimeout       uint64               `json:"apiTimeout" yaml:"apiTimeout"`
