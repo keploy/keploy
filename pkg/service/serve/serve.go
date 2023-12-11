@@ -163,7 +163,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, true); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, 30*time.Second, true); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					s.logger.Info("keploy terminated user application")
