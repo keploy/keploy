@@ -66,15 +66,15 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 		}
 		fileName := filepath.Base(v.Name())
 		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
-		if len(strings.Split(fileNameWithoutExt, "-")) < 2 {
-			Logger.Error("failed to decode the last sequence number from yaml test", zap.Any("for the file", fileName), zap.Any("at path", path))
+		fileNameParts := strings.Split(fileNameWithoutExt, "-")
+		// if the file name is not in the format test-<index>, then skip the file
+		if len(fileNameParts) != 2 || fileNameParts[0] != "test" {
 			continue
 		}
-		indxStr := strings.Split(fileNameWithoutExt, "-")[1]
+		indxStr := fileNameParts[1]
 		indx, err := strconv.Atoi(indxStr)
 		if err != nil {
-			Logger.Error("failed to read the sequence number from the yaml file name", zap.Error(err), zap.Any("for the file", fileName))
-			return 0, err
+			continue
 		}
 		if indx > lastIndex {
 			lastIndex = indx
