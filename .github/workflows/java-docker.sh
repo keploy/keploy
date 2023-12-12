@@ -22,6 +22,8 @@ sudo java --version
 mvn clean install -Dmaven.test.skip=true
 ls target/
 sudo docker build -t java-app:1.0 .
+"checking the connections"
+cat src/main/resources/application-postgresql.properties
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p 9966:9966 --name javaApp --network keploy-network java-app:1.0'  &
 sleep 3
 docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
@@ -67,10 +69,11 @@ curl -X GET http://localhost:9966/petclinic/api/pettypes
 sleep 5
 
 # Stop keploy.
-sudo kill $pid
+sudo docker rm -f keploy-v2
+sudo docker rm -f javaApp
 
 # Start keploy in test mode.
-sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c './mvnw spring-boot:run' --containerName javaApp --delay 20
+sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c 'docker run -p 9966:9966 --name javaApp --network keploy-network java-app:1.0' --containerName javaApp --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
