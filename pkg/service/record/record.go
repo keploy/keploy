@@ -37,7 +37,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	models.SetMode(models.MODE_RECORD)
 
-	teleFS := fs.NewTeleFS()
+	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
 
