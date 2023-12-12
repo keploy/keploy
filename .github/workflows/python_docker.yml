@@ -13,9 +13,9 @@ jobs:
     - name: Checkout the samples-python repository
       uses: actions/checkout@v2
       with:
-        repository: PranshuSrivastava/samples-python
+        repository: keploy/samples-python
         path: samples-python
     - name: Run the sample python application
       run: |
-        cd samples-python/django-postgres/django_postgres
-        source ../../../.github/workflows/python-docker.sh
+        cd samples-python/flask-mongo
+        source ./../../.github/workflows/python-docker.sh
