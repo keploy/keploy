@@ -17,6 +17,7 @@ docker network create keploy-network
 sudo mvn --version
 sudo java --version
 mvn clean install -Dmaven.test.skip=true
+ls target/
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker compose up' --containerName javaApp
 sleep 3
 docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
