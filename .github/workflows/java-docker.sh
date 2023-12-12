@@ -1,5 +1,8 @@
 #! /bin/bash
 
+# Start postgres instance.
+docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 --name mypostgres postgres:15.2
+
 # Checkout the add-petclinic branch.
 git fetch origin
 git checkout add-petclinic
@@ -18,7 +21,8 @@ sudo mvn --version
 sudo java --version
 mvn clean install -Dmaven.test.skip=true
 ls target/
-docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker compose up' --containerName javaApp --buildDelay 100s &
+sudo docker build -t java-app:1.0 .
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p 9966:9966 --name javaApp --network keploy-network java-app:1.0'  &
 sleep 3
 docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
 docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
