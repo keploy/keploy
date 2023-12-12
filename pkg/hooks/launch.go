@@ -83,6 +83,21 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
 				newComposeFile := "kdocker-compose.yaml"
 
+				// Check if docker compose file uses relative file names for bind mounts
+				hasRelativeBindMounts := h.idc.CheckBindMounts(dockerComposeFile)
+
+				if hasRelativeBindMounts {
+					err := h.idc.ReplaceRelativePaths(dockerComposeFile, newComposeFile)
+					if err != nil {
+						h.logger.Error("failed to convert relative paths to absolute paths in volume mounts in docker compose file")
+						return err
+					}
+					h.logger.Info("Created kdocker-compose.yml file and Replaced relative file paths in docker compose file.")
+					//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
+					appCmd = modifyDockerComposeCommand(appCmd, newComposeFile)
+					dockerComposeFile = newComposeFile
+				}
+
 				// Checking info about the network and whether its external:true
 				hasNetwork, isExternal, network := h.idc.CheckNetworkInfo(dockerComposeFile)
 
