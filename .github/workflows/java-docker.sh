@@ -1,6 +1,7 @@
 #! /bin/bash
 
 # Start postgres instance.
+docker network create keploy-network
 docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 --name mypostgres --network keploy-network postgres:15.2
 
 # Checkout the add-petclinic branch.
@@ -16,7 +17,6 @@ cd ./spring-petclinic/spring-petclinic-rest
 sudo rm -rf keploy/
 
 # Start keploy in record mode.
-docker network create keploy-network
 sudo mvn --version
 sudo java --version
 mvn clean install -Dmaven.test.skip=true
