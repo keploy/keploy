@@ -9,8 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
 )
+
+var Emoji = "\U0001F430" + " Keploy:"
 
 // askForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
@@ -66,7 +69,7 @@ func HandlePanic() {
 	if r := recover(); r != nil {
 		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
-		fmt.Printf("ERROR:Recovered from %v\n", r)
+		log.Error(Emoji+"Recovered from:", r)
 		sentry.Flush(time.Second * 2)
 	}
 }
