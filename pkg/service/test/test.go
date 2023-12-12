@@ -110,7 +110,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 	models.SetMode(models.MODE_TEST)
 
-	teleFS := fs.NewTeleFS()
+	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
 
 	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)

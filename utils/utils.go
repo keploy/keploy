@@ -1,14 +1,13 @@
 package utils
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
-	"time"
-	"bufio"
 	"strings"
-
+	"time"
 
 	sentry "github.com/getsentry/sentry-go"
 )
@@ -47,7 +46,6 @@ func CheckFileExists(path string) bool {
 
 var KeployVersion string
 
-
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
 	if err != nil {
@@ -68,6 +66,7 @@ func HandlePanic() {
 	if r := recover(); r != nil {
 		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
+		fmt.Printf("ERROR:Recovered from %v\n", r)
 		sentry.Flush(time.Second * 2)
 	}
 }
