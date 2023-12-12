@@ -6,6 +6,7 @@ git checkout add-petclinic
 
 # Update the java version
 source ./../.github/workflows/update-java.sh
+mvn --version
 cd ./spring-petclinic/spring-petclinic-rest
 
 # Remove any existing test and mocks by keploy.
