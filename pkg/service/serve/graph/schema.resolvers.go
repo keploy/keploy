@@ -99,7 +99,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 // TestSetStatus is the resolver for the testSetStatus field.
 func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error) {
 	//Initiate the telemetry.
-	var store = fs.NewTeleFS()
+	var store = fs.NewTeleFS(r.Logger)
 	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
