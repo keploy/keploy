@@ -67,8 +67,7 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 		fileName := filepath.Base(v.Name())
 		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
 		fileNameParts := strings.Split(fileNameWithoutExt, "-")
-		// if the file name is not in the format test-<index>, then skip the file
-		if len(fileNameParts) != 2 || fileNameParts[0] != "test" {
+		if len(fileNameParts) != 2 || (fileNameParts[0] != "test" && fileNameParts[0] != "report") {
 			continue
 		}
 		indxStr := fileNameParts[1]
