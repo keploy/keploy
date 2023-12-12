@@ -39,6 +39,9 @@ curl -X PUT -H "Content-Type: application/json" -d '{"name": "Jane Smith", "age"
 curl http://localhost:6000/students
 curl -X DELETE http://localhost:6000/students/12345
 
+# wait for 5 seconds for keploy to record.
+sleep 5
+
 # Stop the keploy container and the application container.
 docker rm -f keploy-v2
 docker rm -f flask-app
