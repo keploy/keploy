@@ -20,7 +20,7 @@ sleep 5
 docker build -t flask-app:1.0 .
 
 for i in {1..2}; do
-docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker compose up" --buildDelay 40s  &
+docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s  &
 
 # Wait for the application to start.
 app_started=false
@@ -45,7 +45,7 @@ docker rm -f flask-app
 done
 
 # Start the app in test mode.
-docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker compose up" --buildDelay 40s --delay 15
+docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40s --delay 15
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
