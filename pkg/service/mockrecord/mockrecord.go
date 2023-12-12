@@ -35,7 +35,7 @@ func NewMockRecorder(logger *zap.Logger) MockRecorder {
 func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, mockName string) {
 
 	models.SetMode(models.MODE_RECORD)
-	teleFS := fs.NewTeleFS()
+	teleFS := fs.NewTeleFS(s.logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
