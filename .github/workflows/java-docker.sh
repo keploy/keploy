@@ -13,7 +13,7 @@ sudo rm -rf keploy/
 
 # Start keploy in record mode.
 docker network create keploy-network
-docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker compose up'
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker compose up' --containerName javaApp
 sleep 3
 docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
 docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
@@ -61,7 +61,7 @@ sleep 5
 sudo kill $pid
 
 # Start keploy in test mode.
-sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c './mvnw spring-boot:run' --delay 20
+sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c './mvnw spring-boot:run' --containerName javaApp --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
