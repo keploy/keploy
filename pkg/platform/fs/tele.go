@@ -15,7 +15,9 @@ import (
 )
 
 // Telemetry provides interface for create-read installationID for self-hosted keploy
-type Telemetry struct{}
+type Telemetry struct {
+	logger *zap.Logger
+}
 
 func UserHomeDir(isNewConfigPath bool) string {
 
@@ -34,8 +36,10 @@ func UserHomeDir(isNewConfigPath bool) string {
 	return os.Getenv("HOME") + configFolder
 }
 
-func NewTeleFS() *Telemetry {
-	return &Telemetry{}
+func NewTeleFS(logger *zap.Logger) *Telemetry {
+	return &Telemetry{
+		logger: logger,
+	}
 }
 
 func (fs *Telemetry) Get(isNewConfigPath bool) (string, error) {
@@ -43,6 +47,7 @@ func (fs *Telemetry) Get(isNewConfigPath bool) (string, error) {
 		path = UserHomeDir(isNewConfigPath)
 		id   = ""
 	)
+
 	file, err := os.OpenFile(filepath.Join(path, "installation-id.yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return "", err
@@ -62,7 +67,7 @@ func (fs *Telemetry) Get(isNewConfigPath bool) (string, error) {
 
 func (fs *Telemetry) Set(id string) error {
 	path := UserHomeDir(true)
-	util.CreateYamlFile(path, "installation-id", &zap.Logger{})
+	util.CreateYamlFile(path, "installation-id", fs.logger)
 
 	data := []byte{}
 
