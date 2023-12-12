@@ -32,6 +32,7 @@ record:
   containerName: ""
   networkName: ""
   delay: 5
+  buildDelay: 30s
   passThroughPorts: []
   filters:
     ReqHeader: []
@@ -43,7 +44,8 @@ test:
   proxyport: 0
   containerName: ""
   networkName: ""
-  testSets: []
+  # example: "test-set-1": ["test-1", "test-2", "test-3"]
+  tests: 
   globalNoise: |-
     {
       "global": {
@@ -58,8 +60,11 @@ test:
       }
     }
   delay: 5
+  buildDelay: 30s
   apiTimeout: 5
   passThroughPorts: []
+  withCoverage: false
+  coverageReportPath: ""
   #
   # Example on using globalNoise
   # globalNoise: |-
