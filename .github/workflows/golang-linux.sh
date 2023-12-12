@@ -71,6 +71,8 @@ done
 # Start the gin-mongo app in test omde.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 
+# list the files inside keploy/testReports.
+ls -l ./keploy/testReports
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
