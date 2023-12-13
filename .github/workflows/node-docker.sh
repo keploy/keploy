@@ -1,6 +1,6 @@
 #! /bin/bash
 
-./../../.github/workflows/fake-iid.sh
+source ./../../.github/workflows/fake-iid.sh
 
 # Start the docker container.
 docker network create keploy-network
