@@ -1,0 +1,134 @@
+version: api.keploy.io/v1beta1
+kind: SQL
+name: mocks
+spec:
+    metadata:
+        operation: HANDSHAKE_RESPONSE
+        responseOperation: HANDSHAKE_RESPONSE_OK
+        type: config
+    requests:
+        - header:
+            packet_length: 277
+            packet_number: 1
+            packet_type: HANDSHAKE_RESPONSE
+          message:
+            capability_flags: 417309191
+            max_packet_size: 16777215
+            character_set: 33
+            reserved:
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+            username: root
+            auth_data:
+                - 110
+                - 141
+                - 113
+                - 11
+                - 106
+                - 29
+                - 119
+                - 121
+                - 41
+                - 181
+                - 74
+                - 110
+                - 70
+                - 85
+                - 100
+                - 215
+                - 89
+                - 148
+                - 186
+                - 152
+                - 83
+                - 95
+                - 161
+                - 31
+                - 102
+                - 113
+                - 135
+                - 237
+                - 64
+                - 246
+                - 171
+                - 103
+            database: caching_sha2_password
+            auth_plugin_name: ""
+    responses:
+        - header:
+            packet_length: 73
+            packet_number: 0
+            packet_type: MySQLHandshakeV10
+          message:
+            protocol_version: 10
+            server_version: 8.1.0
+            connection_id: 50
+            auth_plugin_data:
+                - 37
+                - 103
+                - 25
+                - 28
+                - 21
+                - 120
+                - 52
+                - 72
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 0
+                - 112
+                - 10
+                - 127
+            capability_flags: 3758096383
+            character_set: 255
+            status_flags: 2
+            auth_plugin_name: caching_sha2_password
+        - header:
+            packet_length: 2
+            packet_number: 2
+            packet_type: HANDSHAKE_RESPONSE_OK
+          message:
+            packet_indicator: AuthMoreData
+            plugin_details:
+                type: cachingSha2PasswordFastAuthSuccess
+                message: Ok
+            remaining_bytes:
+                - 7
+                - 0
+                - 0
+                - 3
+                - 0
+                - 0
+                - 0
+                - 2
+                - 0
+                - 0
+                - 0
+    created: 1702460702

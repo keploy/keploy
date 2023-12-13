@@ -825,11 +825,12 @@ func ReadFirstBuffer(clientConn, destConn net.Conn) ([]byte, string, error) {
 }
 func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger, ctx context.Context) ([]*models.Mock, error) {
 	firstIteration := true
-	var (
-		mysqlRequests  []models.MySQLRequest
-		mysqlResponses []models.MySQLResponse
-	)
+	// var (
+	// 	mysqlRequests  []models.MySQLRequest
+	// 	mysqlResponses []models.MySQLResponse
+	// )
 	for {
+		logger.Info("recieved an incoming request from client")
 		var queryBuffer []byte
 		var err error
 		if firstIteration && initialBuffer != nil {
@@ -845,15 +846,15 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 		if len(queryBuffer) == 0 {
 			break
 		}
-		operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(queryBuffer), logger, destConn)
-		mysqlRequests = append([]models.MySQLRequest{}, models.MySQLRequest{
-			Header: &models.MySQLPacketHeader{
-				PacketLength: requestHeader.PayloadLength,
-				PacketNumber: requestHeader.SequenceID,
-				PacketType:   operation,
-			},
-			Message: mysqlRequest,
-		})
+		// operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(queryBuffer), logger, destConn)
+		// mysqlRequests = append([]models.MySQLRequest{}, models.MySQLRequest{
+		// 	Header: &models.MySQLPacketHeader{
+		// 		PacketLength: requestHeader.PayloadLength,
+		// 		PacketNumber: requestHeader.SequenceID,
+		// 		PacketType:   operation,
+		// 	},
+		// 	Message: mysqlRequest,
+		// })
 		res, err := destConn.Write(queryBuffer)
 		if err != nil {
 			logger.Error("failed to write query to mysql server", zap.Error(err))
@@ -867,32 +868,40 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 			logger.Error("failed to read query response from mysql server", zap.Error(err))
 			return nil, err
 		}
+		logger.Info("recieved an incoming response from server", zap.Any("response", queryResponse))
+
 		_, err = clientConn.Write(queryResponse)
 		if err != nil {
 			logger.Error("failed to write query response to mysql client", zap.Error(err))
 			return nil, err
 		}
+		logger.Info("wrote the incoming response to client", zap.Any("response", len(queryResponse)))
+
 		if len(queryResponse) == 0 {
 			break
 		}
-		responseOperation, responseHeader, mysqlResp, err := DecodeMySQLPacket(bytesToMySQLPacket(queryResponse), logger, destConn)
+		// responseOperation, responseHeader, mysqlResp, err := DecodeMySQLPacket(bytesToMySQLPacket(queryResponse), logger, destConn)
+		// logger.Info("after decoding the mysql packet", zap.Any("responseOperation", responseOperation), zap.Any("responseHeader", responseHeader), zap.Any("mysqlResp", mysqlResp), zap.Error(err))
 		if err != nil {
 			logger.Error("Failed to decode the MySQL packet from the destination server", zap.Error(err))
 			continue
 		}
-		if len(queryResponse) == 0 || responseOperation == "COM_STMT_CLOSE" {
-			break
-		}
-		mysqlResponses = append([]models.MySQLResponse{}, models.MySQLResponse{
-			Header: &models.MySQLPacketHeader{
-				PacketLength: responseHeader.PayloadLength,
-				PacketNumber: responseHeader.SequenceID,
-				PacketType:   responseOperation,
-			},
-			Message: mysqlResp,
-		})
-		recordMySQLMessage(h, mysqlRequests, mysqlResponses, operation, responseOperation, "mocks", ctx)
+		// if len(queryResponse) == 0 || responseOperation == "COM_STMT_CLOSE" {
+		// 	logger.Error("exiting the mysql parer as the response is empty or COM_STMT_CLOSE is recieved", zap.Any("responseoperation", responseOperation), zap.Any("queryResponse", queryResponse))
+		// 	break
+		// }
+		// mysqlResponses = append([]models.MySQLResponse{}, models.MySQLResponse{
+		// 	Header: &models.MySQLPacketHeader{
+		// 		PacketLength: responseHeader.PayloadLength,
+		// 		PacketNumber: responseHeader.SequenceID,
+		// 		PacketType:   responseOperation,
+		// 	},
+		// 	Message: mysqlResp,
+		// })
+		// recordMySQLMessage(h, mysqlRequests, mysqlResponses, operation, responseOperation, "mocks", ctx)
+		logger.Info("ended an incoming request/response from client")
 	}
+	logger.Error("exiting the mysql parer as the response is empty or COM_STMT_CLOSE is recieved")
 	return nil, nil
 }
 func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, operation string, responseOperation string, name string, ctx context.Context) {
@@ -914,6 +923,7 @@ func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysq
 				Created:        time.Now().Unix(),
 			},
 		}
+		fmt.Println("capturing the MYSQL MOCK before appendMocks", mysqlMock)
 		h.AppendMocks(mysqlMock, ctx)
 	}
 }
@@ -927,6 +937,7 @@ func bytesToMySQLPacket(buffer []byte) MySQLPacket {
 	length := binary.LittleEndian.Uint32(tempBuffer)
 	sequenceID := buffer[3]
 	payload := buffer[4:]
+	fmt.Println("bytesToMySQLPacket MySQLPacket: ", length, sequenceID, payload)
 	return MySQLPacket{
 		Header: MySQLPacketHeader{
 			PayloadLength: length,

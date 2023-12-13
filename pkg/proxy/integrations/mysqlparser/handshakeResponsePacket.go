@@ -58,13 +58,13 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 		data = data[idx+1:]
 	}
 
-	if packet.CapabilityFlags&0x00080000 != 0 {
-		idx := bytes.IndexByte(data, 0x00)
-		if idx == -1 {
-			return nil, errors.New("malformed handshake response packet: missing null terminator for AuthPluginName")
-		}
-		packet.AuthPluginName = string(data[:idx])
-	}
+	// if packet.CapabilityFlags&0x00080000 != 0 {
+	// 	idx := bytes.IndexByte(data, 0x00)
+	// 	if idx == -1 {
+	// 		return nil, errors.New("malformed handshake response packet: missing null terminator for AuthPluginName")
+	// 	}
+	// 	packet.AuthPluginName = string(data[:idx])
+	// }
 
 	return packet, nil
 }
