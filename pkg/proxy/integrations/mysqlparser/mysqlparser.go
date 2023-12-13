@@ -59,6 +59,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		mysqlResponses = []models.MySQLResponse{}
 	)
 	for {
+		lastCommand = 0x00 //resetting last command for new loop
 		data, source, err := ReadFirstBuffer(clientConn, destConn)
 		if len(data) == 0 {
 			break
