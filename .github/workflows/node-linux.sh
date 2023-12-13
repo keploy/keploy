@@ -1,5 +1,7 @@
 #! /bin/bash
 
+./../.github/workflows/fake-iid.sh
+
 # Start the docker container.
 sudo docker run --name mongoDb --rm -p 27017:27017 -d mongo
 

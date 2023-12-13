@@ -1,5 +1,7 @@
 #! /bin/bash
 
+./../.github/workflows/fake-iid.sh
+
 # Start postgres instance.
 docker network create keploy-network
 docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 --name mypostgres --network keploy-network postgres:15.2
