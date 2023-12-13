@@ -75,6 +75,10 @@ sleep 5
 sudo docker rm -f keploy-v2
 sudo docker rm -f javaApp
 
+# checking the mocks
+cat ./keploy/test-set-0/mocks.yaml
+cat ./keploy/test-set-1/mocks.yaml
+
 # Start keploy in test mode.
 sudo docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c 'docker run -p 9966:9966 --name javaApp --network keploy-network java-app:1.0' --delay 100 --apiTimeout 10
 
