@@ -57,7 +57,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	models.SetMode(models.MODE_TEST)
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
-	teleFS := fs.NewTeleFS()
+	teleFS := fs.NewTeleFS(s.logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore("", "", "", "", s.logger, tele)
