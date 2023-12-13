@@ -449,7 +449,7 @@ var (
 	mockResponseRead = 0
 )
 
-func ndecodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
+func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
 	doHandshakeAgain := true
 	configResponseRead := 0
@@ -560,7 +560,7 @@ var (
 	expectingHandshakeResponseTest = false
 )
 
-func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
+func decodeOutgoingMySQL1(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	firstLoop := true
 	doHandshakeAgain := true
 	prevRequest := ""
@@ -681,7 +681,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		}
 	}
 }
-func bmatchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, error) {
+func matchRequestWithMock1(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, error) {
 	// Combine configMocks and tcsMocks for simplicity
 	allMocks := append(configMocks, tcsMocks...)
 
