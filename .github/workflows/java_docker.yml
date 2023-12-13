@@ -7,7 +7,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v2
 
-    - name: Build Keploy binary
+    - name: Build Keploy docker image
       run: |
         docker build -t keployv2 .
 
