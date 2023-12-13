@@ -1,6 +1,6 @@
 #! /bin/bash
 
-./../../.github/workflows/fake-iid.sh
+source ./../../.github/workflows/fake-iid.sh
 
 # Start the postgres database.
 docker network create backend
