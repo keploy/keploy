@@ -1,6 +1,6 @@
 #! /bin/bash
 
-./../.github/workflows/fake-iid.sh
+# ./../.github/workflows/fake-iid.sh
 
 # Start postgres instance.
 docker network create keploy-network
