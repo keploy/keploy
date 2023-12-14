@@ -62,9 +62,9 @@ done
 
 # Start keploy in test mode.
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'node src/app.js' --delay 10
-
+ls ./keploy/testReports
 sudo -E env PATH=$PATH ./../../keployv2 serve -c "npm test" --delay 5
-
+ls ./keploy/testReports
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
