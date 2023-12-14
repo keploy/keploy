@@ -71,7 +71,7 @@ type RunTestSetConfig struct {
 	Pid            uint32
 	YamlStore      platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
@@ -88,7 +88,7 @@ type SimulateRequestConfig struct {
 	Success      *int
 	Failure      *int
 	Status       *models.TestRunStatus
-	TestReportFS yaml.TestReportFS
+	TestReportFS platform.TestReportDB
 	TestReport   *models.TestReport
 	Path         string
 	DockerID     bool
@@ -96,7 +96,7 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestReport     *models.TestReport
 	Status         *models.TestRunStatus
 	TestSet        string
