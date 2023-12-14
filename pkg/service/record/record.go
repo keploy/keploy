@@ -36,7 +36,6 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	models.SetMode(models.MODE_RECORD)
-	r.Logger.Info("Telemetry is now enabled")
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(!disableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)

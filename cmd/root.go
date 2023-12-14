@@ -254,7 +254,6 @@ func (r *Root) execute() {
 	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
-	r.logger.Error("Testing Sentry II")
 	defer deleteLogs(r.logger)
 	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
 
