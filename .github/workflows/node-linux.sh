@@ -74,6 +74,11 @@ report_file3="./keploy/testReports/report-3.yaml"
 test_status3=$(grep 'status:' "$report_file3" | head -n 1 | awk '{print $2}')
 report_file4="./keploy/testReports/report-4.yaml"
 test_status4=$(grep 'status:' "$report_file4" | head -n 1 | awk '{print $2}')
+# print the test_status
+echo $test_status1
+echo $test_status2
+echo $test_status3
+echo $test_status4
 
 # Return the exit code according to the status.
 if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && ["$test_status4" = "PASSED"]; then
