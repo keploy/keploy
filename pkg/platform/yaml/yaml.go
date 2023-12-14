@@ -341,7 +341,7 @@ func (ys *Yaml) WriteMock(mockRead platform.Interface, ctx context.Context) erro
 }
 
 func (ys *Yaml) ReadTcsMocks(tcRead platform.Interface, path string) ([]platform.Interface, error) {
-	tc, _ := tcRead.(*models.TestCase)
+	tc, readTcs := tcRead.(*models.TestCase)
 	var (
 		tcsMocks = make([]platform.Interface, 0)
 	)
@@ -380,7 +380,9 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.Interface, path string) ([]platform
 		}
 	}
 	filteredMocks := make([]platform.Interface, 0)
-
+	if !readTcs {
+		return tcsMocks, nil
+	}
 	if tc.HttpReq.Timestamp == (time.Time{}) {
 		ys.Logger.Warn("request timestamp is missing for " + tc.Name)
 		return tcsMocks, nil
