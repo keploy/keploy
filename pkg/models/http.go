@@ -16,6 +16,7 @@ type HttpReq struct {
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
+	Host       string            `json:"host" yaml:"host"`
 }
 
 type FormData struct {
