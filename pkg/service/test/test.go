@@ -444,7 +444,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			*cfg.Status = models.TestRunStatusFailed
 		}
 
-		cfg.TestReportFS.SetResult(cfg.TestReport.Name, models.TestResult{
+		cfg.TestReportFS.SetResult(cfg.TestReport.Name, &models.TestResult{
 			Kind:       models.HTTP,
 			Name:       cfg.TestReport.Name,
 			Status:     testStatus,
@@ -489,11 +489,11 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	}
 	readTestResults := []models.TestResult{}
 	for _, mock := range testResults {
-		testResult, ok := mock.(models.TestResult)
+		testResult, ok := mock.(*models.TestResult)
 		if !ok {
 			continue
 		}
-		readTestResults = append(readTestResults, testResult)
+		readTestResults = append(readTestResults, *testResult)
 	}
 	cfg.TestReport.TestSet = cfg.TestSet
 	cfg.TestReport.Total = len(readTestResults)

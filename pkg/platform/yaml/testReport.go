@@ -57,16 +57,16 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Kin
 
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		return models.TestReport{}, err
+		return &models.TestReport{}, err
 	}
 	defer file.Close()
 	decoder := yamlLib.NewDecoder(file)
 	var doc models.TestReport
 	err = decoder.Decode(&doc)
 	if err != nil {
-		return models.TestReport{}, fmt.Errorf(Emoji, "failed to decode the yaml file documents. error: %v", err.Error())
+		return &models.TestReport{}, fmt.Errorf(Emoji, "failed to decode the yaml file documents. error: %v", err.Error())
 	}
-	return doc, nil
+	return &doc, nil
 }
 
 func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindSpecifier) error {

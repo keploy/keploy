@@ -116,7 +116,7 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 		r.Logger.Error("failed to fetch testReport", zap.Any("testRunID", testRunID), zap.Error(err))
 		return nil, err
 	}
-	readTestReport, ok := testReport.(models.TestReport)
+	readTestReport, ok := testReport.(*models.TestReport)
 	if !ok {
 		r.Logger.Error("failed to read testReport from resolver")
 		return nil, fmt.Errorf(Emoji+"failed to read the test report for testRunID:%v", testRunID)

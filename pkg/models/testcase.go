@@ -50,6 +50,6 @@ type TestCase struct {
 	Type     string              `json:"type"`
 }
 
-func (tc TestCase) GetKind() string {
+func (tc *TestCase) GetKind() string {
 	return string(tc.Kind)
 }

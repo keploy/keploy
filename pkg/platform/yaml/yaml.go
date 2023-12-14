@@ -88,7 +88,7 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
 func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) error {
 	//
-	doc, _ := docRead.(NetworkTrafficDoc)
+	doc, _ := docRead.(*NetworkTrafficDoc)
 	isFileEmpty, err := util.CreateYamlFile(path, fileName, ys.Logger)
 	if err != nil {
 		return err
@@ -166,11 +166,10 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 		return fmt.Errorf(Emoji, "failed to read testcase in WriteTestcase.")
 	}
 	filters, ok := filtersRead.(*models.Filters)
-	if !ok {
-		return fmt.Errorf(Emoji, "failed to read testcase in filter.")
-	}
+
 	var bypassTestCase = false
-	if filters != nil {
+
+	if ok {
 		if containsMatchingUrl(filters.URLMethods, tc.HttpReq.URL, tc.HttpReq.Method) {
 			bypassTestCase = true
 		} else if hasBannedHeaders(tc.HttpReq.Header, filters.ReqHeader) {
@@ -212,7 +211,7 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 
 		// write testcase yaml
 		yamlTc.Name = tcsName
-		err = ys.Write(ys.TcsPath, tcsName, *yamlTc)
+		err = ys.Write(ys.TcsPath, tcsName, yamlTc)
 		if err != nil {
 			ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 			return err
@@ -240,9 +239,6 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		}
 		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", suitName))
 		tcsRead := make([]platform.KindSpecifier, len(tcs))
-		for i, tc := range tcs {
-			tcsRead[i] = tc
-		}
 		return tcsRead, nil
 	}
 
@@ -332,7 +328,7 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 		mock.Name = "mocks"
 	}
 
-	err = ys.Write(ys.MockPath, mock.Name, *mockYaml)
+	err = ys.Write(ys.MockPath, mock.Name, mockYaml)
 	if err != nil {
 		return err
 	}
