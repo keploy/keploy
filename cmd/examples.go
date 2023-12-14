@@ -57,14 +57,10 @@ Docker
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --buildDelay 35s
-	or
-	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --buildDelay 1m
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1 --buildDelay 35s
-	or
-	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1 --buildDelay 1m
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
 
 `
 
@@ -92,12 +88,10 @@ Java
 
 Docker
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage"
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage> --buildDelay 1m"
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1 --buildDelay 35s
-	or
-	keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImage" --delay 1 --buildDelay 1m
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
 `
 
 type Example struct {
