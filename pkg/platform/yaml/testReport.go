@@ -15,14 +15,14 @@ import (
 )
 
 type TestReport struct {
-	tests  map[string][]platform.MockDescriptor
+	tests  map[string][]platform.KindSpecifier
 	m      sync.Mutex
 	Logger *zap.Logger
 }
 
 func NewTestReportFS(logger *zap.Logger) *TestReport {
 	return &TestReport{
-		tests:  make(map[string][]platform.MockDescriptor), // Correctly initialize the map
+		tests:  make(map[string][]platform.KindSpecifier), // Correctly initialize the map
 		m:      sync.Mutex{},
 		Logger: logger,
 	}
@@ -36,7 +36,7 @@ func (fe *TestReport) Unlock() {
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) SetResult(runId string, test platform.MockDescriptor) {
+func (fe *TestReport) SetResult(runId string, test platform.KindSpecifier) {
 	fe.m.Lock()
 	tests := fe.tests[runId]
 	tests = append(tests, test)
@@ -44,7 +44,7 @@ func (fe *TestReport) SetResult(runId string, test platform.MockDescriptor) {
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) GetResults(runId string) ([]platform.MockDescriptor, error) {
+func (fe *TestReport) GetResults(runId string) ([]platform.KindSpecifier, error) {
 	testResults, ok := fe.tests[runId]
 	if !ok {
 		return nil, fmt.Errorf("%s found no test results for test report with id: %s", Emoji, runId)
@@ -53,7 +53,7 @@ func (fe *TestReport) GetResults(runId string) ([]platform.MockDescriptor, error
 	return testResults, nil
 }
 
-func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.MockDescriptor, error) {
+func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.KindSpecifier, error) {
 
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -69,7 +69,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Moc
 	return doc, nil
 }
 
-func (fe *TestReport) Write(ctx context.Context, path string, doc platform.MockDescriptor) error {
+func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindSpecifier) error {
 	readDock, ok := doc.(*models.TestReport)
 	if !ok {
 		return fmt.Errorf(Emoji, "failed to read test report in yaml file.")
