@@ -25,7 +25,8 @@ sudo rm -rf keploy/
 
 # Update the global noise to ignore the Allow header.
 config_file="./keploy-config.yaml"
-sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
+sed -i 's/header: {}/header:{"Allow":[]}/' "$config_file"
+cat ./keploy-config.yaml
 
 # Wait for 5 seconds for it to complete
 sleep 5
