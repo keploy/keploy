@@ -32,11 +32,11 @@ func NewMockTester(logger *zap.Logger) MockTester {
 	}
 }
 
-func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName string) {
+func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName string, disableTele bool) {
 
 	models.SetMode(models.MODE_TEST)
 	teleFS := fs.NewTeleFS(s.logger)
-	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	tele := telemetry.NewTelemetry(!disableTele, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
 

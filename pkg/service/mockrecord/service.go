@@ -1,5 +1,5 @@
 package mockrecord
 
 type MockRecorder interface {
-	MockRecord(path string, proxyPort uint32, pid uint32, dir string)
+	MockRecord(path string, proxyPort uint32, pid uint32, dir string, disableTele bool)
 }

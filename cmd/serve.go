@@ -99,6 +99,12 @@ func (s *Serve) GetCmd() *cobra.Command {
 				return
 			}
 
+			disableTele, err := cmd.Flags().GetBool("disableTele")
+			if err != nil {
+				s.logger.Error("failed to read the disable telemetry flag")
+				return
+			}
+
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				s.logger.Error("failed to read the proxy port")
@@ -106,7 +112,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 			}
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			s.server.Serve(path, proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout, appCmd)
+			s.server.Serve(path, proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout, appCmd, disableTele)
 		},
 	}
 
@@ -124,6 +130,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 	serveCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	serveCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+	serveCmd.Flags().Bool("disableTele", false, "Switch for telemetry" )
 
 	serveCmd.Flags().StringP("language", "l", "", "application programming language")
 	serveCmd.Flags().StringP("command", "c", "", "Command to start the user application")

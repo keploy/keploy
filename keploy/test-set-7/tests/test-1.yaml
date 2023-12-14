@@ -1,0 +1,40 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/CJBKJd92
+        header:
+            Accept: '*/*'
+            Host: localhost:8080
+            User-Agent: curl/7.81.0
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-13T11:03:19.247850724Z
+    resp:
+        status_code: 404
+        header:
+            Content-Length: "25"
+            Content-Type: application/json; charset=utf-8
+            Date: Wed, 13 Dec 2023 11:03:19 GMT
+        body: '{"error":"url not found"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-13T11:03:21.264585638Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1702465401
+curl: |
+    curl --request GET \
+      --url http://localhost:8080/CJBKJd92 \
+      --header 'User-Agent: curl/7.81.0' \
+      --header 'Accept: */*' \
+      --header 'Host: localhost:8080' \

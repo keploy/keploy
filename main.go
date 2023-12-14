@@ -36,6 +36,7 @@ func main() {
 	utils.KeployVersion = version
 	fmt.Println(logo, " ")
 	fmt.Printf("version: %v\n\n", version)
+	dsn = "https://fd3cdb889ead5026b4a73a8b8c5b433f@o4506071098195968.ingest.sentry.io/4506071101472768"
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,

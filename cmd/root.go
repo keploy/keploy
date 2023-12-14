@@ -5,12 +5,15 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os/exec"
+	"runtime"
 	_ "net/http/pprof"
 	"os"
 	"time"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/pkg/platform/fs"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
@@ -124,8 +127,35 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 	}
 
 	log = zapsentry.AttachCoreToLogger(core, log)
-
-	return log.With(zapsentry.NewScope())
+	kernelVersion := "Not linux"
+	if runtime.GOOS == "linux" {
+		cmd := exec.Command("uname", "-r")
+		kernelBytes, err := cmd.Output()
+		if err != nil {
+			log.Debug("failed to get kernel version", zap.Error(err))
+		} else {
+			kernelVersion = string(kernelBytes)
+		}
+	}
+	arch := runtime.GOARCH
+	installationID, err := fs.NewTeleFS(log).Get(false)
+	if err != nil {
+		log.Debug("failed to get installationID", zap.Error(err))
+	}
+	if installationID == "" {
+		installationID , err = fs.NewTeleFS(log).Get(true)
+		if err != nil {
+			log.Debug("failed to get installationID for new user.", zap.Error(err))
+		}
+	}
+	sentry.ConfigureScope(func(scope *sentry.Scope) {
+    scope.SetTag("Keploy Version", utils.KeployVersion)
+	scope.SetTag("Linux Kernel Version", kernelVersion)
+	scope.SetTag("Architecture", arch)
+	scope.SetTag("Installation ID", installationID)
+    // Add more context as needed
+})
+	return log
 }
 
 func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
@@ -224,6 +254,7 @@ func (r *Root) execute() {
 	// Now that flags are parsed, set up the l722ogger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
+	r.logger.Error("Testing Sentry II")
 	defer deleteLogs(r.logger)
 	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
 

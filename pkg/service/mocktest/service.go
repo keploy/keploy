@@ -1,5 +1,5 @@
 package mocktest
 
 type MockTester interface {
-	MockTest(path string, proxyPort uint32, pid uint32, dir string)
+	MockTest(path string, proxyPort uint32, pid uint32, dir string, disableTele bool)
 }
