@@ -108,6 +108,7 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 	err = cmd.Run()
 	if err != nil {
 		g.logger.Error("failed to set the permission of config file", zap.Error(err))
+                return
 	}
 
 	g.logger.Info("Config file generated successfully")
