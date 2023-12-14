@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -115,12 +116,17 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 		r.Logger.Error("failed to fetch testReport", zap.Any("testRunID", testRunID), zap.Error(err))
 		return nil, err
 	}
-	if testReport.Status == "PASSED" || testReport.Status == "FAILED" {
-		tele.Testrun(testReport.Success, testReport.Failure)
+	readTestReport, ok := testReport.(*models.TestReport)
+	if !ok {
+		r.Logger.Error("failed to read testReport from resolver")
+		return nil, fmt.Errorf(Emoji+"failed to read the test report for testRunID:%v", testRunID)
+	}
+	if readTestReport.Status == "PASSED" || readTestReport.Status == "FAILED" {
+		tele.Testrun(readTestReport.Success, readTestReport.Failure)
 	}
 
-	r.Logger.Debug("", zap.Any("testRunID", testRunID), zap.Any("testSetStatus", testReport.Status))
-	return &model.TestSetStatus{Status: testReport.Status}, nil
+	r.Logger.Debug("", zap.Any("testRunID", testRunID), zap.Any("testSetStatus", readTestReport.Status))
+	return &model.TestSetStatus{Status: readTestReport.Status}, nil
 }
 
 // Mutation returns MutationResolver implementation.

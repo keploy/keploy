@@ -23,6 +23,10 @@ type NetworkTrafficDoc struct {
 	Curl    string         `json:"curl" yaml:"curl,omitempty"`
 }
 
+func (nd *NetworkTrafficDoc) GetKind() string {
+	return string(nd.Kind)
+}
+
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc, error) {
 
 	header := pkg.ToHttpHeader(tc.HttpReq.Header)

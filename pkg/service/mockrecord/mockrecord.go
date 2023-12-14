@@ -39,7 +39,6 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
-
 	routineId := pkg.GenerateRandomID()
 
 	mocksTotal := make(map[string]int)
