@@ -22,7 +22,7 @@ fi
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"
-sed -i 's/"body": {}/"body": {"ts":[]}/' "$config_file"
+sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
