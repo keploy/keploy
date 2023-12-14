@@ -9,7 +9,7 @@ type Mock struct {
 	Spec    MockSpec `json:"Spec,omitempty" bson:"Spec,omitempty"`
 }
 
-func (m Mock) GetKind() string {
+func (m *Mock) GetKind() string {
 	return string(m.Kind)
 }
 

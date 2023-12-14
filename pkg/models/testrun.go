@@ -16,6 +16,10 @@ func (tr TestReport) GetKind() string {
 	return "TestReport"
 }
 
+func (tr *TestReport) GetKind() string {
+	return "TestReport"
+}
+
 type TestResult struct {
 	Kind         Kind       `json:"kind" yaml:"kind"`
 	Name         string     `json:"name" yaml:"name"`
@@ -31,7 +35,7 @@ type TestResult struct {
 	Result       Result     `json:"result" yaml:"result"`
 }
 
-func (tr TestResult) GetKind() string {
+func (tr *TestResult) GetKind() string {
 	return string(tr.Kind)
 }
 

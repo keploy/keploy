@@ -23,7 +23,7 @@ type NetworkTrafficDoc struct {
 	Curl    string         `json:"curl" yaml:"curl,omitempty"`
 }
 
-func (nd NetworkTrafficDoc) GetKind() string {
+func (nd *NetworkTrafficDoc) GetKind() string {
 	return string(nd.Kind)
 }
 

@@ -24,7 +24,7 @@ type Filters struct {
 	URLMethods map[string][]string `json:"urlMethods" yaml:"urlMethods"`
 }
 
-func (filter Filters) GetKind() string {
+func (filter *Filters) GetKind() string {
 	return "filter"
 }
 
