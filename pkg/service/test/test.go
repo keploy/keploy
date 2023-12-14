@@ -557,8 +557,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			continue
 		}
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		// filteredTcsMocks := FilterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
-		// loadedHooks.SetTcsMocks(filteredTcsMocks)
+		filteredTcsMocks := FilterTcsMocks(tc, initialisedValues.TcsMocks, t.logger)
+		loadedHooks.SetTcsMocks(filteredTcsMocks)
 
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
