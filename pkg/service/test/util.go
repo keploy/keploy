@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/pkg/hooks"
@@ -30,7 +32,7 @@ type InitialiseRunTestSetReturn struct {
 }
 
 type InitialiseTestReturn struct {
-	SessionsMap              map[string]string
+	Sessions                 []string
 	TestReportFS             *yaml.TestReport
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
@@ -47,12 +49,14 @@ type TestConfig struct {
 	TestReportPath   string
 	AppCmd           string
 	MongoPassword    string
-	Testsets         *[]string
 	AppContainer     string
 	AppNetwork       string
 	Delay            uint64
+	BuildDelay       time.Duration
 	PassThroughPorts []uint
 	ApiTimeout       uint64
+	WithCoverage  bool
+	CoverageReportPath       string
 }
 
 type RunTestSetConfig struct {
@@ -63,6 +67,7 @@ type RunTestSetConfig struct {
 	AppContainer   string
 	AppNetwork     string
 	Delay          uint64
+	BuildDelay     time.Duration
 	Pid            uint32
 	YamlStore      platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
@@ -400,4 +405,15 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 		}
 	}
 	return filteredMocks
+}
+
+// creates a directory if not exists with all user access
+func makeDirectory (path string) error {
+	oldUmask := syscall.Umask(0)
+	err := os.MkdirAll(path, 0777)
+	if err != nil {
+		return err
+	}
+	syscall.Umask(oldUmask)
+	return nil
 }

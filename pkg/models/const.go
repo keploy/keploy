@@ -1,8 +1,8 @@
 package models
 
 import (
-	"github.com/k0kubun/pp/v3"
 	"github.com/fatih/color"
+	"github.com/k0kubun/pp/v3"
 )
 
 const (
@@ -14,7 +14,11 @@ const (
 	String         string = "string"
 )
 
-var orangeColorSGR = []color.Attribute{38,5,208}
+var (
+	PassThroughHosts = []string{"dc.services.visualstudio.com"}
+)
+
+var orangeColorSGR = []color.Attribute{38, 5, 208}
 
 var HighlightString = color.New(orangeColorSGR...).SprintFunc()
 var HighlightPassingString = color.New(color.FgGreen).SprintFunc()

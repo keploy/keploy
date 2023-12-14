@@ -405,7 +405,15 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		}
 
 		if len(eligibleMock) == 0 {
-			logger.Error("Didn't match any prexisting http mock")
+			passthroughHost := false
+			for _, host := range models.PassThroughHosts {
+				if req.Host == host {
+					passthroughHost = true
+				}
+			}
+			if !passthroughHost {
+				logger.Error("Didn't match any prexisting http mock")
+			}
 			util.Passthrough(clienConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
 			return
 		}
@@ -641,32 +649,40 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			"type":      models.HttpClient,
 			"operation": req.Method,
 		}
-
-		h.AppendMocks(&models.Mock{
-			Version: models.GetVersion(),
-			Name:    "mocks",
-			Kind:    models.HTTP,
-			Spec: models.MockSpec{
-				Metadata: meta,
-				HttpReq: &models.HttpReq{
-					Method:     models.Method(req.Method),
-					ProtoMajor: req.ProtoMajor,
-					ProtoMinor: req.ProtoMinor,
-					URL:        req.URL.String(),
-					Header:     pkg.ToYamlHttpHeader(req.Header),
-					Body:       string(reqBody),
-					URLParams:  pkg.UrlParams(req),
+		passthroughHost := false
+		for _, host := range models.PassThroughHosts {
+			if req.Host == host {
+				passthroughHost = true
+			}
+		}
+		if !passthroughHost {
+			h.AppendMocks(&models.Mock{
+				Version: models.GetVersion(),
+				Name:    "mocks",
+				Kind:    models.HTTP,
+				Spec: models.MockSpec{
+					Metadata: meta,
+					HttpReq: &models.HttpReq{
+						Method:     models.Method(req.Method),
+						ProtoMajor: req.ProtoMajor,
+						ProtoMinor: req.ProtoMinor,
+						URL:        req.URL.String(),
+						Header:     pkg.ToYamlHttpHeader(req.Header),
+						Body:       string(reqBody),
+						URLParams:  pkg.UrlParams(req),
+						Host:       req.Host,
+					},
+					HttpResp: &models.HttpResp{
+						StatusCode: respParsed.StatusCode,
+						Header:     pkg.ToYamlHttpHeader(respParsed.Header),
+						Body:       string(respBody),
+					},
+					Created:          time.Now().Unix(),
+					ReqTimestampMock: reqTimestampMock,
+					ResTimestampMock: resTimestampcMock,
 				},
-				HttpResp: &models.HttpResp{
-					StatusCode: respParsed.StatusCode,
-					Header:     pkg.ToYamlHttpHeader(respParsed.Header),
-					Body:       string(respBody),
-				},
-				Created:          time.Now().Unix(),
-				ReqTimestampMock: reqTimestampMock,
-				ResTimestampMock: resTimestampcMock,
-			},
-		}, ctx)
+			}, ctx)
+		}
 		finalReq = []byte("")
 		finalResp = []byte("")
 

@@ -7,6 +7,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -61,7 +62,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, serveTest)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, nil, serveTest)
 	}()
 
 	testRunID := <-testRunChan
@@ -97,7 +98,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 // TestSetStatus is the resolver for the testSetStatus field.
 func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error) {
 	//Initiate the telemetry.
-	var store = fs.NewTeleFS()
+	var store = fs.NewTeleFS(r.Logger)
 	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
