@@ -156,7 +156,10 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 			paddingFinal = true
 			b = b[2:] // Skip padding
 		}
-		return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, nil
+		if len(b) < 14 {
+			return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, nil
+
+		}
 	}
 	packetLength := int(b[0])
 	sequenceID := b[3]
