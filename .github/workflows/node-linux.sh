@@ -62,9 +62,9 @@ done
 
 # Start keploy in test mode.
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'node src/app.js' --delay 10
-ls ./keploy/testReports
+
 sudo -E env PATH=$PATH ./../../keployv2 serve -c "npm test" --delay 5
-ls ./keploy/testReports
+
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
@@ -74,14 +74,9 @@ report_file3="./keploy/testReports/report-3.yaml"
 test_status3=$(grep 'status:' "$report_file3" | head -n 1 | awk '{print $2}')
 report_file4="./keploy/testReports/report-4.yaml"
 test_status4=$(grep 'status:' "$report_file4" | head -n 1 | awk '{print $2}')
-# print the test_status
-echo $test_status1
-echo $test_status2
-echo $test_status3
-echo $test_status4
 
 # Return the exit code according to the status.
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && ["$test_status4" = "PASSED"]; then
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ]; then
     exit 0
 else
     exit 1
