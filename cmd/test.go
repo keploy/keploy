@@ -187,6 +187,15 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
+			if delay <= 5 {
+				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				} else {
+					fmt.Println("Example usage:\n", cmd.Example)
+				}
+			}
+
 			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
 			if err != nil {
 				if err == errFileNotFound {
@@ -204,15 +213,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				fmt.Println("Example usage:\n", cmd.Example)
 
 				return errors.New("missing required -c flag or appCmd in config file")
-			}
-
-			if delay <= 5 {
-				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
-				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
-				} else {
-					fmt.Println("Example usage:\n", cmd.Example)
-				}
 			}
 
 			if isDockerCmd && buildDelay <= 30*time.Second {
