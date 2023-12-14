@@ -61,7 +61,6 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore("", "", "", "", s.logger, tele)
-
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
