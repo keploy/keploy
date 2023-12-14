@@ -57,3 +57,7 @@ type TestCase struct {
 func (tc TestCase) GetKind() string {
 	return string(tc.Kind)
 }
+
+func (tc *TestCase) GetKind() string {
+	return string(tc.Kind)
+}

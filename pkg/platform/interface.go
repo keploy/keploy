@@ -5,23 +5,23 @@ import (
 )
 
 type TestCaseDB interface {
-	WriteTestcase(tc Interface, ctx context.Context, filters Interface) error
-	WriteMock(tc Interface, ctx context.Context) error
+	WriteTestcase(tc KindSpecifier, ctx context.Context, filters KindSpecifier) error
+	WriteMock(tc KindSpecifier, ctx context.Context) error
 
-	ReadTestcase(path string, lastSeenId Interface, options Interface) ([]Interface, error)
-	ReadTcsMocks(tc Interface, path string) ([]Interface, error)
-	ReadConfigMocks(path string) ([]Interface, error)
+	ReadTestcase(path string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
+	ReadTcsMocks(tc KindSpecifier, path string) ([]KindSpecifier, error)
+	ReadConfigMocks(path string) ([]KindSpecifier, error)
 }
 
 type TestReportDB interface {
 	Lock()
 	Unlock()
-	SetResult(runId string, test Interface)
-	GetResults(runId string) ([]Interface, error)
-	Read(ctx context.Context, path, name string) (Interface, error)
-	Write(ctx context.Context, path string, doc Interface) error
+	SetResult(runId string, test KindSpecifier)
+	GetResults(runId string) ([]KindSpecifier, error)
+	Read(ctx context.Context, path, name string) (KindSpecifier, error)
+	Write(ctx context.Context, path string, doc KindSpecifier) error
 }
 
-type Interface interface {
+type KindSpecifier interface {
 	GetKind() string
 }

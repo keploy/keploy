@@ -113,7 +113,6 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 	returnVal.TestReportFS = cfg.TestReport
 	// fetch the recorded testcases with their mocks
-
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	returnVal.LoadedHooks = hooks.NewHook(returnVal.Store, routineId, t.logger)
@@ -320,13 +319,14 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
-
 	if err != nil {
 		t.logger.Error(err.Error())
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
-	// t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
+	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
+	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
+	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
 
@@ -434,7 +434,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			*cfg.Status = models.TestRunStatusFailed
 		}
 
-		cfg.TestReportFS.SetResult(cfg.TestReport.Name, models.TestResult{
+		cfg.TestReportFS.SetResult(cfg.TestReport.Name, &models.TestResult{
 			Kind:       models.HTTP,
 			Name:       cfg.TestReport.Name,
 			Status:     testStatus,
@@ -479,11 +479,11 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	}
 	readTestResults := []models.TestResult{}
 	for _, mock := range testResults {
-		testResult, ok := mock.(models.TestResult)
+		testResult, ok := mock.(*models.TestResult)
 		if !ok {
 			continue
 		}
-		readTestResults = append(readTestResults, testResult)
+		readTestResults = append(readTestResults, *testResult)
 	}
 	cfg.TestReport.TestSet = cfg.TestSet
 	cfg.TestReport.Total = len(readTestResults)
