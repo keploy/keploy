@@ -86,7 +86,7 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 }
 
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
-func (ys *Yaml) Write(path, fileName string, docRead platform.Interface) error {
+func (ys *Yaml) Write(path, fileName string, docRead platform.MockDescriptor) error {
 	//
 	doc, _ := docRead.(NetworkTrafficDoc)
 	isFileEmpty, err := util.CreateYamlFile(path, fileName, ys.Logger)
@@ -160,7 +160,7 @@ func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 	return false
 }
 
-func (ys *Yaml) WriteTestcase(tcRead platform.Interface, ctx context.Context, filtersRead platform.Interface) error {
+func (ys *Yaml) WriteTestcase(tcRead platform.MockDescriptor, ctx context.Context, filtersRead platform.MockDescriptor) error {
 	tc, ok := tcRead.(*models.TestCase)
 	if !ok {
 		return fmt.Errorf(Emoji, "failed to read testcase in WriteTestcase.")
@@ -223,7 +223,7 @@ func (ys *Yaml) WriteTestcase(tcRead platform.Interface, ctx context.Context, fi
 	return nil
 }
 
-func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.Interface, options platform.Interface) ([]platform.Interface, error) {
+func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.MockDescriptor, options platform.MockDescriptor) ([]platform.MockDescriptor, error) {
 
 	if path == "" {
 		path = ys.TcsPath
@@ -239,7 +239,7 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.Interface, options
 			suitName = dirNames[len(dirNames)-2]
 		}
 		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", suitName))
-		tcsRead := make([]platform.Interface, len(tcs))
+		tcsRead := make([]platform.MockDescriptor, len(tcs))
 		for i, tc := range tcs {
 			tcsRead[i] = tc
 		}
@@ -280,7 +280,7 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.Interface, options
 	sort.Slice(tcs, func(i, j int) bool {
 		return tcs[i].Created < tcs[j].Created
 	})
-	tcsRead := make([]platform.Interface, len(tcs))
+	tcsRead := make([]platform.MockDescriptor, len(tcs))
 	for i, tc := range tcs {
 		tcsRead[i] = tc
 	}
@@ -309,7 +309,7 @@ func read(path, name string) ([]*NetworkTrafficDoc, error) {
 	return yamlDocs, nil
 }
 
-func (ys *Yaml) WriteMock(mockRead platform.Interface, ctx context.Context) error {
+func (ys *Yaml) WriteMock(mockRead platform.MockDescriptor, ctx context.Context) error {
 	mock := mockRead.(*models.Mock)
 	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
 	if !ok {
@@ -340,10 +340,10 @@ func (ys *Yaml) WriteMock(mockRead platform.Interface, ctx context.Context) erro
 	return nil
 }
 
-func (ys *Yaml) ReadTcsMocks(tcRead platform.Interface, path string) ([]platform.Interface, error) {
+func (ys *Yaml) ReadTcsMocks(tcRead platform.MockDescriptor, path string) ([]platform.MockDescriptor, error) {
 	tc, readTcs := tcRead.(*models.TestCase)
 	var (
-		tcsMocks = make([]platform.Interface, 0)
+		tcsMocks = make([]platform.MockDescriptor, 0)
 	)
 
 	if path == "" {
@@ -379,7 +379,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.Interface, path string) ([]platform
 			}
 		}
 	}
-	filteredMocks := make([]platform.Interface, 0)
+	filteredMocks := make([]platform.MockDescriptor, 0)
 	if !readTcs {
 		return tcsMocks, nil
 	}
@@ -423,9 +423,9 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.Interface, path string) ([]platform
 
 }
 
-func (ys *Yaml) ReadConfigMocks(path string) ([]platform.Interface, error) {
+func (ys *Yaml) ReadConfigMocks(path string) ([]platform.MockDescriptor, error) {
 	var (
-		configMocks = make([]platform.Interface, 0)
+		configMocks = make([]platform.MockDescriptor, 0)
 	)
 
 	if path == "" {

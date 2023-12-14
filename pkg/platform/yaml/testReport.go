@@ -15,14 +15,14 @@ import (
 )
 
 type TestReport struct {
-	tests  map[string][]platform.Interface
+	tests  map[string][]platform.MockDescriptor
 	m      sync.Mutex
 	Logger *zap.Logger
 }
 
 func NewTestReportFS(logger *zap.Logger) *TestReport {
 	return &TestReport{
-		tests:  make(map[string][]platform.Interface), // Correctly initialize the map
+		tests:  make(map[string][]platform.MockDescriptor), // Correctly initialize the map
 		m:      sync.Mutex{},
 		Logger: logger,
 	}
@@ -36,7 +36,7 @@ func (fe *TestReport) Unlock() {
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) SetResult(runId string, test platform.Interface) {
+func (fe *TestReport) SetResult(runId string, test platform.MockDescriptor) {
 	fe.m.Lock()
 	tests := fe.tests[runId]
 	tests = append(tests, test)
@@ -44,7 +44,7 @@ func (fe *TestReport) SetResult(runId string, test platform.Interface) {
 	fe.m.Unlock()
 }
 
-func (fe *TestReport) GetResults(runId string) ([]platform.Interface, error) {
+func (fe *TestReport) GetResults(runId string) ([]platform.MockDescriptor, error) {
 	testResults, ok := fe.tests[runId]
 	if !ok {
 		return nil, fmt.Errorf("%s found no test results for test report with id: %s", Emoji, runId)
@@ -53,7 +53,7 @@ func (fe *TestReport) GetResults(runId string) ([]platform.Interface, error) {
 	return testResults, nil
 }
 
-func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Interface, error) {
+func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.MockDescriptor, error) {
 
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -69,7 +69,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Int
 	return doc, nil
 }
 
-func (fe *TestReport) Write(ctx context.Context, path string, doc platform.Interface) error {
+func (fe *TestReport) Write(ctx context.Context, path string, doc platform.MockDescriptor) error {
 	readDock, ok := doc.(*models.TestReport)
 	if !ok {
 		return fmt.Errorf(Emoji, "failed to read test report in yaml file.")
