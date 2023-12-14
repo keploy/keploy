@@ -51,7 +51,6 @@ test:
     global:
       body: {}
       header: {}
-    test-sets:
   delay: 5
   buildDelay: 30s
   apiTimeout: 5
