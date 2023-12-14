@@ -91,31 +91,30 @@ test:
 `
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
-  var node yaml.Node
+	var node yaml.Node
 
-  data := []byte(config)
+	data := []byte(config)
 
-  if err := yaml.Unmarshal(data, &node); err != nil {
-    g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))
-  }
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))
+	}
 
-  results, err := yaml.Marshal(node.Content[0])
-  if err != nil {
-    g.logger.Fatal("Failed to marshal the config", zap.Error(err))
-  }
+	results, err := yaml.Marshal(node.Content[0])
+	if err != nil {
+		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
+	}
 
-  err = os.WriteFile(filePath, results, os.ModePerm)
-  if err != nil {
-    g.logger.Fatal("Failed to write config file", zap.Error(err))
-  }
+	err = os.WriteFile(filePath, results, os.ModePerm)
+	if err != nil {
+		g.logger.Fatal("Failed to write config file", zap.Error(err))
+	}
 
-
-  cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
-  err = cmd.Run()
-  if err != nil {
-    g.logger.Error("failed to set the permission of config file", zap.Error(err))
+	cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
+	err = cmd.Run()
+	if err != nil {
+		g.logger.Error("failed to set the permission of config file", zap.Error(err))
     return
-  }
-  
-  g.logger.Info("Config file generated successfully")
+	}
+
+	g.logger.Info("Config file generated successfully")
 }
