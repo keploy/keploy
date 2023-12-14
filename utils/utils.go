@@ -1,17 +1,19 @@
 package utils
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
-	"time"
-	"bufio"
 	"strings"
+	"time"
 
-
+	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
 )
+
+var Emoji = "\U0001F430" + " Keploy:"
 
 // askForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
@@ -47,7 +49,6 @@ func CheckFileExists(path string) bool {
 
 var KeployVersion string
 
-
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
 	if err != nil {
@@ -68,6 +69,7 @@ func HandlePanic() {
 	if r := recover(); r != nil {
 		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
+		log.Error(Emoji+"Recovered from:", r)
 		sentry.Flush(time.Second * 2)
 	}
 }

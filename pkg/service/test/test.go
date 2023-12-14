@@ -110,7 +110,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 	models.SetMode(models.MODE_TEST)
 
-	teleFS := fs.NewTeleFS()
+	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
 
 	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)
@@ -397,7 +397,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		t.logger.Debug("After simulating the request", zap.Any("test case id", cfg.Tc.Name))
 		t.logger.Debug("After GetResp of the request", zap.Any("test case id", cfg.Tc.Name))
 
-		if err != nil {
+		if err != nil && resp == nil {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
