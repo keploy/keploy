@@ -2,19 +2,21 @@
 
 source ./../.github/workflows/fake-iid.sh
 
-# Start postgres instance.
-docker network create keploy-network
-docker compose up -d
-docker logs mypostgres --follow &
-
 # Checkout the add-petclinic branch.
 git fetch origin
 git checkout employeem-docker
+
+
 
 # Update the java version
 source ./../.github/workflows/update-java.sh
 mvn --version
 cd ./employee-manager
+
+# Start postgres instance.
+docker network create keploy-network
+docker compose up -d
+docker logs mypostgres --follow &
 
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
