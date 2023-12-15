@@ -7,6 +7,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"go.keploy.io/server/pkg/models"
@@ -65,6 +66,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		LoadedHooks:  loadedHooks,
 		TestReportFS: testReportFS,
 		Storage:      ys,
+		TestPath:     filepath.Join(testCasePath, testSet, "tests"),
 	}
 	go func() {
 		defer utils.HandlePanic()
