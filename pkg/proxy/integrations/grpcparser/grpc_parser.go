@@ -31,12 +31,12 @@ func NewGrpcParser(logger *zap.Logger, h *hooks.Hook) *GrpcParser {
 	}
 }
 
-//OutgoingType will be a method of GrpcParser.
+// OutgoingType will be a method of GrpcParser.
 func (g *GrpcParser) OutgoingType(buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("PRI * HTTP/2"))
 }
 
-func(g *GrpcParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
+func (g *GrpcParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, g.hooks, g.logger, ctx)
@@ -119,7 +119,7 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 			}
 			return fmt.Errorf("error reading frame %v", err)
 		}
-		//PrintFrame(frame)	
+		//PrintFrame(frame)
 
 		switch frame.(type) {
 		case *http2.SettingsFrame:
