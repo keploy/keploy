@@ -60,7 +60,7 @@ func NewTester(logger *zap.Logger) Tester {
 
 func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	var returnVal InitialiseTestReturn
-
+	returnVal.Storage = cfg.Storage
 	// capturing the code coverage for go bianries built by go-version 1.20^
 	if cfg.WithCoverage {
 
@@ -110,16 +110,11 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 	models.SetMode(models.MODE_TEST)
 
-	teleFS := fs.NewTeleFS(t.logger)
-	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
-
-	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)
+	returnVal.TestReportFS = cfg.TestReport
 	// fetch the recorded testcases with their mocks
-	yamlStore := yaml.NewYamlStore(cfg.Path+"/tests", cfg.Path, "", "", t.logger, tele)
-	returnVal.YamlStore = yamlStore
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	returnVal.LoadedHooks = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
+	returnVal.LoadedHooks = hooks.NewHook(returnVal.Storage, routineId, t.logger)
 
 	select {
 	case <-stopper:
@@ -150,15 +145,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	if err := returnVal.LoadedHooks.SendPassThroughPorts(cfg.PassThroughPorts); err != nil {
 		return returnVal, err
 	}
-
-	sessions, err := yaml.ReadSessionIndices(cfg.Path, t.logger)
-	if err != nil {
-		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
-		return returnVal, err
-	}
-	t.logger.Debug(fmt.Sprintf("the session indices are:%v", sessions))
-	returnVal.Sessions = sessions
-
+	t.logger.Debug(fmt.Sprintf("the session indices are:%v", cfg.Session))
 	// Channels to communicate between different types of closing keploy
 	returnVal.AbortStopHooksInterrupt = make(chan bool) // channel to stop closing of keploy via interrupt
 	returnVal.AbortStopHooksForcefully = false          // boolen to stop closing of keploy via user app error
@@ -173,14 +160,14 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 			returnVal.LoadedHooks.Stop(false)
 			//Call the telemetry events.
 			if resultForTele[0] != 0 || resultForTele[1] != 0 {
-				tele.Testrun(resultForTele[0], resultForTele[1])
+				cfg.Tele.Testrun(resultForTele[0], resultForTele[1])
 			}
 			returnVal.ProxySet.StopProxyServer()
 			returnVal.ExitCmd <- true
 		case <-returnVal.AbortStopHooksInterrupt:
 			//Call the telemetry events.
 			if resultForTele[0] != 0 || resultForTele[1] != 0 {
-				tele.Testrun(resultForTele[0], resultForTele[1])
+				cfg.Tele.Testrun(resultForTele[0], resultForTele[1])
 			}
 			return
 		}
@@ -194,7 +181,13 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	testRes := false
 	result := true
 	exitLoop := false
-
+	sessions, err := yaml.ReadSessionIndices(path, t.logger)
+	if err != nil {
+		t.logger.Error("failed to read the recorded sessions", zap.Error(err))
+		return false
+	}
+	teleFS := fs.NewTeleFS(t.logger)
+	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
 	cfg := &TestConfig{
 		Path:               path,
 		Proxyport:          options.ProxyPort,
@@ -209,6 +202,10 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		MongoPassword:      options.MongoPassword,
 		WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
+		Session:            sessions,
+		Tele:               tele,
+		TestReport:         yaml.NewTestReportFS(t.logger),
+		Storage:            yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele),
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracfully shutdown
@@ -218,6 +215,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		return false
 	}
 	for _, sessionIndex := range initialisedValues.Sessions {
+		initialisedValues.Path = filepath.Join(path, sessionIndex)
+		initialisedValues.TestPath = filepath.Join(path, sessionIndex, "tests")
 		// checking whether the provided testset match with a recorded testset.
 		testcases := ArrayToMap(options.Tests[sessionIndex])
 		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
@@ -228,7 +227,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.Storage, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, initialisedValues.TestPath)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -289,7 +288,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	var returnVal InitialiseRunTestSetReturn
 	var err error
 	var readTcs []*models.TestCase
-	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil, nil)
+	tcsMocks, err := cfg.Storage.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil, nil)
 	for _, mock := range tcsMocks {
 		tcs, ok := mock.(*models.TestCase)
 		if !ok {
@@ -310,32 +309,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
-	var readConfigMocks []*models.Mock
-	configMocks, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
-	for _, mock := range configMocks {
-		configMock, ok := mock.(*models.Mock)
-		if !ok {
-			continue
-		}
-		readConfigMocks = append(readConfigMocks, configMock)
-	}
-	var readTcsMocks []*models.Mock
-	readTcsMockss, err := cfg.YamlStore.ReadTcsMocks(nil, filepath.Join(cfg.Path, cfg.TestSet))
-	for _, mock := range readTcsMockss {
-		configMock, ok := mock.(*models.Mock)
-		if !ok {
-			continue
-		}
-		readTcsMocks = append(readTcsMocks, configMock)
-	}
-	if err != nil {
-		t.logger.Error(err.Error())
-		returnVal.InitialStatus = models.TestRunStatusFailed
-		return returnVal
-	}
-	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
-	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
-	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
+
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
 
@@ -532,7 +506,34 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, testPath string) models.TestRunStatus {
+	var readConfigMocks []*models.Mock
+	configMocks, err := ys.ReadConfigMocks(filepath.Join(path, testSet))
+	for _, mock := range configMocks {
+		configMock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readConfigMocks = append(readConfigMocks, configMock)
+	}
+	if err != nil {
+		t.logger.Error(err.Error())
+		return models.TestRunStatusAppHalted
+	}
+	var readTcsMocks []*models.Mock
+	tcsMocks, err := ys.ReadTcsMocks(nil, filepath.Join(path, testSet))
+	for _, mock := range tcsMocks {
+		tcsMock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readTcsMocks = append(readTcsMocks, tcsMock)
+	}
+	if err != nil {
+		t.logger.Error(err.Error())
+		return models.TestRunStatusAppHalted
+	}
+	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, readConfigMocks, readTcsMocks))
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -543,7 +544,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		Delay:          delay,
 		BuildDelay:     buildDelay,
 		Pid:            pid,
-		YamlStore:      ys,
+		Storage:        ys,
 		LoadedHooks:    loadedHooks,
 		TestReportFS:   testReportFS,
 		TestRunChan:    testRunChan,
@@ -551,6 +552,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		Ctx:            ctx,
 		ServeTest:      serveTest,
 	}
+	loadedHooks.SetConfigMocks(readConfigMocks)
+	loadedHooks.SetTcsMocks(readTcsMocks)
 	initialisedValues := t.InitialiseRunTestSet(cfg)
 	if initialisedValues.InitialStatus != "" {
 		return initialisedValues.InitialStatus
@@ -587,7 +590,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			continue
 		}
 		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
+		filteredTcsMocks, _ := cfg.Storage.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
 		readTcsMocks := []*models.Mock{}
 		for _, mock := range filteredTcsMocks {
 			tcsmock, ok := mock.(*models.Mock)

@@ -202,9 +202,10 @@ func (r *Record) GetCmd() *cobra.Command {
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-
+			tele := r.recorder.NewTelemetry()
+			tcDB, dirName := r.recorder.NewStorage(path, tele)
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, dirName, delay, buildDelay, ports, &filters, tcDB, tele)
 			return nil
 		},
 	}
