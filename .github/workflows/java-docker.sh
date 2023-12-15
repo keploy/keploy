@@ -25,8 +25,6 @@ mvn clean install -Dmaven.test.skip=true
 ls target/
 sudo docker build -t java-app:1.0 .
 pwd
-echo "checking the connections again"
-cat src/main/resources/application-postgresql.properties
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p 8080 --name javaApp --network keploy-network java-app:1.0' --debug  &
 sleep 3
 # docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
