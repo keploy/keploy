@@ -5,6 +5,7 @@ source ./../.github/workflows/fake-iid.sh
 # Start postgres instance.
 docker network create keploy-network
 docker compose up -d
+docker logs mypostgres --follow &
 
 # Checkout the add-petclinic branch.
 git fetch origin
@@ -24,7 +25,7 @@ sudo java --version
 mvn clean install -Dmaven.test.skip=true
 ls target/
 sudo docker build -t java-app:1.0 .
-docker inspect network keploy-network
+docker inspect keploy-network
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p 8080 --name javaApp --network keploy-network java-app:1.0' --debug  &
 sleep 3
 # docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
