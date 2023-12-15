@@ -60,6 +60,7 @@ func NewTester(logger *zap.Logger) Tester {
 
 func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	var returnVal InitialiseTestReturn
+	returnVal.Sessions = cfg.Session
 	returnVal.Storage = cfg.Storage
 	// capturing the code coverage for go bianries built by go-version 1.20^
 	if cfg.WithCoverage {
