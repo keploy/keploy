@@ -12,10 +12,6 @@ type TestReport struct {
 	ID      string       `-`
 }
 
-func (tr TestReport) GetKind() string {
-	return "TestReport"
-}
-
 func (tr *TestReport) GetKind() string {
 	return "TestReport"
 }
