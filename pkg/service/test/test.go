@@ -21,7 +21,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -217,7 +216,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	}
 	for _, sessionIndex := range initialisedValues.Sessions {
 		initialisedValues.Path = filepath.Join(path, sessionIndex)
-		initialisedValues.TestPath = filepath.Join(path, sessionIndex, "tests")
+		initialisedValues.TestPath = filepath.Join(initialisedValues.Path, "tests")
 		// checking whether the provided testset match with a recorded testset.
 		testcases := ArrayToMap(options.Tests[sessionIndex])
 		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
@@ -228,7 +227,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.Storage, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, initialisedValues.TestPath)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -289,7 +288,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	var returnVal InitialiseRunTestSetReturn
 	var err error
 	var readTcs []*models.TestCase
-	tcsMocks, err := cfg.Storage.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil, nil)
+	tcsMocks, err := cfg.Storage.ReadTestcase(cfg.TestPath, nil, nil)
 	for _, mock := range tcsMocks {
 		tcs, ok := mock.(*models.TestCase)
 		if !ok {
@@ -507,9 +506,9 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, testPath string) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues InitialiseTestReturn) models.TestRunStatus {
 	var readConfigMocks []*models.Mock
-	configMocks, err := ys.ReadConfigMocks(filepath.Join(path, testSet))
+	configMocks, err := initialisedValues.Storage.ReadConfigMocks(initialisedValues.Path)
 	for _, mock := range configMocks {
 		configMock, ok := mock.(*models.Mock)
 		if !ok {
@@ -522,7 +521,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		return models.TestRunStatusAppHalted
 	}
 	var readTcsMocks []*models.Mock
-	tcsMocks, err := ys.ReadTcsMocks(nil, filepath.Join(path, testSet))
+	tcsMocks, err := initialisedValues.Storage.ReadTcsMocks(nil, initialisedValues.Path)
 	for _, mock := range tcsMocks {
 		tcsMock, ok := mock.(*models.Mock)
 		if !ok {
@@ -545,31 +544,32 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		Delay:          delay,
 		BuildDelay:     buildDelay,
 		Pid:            pid,
-		Storage:        ys,
-		LoadedHooks:    loadedHooks,
-		TestReportFS:   testReportFS,
+		Storage:        initialisedValues.Storage,
+		LoadedHooks:    initialisedValues.LoadedHooks,
+		TestReportFS:   initialisedValues.TestReportFS,
 		TestRunChan:    testRunChan,
 		ApiTimeout:     apiTimeout,
-		Ctx:            ctx,
+		Ctx:            initialisedValues.Ctx,
 		ServeTest:      serveTest,
+		TestPath:       initialisedValues.TestPath,
 	}
-	loadedHooks.SetConfigMocks(readConfigMocks)
-	loadedHooks.SetTcsMocks(readTcsMocks)
-	initialisedValues := t.InitialiseRunTestSet(cfg)
-	if initialisedValues.InitialStatus != "" {
-		return initialisedValues.InitialStatus
+	initialisedValues.LoadedHooks.SetConfigMocks(readConfigMocks)
+	initialisedValues.LoadedHooks.SetTcsMocks(readTcsMocks)
+	initialisedTestSets := t.InitialiseRunTestSet(cfg)
+	if initialisedTestSets.InitialStatus != "" {
+		return initialisedTestSets.InitialStatus
 	}
 
 	isApplicationStopped := false
 	// Recover from panic and gracfully shutdown
-	defer loadedHooks.Recover(pkg.GenerateRandomID())
+	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
 	defer func() {
 		if len(appCmd) == 0 && pid != 0 {
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
 		} else {
 			// stop the user application
 			if !isApplicationStopped && !serveTest {
-				loadedHooks.StopUserApplication()
+				initialisedValues.LoadedHooks.StopUserApplication()
 			}
 		}
 	}()
@@ -581,12 +581,11 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		status  = models.TestRunStatusPassed
 	)
 
-	var userIp string
-	userIp = initialisedValues.UserIP
+	userIp := initialisedTestSets.UserIP
 	t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
 
 	var entTcs, nonKeployTcs []string
-	for _, tc := range initialisedValues.Tcs {
+	for _, tc := range initialisedTestSets.Tcs {
 		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
 			continue
 		}
@@ -601,14 +600,14 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			readTcsMocks = append(readTcsMocks, tcsmock)
 		}
 		readTcsMocks = FilterTcsMocks(tc, readTcsMocks, t.logger)
-		loadedHooks.SetTcsMocks(readTcsMocks)
+		initialisedValues.LoadedHooks.SetTcsMocks(readTcsMocks)
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
 			nonKeployTcs = append(nonKeployTcs, tc.Name)
 		}
 		select {
-		case err := <-initialisedValues.ErrChan:
+		case err := <-initialisedTestSets.ErrChan:
 			isApplicationStopped = true
 			switch err {
 			case hooks.ErrInterrupted:
@@ -635,7 +634,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 		cfg := &SimulateRequestConfig{
 			Tc:           tc,
-			LoadedHooks:  loadedHooks,
+			LoadedHooks:  initialisedValues.LoadedHooks,
 			AppCmd:       appCmd,
 			UserIP:       userIp,
 			TestSet:      testSet,
@@ -643,10 +642,10 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			Success:      &success,
 			Failure:      &failure,
 			Status:       &status,
-			TestReportFS: testReportFS,
-			TestReport:   initialisedValues.TestReport,
+			TestReportFS: initialisedValues.TestReportFS,
+			TestReport:   initialisedTestSets.TestReport,
 			Path:         path,
-			DockerID:     initialisedValues.DockerID,
+			DockerID:     initialisedTestSets.DockerID,
 			NoiseConfig:  noiseConfig,
 		}
 		t.SimulateRequest(cfg)
@@ -658,13 +657,13 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
 	resultsCfg := &FetchTestResultsConfig{
-		TestReportFS:   testReportFS,
-		TestReport:     initialisedValues.TestReport,
+		TestReportFS:   initialisedValues.TestReportFS,
+		TestReport:     initialisedTestSets.TestReport,
 		Status:         &status,
 		TestSet:        testSet,
 		Success:        &success,
 		Failure:        &failure,
-		Ctx:            ctx,
+		Ctx:            initialisedValues.Ctx,
 		TestReportPath: testReportPath,
 		Path:           path,
 	}

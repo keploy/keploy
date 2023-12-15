@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/service/serve/graph/model"
+	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -59,11 +60,16 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
-
+	initialisedValues := test.InitialiseTestReturn{
+		Ctx:          ctx,
+		LoadedHooks:  loadedHooks,
+		TestReportFS: testReportFS,
+		Storage:      ys,
+	}
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, nil, serveTest, testCasePath)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, nil, nil, serveTest, initialisedValues)
 	}()
 
 	testRunID := <-testRunChan
