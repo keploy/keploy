@@ -165,3 +165,17 @@ type MySQLComChangeUserPacket struct {
 	CharacterSet uint8  `yaml:"character_set" bson:"character_set"`
 	AuthPlugin   string `yaml:"auth_plugin" bson:"auth_plugin"`
 }
+
+type MySQLComStmtClosePacket struct {
+	StatementID uint32 `bson:"statement_id"`
+}
+
+type AuthSwitchResponsePacket struct {
+	AuthResponseData string `yaml:"auth_response_data" bson:"auth_response_data"`
+}
+
+type AuthSwitchRequestPacket struct {
+	StatusTag      byte   `yaml:"status_tag" bson:"status_tag"`
+	PluginName     string `yaml:"plugin_name" bson:"plugin_name"`
+	PluginAuthData string `yaml:"plugin_authdata" bson:"plugin_authdata"`
+}
