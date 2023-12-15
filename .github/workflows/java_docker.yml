@@ -17,7 +17,7 @@ jobs:
         repository: keploy/samples-java
         path: samples-java
 
-    - name: Run the spring-petclinic-rest app
+    - name: Run the employee-manager app
       run: |
         cd samples-java
         source ./../.github/workflows/java-docker.sh
