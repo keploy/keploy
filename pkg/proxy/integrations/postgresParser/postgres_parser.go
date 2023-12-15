@@ -451,11 +451,11 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	tcsMocks := h.GetTcsMocks()
 		// change auth to md5 instead of scram
 		// CheckValidEncode(tcsMocks, h, logger)
-	ChangeAuthToMD5(tcsMocks, h, logger)
+	// ChangeAuthToMD5(tcsMocks, h, logger)
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
-		err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+		err := clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
 			logger.Error(hooks.Emoji+"failed to set the read deadline for the pg client connection", zap.Error(err))
 			return err
