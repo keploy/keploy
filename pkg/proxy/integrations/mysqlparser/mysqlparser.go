@@ -638,6 +638,9 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				logger.Error("Failed to decode MySQL packet", zap.Error(err))
 				return
 			}
+			if oprRequest == "COM_QUIT" {
+				return
+			}
 			if expectingHandshakeResponseTest {
 				// configMocks = configMocks[1:]
 				// h.SetConfigMocks(configMocks)
@@ -656,8 +659,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				Message: decodedRequest,
 			}
 			if oprRequest == "COM_STMT_CLOSE" {
-				doHandshakeAgain = true
-				continue
+				return
 			}
 			matchedResponse, _, _, err := matchRequestWithMock(mysqlRequest, configMocks, tcsMocks, h)
 			if err != nil {
@@ -789,8 +791,6 @@ func compareMySQLRequests(req1, req2 models.MySQLRequest) int {
 		}
 		if packet.Query == packet3.Query {
 			matchCount += 5
-		} else {
-			return 0
 		}
 	}
 	if req1.Header.PacketLength == req2.Header.PacketLength {

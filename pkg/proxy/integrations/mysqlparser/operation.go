@@ -253,8 +253,13 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetData, err = decodeHandshakeResponse(data)
 		lastCommand = 0x8d // This value may differ depending on the handshake response protocol version
 	case data[0] == 0x01: // Handshake Response packet
-		packetType = "HANDSHAKE_RESPONSE_OK"
-		packetData, err = decodeHandshakeResponseOk(data)
+		if len(data) == 1 {
+			packetType = "COM_QUIT"
+			packetData = nil
+		} else {
+			packetType = "HANDSHAKE_RESPONSE_OK"
+			packetData, err = decodeHandshakeResponseOk(data)
+		}
 	default:
 		packetType = "Unknown"
 		packetData = data
