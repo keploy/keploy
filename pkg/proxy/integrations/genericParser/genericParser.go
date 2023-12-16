@@ -190,17 +190,19 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// case <-start.C:
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				h.AppendMocks(&models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.GENERIC,
-					Spec: models.MockSpec{
-						GenericRequests:  genericRequests,
-						GenericResponses: genericResponses,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-					},
-				}, ctx)
+				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+					h.AppendMocks(&models.Mock{
+						Version: models.GetVersion(),
+						Name:    "mocks",
+						Kind:    models.GENERIC,
+						Spec: models.MockSpec{
+							GenericRequests:  reqs,
+							GenericResponses: resps,
+							ReqTimestampMock: reqTimestampMock,
+							ResTimestampMock: resTimestampMock,
+						},
+					}, ctx)
+				}(genericRequests, genericResponses)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 				clientConn.Close()
@@ -217,17 +219,19 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				h.AppendMocks(&models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.GENERIC,
-					Spec: models.MockSpec{
-						GenericRequests:  genericRequests,
-						GenericResponses: genericResponses,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-					},
-				}, ctx)
+				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+					h.AppendMocks(&models.Mock{
+						Version: models.GetVersion(),
+						Name:    "mocks",
+						Kind:    models.GENERIC,
+						Spec: models.MockSpec{
+							GenericRequests:  reqs,
+							GenericResponses: resps,
+							ReqTimestampMock: reqTimestampMock,
+							ResTimestampMock: resTimestampMock,
+						},
+					}, ctx)
+				}(genericRequests, genericResponses)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}
