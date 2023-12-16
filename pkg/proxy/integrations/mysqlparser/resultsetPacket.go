@@ -59,7 +59,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	}
 
 	// Check for EOF packet after columns
-	if len(b) > 4 && bytes.Equal(b[4:9], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}) {
+	if len(b) > 4 && bytes.Contains(b[4:9], []byte{0xfe, 0x00, 0x00}) {
 		eofPresent = true
 		eofAfterColumns = b[:9]
 		b = b[9:] // Skip the EOF packet
@@ -176,6 +176,9 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 	for _, columnDef := range columnDefinitions {
 		var colValue RowColumnDefinition
 		var length int
+		// if b[0] == 0x00 {
+		// 	b = b[1:]
+		// }
 		dataLength := int(b[0])
 
 		// Check the column type
@@ -199,10 +202,10 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 			colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)
 			length = dataLength // Including the initial byte for dataLength
 
-		case models.FieldTypeInt24, models.FieldTypeLong:
-			colValue.Type = models.FieldType(columnDef.ColumnType)
-			colValue.Value = int32(binary.LittleEndian.Uint32(b[:4]))
-			length = 4
+		// case models.FieldTypeInt24, models.FieldTypeLong:
+		// 	colValue.Type = models.FieldType(columnDef.ColumnType)
+		// 	colValue.Value = int32(binary.LittleEndian.Uint32(b[:4]))
+		// 	length = 4
 		case models.FieldTypeLongLong:
 			colValue.Type = models.FieldTypeLongLong
 			var longLongBytes []byte = b[1 : dataLength+1]
