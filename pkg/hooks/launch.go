@@ -40,7 +40,7 @@ var (
 	ErrFailedUnitTest = errors.New("test failure occured when running keploy tests along with unit tests")
 )
 
-func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, isUnitTestIntegration bool) error {
+func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, isUnitTestIntegration bool) error {
 	// Supports Native-Linux, Windows (WSL), Lima, Colima
 
 	if appCmd == "" {
@@ -56,7 +56,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		h.logger.Debug("User Application is running inside docker in isolation", zap.Any("Container", appContainer), zap.Any("Network", appNetwork))
 		//search for the container and process it
-		err := h.processDockerEnv("", appContainer, appNetwork)
+		err := h.processDockerEnv("", appContainer, appNetwork, buildDelay)
 		if err != nil {
 			return err
 		}
@@ -82,6 +82,21 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 				// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
 				newComposeFile := "kdocker-compose.yaml"
+
+				// Check if docker compose file uses relative file names for bind mounts
+				hasRelativeBindMounts := h.idc.CheckBindMounts(dockerComposeFile)
+
+				if hasRelativeBindMounts {
+					err := h.idc.ReplaceRelativePaths(dockerComposeFile, newComposeFile)
+					if err != nil {
+						h.logger.Error("failed to convert relative paths to absolute paths in volume mounts in docker compose file")
+						return err
+					}
+					h.logger.Info("Created kdocker-compose.yml file and Replaced relative file paths in docker compose file.")
+					//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
+					appCmd = modifyDockerComposeCommand(appCmd, newComposeFile)
+					dockerComposeFile = newComposeFile
+				}
 
 				// Checking info about the network and whether its external:true
 				hasNetwork, isExternal, network := h.idc.CheckNetworkInfo(dockerComposeFile)
@@ -220,7 +235,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				}
 			}
 
-			err := h.processDockerEnv(appCmd, appContainer, appNetwork)
+			err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay)
 			if err != nil {
 				return err
 			}
@@ -243,7 +258,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	}
 }
 
-func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
+func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration) error {
 	// to notify the kernel hooks that the user application is related to Docker.
 	key := 0
 	value := true
@@ -282,7 +297,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string) error {
 			h.logger.Debug("exiting from goroutine of docker daemon event listener")
 		}()
 
-		endTime := time.Now().Add(30 * time.Second)
+		endTime := time.Now().Add(buildDelay)
 		logTicker := time.NewTicker(1 * time.Second)
 		defer logTicker.Stop()
 

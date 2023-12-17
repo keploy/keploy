@@ -52,6 +52,7 @@ type TestConfig struct {
 	AppContainer     string
 	AppNetwork       string
 	Delay            uint64
+	BuildDelay       time.Duration
 	PassThroughPorts []uint
 	ApiTimeout       uint64
 	WithCoverage  bool
@@ -66,10 +67,11 @@ type RunTestSetConfig struct {
 	AppContainer   string
 	AppNetwork     string
 	Delay          uint64
+	BuildDelay     time.Duration
 	Pid            uint32
 	YamlStore      platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
@@ -86,7 +88,7 @@ type SimulateRequestConfig struct {
 	Success      *int
 	Failure      *int
 	Status       *models.TestRunStatus
-	TestReportFS yaml.TestReportFS
+	TestReportFS platform.TestReportDB
 	TestReport   *models.TestReport
 	Path         string
 	DockerID     bool
@@ -94,7 +96,7 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestReport     *models.TestReport
 	Status         *models.TestRunStatus
 	TestSet        string

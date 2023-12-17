@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
@@ -28,7 +29,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, ports []uint, filters *models.Filters) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -36,7 +37,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	models.SetMode(models.MODE_RECORD)
 
-	teleFS := fs.NewTeleFS()
+	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(true, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
 
@@ -98,7 +99,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		// start user application
 		go func() {
 			stopApplication := false
-			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay, false); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay, buildDelay, false); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					r.Logger.Info("keploy terminated user application")
