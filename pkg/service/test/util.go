@@ -44,19 +44,19 @@ type InitialiseTestReturn struct {
 }
 
 type TestConfig struct {
-	Path             string
-	Proxyport        uint32
-	TestReportPath   string
-	AppCmd           string
-	MongoPassword    string
-	AppContainer     string
-	AppNetwork       string
-	Delay            uint64
-	BuildDelay       time.Duration
-	PassThroughPorts []uint
-	ApiTimeout       uint64
-	WithCoverage  bool
-	CoverageReportPath       string
+	Path               string
+	Proxyport          uint32
+	TestReportPath     string
+	AppCmd             string
+	MongoPassword      string
+	AppContainer       string
+	AppNetwork         string
+	Delay              uint64
+	BuildDelay         time.Duration
+	PassThroughPorts   []uint
+	ApiTimeout         uint64
+	WithCoverage       bool
+	CoverageReportPath string
 }
 
 type RunTestSetConfig struct {
@@ -408,7 +408,7 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 }
 
 // creates a directory if not exists with all user access
-func makeDirectory (path string) error {
+func makeDirectory(path string) error {
 	oldUmask := syscall.Umask(0)
 	err := os.MkdirAll(path, 0777)
 	if err != nil {

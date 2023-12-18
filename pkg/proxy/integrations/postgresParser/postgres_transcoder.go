@@ -164,7 +164,7 @@ func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.Fr
 	if b.BackendWrapper.MsgType == 'P' {
 		*msg.(*pgproto3.Parse) = b.BackendWrapper.Parse
 	}
-	
+
 	// bits := msg.Encode([]byte{})
 	// // println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
 	// if len(bits) != len(msgBody) {
