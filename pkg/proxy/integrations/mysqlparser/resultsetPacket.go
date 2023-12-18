@@ -305,7 +305,6 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	if resultSet.PaddingPresentFinal {
 		buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 	}
-	fmt.Print(buf.Bytes(), "ResultSEt ", buf)
 	return buf.Bytes(), nil
 }
 

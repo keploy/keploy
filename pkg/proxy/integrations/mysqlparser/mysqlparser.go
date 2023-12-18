@@ -527,7 +527,7 @@ func decodeOutgoingMySQL1(requestBuffer []byte, clientConn, destConn net.Conn, h
 				return
 			}
 			oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
-			fmt.Println(oprRequest)
+			logger.Debug(oprRequest)
 			if oprRequest == "COM_STMT_CLOSE" {
 				if len(tcsMocks) == mockResponseRead {
 					mockResponseRead = 0
@@ -547,7 +547,7 @@ func decodeOutgoingMySQL1(requestBuffer []byte, clientConn, destConn net.Conn, h
 			handshakeResponseFromConfig := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Message
 			opr2 := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header.PacketType
 			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, header, opr2, mockResponseRead+1)
-			fmt.Print(responseBinary)
+			logger.Debug("Logging response binary", zap.ByteString("response", responseBinary))
 			_, err = clientConn.Write(responseBinary)
 			mockResponseRead++
 			time.Sleep(1000 * time.Millisecond)
@@ -598,7 +598,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			h.SetConfigMocks(configMocks)
 			firstLoop = false
 			doHandshakeAgain = false
-			fmt.Println("BINARY PACKET SENT HANDSHAKE", binaryPacket, "/n")
+			logger.Debug("BINARY PACKET SENT HANDSHAKE", zap.ByteString("binaryPacketKey", binaryPacket))
 			prevRequest = "MYSQLHANDSHAKE"
 		} else {
 			timeoutDuration := 6 * time.Second // 2-second timeout
@@ -648,7 +648,9 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			}
 
 			prevRequest = ""
-			fmt.Println(requestBuffer, "\n", oprRequest)
+			logger.Debug("Logging request buffer and operation request",
+				zap.ByteString("requestBuffer", requestBuffer),
+				zap.String("oprRequest", oprRequest))
 
 			mysqlRequest := models.MySQLRequest{
 				Header: &models.MySQLPacketHeader{
@@ -668,7 +670,9 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			}
 
 			responseBinary, err := encodeToBinary(&matchedResponse.Message, matchedResponse.Header, matchedResponse.Header.PacketType, 1)
-			fmt.Println(responseBinary, "\n", matchedResponse.Header.PacketType, "\n")
+			logger.Debug("Response binary",
+				zap.ByteString("responseBinary", responseBinary),
+				zap.String("packetType", matchedResponse.Header.PacketType))
 
 			if err != nil {
 				logger.Error("Failed to encode response to binary", zap.Error(err))
@@ -779,14 +783,12 @@ func compareMySQLRequests(req1, req2 models.MySQLRequest) int {
 		packet1 := req1.Message
 		packet, ok := packet1.(*QueryPacket)
 		if !ok {
-			fmt.Println("Type assertion failed")
 			return 0
 		}
 		packet2 := req2.Message
 
 		packet3, ok := packet2.(*models.MySQLQueryPacket)
 		if !ok {
-			fmt.Println("Type assertion failed")
 			return 0
 		}
 		if packet.Query == packet3.Query {
