@@ -67,8 +67,6 @@ sudo -E env PATH=$PATH ./../../keployv2 serve -c "npm test" --delay 5
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
 
-sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
-
 # Generate the keploy-config file.
 ./../../keployv2 generate-config
 
