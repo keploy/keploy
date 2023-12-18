@@ -57,8 +57,8 @@ func (d *DiffsPrinter) Render() {
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
 		if json.Valid(bE) && json.Valid(bA) {
-			difference,err:=sprintJSONDiff(bE, bA, "body", d.bodyNoise)
-			if err!=nil {
+			difference, err := sprintJSONDiff(bE, bA, "body", d.bodyNoise)
+			if err != nil {
 				difference = sprintDiff(d.bodyExp, d.bodyAct, "body")
 			}
 			diffs = append(diffs, difference)
@@ -82,15 +82,15 @@ func (d *DiffsPrinter) Render() {
 /*
  * Returns a nice diff table where the left is the expect and the right
  * is the actual. each entry in expect and actual will contain the key
- * and the corresponding value. 
+ * and the corresponding value.
  */
 func sprintDiffHeader(expect, actual map[string]string) string {
-	
+
 	expectAll := ""
 	actualAll := ""
 	for key, expValue := range expect {
-		actValue := key + ": " + actual[key] 
-		expValue = key + ": " + expValue 
+		actValue := key + ": " + actual[key]
+		expValue = key + ": " + expValue
 		// Offset will be where the string start to unmatch
 		offset, _ := diffIndex(expValue, actValue)
 
@@ -134,14 +134,14 @@ func sprintDiff(expect, actual, field string) string {
  * the body isnt in the rest-api formats (what means it is not json-based)
  * its better to use a generic diff output as the SprintDiff.
  */
-func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string,error) {
-	diffString,err := calculateJSONDiffs(json1, json2)
-	if err!=nil {
-		return "",err
+func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string, error) {
+	diffString, err := calculateJSONDiffs(json1, json2)
+	if err != nil {
+		return "", err
 	}
 	expect, actual := separateAndColorize(diffString, noise)
 	result := expectActualTable(expect, actual, field, false)
-	return result,nil
+	return result, nil
 }
 
 // Find the diff between two strings returning index where
@@ -173,14 +173,14 @@ func diffIndex(s1, s2 string) (int, bool) {
  * containes the lines that does not match represented by either a
  * minus or add symbol followed by the respective line.
  */
-func calculateJSONDiffs(json1 []byte, json2 []byte) (string,error) {
+func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 	var diff = gojsondiff.New()
 	dObj, _ := diff.Compare(json1, json2)
 
 	var jsonObject map[string]interface{}
 	err := json.Unmarshal([]byte(json1), &jsonObject)
-	if err!=nil {
-		return "",err
+	if err != nil {
+		return "", err
 	}
 
 	diffString, _ := formatter.NewAsciiFormatter(jsonObject, formatter.AsciiFormatterConfig{
@@ -188,7 +188,7 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string,error) {
 		Coloring:       false, // We will color our way
 	}).Format(dObj)
 
-	return diffString,nil
+	return diffString, nil
 }
 
 // Will receive a string that has the differences represented

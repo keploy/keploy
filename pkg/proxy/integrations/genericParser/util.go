@@ -1,13 +1,15 @@
 package genericparser
+
 import (
 	"encoding/base64"
 	// "fmt"
 	"unicode"
-	"go.keploy.io/server/pkg/proxy/util"
+
 	"github.com/agnivade/levenshtein"
 	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
 )
 
 func PostgresDecoder(encoded string) ([]byte, error) {
@@ -95,7 +97,6 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 	}
 	return mxIdx
 }
-
 
 // checks if s is ascii and printable, aka doesn't include tab, backspace, etc.
 func IsAsciiPrintable(s string) bool {
