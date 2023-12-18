@@ -162,12 +162,12 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			if appCmd == "" {
-			fmt.Println("Error: missing required -c flag or appCmd in config file")
-			if isDockerCmd {
-			fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
-			} else {
-			fmt.Println("Example usage:\n", cmd.Example)
-			}
+				fmt.Println("Error: missing required -c flag or appCmd in config file")
+				if isDockerCmd {
+					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
+				} else {
+					fmt.Println("Example usage:\n", cmd.Example)
+				}
 				return errors.New("missing required -c flag or appCmd in config file")
 			}
 
@@ -234,7 +234,7 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
 	recordCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
-	_ = recordCmd.Flags().MarkHidden("enableTele")
+	recordCmd.Flags().MarkHidden("enableTele")
 
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true

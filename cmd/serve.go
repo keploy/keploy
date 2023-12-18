@@ -132,7 +132,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 	serveCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
-	_ = serveCmd.Flags().MarkHidden("enableTele")
+	serveCmd.Flags().MarkHidden("enableTele")
 
 	serveCmd.Flags().StringP("language", "l", "", "application programming language")
 	serveCmd.Flags().StringP("command", "c", "", "Command to start the user application")

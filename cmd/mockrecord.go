@@ -87,7 +87,7 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 
 	serveCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 	serveCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
-	_ = serveCmd.Flags().MarkHidden("enableTele")
+	serveCmd.Flags().MarkHidden("enableTele")
 
 	serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 	serveCmd.MarkFlagRequired("path")

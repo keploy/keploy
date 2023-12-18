@@ -316,7 +316,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().String("coverageReportPath", "", "Write a go coverage profile to the file in the given directory.")
 
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
-	_ = testCmd.Flags().MarkHidden("enableTele")
+	testCmd.Flags().MarkHidden("enableTele")
 
 	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"

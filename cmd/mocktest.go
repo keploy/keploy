@@ -88,7 +88,7 @@ func (s *MockTest) GetCmd() *cobra.Command {
 	serveCmd.MarkFlagRequired("path")
 	serveCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 	serveCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
-	_ = serveCmd.Flags().MarkHidden("enableTele")
+	serveCmd.Flags().MarkHidden("enableTele")
 
 	serveCmd.Flags().StringP("mockName", "m", "", "User provided test suite")
 	serveCmd.MarkFlagRequired("mockName")

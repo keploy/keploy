@@ -5,16 +5,16 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os/exec"
-	"runtime"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
-	"go.keploy.io/server/pkg/platform/fs"
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
@@ -143,18 +143,18 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		log.Debug("failed to get installationID", zap.Error(err))
 	}
 	if installationID == "" {
-		installationID , err = fs.NewTeleFS(log).Get(true)
+		installationID, err = fs.NewTeleFS(log).Get(true)
 		if err != nil {
 			log.Debug("failed to get installationID for new user.", zap.Error(err))
 		}
 	}
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
-    scope.SetTag("Keploy Version", utils.KeployVersion)
-	scope.SetTag("Linux Kernel Version", kernelVersion)
-	scope.SetTag("Architecture", arch)
-	scope.SetTag("Installation ID", installationID)
-    // Add more context as needed
-})
+		scope.SetTag("Keploy Version", utils.KeployVersion)
+		scope.SetTag("Linux Kernel Version", kernelVersion)
+		scope.SetTag("Architecture", arch)
+		scope.SetTag("Installation ID", installationID)
+		// Add more context as needed
+	})
 	return log
 }
 
