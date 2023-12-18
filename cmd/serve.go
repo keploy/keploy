@@ -1,11 +1,12 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/serve"
 	"go.uber.org/zap"
-	"os"
-	"path/filepath"
 )
 
 func NewCmdServe(logger *zap.Logger) *Serve {
