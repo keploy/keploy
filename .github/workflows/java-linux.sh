@@ -13,7 +13,8 @@ sudo rm -rf keploy/
 
 for i in {1..2}; do
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../../../keployv2 record -c './mvnw spring-boot:run' &
+mvn clean install -Dmaven.test.skip=true
+sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' &
 
 # Wait for the application to start.
 app_started=false
@@ -63,7 +64,7 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c './mvnw spring-boot:run' --delay 20
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
