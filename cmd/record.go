@@ -146,6 +146,12 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			enableTele, err := cmd.Flags().GetBool("enableTele")
+			if err != nil {
+				r.logger.Error("failed to read the disable telemetry flag")
+				return err
+			}
+
 			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, configPath)
 			if err != nil {
 				if err == errFileNotFound {
@@ -204,7 +210,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele)
 			return nil
 		},
 	}
@@ -226,6 +232,9 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
+
+	recordCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+	recordCmd.Flags().MarkHidden("enableTele")
 
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true
