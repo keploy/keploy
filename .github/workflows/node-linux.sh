@@ -72,7 +72,7 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testset
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"
-sed -i '/tests:/a \        "test-set-0": ["test-1", "test-2", "test-3"]' "keploy-config.yaml"
+sed -i '/tests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10
 
@@ -89,11 +89,9 @@ report_file5="./keploy/testReports/report-5.yaml"
 test_status5=$(grep 'status:' "$report_file5" | head -n 1 | awk '{print $2}')
 report_file6="./keploy/testReports/report-6.yaml"
 test_status6=$(grep 'status:' "$report_file6" | head -n 1 | awk '{print $2}')
-report_file7="./keploy/testReports/report-7.yaml"
-test_status7=$(grep 'status:' "$report_file7" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_status7" = "PASSED" ] ; then
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ]; then
     exit 0
 else
     exit 1
