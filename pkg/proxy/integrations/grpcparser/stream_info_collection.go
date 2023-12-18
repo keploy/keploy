@@ -13,9 +13,9 @@ import (
 // that happen in a stream for grpc. This includes the headers and data frame for the
 // request and response.
 type StreamInfoCollection struct {
-	hook       *hooks.Hook
-	mutex      sync.Mutex
-	StreamInfo map[uint32]models.GrpcStream
+	hook             *hooks.Hook
+	mutex            sync.Mutex
+	StreamInfo       map[uint32]models.GrpcStream
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
 }
@@ -113,8 +113,8 @@ func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32, ctx conte
 		Name:    "mocks",
 		Kind:    models.GRPC_EXPORT,
 		Spec: models.MockSpec{
-			GRPCReq:  &grpcReq,
-			GRPCResp: &grpcResp,
+			GRPCReq:          &grpcReq,
+			GRPCResp:         &grpcResp,
 			ReqTimestampMock: sic.ReqTimestampMock,
 			ResTimestampMock: sic.ResTimestampMock,
 		},

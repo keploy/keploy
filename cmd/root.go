@@ -1,21 +1,21 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"time"
-	"errors"
-	"bytes"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/buffer"
+	"go.uber.org/zap/zapcore"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -61,13 +61,13 @@ func (c colorConsoleEncoder) Clone() zapcore.Encoder {
 	clone := c.Encoder.Clone()
 	return colorConsoleEncoder{
 		EncoderConfig: c.EncoderConfig,
-		Encoder: clone,
+		Encoder:       clone,
 	}
 }
 
 func init() {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
-	  	return NewColorConsole(config), nil
+		return NewColorConsole(config), nil
 	})
 }
 
@@ -78,7 +78,7 @@ func setupLogger() *zap.Logger {
 
 	// Customize the encoder config to put the emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
-  logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
 	logCfg.OutputPaths = []string{
 		"stdout",
@@ -170,14 +170,14 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 `
 
 var rootExamples = `
-Record:
-keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1
+  Record:
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1 --buildDelay 1m
 
-Test:
-keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1
+  Test:
+	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1 --buildDelay 1m
 
-Generate-Config:
-keploy generate-config -p "/path/to/localdir"
+  Generate-Config:
+	keploy generate-config -p "/path/to/localdir"
 `
 
 func checkForDebugFlag(args []string) bool {

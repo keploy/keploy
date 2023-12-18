@@ -2,14 +2,26 @@ package platform
 
 import (
 	"context"
-
-	"go.keploy.io/server/pkg/models"
 )
 
 type TestCaseDB interface {
-	WriteTestcase(tc *models.TestCase, ctx context.Context, filters *models.Filters) error
-	WriteMock(tc *models.Mock, ctx context.Context) error
+	WriteTestcase(tc KindSpecifier, ctx context.Context, filters KindSpecifier) error
+	WriteMock(tc KindSpecifier, ctx context.Context) error
 
-	ReadTestcase(path string, options interface{}) ([]*models.TestCase, error)
-	ReadMocks(path string) ([]*models.Mock, []*models.Mock, error)
+	ReadTestcase(path string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
+	ReadTcsMocks(tc KindSpecifier, path string) ([]KindSpecifier, error)
+	ReadConfigMocks(path string) ([]KindSpecifier, error)
+}
+
+type TestReportDB interface {
+	Lock()
+	Unlock()
+	SetResult(runId string, test KindSpecifier)
+	GetResults(runId string) ([]KindSpecifier, error)
+	Read(ctx context.Context, path, name string) (KindSpecifier, error)
+	Write(ctx context.Context, path string, doc KindSpecifier) error
+}
+
+type KindSpecifier interface {
+	GetKind() string
 }

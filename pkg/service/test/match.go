@@ -3,8 +3,8 @@ package test
 import (
 	"encoding/json"
 	"errors"
-	"reflect"
 	"fmt"
+	"reflect"
 
 	"go.uber.org/zap"
 )
@@ -110,7 +110,7 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 				delete(expMap, prefix+k)
 				delete(actMap, k)
 				continue
-			}			
+			}
 		}
 		// checks if there is a key which is not present in expMap but present in actMap.
 		for k := range actMap {
@@ -122,7 +122,7 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 
 	case reflect.Slice:
 		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
-			break;
+			break
 		}
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
@@ -131,16 +131,10 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 		}
 		isMatched := true
 		for i := 0; i < expSlice.Len(); i++ {
-
-			isMatchedElement := false
-			for j := 0; j < actSlice.Len(); j++ {
-				if x, err := jsonMatch(key, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap); err == nil && x {
-					isMatchedElement = true
-					break
-				}
+			if x, err := jsonMatch(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap); err == nil && !x {
+				isMatched = false
+				break
 			}
-			isMatched = isMatchedElement && isMatched
-
 		}
 		return isMatched, nil
 	default:

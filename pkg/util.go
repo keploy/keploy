@@ -112,25 +112,31 @@ func SimulateHttp(tc models.TestCase, testSet string, logger *zap.Logger, apiTim
 		}
 	}
 
-	httpResp, err := client.Do(req)
-	if err != nil {
+	httpResp, errHttpReq := client.Do(req)
+	if httpResp != nil {
+		// Cases covered, non-nil httpResp with non-nil errHttpReq and non-nil httpResp
+		// with nil errHttpReq
+		respBody, errReadRespBody := io.ReadAll(httpResp.Body)
+		if errReadRespBody != nil {
+			logger.Error("failed reading response body", zap.Error(errReadRespBody))
+			return nil, err
+		}
+
+		resp = &models.HttpResp{
+			StatusCode: httpResp.StatusCode,
+			Body:       string(respBody),
+			Header:     ToYamlHttpHeader(httpResp.Header),
+		}
+	} else if errHttpReq != nil {
+		// Case covered, nil HTTP response with non-nil error
 		logger.Error("failed sending testcase request to app", zap.Error(err))
-		return nil, err
+
+		resp = &models.HttpResp{
+			Body: errHttpReq.Error(),
+		}
 	}
 
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		logger.Error("failed reading response body", zap.Error(err))
-		return nil, err
-	}
-
-	resp = &models.HttpResp{
-		StatusCode: httpResp.StatusCode,
-		Body:       string(respBody),
-		Header:     ToYamlHttpHeader(httpResp.Header),
-	}
-
-	return resp, nil
+	return resp, errHttpReq
 }
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
