@@ -111,7 +111,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	models.SetMode(models.MODE_TEST)
 
 	teleFS := fs.NewTeleFS(t.logger)
-	tele := telemetry.NewTelemetry(true, false, teleFS, t.logger, "", nil)
+	tele := telemetry.NewTelemetry(cfg.EnableTele, false, teleFS, t.logger, "", nil)
 
 	returnVal.TestReportFS = yaml.NewTestReportFS(t.logger)
 	// fetch the recorded testcases with their mocks
@@ -189,7 +189,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
 
 	testRes := false
 	result := true
@@ -209,6 +209,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		MongoPassword:      options.MongoPassword,
 		WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
+		EnableTele:         enableTele,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracfully shutdown
