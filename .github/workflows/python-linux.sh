@@ -39,7 +39,7 @@ sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runser
 # Wait for the application to start.
 app_started=false
 while [ "$app_started" = false ]; do
-    if curl --location 'http://127.0.0.1:8000/'; then
+    if curl --location 'http://127.0.0.1:8000/user'; then
         app_started=true
     fi
     sleep 3 # wait for 3 seconds before checking again.
@@ -72,10 +72,10 @@ curl --location 'http://127.0.0.1:8000/user/'
 curl --location 'http://127.0.0.1:8000/user/' \
 --header 'Content-Type: application/json' \
 --data-raw '    {
-        "name": "John Doe",
-        "email": "john.doe@example.com",
-        "password": "john567",
-        "website": "www.johndoe.com"
+        "name": "Alice green",
+        "email": "alice.green@example.com",
+        "password": "alice789",
+        "website": "www.alicegreen.com"
     }'
 
 # Wait for 5 seconds for keploy to record the tcs and mocks.
