@@ -25,8 +25,8 @@ import (
 	"github.com/cloudflare/cfssl/log"
 
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/hooks"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/utils"
 )
 
