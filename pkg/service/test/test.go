@@ -599,7 +599,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 			readTcsMocks = append(readTcsMocks, tcsmock)
 		}
-		readTcsMocks = FilterTcsMocks(tc, readTcsMocks, t.logger)
 		initialisedValues.LoadedHooks.SetTcsMocks(readTcsMocks)
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)

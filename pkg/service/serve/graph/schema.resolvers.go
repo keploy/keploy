@@ -67,6 +67,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		TestReportFS: testReportFS,
 		Storage:      ys,
 		TestPath:     filepath.Join(testCasePath, testSet, "tests"),
+		Path:         filepath.Join(testCasePath, testSet),
 	}
 	go func() {
 		defer utils.HandlePanic()
