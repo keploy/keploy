@@ -127,7 +127,7 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 	}
 
 	log = zapsentry.AttachCoreToLogger(core, log)
-	kernelVersion := "Not linux"
+	kernelVersion := ""
 	if runtime.GOOS == "linux" {
 		cmd := exec.Command("uname", "-r")
 		kernelBytes, err := cmd.Output()

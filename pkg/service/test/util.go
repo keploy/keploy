@@ -57,7 +57,7 @@ type TestConfig struct {
 	ApiTimeout         uint64
 	WithCoverage       bool
 	CoverageReportPath string
-	DisableTele        bool
+	EnableTele         bool
 }
 
 type RunTestSetConfig struct {

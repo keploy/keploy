@@ -172,7 +172,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
-			disableTele, err := cmd.Flags().GetBool("disableTele")
+			enableTele, err := cmd.Flags().GetBool("enableTele")
 			if err != nil {
 				t.logger.Error("failed to read the disable telemetry flag")
 				return err
@@ -284,7 +284,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
-			}, disableTele)
+			}, enableTele)
 
 			return nil
 		},
@@ -315,7 +315,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().String("coverageReportPath", "", "Write a go coverage profile to the file in the given directory.")
 
-	testCmd.Flags().Bool("disableTele", false, "Switch for telemetry" )
+	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+	_ = testCmd.Flags().MarkHidden("enableTele")
 
 	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"

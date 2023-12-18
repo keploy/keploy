@@ -65,9 +65,9 @@ func (s *MockTest) GetCmd() *cobra.Command {
 				return
 			}
 
-			disableTele, err := cmd.Flags().GetBool("disableTele")
+			enableTele, err := cmd.Flags().GetBool("enableTele")
 			if err != nil {
-				s.logger.Error(Emoji + "failed to read the disableTele flag")
+				s.logger.Error(Emoji + "failed to read the enableTele flag")
 				return
 			}
 
@@ -77,18 +77,18 @@ func (s *MockTest) GetCmd() *cobra.Command {
 				return
 			}
 
-			s.mockTester.MockTest(path, proxyPort, pid, dir, disableTele)
+			s.mockTester.MockTest(path, proxyPort, pid, dir, enableTele)
 		},
 	}
 
 	serveCmd.Flags().Uint32("pid", 0, "Process id of your application.")
 	serveCmd.MarkFlagRequired("pid")
 
-    serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+	serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 	serveCmd.MarkFlagRequired("path")
 	serveCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
-	serveCmd.Flags().Bool("disableTele", false, "Switch for telemetry" )
-
+	serveCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+	_ = serveCmd.Flags().MarkHidden("enableTele")
 
 	serveCmd.Flags().StringP("mockName", "m", "", "User provided test suite")
 	serveCmd.MarkFlagRequired("mockName")
