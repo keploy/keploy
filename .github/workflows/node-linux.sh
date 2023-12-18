@@ -89,9 +89,11 @@ report_file5="./keploy/testReports/report-5.yaml"
 test_status5=$(grep 'status:' "$report_file5" | head -n 1 | awk '{print $2}')
 report_file6="./keploy/testReports/report-6.yaml"
 test_status6=$(grep 'status:' "$report_file6" | head -n 1 | awk '{print $2}')
+test_total6=$(grep 'total:' "$report_file6" | head -n 1 | awk '{print $2}')
+test_failure=$(grep 'failure:' "$report_file6" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ]; then
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
     exit 0
 else
     exit 1
