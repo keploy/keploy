@@ -14,13 +14,13 @@ func NewCmdGenerateConfig(logger *zap.Logger) *GenerateConfig {
 	generatorConfig := generateConfig.NewGeneratorConfig(logger)
 	return &GenerateConfig{
 		generatorConfig: generatorConfig,
-		logger:     logger,
+		logger:          logger,
 	}
 }
 
 type GenerateConfig struct {
 	generatorConfig generateConfig.GeneratorConfig
-	logger   *zap.Logger
+	logger          *zap.Logger
 }
 
 func (g *GenerateConfig) GetCmd() *cobra.Command {
@@ -36,7 +36,7 @@ func (g *GenerateConfig) GetCmd() *cobra.Command {
 				g.logger.Error("failed to read the config path")
 				return err
 			}
-			
+
 			filePath := filepath.Join(configPath, "keploy-config.yaml")
 
 			if utils.CheckFileExists(filePath) {
@@ -49,7 +49,7 @@ func (g *GenerateConfig) GetCmd() *cobra.Command {
 					return nil
 				}
 			}
-			
+
 			g.generatorConfig.GenerateConfig(filePath)
 			return nil
 		},
