@@ -270,7 +270,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+			t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
 				Tests:              tests,
 				AppContainer:       appContainer,
 				AppNetwork:         networkName,

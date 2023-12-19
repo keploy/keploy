@@ -2,6 +2,8 @@ package platform
 
 import (
 	"context"
+
+	"go.uber.org/zap"
 )
 
 type TestCaseDB interface {
@@ -20,6 +22,7 @@ type TestReportDB interface {
 	GetResults(runId string) ([]KindSpecifier, error)
 	Read(ctx context.Context, path, name string) (KindSpecifier, error)
 	Write(ctx context.Context, path string, doc KindSpecifier) error
+	ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error)
 }
 
 type KindSpecifier interface {

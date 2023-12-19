@@ -16,7 +16,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -31,14 +31,14 @@ type InitialiseRunTestSetReturn struct {
 	TcsMocks      []*models.Mock
 }
 
-type InitialiseTestReturn struct {
+type TestEnvironmentSetup struct {
 	Sessions                 []string
-	TestReportFS             *yaml.TestReport
+	TestReportFS             platform.TestReportDB
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
-	YamlStore                platform.TestCaseDB
+	Storage                  platform.TestCaseDB
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 }
@@ -57,7 +57,9 @@ type TestConfig struct {
 	ApiTimeout         uint64
 	WithCoverage       bool
 	CoverageReportPath string
-	EnableTele         bool
+	TestReport         platform.TestReportDB
+	Storage            platform.TestCaseDB
+	Tele               *telemetry.Telemetry
 }
 
 type RunTestSetConfig struct {
@@ -70,7 +72,7 @@ type RunTestSetConfig struct {
 	Delay          uint64
 	BuildDelay     time.Duration
 	Pid            uint32
-	YamlStore      platform.TestCaseDB
+	Storage        platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
 	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
