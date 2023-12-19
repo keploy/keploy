@@ -21,9 +21,9 @@ type Telemetry struct {
 
 func UserHomeDir(isNewConfigPath bool) string {
 
-	var configFolder = "/keploy-config"
+	var configFolder = "/.keploy-config"
 	if isNewConfigPath {
-		configFolder = "/.keploy-config"
+		configFolder = "/.keploy"
 	}
 
 	if runtime.GOOS == "windows" {

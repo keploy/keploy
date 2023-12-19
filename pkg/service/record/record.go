@@ -29,16 +29,15 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters, enableTele bool) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	models.SetMode(models.MODE_RECORD)
-
 	teleFS := fs.NewTeleFS(r.Logger)
-	tele := telemetry.NewTelemetry(true, false, teleFS, r.Logger, "", nil)
+	tele := telemetry.NewTelemetry(enableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
 
 	dirName, err := yaml.NewSessionIndex(path, r.Logger)
