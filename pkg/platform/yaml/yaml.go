@@ -228,12 +228,7 @@ func (ys *Yaml) ReadTestcase(testSet string, lastSeenId platform.KindSpecifier, 
 
 	_, err := os.Stat(ys.MockPath + "/" + testSet)
 	if err != nil {
-		dirNames := strings.Split(ys.MockPath, "/")
-		suitName := ""
-		if len(dirNames) > 1 {
-			suitName = dirNames[len(dirNames)-2]
-		}
-		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", suitName))
+		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", testSet))
 		tcsRead := make([]platform.KindSpecifier, len(tcs))
 		return tcsRead, nil
 	}
