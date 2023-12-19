@@ -15,7 +15,7 @@ jobs:
       with:
         repository: keploy/samples-go
         path: samples-go
-    - name: Run samples-go application
+    - name: Run gin-mongo application
       run: |
         cd samples-go/gin-mongo
         source ./../../.github/workflows/workflow_scripts/golang-docker.sh

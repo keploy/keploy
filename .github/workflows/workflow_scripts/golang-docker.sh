@@ -5,7 +5,7 @@ source ./../../.github/workflows/workflow_scripts/fake-iid.sh
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-sudo docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 generate-config
@@ -19,9 +19,7 @@ sudo rm -rf keploy/
 docker logs mongoDb &
 
 # Start keploy in record mode.
-sudo docker build -t gin-mongo .
-echo "checking the installation id"
-cat ~/.keploy-config/installation-id.yaml
+docker build -t gin-mongo .
 for i in {1..2}; do
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' &
 

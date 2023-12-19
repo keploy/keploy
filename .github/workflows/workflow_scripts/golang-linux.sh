@@ -9,9 +9,6 @@ git checkout native-linux
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
-# Check docker logs continuously.
-docker logs -f mongoDb &
-
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy-config.yaml" ]; then
     rm ./keploy-config.yaml
@@ -25,7 +22,7 @@ config_file="./keploy-config.yaml"
 sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
-sudo rm -rf keploy/
+rm -rf keploy/
 
 # Build the binary.
 go build -o ginApp

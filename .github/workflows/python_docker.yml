@@ -15,7 +15,7 @@ jobs:
       with:
         repository: keploy/samples-python
         path: samples-python
-    - name: Run the sample python application
+    - name: Run the flask-mongo application
       run: |
         cd samples-python/flask-mongo
         source ./../../.github/workflows/workflow_scripts/python-docker.sh
