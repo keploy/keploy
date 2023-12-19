@@ -412,11 +412,13 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
+			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 			if coverage {
 				g := graph.NewGraph(t.logger)
 				g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
-				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+
+				t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,

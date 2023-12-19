@@ -3,8 +3,10 @@ package yaml
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 
 	"go.keploy.io/server/pkg/models"
@@ -99,4 +101,35 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
 	}
 	return nil
+}
+
+func (fe *TestReport) ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
+	indices := []string{}
+	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		return indices, nil
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return indices, err
+	}
+
+	for _, v := range files {
+		// Define the regular expression pattern
+		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
+
+		// Compile the regular expression
+		regex, err := regexp.Compile(pattern)
+		if err != nil {
+			return indices, err
+		}
+
+		// Check if the string matches the pattern
+		if regex.MatchString(v.Name()) {
+			indices = append(indices, v.Name())
+		}
+	}
+	return indices, nil
 }
