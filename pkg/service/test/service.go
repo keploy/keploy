@@ -4,11 +4,12 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/telemetry"
 )
 
 type Tester interface {
-	Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry) bool
+	Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool
 	StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool
 	RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, testEnv TestEnvironmentSetup) models.TestRunStatus
 	InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error)

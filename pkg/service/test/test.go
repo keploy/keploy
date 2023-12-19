@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -174,7 +175,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
 
 	testRes := false
 	result := true
@@ -195,8 +196,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
 		Tele:               tele,
-		TestReport:         yaml.NewTestReportFS(t.logger),
-		Storage:            yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele),
+		TestReport:         testReportStorage,
+		Storage:            tcsStorage,
 	}
 	sessions, err := cfg.TestReport.ReadSessionIndices(path, t.logger)
 	if err != nil {
@@ -281,7 +282,9 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 func (t *tester) StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
-	return t.Test(path, testReportPath, appCmd, options, tele)
+	reportStorage := yaml.NewTestReportFS(t.logger)
+	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
+	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
