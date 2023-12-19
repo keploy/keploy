@@ -57,7 +57,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	teleFS := fs.NewTeleFS(g.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
 	tele.Ping(false)
-	ys := yaml.NewYamlStore("", "", "", "", g.logger, tele)
+	ys := yaml.NewYamlStore(path, path, "", "", s.logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	loadedHooks, err := hooks.NewHook(ys, routineId, g.logger)
