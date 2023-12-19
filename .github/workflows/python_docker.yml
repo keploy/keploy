@@ -18,4 +18,4 @@ jobs:
     - name: Run the sample python application
       run: |
         cd samples-python/flask-mongo
-        source ./../../.github/workflows/python-docker.sh
+        source ./../../.github/workflows/workflow_scripts/python-docker.sh

@@ -9,7 +9,7 @@ git checkout employeem-docker
 
 
 # Update the java version
-source ./../.github/workflows/update-java.sh
+source ./../.github/workflows/workflow_scripts/update-java.sh
 mvn --version
 cd ./employee-manager
 

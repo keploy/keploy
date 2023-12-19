@@ -1,7 +1,7 @@
 
 #!/bin/bash
 
-source ./../../.github/workflows/fake-iid.sh
+source ./../../.github/workflows/workflow_scripts/fake-iid.sh
 
 # Start mongo before starting keploy.
 docker network create keploy-network
