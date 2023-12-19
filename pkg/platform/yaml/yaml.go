@@ -257,14 +257,23 @@ func (ys *Yaml) ReadTestcase(testSet string, lastSeenId platform.KindSpecifier, 
 
 	tcs := []*models.TestCase{}
 
-	_, err := os.Stat(ys.MockPath + "/" + testSet)
+	mockPath, err := util.ValidatePath(ys.MockPath + "/" + testSet)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = os.Stat(mockPath)
 	if err != nil {
 		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", testSet))
 		tcsRead := make([]platform.KindSpecifier, len(tcs))
 		return tcsRead, nil
 	}
+	dirPath, err := util.ValidatePath(ys.MockPath + "/" + testSet + "/tests")
+	if err != nil {
+		return nil, err
+	}
 
-	dir, err := os.OpenFile(ys.MockPath+"/"+testSet+"/tests", os.O_RDONLY, os.ModePerm)
+	dir, err := os.OpenFile(dirPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", ys.MockPath+"/"+testSet+"/tests"))
 		return nil, err
