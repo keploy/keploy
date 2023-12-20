@@ -190,7 +190,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			if isDockerCmd && buildDelay <= 30*time.Second {
 				r.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", buildDelay))
-				r.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
+				r.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
 			}
 
 			path += "/keploy"
