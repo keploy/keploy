@@ -9,13 +9,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -464,32 +464,5 @@ func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 }
 
 func (ys *Yaml) ReadTestSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
-	indices := []string{}
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
-	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
-	}
-
-	files, err := dir.ReadDir(0)
-	if err != nil {
-		return indices, err
-	}
-
-	for _, v := range files {
-		// Define the regular expression pattern
-		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
-
-		// Compile the regular expression
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			return indices, err
-		}
-
-		// Check if the string matches the pattern
-		if regex.MatchString(v.Name()) {
-			indices = append(indices, v.Name())
-		}
-	}
-	return indices, nil
+	return pkg.ReadSessionIndices(path, Logger)
 }

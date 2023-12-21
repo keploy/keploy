@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -179,4 +182,35 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 		curl = curl + fmt.Sprintf("  --data '%s'", body)
 	}
 	return curl
+}
+
+func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
+	indices := []string{}
+	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		return indices, nil
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return indices, err
+	}
+
+	for _, v := range files {
+		// Define the regular expression pattern
+		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
+
+		// Compile the regular expression
+		regex, err := regexp.Compile(pattern)
+		if err != nil {
+			return indices, err
+		}
+
+		// Check if the string matches the pattern
+		if regex.MatchString(v.Name()) {
+			indices = append(indices, v.Name())
+		}
+	}
+	return indices, nil
 }
