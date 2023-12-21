@@ -10,9 +10,10 @@ type TestCaseDB interface {
 	WriteTestcase(tc KindSpecifier, ctx context.Context, filters KindSpecifier) error
 	WriteMock(tc KindSpecifier, ctx context.Context) error
 
-	ReadTestcase(path string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
-	ReadTcsMocks(tc KindSpecifier, path string) ([]KindSpecifier, error)
-	ReadConfigMocks(path string) ([]KindSpecifier, error)
+	ReadTestcases(testSet string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
+	ReadTcsMocks(tc KindSpecifier, testSet string) ([]KindSpecifier, error)
+	ReadConfigMocks(testSet string) ([]KindSpecifier, error)
+	ReadTestSessionIndices(path string, Logger *zap.Logger) ([]string, error)
 }
 
 type TestReportDB interface {
@@ -22,7 +23,7 @@ type TestReportDB interface {
 	GetResults(runId string) ([]KindSpecifier, error)
 	Read(ctx context.Context, path, name string) (KindSpecifier, error)
 	Write(ctx context.Context, path string, doc KindSpecifier) error
-	ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error)
+	ReadReportSessionIndices(path string, Logger *zap.Logger) ([]string, error)
 }
 
 type KindSpecifier interface {

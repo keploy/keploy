@@ -103,7 +103,7 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 	return nil
 }
 
-func (fe *TestReport) ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
+func (fe *TestReport) ReadReportSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
