@@ -15,6 +15,10 @@ source ./../../../.github/workflows/workflow_scripts/update-java.sh
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
 
+# Update the postgres database.
+docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
+docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
+
 for i in {1..2}; do
 # Start keploy in record mode.
 mvn clean install -Dmaven.test.skip=true
