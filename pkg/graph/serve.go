@@ -114,7 +114,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 		Resolvers: &Resolver{
 			Tester:         tester,
 			TestReportFS:   testReportFS,
-			YS:             ys,
+			Storage:        ys,
 			LoadedHooks:    loadedHooks,
 			Logger:         g.logger,
 			Path:           path,

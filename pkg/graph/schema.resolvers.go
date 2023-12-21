@@ -45,7 +45,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
-	ys := r.Resolver.YS
+	ys := r.Resolver.Storage
 	if ys == nil {
 		r.Logger.Error("failed to get ys from resolver")
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
@@ -86,7 +86,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	}
 	testPath := r.Resolver.Path
 
-	testSets, err := r.Resolver.TestReportFS.ReadSessionIndices(testPath, r.Logger)
+	testSets, err := r.Resolver.Storage.ReadTestSessionIndices(testPath, r.Logger)
 	if err != nil {
 		r.Resolver.Logger.Error("failed to fetch test sets", zap.Any("testPath", testPath), zap.Error(err))
 		return nil, err
