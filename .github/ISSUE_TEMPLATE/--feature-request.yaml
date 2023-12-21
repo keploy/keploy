@@ -31,21 +31,21 @@ body:
   attributes:
     label: Repository
     options:
-      - keploy
-        - go-sdk
-        - java-sdk
-        - python-sdk
-        - typescript-sdk
-        - docs
-        - website
-        - blog-website
-        - ui
-        - samples-go
-        - samples-java
-        - samples-rust
-        - samples-python
-        - samples-csharp
-        - samples-typescript
+       - keploy
+       - go-sdk
+       - java-sdk
+       - python-sdk
+       - typescript-sdk
+       - docs
+       - website
+       - blog-website
+       - ui
+       - samples-go
+       - samples-java
+       - samples-rust
+       - samples-python
+       - samples-csharp
+       - samples-typescript
   validations:
     required: true
 - type: markdown
