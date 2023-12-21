@@ -1,6 +1,6 @@
 #! /bin/bash
 
-source ./../../../.github/workflows/workflow_scripts/fake-iid.sh
+source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout a different branch
 git fetch origin

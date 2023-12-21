@@ -1,6 +1,6 @@
 #! /bin/bash
 
-source ./../../.github/workflows/workflow_scripts/fake-iid.sh
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start the postgres database.
 docker network create backend
@@ -56,8 +56,14 @@ docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/
 report_file="./keploy/testReports/report-1.yaml"
 test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
+# Get the test results from the testReport file.
+report_file="./keploy/testReports/report-1.yaml"
+test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+report_file2="./keploy/testReports/report-2.yaml"
+test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
+
 # Return the exit code according to the status.
-if [ "$test_status" = "PASSED" ]; then
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
     exit 0
 else
     exit 1
