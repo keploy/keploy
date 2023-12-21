@@ -254,10 +254,10 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 }
 
 func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier, options platform.KindSpecifier) ([]platform.KindSpecifier, error) {
-	path := ys.MockPath + "/" + testSet + "/tests"
+	path := ys.MockPath + "/" + testSet
 	tcs := []*models.TestCase{}
 
-	mockPath, err := util.ValidatePath(ys.MockPath + "/" + testSet)
+	mockPath, err := util.ValidatePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +268,7 @@ func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier,
 		tcsRead := make([]platform.KindSpecifier, len(tcs))
 		return tcsRead, nil
 	}
+	path += "/tests"
 	dirPath, err := util.ValidatePath(path)
 	if err != nil {
 		return nil, err
@@ -396,7 +397,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, testSet string) ([]p
 		}
 		mocks, err := decodeMocks(yamls, ys.Logger)
 		if err != nil {
-			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(ys.MockPath+"/"+testSet)))
+			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 
@@ -460,22 +461,22 @@ func (ys *Yaml) ReadConfigMocks(testSet string) ([]platform.KindSpecifier, error
 	if ys.MockName != "" {
 		mockName = ys.MockName
 	}
+	path := ys.MockPath + "/" + testSet
 
-	mockPath, err := util.ValidatePath(ys.MockPath + "/" + testSet + "/" + mockName + ".yaml")
+	mockPath, err := util.ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
 		return nil, err
 	}
-
 	if _, err := os.Stat(mockPath); err == nil {
 
-		yamls, err := read(ys.MockPath+"/"+testSet, mockName)
+		yamls, err := read(path, mockName)
 		if err != nil {
-			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(ys.MockPath+"/"+testSet)))
+			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 		mocks, err := decodeMocks(yamls, ys.Logger)
 		if err != nil {
-			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(ys.MockPath+"/"+testSet)))
+			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 
