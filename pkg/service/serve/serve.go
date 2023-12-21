@@ -113,7 +113,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		Resolvers: &graph.Resolver{
 			Tester:         tester,
 			TestReportFS:   testReportFS,
-			YS:             ys,
+			Storage:        ys,
 			LoadedHooks:    loadedHooks,
 			Logger:         s.logger,
 			Path:           path,

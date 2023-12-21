@@ -199,7 +199,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		TestReport:         testReportStorage,
 		Storage:            tcsStorage,
 	}
-	sessions, err := cfg.TestReport.ReadSessionIndices(path, t.logger)
+	sessions, err := cfg.Storage.ReadTestSessionIndices(path, t.logger)
 	if err != nil {
 		t.logger.Error("failed to read the recorded sessions", zap.Error(err))
 		return false
@@ -290,21 +290,21 @@ func (t *tester) StartTest(path string, testReportPath string, appCmd string, op
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
 	var returnVal InitialiseRunTestSetReturn
 	var err error
-	var readTcs []*models.TestCase
-	tcsMocks, err := cfg.Storage.ReadTestcase(cfg.TestSet, nil, nil)
-	for _, mock := range tcsMocks {
+	var readTestCaseMocks []*models.TestCase
+	testCaseMocks, err := cfg.Storage.ReadTestcases(cfg.TestSet, nil, nil)
+	for _, mock := range testCaseMocks {
 		tcs, ok := mock.(*models.TestCase)
 		if !ok {
 			continue
 		}
-		readTcs = append(readTcs, tcs)
+		readTestCaseMocks = append(readTestCaseMocks, tcs)
 	}
 	if err != nil {
 		t.logger.Error("Error in reading the testcase", zap.Error(err))
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
-	returnVal.Tcs = readTcs
+	returnVal.Tcs = readTestCaseMocks
 	if len(returnVal.Tcs) == 0 {
 		t.logger.Info("No testcases are recorded for the user application", zap.Any("for session", cfg.TestSet))
 		returnVal.InitialStatus = models.TestRunStatusFailed
