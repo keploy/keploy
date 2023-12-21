@@ -1,6 +1,6 @@
 #! /bin/bash
 
-source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ./../../../.github/workflows/workflow_scripts/fake-iid.sh
 
 # Checkout a different branch
 git fetch origin
@@ -10,10 +10,10 @@ git checkout native-linux
 docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
 
 # Update the java version
-source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
+source ./../../../.github/workflows/workflow_scripts/update-java.sh
 
 # Remove any existing test and mocks by keploy.
-rm -rf keploy/
+sudo rm -rf keploy/
 
 for i in {1..2}; do
 # Start keploy in record mode.
@@ -68,7 +68,7 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --apiTimeout 30 --delay 20
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
