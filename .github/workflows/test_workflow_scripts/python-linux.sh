@@ -89,7 +89,7 @@ sleep 5
 done
 
 # Start the app in test mode.
-sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 20
+sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --apiTimeout 30 --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
