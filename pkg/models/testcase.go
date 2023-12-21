@@ -30,9 +30,6 @@ const (
 	BodyTypePlain  BodyType = "PLAIN"
 	BodyTypeJSON   BodyType = "JSON"
 	BodyTypeError  BodyType = "ERROR"
-	TestSetMocks   string   = "test-set-mocks"
-	TestSetTests   string   = "test-set-tests"
-	TestReports    string   = "test-report"
 )
 
 type TestCase struct {
