@@ -150,10 +150,15 @@ installKeploy (){
                     colima start
                 fi
                 install_colima_docker
-            else
+
+            elif [ "$user_input" = "docker" ]; then
                 install_docker
+
+            else
+                echo "Please enter a valid command"
             fi
             return
+
         elif [ "$OS_NAME" = "Linux" ]; then
             echo -n "Do you want to install keploy with Linux or Docker? (linux/docker): "
             read user_input
