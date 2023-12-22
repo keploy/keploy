@@ -86,7 +86,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	}
 	testPath := r.Resolver.Path
 
-	testSets, err := r.Resolver.Storage.ReadTestSessionIndices(testPath, r.Logger)
+	testSets, err := r.Resolver.Storage.ReadTestSessionIndices(testPath)
 	if err != nil {
 		r.Resolver.Logger.Error("failed to fetch test sets", zap.Any("testPath", testPath), zap.Error(err))
 		return nil, err
