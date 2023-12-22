@@ -102,6 +102,6 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 	return nil
 }
 
-func (fe *TestReport) ReadReportSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
-	return pkg.ReadSessionIndices(path, Logger)
+func (fe *TestReport) ReadReportSessionIndices(path string) ([]string, error) {
+	return pkg.ReadSessionIndices(path, fe.Logger)
 }

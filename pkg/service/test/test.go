@@ -199,7 +199,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		TestReport:         testReportStorage,
 		Storage:            tcsStorage,
 	}
-	sessions, err := cfg.Storage.ReadTestSessionIndices(path, t.logger)
+	sessions, err := cfg.Storage.ReadTestSessionIndices(path)
 	if err != nil {
 		t.logger.Error("failed to read the recorded sessions", zap.Error(err))
 		return false
