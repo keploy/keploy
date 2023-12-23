@@ -27,6 +27,7 @@ body:
         - typescript-sdk
         - docs
         - website
+        - writers-program
         - blog-website
         - ui
         - samples-go
