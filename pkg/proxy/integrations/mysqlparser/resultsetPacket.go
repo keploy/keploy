@@ -38,6 +38,7 @@ type RowHeader struct {
 }
 
 func parseResultSet(b []byte) (*ResultSet, error) {
+
 	columns := make([]*ColumnDefinition, 0)
 	rows := make([]*Row, 0)
 	var err error
@@ -72,6 +73,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// Parse the rows
 	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
 	for len(b) > 5 {
+		fmt.Println(b)
 		var row *Row
 		row, b, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, err = parseRow(b, columns)
 		if err != nil {
@@ -206,20 +208,20 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 		// 	colValue.Type = models.FieldType(columnDef.ColumnType)
 		// 	colValue.Value = int32(binary.LittleEndian.Uint32(b[:4]))
 		// 	length = 4
-		case models.FieldTypeLongLong:
-			colValue.Type = models.FieldTypeLongLong
-			var longLongBytes []byte = b[1 : dataLength+1]
-			colValue.Value = longLongBytes
-			length = dataLength
-			b = b[1:]
-		case models.FieldTypeFloat:
-			colValue.Type = models.FieldTypeFloat
-			colValue.Value = math.Float32frombits(binary.LittleEndian.Uint32(b[:4]))
-			length = 4
-		case models.FieldTypeDouble:
-			colValue.Type = models.FieldTypeDouble
-			colValue.Value = math.Float64frombits(binary.LittleEndian.Uint64(b[:8]))
-			length = 8
+		// case models.FieldTypeLongLong:
+		// 	colValue.Type = models.FieldTypeLongLong
+		// 	var longLongBytes []byte = b[1 : dataLength+1]
+		// 	colValue.Value = longLongBytes
+		// 	length = dataLength
+		// 	b = b[1:]
+		// case models.FieldTypeFloat:
+		// 	colValue.Type = models.FieldTypeFloat
+		// 	colValue.Value = math.Float32frombits(binary.LittleEndian.Uint32(b[:4]))
+		// 	length = 4
+		// case models.FieldTypeDouble:
+		// 	colValue.Type = models.FieldTypeDouble
+		// 	colValue.Value = math.Float64frombits(binary.LittleEndian.Uint64(b[:8]))
+		// 	length = 8
 		default:
 			// Read a length-encoded integer
 			stringLength, _, n := readLengthEncodedInteger(b)
@@ -248,9 +250,12 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	sequenceID := byte(1)
 	buf.Write([]byte{0x01, 0x00, 0x00, 0x01})
-
+	if len(resultSet.Columns) == 24 {
+		fmt.Printf("I am the once")
+	}
 	// Write column count
-	writeLengthEncodedInteger(buf, uint64(len(resultSet.Columns)))
+	lengthColumns := uint64(len(resultSet.Columns))
+	writeLengthEncodedInteger(buf, &lengthColumns)
 
 	if len(resultSet.Columns) > 0 {
 		for _, column := range resultSet.Columns {
@@ -337,38 +342,46 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 			buf.WriteByte(byte(t.Hour()))   // Hour
 			buf.WriteByte(byte(t.Minute())) // Minute
 			buf.WriteByte(byte(t.Second())) // Second
-		case models.FieldTypeLongLong:
-			longLongSlice, ok := column.Value.([]interface{})
-			numElements := len(longLongSlice)
-			buf.WriteByte(byte(numElements))
-			if !ok {
-				return nil, errors.New("invalid type for FieldTypeLongLong, expected []interface{}")
-			}
+			// case models.FieldTypeLongLong:
+			// 	longLongSlice, ok := column.Value.([]interface{})
+			// 	numElements := len(longLongSlice)
+			// 	buf.WriteByte(byte(numElements))
+			// 	if !ok {
+			// 		return nil, errors.New("invalid type for FieldTypeLongLong, expected []interface{}")
+			// 	}
 
-			for _, v := range longLongSlice {
-				intVal, ok := v.(int)
-				if !ok {
-					return nil, errors.New("invalid int value for FieldTypeLongLong in slice")
-				}
+			// 	for _, v := range longLongSlice {
+			// 		intVal, ok := v.(int)
+			// 		if !ok {
+			// 			return nil, errors.New("invalid int value for FieldTypeLongLong in slice")
+			// 		}
 
-				// Check that the int value is within the range of a single byte
-				if intVal < 0 || intVal > 255 {
-					return nil, errors.New("int value for FieldTypeLongLong out of byte range")
-				}
+			// 		// Check that the int value is within the range of a single byte
+			// 		if intVal < 0 || intVal > 255 {
+			// 			return nil, errors.New("int value for FieldTypeLongLong out of byte range")
+			// 		}
 
-				// Convert int to a single byte
-				buf.WriteByte(byte(intVal))
-			}
+			// 		// Convert int to a single byte
+			// 		buf.WriteByte(byte(intVal))
+			// 	}
 		default:
 			strValue, ok := value.(string)
 			if !ok {
 				return nil, errors.New("could not convert value to string")
 			}
-			// Write a length-encoded integer for the string length
-			writeLengthEncodedInteger(&buf, uint64(len(strValue)))
-			// Write the string
-			buf.WriteString(strValue)
+
+			if strValue == "" {
+				// Write 0xFB to represent NULL
+				buf.WriteByte(0xFB)
+			} else {
+				length := uint64(len(strValue))
+				// Now pass a pointer to length
+				writeLengthEncodedInteger(&buf, &length)
+				// Write the string value
+				buf.WriteString(strValue)
+			}
 		}
+
 	}
 
 	return buf.Bytes(), nil

@@ -270,7 +270,9 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		return "", MySQLPacketHeader{}, nil, err
 	}
 	if models.GetMode() != "test" {
-		fmt.Println(packetType+"\n", data, "\n", header, "\n")
+		logger.Debug("Packet Info",
+			zap.String("PacketType", packetType),
+			zap.ByteString("Data", data))
 	}
 	if (models.GetMode()) == "test" {
 		lastCommand = 0x00
@@ -338,44 +340,56 @@ func writeLengthEncodedString(buf *bytes.Buffer, s string) {
 	buf.WriteString(s)
 }
 
-func writeLengthEncodedInteger(buf *bytes.Buffer, val uint64) {
+func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) {
+	if val == nil {
+		// Write 0xFB to represent NULL
+		buf.WriteByte(0xFB)
+		return
+	}
+
 	switch {
-	case val <= 250:
-		buf.WriteByte(byte(val))
-	case val <= 0xFFFF:
+	case *val <= 250:
+		buf.WriteByte(byte(*val))
+	case *val <= 0xFFFF:
 		buf.WriteByte(0xFC)
-		binary.Write(buf, binary.LittleEndian, uint16(val))
-	case val <= 0xFFFFFF:
+		binary.Write(buf, binary.LittleEndian, uint16(*val))
+	case *val <= 0xFFFFFF:
 		buf.WriteByte(0xFD)
-		binary.Write(buf, binary.LittleEndian, uint32(val)&0xFFFFFF)
+		binary.Write(buf, binary.LittleEndian, uint32(*val)&0xFFFFFF)
 	default:
 		buf.WriteByte(0xFE)
-		binary.Write(buf, binary.LittleEndian, val)
+		binary.Write(buf, binary.LittleEndian, *val)
 	}
 }
 
-func writeLengthEncodedIntegers(buf *bytes.Buffer, value uint64) {
-	if value <= 250 {
-		buf.WriteByte(byte(value))
-	} else if value <= 0xffff {
+func writeLengthEncodedIntegers(buf *bytes.Buffer, value *uint64) {
+	if value == nil {
+		// Write 0xFB to represent NULL
+		buf.WriteByte(0xFB)
+		return
+	}
+
+	if *value <= 250 {
+		buf.WriteByte(byte(*value))
+	} else if *value <= 0xffff {
 		buf.WriteByte(0xfc)
-		buf.WriteByte(byte(value))
-		buf.WriteByte(byte(value >> 8))
-	} else if value <= 0xffffff {
+		buf.WriteByte(byte(*value))
+		buf.WriteByte(byte(*value >> 8))
+	} else if *value <= 0xffffff {
 		buf.WriteByte(0xfd)
-		buf.WriteByte(byte(value))
-		buf.WriteByte(byte(value >> 8))
-		buf.WriteByte(byte(value >> 16))
+		buf.WriteByte(byte(*value))
+		buf.WriteByte(byte(*value >> 8))
+		buf.WriteByte(byte(*value >> 16))
 	} else {
 		buf.WriteByte(0xfe)
-		binary.Write(buf, binary.LittleEndian, value)
+		binary.Write(buf, binary.LittleEndian, *value)
 	}
 }
 
 func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
 	data := []byte(value)
 	length := uint64(len(data))
-	writeLengthEncodedIntegers(buf, length)
+	writeLengthEncodedIntegers(buf, &length)
 	buf.Write(data)
 }
 
