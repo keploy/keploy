@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"regexp"
 	"time"
 
 	"go.keploy.io/server/pkg/models"
@@ -38,7 +37,6 @@ type RowHeader struct {
 }
 
 func parseResultSet(b []byte) (*ResultSet, error) {
-
 	columns := make([]*ColumnDefinition, 0)
 	rows := make([]*Row, 0)
 	var err error
@@ -231,11 +229,11 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 			str := string(b[n : n+int(stringLength)])
 
 			// Remove non-printable characters
-			re := regexp.MustCompile(`[^[:print:]\t\r\n]`)
-			cleanedStr := re.ReplaceAllString(str, "")
+			// re := regexp.MustCompile(`[^[:print:]\t\r\n]`)
+			// cleanedStr := re.ReplaceAllString(str, "")
 
 			colValue.Type = models.FieldType(columnDef.ColumnType)
-			colValue.Value = cleanedStr
+			colValue.Value = str
 		}
 
 		colValue.Name = columnDef.Name
