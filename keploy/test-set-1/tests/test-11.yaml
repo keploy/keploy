@@ -1,0 +1,67 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-11
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/plugins/playbooks/api/v0/settings
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-US,en
+            Connection: keep-alive
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2Bt4L9yPg8ldHQbPbG%2B%2BdkW7fEfJ5xRqYw%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX19kb2ysYyHi8HQUP4csrgiCPV9ULpFMsbU%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2B3tU1r0F4cVXTOMaZWslQw%2ByJBuEAUXgiTZaQkopxaqvSUNo1NW9PLFbccXDDzld9vMzhy5X0%2Bqw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B3XFB1XI77k%2BfsG4qj1dg8EFhf1u5oLX0%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BRR2zKaos8bwmfBctt2r3euo5sP2qubMs%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX187mnfQ0D17bd0OzYhjbm9%2Fb%2F5nMIq6Xhg%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2BogEKgK6rq%2BEpdY%2BBbWh3EfXacZXQTMrs9OVKfv2qN1Tar9wA%2BN%2BbP%22
+            Host: localhost:8065
+            Sec-Ch-Ua: '"Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"Linux"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+            X-Requested-With: XMLHttpRequest
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-24T06:19:41.100141529Z
+        host: ""
+    resp:
+        status_code: 401
+        header:
+            Content-Length: "15"
+            Content-Type: text/plain; charset=utf-8
+            Date: Sun, 24 Dec 2023 06:19:41 GMT
+            X-Content-Type-Options: nosniff
+        body: |
+            Not authorized
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-24T06:19:41.506888904Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1703398781
+curl: |
+    curl --request GET \
+      --url http://localhost:8065/plugins/playbooks/api/v0/settings \
+      --header 'Accept-Language: en-US,en' \
+      --header 'Sec-Gpc: 1' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Connection: keep-alive' \
+      --header 'Host: localhost:8065' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"' \
+      --header 'Sec-Ch-Ua-Platform: "Linux"' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+      --header 'Accept: */*' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2Bt4L9yPg8ldHQbPbG%2B%2BdkW7fEfJ5xRqYw%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX19kb2ysYyHi8HQUP4csrgiCPV9ULpFMsbU%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2B3tU1r0F4cVXTOMaZWslQw%2ByJBuEAUXgiTZaQkopxaqvSUNo1NW9PLFbccXDDzld9vMzhy5X0%2Bqw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B3XFB1XI77k%2BfsG4qj1dg8EFhf1u5oLX0%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BRR2zKaos8bwmfBctt2r3euo5sP2qubMs%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX187mnfQ0D17bd0OzYhjbm9%2Fb%2F5nMIq6Xhg%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2BogEKgK6rq%2BEpdY%2BBbWh3EfXacZXQTMrs9OVKfv2qN1Tar9wA%2BN%2BbP%22' \

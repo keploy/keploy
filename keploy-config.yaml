@@ -1,0 +1,50 @@
+test:
+    path: "."
+    command: "sudo docker compose -f docker-compose.yml -f docker-compose.without-nginx.yml up"
+    proxyport: 16789
+    containerName: "docker-mattermost-1"
+    networkName: ""
+    tests: {}
+    globalNoise:
+        global:
+            body: {}
+            header: {
+                timestamp: [],
+                Date: [],
+                X-Request-Id: [],
+                X-Version-Id: []  # Add this if the version ID is subject to change and is not relevant for test validation
+                # Add other headers here if needed
+            }
+    delay: 200
+    buildDelay: 30s
+    apiTimeout: 5
+    passThroughPorts: []
+    withCoverage: false
+    coverageReportPath: ""
+    # Example on using globalNoise
+    # globalNoise:
+    #    global:
+    #      body: {
+    #         # to ignore some values for a field,
+    #         # pass regex patterns to the corresponding array value
+    #         "url": ["https?://\S+", "http://\S+"],
+    #      }
+    #      header: {
+    #         # to ignore the entire field, pass an empty array
+    #         "Date": [],
+    #         "X-Request-Id": [],
+    #         "X-Version-Id": []  # Uncomment or add this line if needed
+    #       }
+    #     # to ignore fields or the corresponding values for a specific test-set,
+    #     # pass the test-set-name as a key to the "test-sets" object and
+    #     # populate the corresponding "body" and "header" objects
+    #     test-sets:
+    #       test-set-1:
+    #         body: {
+    #           # ignore all the values for the "url" field
+    #           "url": []
+    #         }
+    #         header: {
+    #           # we can also pass the exact value to ignore for a field
+    #           "User-Agent": ["PostmanRuntime/7.34.0"]
+    #         }

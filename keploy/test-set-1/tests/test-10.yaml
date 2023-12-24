@@ -1,0 +1,69 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-10
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/plugins/focalboard/api/v2/clientConfig
+        header:
+            Accept: application/json
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-US,en
+            Authorization: ""
+            Connection: keep-alive
+            Content-Type: application/json
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2Bt4L9yPg8ldHQbPbG%2B%2BdkW7fEfJ5xRqYw%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX19kb2ysYyHi8HQUP4csrgiCPV9ULpFMsbU%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2B3tU1r0F4cVXTOMaZWslQw%2ByJBuEAUXgiTZaQkopxaqvSUNo1NW9PLFbccXDDzld9vMzhy5X0%2Bqw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B3XFB1XI77k%2BfsG4qj1dg8EFhf1u5oLX0%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BRR2zKaos8bwmfBctt2r3euo5sP2qubMs%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX187mnfQ0D17bd0OzYhjbm9%2Fb%2F5nMIq6Xhg%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2BogEKgK6rq%2BEpdY%2BBbWh3EfXacZXQTMrs9OVKfv2qN1Tar9wA%2BN%2BbP%22
+            Host: localhost:8065
+            Sec-Ch-Ua: '"Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"Linux"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+            X-Requested-With: XMLHttpRequest
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-24T06:19:40.926416601Z
+        host: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "877"
+            Content-Type: application/json
+            Date: Sun, 24 Dec 2023 06:19:40 GMT
+        body: '{"telemetry":true,"telemetryid":"4zjjcj3x5bbnin4womo7jbcuze","enablePublicSharedBoards":false,"teammateNameDisplay":"username","featureFlags":{"":"true","AnnualSubscription":"false","AppsEnabled":"true","BoardsDataRetention":"false","BoardsProduct":"false","CallsEnabled":"true","CommandPalette":"false","EnableInactivityCheckJob":"true","EnableRemoteClusterService":"false","GlobalDrafts":"true","GraphQL":"false","InsightsEnabled":"true","NormalizeLdapDNs":"false","OnboardingTourTips":"true","PeopleProduct":"false","PermalinkPreviews":"true","PluginApps":"","PluginCalls":"","PluginFocalboard":"","PluginPlaybooks":"","PostPriority":"true","ReduceOnBoardingTaskList":"false","SendWelcomePost":"true","TestBoolFeature":"false","TestFeature":"off","ThreadsEverywhere":"false","UseCaseOnboarding":"true","WorkTemplate":"false","WysiwygEditor":"false"},"maxFileSize":104857600}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-24T06:19:41.494067689Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1703398781
+curl: |
+    curl --request GET \
+      --url http://localhost:8065/plugins/focalboard/api/v2/clientConfig \
+      --header 'Host: localhost:8065' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Content-Type: application/json' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2Bt4L9yPg8ldHQbPbG%2B%2BdkW7fEfJ5xRqYw%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX19kb2ysYyHi8HQUP4csrgiCPV9ULpFMsbU%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2B3tU1r0F4cVXTOMaZWslQw%2ByJBuEAUXgiTZaQkopxaqvSUNo1NW9PLFbccXDDzld9vMzhy5X0%2Bqw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B3XFB1XI77k%2BfsG4qj1dg8EFhf1u5oLX0%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BRR2zKaos8bwmfBctt2r3euo5sP2qubMs%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX187mnfQ0D17bd0OzYhjbm9%2Fb%2F5nMIq6Xhg%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2BogEKgK6rq%2BEpdY%2BBbWh3EfXacZXQTMrs9OVKfv2qN1Tar9wA%2BN%2BbP%22' \
+      --header 'Sec-Ch-Ua-Platform: "Linux"' \
+      --header 'Authorization: ' \
+      --header 'Connection: keep-alive' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Accept-Language: en-US,en' \
+      --header 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"' \
+      --header 'Accept: application/json' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Sec-Gpc: 1' \
