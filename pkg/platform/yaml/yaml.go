@@ -255,35 +255,29 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 }
 
 func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier, options platform.KindSpecifier) ([]platform.KindSpecifier, error) {
-	path := ys.MockPath + "/" + testSet
+	path := ys.MockPath + "/" + testSet + "/tests"
 	tcs := []*models.TestCase{}
 
 	mockPath, err := util.ValidatePath(path)
 	if err != nil {
 		return nil, err
 	}
-
 	_, err = os.Stat(mockPath)
 	if err != nil {
 		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", testSet))
 		tcsRead := make([]platform.KindSpecifier, len(tcs))
 		return tcsRead, nil
 	}
-	path += "/tests"
-	dirPath, err := util.ValidatePath(path)
-	if err != nil {
-		return nil, err
-	}
 
-	dir, err := os.OpenFile(dirPath, os.O_RDONLY, os.ModePerm)
+	dir, err := os.OpenFile(mockPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", dirPath))
+		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", mockPath))
 		return nil, err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", dirPath))
+		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", mockPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -292,7 +286,7 @@ func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier,
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		yamlTestcase, err := read(dirPath, name)
+		yamlTestcase, err := read(mockPath, name)
 		if err != nil {
 			ys.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
 			return nil, err
