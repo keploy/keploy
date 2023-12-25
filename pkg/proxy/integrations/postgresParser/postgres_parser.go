@@ -493,6 +493,9 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
 				return err
 			}
+			continue
+
+			
 		}
 
 		for _, pgResponse := range pgResponses {
