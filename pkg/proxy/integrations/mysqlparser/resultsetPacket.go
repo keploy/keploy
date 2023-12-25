@@ -71,7 +71,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// Parse the rows
 	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
 	for len(b) > 5 {
-		fmt.Println(b)
+		// fmt.Println(b)
 		var row *Row
 		row, b, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, err = parseRow(b, columns)
 		if err != nil {
@@ -248,9 +248,6 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	sequenceID := byte(1)
 	buf.Write([]byte{0x01, 0x00, 0x00, 0x01})
-	if len(resultSet.Columns) == 24 {
-		fmt.Printf("I am the once")
-	}
 	// Write column count
 	lengthColumns := uint64(len(resultSet.Columns))
 	writeLengthEncodedInteger(buf, &lengthColumns)
