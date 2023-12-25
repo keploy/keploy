@@ -1,0 +1,21 @@
+name: Python On Docker
+on: [pull_request]
+jobs:
+  python_docker:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Build docker image
+      run: |
+        docker build -t keployv2 .
+    - name: Checkout the samples-python repository
+      uses: actions/checkout@v2
+      with:
+        repository: keploy/samples-python
+        path: samples-python
+    - name: Run the flask-mongo application
+      run: |
+        cd samples-python/flask-mongo
+        source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
