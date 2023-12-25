@@ -464,6 +464,6 @@ func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 	return nil
 }
 
-func (ys *Yaml) ReadTestSessionIndices(path string) ([]string, error) {
-	return pkg.ReadSessionIndices(path, ys.Logger)
+func (ys *Yaml) ReadTestSessionIndices() ([]string, error) {
+	return pkg.ReadSessionIndices(ys.MockPath, ys.Logger)
 }

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -100,8 +99,4 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
 	}
 	return nil
-}
-
-func (fe *TestReport) ReadReportSessionIndices(path string) ([]string, error) {
-	return pkg.ReadSessionIndices(path, fe.Logger)
 }
