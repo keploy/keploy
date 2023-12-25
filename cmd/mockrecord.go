@@ -65,13 +65,20 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 				return
 			}
 
+			enableTele, err := cmd.Flags().GetBool("enableTele")
+			if err != nil {
+				mr.logger.Error(Emoji + "failed to read the enableTele flag")
+				return
+			}
+
+
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
 				mr.logger.Error(Emoji + "failed to read the proxy port")
 				return
 			}
 
-			mr.mockRecorder.MockRecord(path, proxyPort, pid, dir)
+			mr.mockRecorder.MockRecord(path, proxyPort, pid, dir, enableTele)
 		},
 	}
 
@@ -79,6 +86,8 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 	serveCmd.MarkFlagRequired("pid")
 
 	serveCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
+	serveCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+	serveCmd.Flags().MarkHidden("enableTele")
 
 	serveCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 	serveCmd.MarkFlagRequired("path")

@@ -39,7 +39,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 	return &doc.Record, nil
 }
 
-var filters = *&models.Filters{}
+var filters = models.Filters{}
 
 func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
@@ -146,6 +146,12 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			enableTele, err := cmd.Flags().GetBool("enableTele")
+			if err != nil {
+				r.logger.Error("failed to read the disable telemetry flag")
+				return err
+			}
+
 			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, configPath)
 			if err != nil {
 				if err == errFileNotFound {
@@ -156,11 +162,11 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag or appCmd in config file")
+				r.logger.Error("missing required -c flag or appCmd in config file")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					r.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 				} else {
-					fmt.Println("Example usage:\n", cmd.Example)
+					r.logger.Info(fmt.Sprintf("Example usage:%s", cmd.Example))
 				}
 				return errors.New("missing required -c flag or appCmd in config file")
 			}
@@ -183,8 +189,8 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			if isDockerCmd && buildDelay <= 30*time.Second {
-				fmt.Printf("Warning: buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
-				fmt.Println("Example usage:\n", `keploy record -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy record -c "docker-compose up --build" --buildDelay 1m\n`)
+				r.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", buildDelay))
+				r.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
 			}
 
 			path += "/keploy"
@@ -197,14 +203,14 @@ func (r *Record) GetCmd() *cobra.Command {
 					hasContainerName = true
 				}
 				if !hasContainerName && appContainer == "" {
-					fmt.Println("Error: missing required --containerName flag or containerName in config file")
-					fmt.Println("\nExample usage:\n", `keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					r.logger.Error("Couldn't find containerName")
+					r.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele)
 			return nil
 		},
 	}
@@ -226,6 +232,9 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
+
+	recordCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+	recordCmd.Flags().MarkHidden("enableTele")
 
 	recordCmd.SilenceUsage = true
 	recordCmd.SilenceErrors = true

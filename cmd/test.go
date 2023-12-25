@@ -172,6 +172,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			enableTele, err := cmd.Flags().GetBool("enableTele")
+			if err != nil {
+				t.logger.Error("failed to read the disable telemetry flag")
+				return err
+			}
+
 			tests := map[string][]string{}
 
 			testsets, err := cmd.Flags().GetStringSlice("testsets")
@@ -197,27 +203,27 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			if appCmd == "" {
-				fmt.Println("Error: missing required -c flag or appCmd in config file")
+				t.logger.Error("Couldn't find appCmd")
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					t.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+				} else {
+					t.logger.Info(fmt.Sprintf("Example usage: %s", cmd.Example))
 				}
-				fmt.Println("Example usage:\n", cmd.Example)
-
 				return errors.New("missing required -c flag or appCmd in config file")
 			}
 
 			if delay <= 5 {
-				fmt.Printf("Warning: delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay\n", delay)
+				t.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", delay))
 				if isDockerCmd {
-					fmt.Println("Example usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6\n`)
+					t.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 				} else {
-					fmt.Println("Example usage:\n", cmd.Example)
+					t.logger.Info("Example usage: " + cmd.Example)
 				}
 			}
 
 			if isDockerCmd && buildDelay <= 30*time.Second {
-				fmt.Printf("Warning: buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay\n", buildDelay)
-				fmt.Println("Example usage:\n", `keploy test -c "docker-compose up --build" --buildDelay 35s\n`, "\nor\n", `keploy test -c "docker-compose up --build" --buildDelay 1m\n`)
+				t.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", buildDelay))
+				t.logger.Info(`Example usage:keploy test -c "docker-compose up --build" --buildDelay 35s`)
 			}
 
 			//if user provides relative path
@@ -249,8 +255,8 @@ func (t *Test) GetCmd() *cobra.Command {
 					hasContainerName = true
 				}
 				if !hasContainerName && appContainer == "" {
-					fmt.Println("Error: missing required --containerName flag or containerName in config file")
-					fmt.Println("\nExample usage:\n", `keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					t.logger.Error("Couldn't find containerName")
+					t.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
@@ -278,7 +284,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
-			})
+			}, enableTele)
 
 			return nil
 		},
@@ -308,6 +314,9 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().String("mongoPassword", "default123", "Authentication password for mocking MongoDB connection")
 
 	testCmd.Flags().String("coverageReportPath", "", "Write a go coverage profile to the file in the given directory.")
+
+	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+	testCmd.Flags().MarkHidden("enableTele")
 
 	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"

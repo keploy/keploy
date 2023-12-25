@@ -1,7 +1,9 @@
 #! /bin/bash
 
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+
 # Start the docker container.
-sudo docker run --name mongoDb --rm -p 27017:27017 -d mongo
+docker run --name mongoDb --rm -p 27017:27017 -d mongo
 
 # Install the required node dependencies.
 npm install
@@ -11,7 +13,7 @@ file_path="src/db/connection.js"
 sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
 
 # Remove any preexisting keploy tests.
-sudo rm -rf keploy/
+rm -rf keploy/
 
 for i in {1..2}; do
 # Start keploy in record mode.
@@ -74,7 +76,7 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testset
 config_file="./keploy-config.yaml"
 sed -i '/tests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
