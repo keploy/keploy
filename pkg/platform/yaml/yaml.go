@@ -163,7 +163,7 @@ func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context, filtersRead platform.KindSpecifier) error {
 	tc, ok := tcRead.(*models.TestCase)
 	if !ok {
-		return fmt.Errorf(Emoji, "failed to read testcase in WriteTestcase.")
+		return fmt.Errorf("%s failed to read testcase in WriteTestcase", Emoji)
 	}
 	filters, ok := filtersRead.(*models.Filters)
 
