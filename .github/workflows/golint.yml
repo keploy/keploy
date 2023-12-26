@@ -33,3 +33,4 @@ jobs:
           version: v1.54
           only-new-issues: true
           install-mode: "goinstall"
+        config: .golangci.yml
