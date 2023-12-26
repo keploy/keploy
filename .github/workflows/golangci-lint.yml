@@ -36,7 +36,7 @@ jobs:
           version: v1.54
 
           # Optional: show only new issues if it's a pull request. The default value is `false`.
-          only-new-issues: true
+          # only-new-issues: true
 
           # Optional: The mode to install golangci-lint. It can be 'binary' or 'goinstall'.
           install-mode: "goinstall"
