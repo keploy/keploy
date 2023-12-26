@@ -16,10 +16,10 @@ var (
 func InitRealTimeOffset() error {
 	var monotonicTime, realTime unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &monotonicTime); err != nil {
-		return fmt.Errorf(Emoji, "failed getting monotonic clock due to: %v", err)
+		return fmt.Errorf("%s failed getting monotonic clock due to: %v", Emoji, err)
 	}
 	if err := unix.ClockGettime(unix.CLOCK_REALTIME, &realTime); err != nil {
-		return fmt.Errorf(Emoji, "failed getting real clock time due to: %v", err)
+		return fmt.Errorf("%s failed getting real clock time due to: %v", Emoji, err)
 	}
 	realTimeOffset = uint64(time.Second)*(uint64(realTime.Sec)-uint64(monotonicTime.Sec)) + uint64(realTime.Nsec) - uint64(monotonicTime.Nsec)
 	return nil

@@ -64,7 +64,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Kin
 	var doc models.TestReport
 	err = decoder.Decode(&doc)
 	if err != nil {
-		return &models.TestReport{}, fmt.Errorf(Emoji, "failed to decode the yaml file documents. error: %v", err.Error())
+		return &models.TestReport{}, fmt.Errorf("%s failed to decode the yaml file documents. error: %v", Emoji, err.Error())
 	}
 	return &doc, nil
 }
@@ -72,7 +72,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Kin
 func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindSpecifier) error {
 	readDock, ok := doc.(*models.TestReport)
 	if !ok {
-		return fmt.Errorf(Emoji, "failed to read test report in yaml file.")
+		return fmt.Errorf("%s failed to read test report in yaml file.", Emoji)
 	}
 	if readDock.Name == "" {
 		lastIndex, err := findLastIndex(path, fe.Logger)
@@ -90,13 +90,13 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 	data := []byte{}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {
-		return fmt.Errorf(Emoji, "failed to marshal document to yaml. error: %s", err.Error())
+		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", Emoji, err.Error())
 	}
 	data = append(data, d...)
 
 	err = os.WriteFile(filepath.Join(path, readDock.Name+".yaml"), data, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf(Emoji, "failed to write test report in yaml file. error: %s", err.Error())
+		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
 	}
 	return nil
 }
