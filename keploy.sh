@@ -14,6 +14,10 @@ installKeploy (){
         esac
     done
 
+    get_current_docker_context() {
+        current_context=$(docker context ls --format '{{.Name}} {{if .Current}}{{end}}' | grep '' | awk '{print $1}')
+    }
+
     install_keploy_arm() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
@@ -88,7 +92,7 @@ installKeploy (){
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
-        #!/bin/bash
+            get_current_docker_context
             if ! which docker &> /dev/null; then
                 echo -n "Docker not found on device, install docker? (y/n):"
                 read user_input
@@ -114,6 +118,11 @@ installKeploy (){
             read user_input
 
             if [ "$user_input" = "colima" ]; then
+                if [ "$current_context" = "default" ]; then
+                    echo -n
+                    echo 'Error: Docker is using the default context, set to colima using "docker context use colima"'
+                    return
+                fi
                 if ! which colima &> /dev/null; then
                     echo
                     echo -e "\e]8;;https://kumojin.com/en/colima-alternative-docker-desktop\aAlternate is to use colima(lightweight and performant alternative to Docker Desktop)\e]8;;\a"
@@ -146,7 +155,7 @@ installKeploy (){
                     fi
                 fi
 
-                if timeout 5s colima status | grep -q "Running"; then
+                if colima status | grep -q "Running"; then
                     echo "colima is already running."
                 else
                     colima start
@@ -154,6 +163,11 @@ installKeploy (){
                 install_colima_docker
 
             elif [ "$user_input" = "docker" ]; then
+                if [ "$current_context" = "colima" ]; then
+                    echo -n
+                    echo 'Error: Docker is using the colima context, set to default using "docker context use default"'
+                    return
+                fi
                 install_docker
 
             else
