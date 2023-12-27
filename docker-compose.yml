@@ -33,7 +33,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 200
-    # read_only: ${MATTERMOST_CONTAINER_READONLY}
+    read_only: ${MATTERMOST_CONTAINER_READONLY}
     tmpfs:
       - /tmp
     volumes:
@@ -41,8 +41,8 @@ services:
       - ${MATTERMOST_DATA_PATH}:/mattermost/data:rw
       - ${MATTERMOST_LOGS_PATH}:/mattermost/logs:rw
       - ${MATTERMOST_PLUGINS_PATH}:/mattermost/plugins:rw
-      - ${MATTERMOST_CLIENT_PLUGINS_PATH}:rw
-      - ${MATTERMOST_BLEVE_INDEXES_PATH}:rw
+      - ${MATTERMOST_CLIENT_PLUGINS_PATH}:/mattermost/client/plugins:rw
+      - ${MATTERMOST_BLEVE_INDEXES_PATH}:/mattermost/bleve-indexes:rw
       # When you want to use SSO with GitLab, you have to add the cert pki chain of GitLab inside Alpine
       # to avoid Token request failed: certificate signed by unknown authority 
       # (link: https://github.com/mattermost/mattermost-server/issues/13059 and https://github.com/mattermost/docker/issues/34)
