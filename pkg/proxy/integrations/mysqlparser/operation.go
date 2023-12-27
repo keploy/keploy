@@ -163,7 +163,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		default:
 			packetType = "Unknown"
 			packetData = data
-			logger.Warn("unknown packet type after COM_QUERY", zap.Int("unknownPacketTypeInt", int(data[0])))
+			logger.Debug("unknown packet type after COM_QUERY", zap.Int("unknownPacketTypeInt", int(data[0])))
 		}
 	case data[0] == 0x0e: // COM_PING
 		packetType = "COM_PING"
@@ -263,7 +263,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	default:
 		packetType = "Unknown"
 		packetData = data
-		logger.Warn("unknown packet type", zap.Int("unknownPacketTypeInt", int(data[0])))
+		logger.Debug("unknown packet type", zap.Int("unknownPacketTypeInt", int(data[0])))
 	}
 
 	if err != nil {
