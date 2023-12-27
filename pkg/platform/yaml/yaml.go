@@ -36,7 +36,7 @@ type Yaml struct {
 	mutex    sync.RWMutex
 }
 
-func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) *Yaml {
+func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) platform.TestCaseDB {
 	return &Yaml{
 		TcsPath:  tcsPath,
 		MockPath: mockPath,
