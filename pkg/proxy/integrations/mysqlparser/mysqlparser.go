@@ -863,8 +863,10 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 		} else {
 			queryBuffer, err = util.ReadBytes(clientConn)
 			if err != nil {
-				logger.Error("failed to read query from the mysql client", zap.Error(err))
-				return nil, err
+				if !h.IsUserAppTerminated() {
+					logger.Error("failed to read query from the mysql client", zap.Error(err))
+					return nil, err
+				}
 			}
 		}
 		if len(queryBuffer) == 0 {

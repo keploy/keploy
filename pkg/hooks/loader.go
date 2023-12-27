@@ -158,6 +158,10 @@ func (h *Hook) PopIndex(index int) {
 	h.mu.Unlock()
 }
 
+func (h *Hook) IsUserAppTerminated() bool {
+	return h.userAppShutdownInitiated
+}
+
 func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
 	dep := h.tcsMocks[indx]
