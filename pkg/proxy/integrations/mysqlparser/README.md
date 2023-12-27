@@ -5,7 +5,13 @@ to read MySql binary messages and capture and test the outputs.
 Utilized by the `hooks` package, it assists in redirecting outgoing 
 calls for the purpose of recording or testing the outputs.
 
-The following MySQL packet types are handled in the parser:
+## SSL Support
+
+Please note that SSL is currently not supported in the MySQL package. To use the package without SSL, you can include the following parameters in your database URL:
+
+``` useSSL=false&allowPublicKeyRetrieval=true ```
+
+## The following MySQL packet types are handled in the parser:
 
 **COM_PING**: A ping command sent to the server to check if it's alive and responsive.
 
