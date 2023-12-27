@@ -7,9 +7,9 @@ calls for the purpose of recording or testing the outputs.
 
 ## SSL Support
 
-Please note that SSL is currently not supported in the MySQL package. To use the package without SSL, you can include the following parameters in your database URL:
+Please note that SSL is currently not supported in the MySQL package. To use the package without SSL, you can include the following parameters in your database URL like the following example:
 
-``` useSSL=false&allowPublicKeyRetrieval=true ```
+``` jdbc:mysql://localhost:3306/db_name?useSSL=false&allowPublicKeyRetrieval=true ```
 
 ## The following MySQL packet types are handled in the parser:
 
