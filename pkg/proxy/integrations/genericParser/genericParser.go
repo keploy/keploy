@@ -109,15 +109,17 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 	}
 }
 
-func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger) error {
+func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger, h *hooks.Hook) error {
 	for {
 		buffer, err := util.ReadBytes(conn)
 		if err != nil {
-			if !strings.Contains(err.Error(), "use of closed network connection") {
-				logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
+			if !h.IsUsrAppTerminateInitiated() {
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
+				}
+				errChannel <- err
+				return err
 			}
-			errChannel <- err
-			return err
 		}
 		bufferChannel <- buffer
 	}
@@ -163,14 +165,14 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
 		defer utils.HandlePanic()
-		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger)
+		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger, h)
 	}()
 	// read response from destination
 	go func() {
 		// Recover from panic and gracefully shutdown
 		defer h.Recover(pkg.GenerateRandomID())
 		defer utils.HandlePanic()
-		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+		ReadBuffConn(destConn, destBufferChannel, errChannel, logger, h)
 	}()
 
 	isPreviousChunkRequest := false

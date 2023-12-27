@@ -365,12 +365,14 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			requestBuffer, err = util.ReadBytes(clientConn)
 			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
-				if err == io.EOF {
-					logger.Debug("recieved request buffer is empty in record mode for mongo call")
+				if !h.IsUsrAppTerminateInitiated() {
+					if err == io.EOF {
+						logger.Debug("recieved request buffer is empty in record mode for mongo call")
+						return
+					}
+					logger.Error("failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()))
 					return
 				}
-				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()))
-				return
 			}
 			readRequestDelay = time.Since(started)
 			// logStr += lstr
@@ -402,14 +404,17 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for {
 				requestBuffer1, err := util.ReadBytes(clientConn)
+
 				// logStr += tmpStr
 				if err != nil {
-					if err == io.EOF {
-						logger.Debug("recieved request buffer is empty in record mode for mongo request")
+					if !h.IsUsrAppTerminateInitiated() {
+						if err == io.EOF {
+							logger.Debug("recieved request buffer is empty in record mode for mongo request")
+							return
+						}
+						logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 						return
 					}
-					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
-					return
 				}
 
 				// write the reply to mongo client
