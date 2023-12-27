@@ -88,7 +88,7 @@ Java
 
 Docker
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage> --buildDelay 1m"
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
 
 	Test:
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
