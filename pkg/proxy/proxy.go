@@ -310,13 +310,13 @@ func Register(parserName string, parser DependencyHandler) {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context, delay uint64) *ProxySet {
 	//Register all the parsers in the map.
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
 	Register("mongo", mongoparser.NewMongoParser(logger, h, opt.MongoPassword))
 	Register("http", httpparser.NewHttpParser(logger, h))
-	Register("mysql", mysqlparser.NewMySqlParser(logger, h))
+	Register("mysql", mysqlparser.NewMySqlParser(logger, h, delay))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
