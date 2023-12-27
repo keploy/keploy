@@ -425,7 +425,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	for {
 		buffer, err := util.ReadBytes(conn)
 		if err != nil {
-			if !h.IsUserAppTerminated() {
+			if !h.IsUsrAppTerminateInitiated() {
 				if err == io.EOF {
 					logger.Debug("EOF error received from client. Closing connection in postgres !!")
 					return err

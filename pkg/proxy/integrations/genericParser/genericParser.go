@@ -113,7 +113,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	for {
 		buffer, err := util.ReadBytes(conn)
 		if err != nil {
-			if !h.IsUserAppTerminated() {
+			if !h.IsUsrAppTerminateInitiated() {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
 					logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
 				}

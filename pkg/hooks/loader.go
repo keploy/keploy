@@ -158,7 +158,7 @@ func (h *Hook) PopIndex(index int) {
 	h.mu.Unlock()
 }
 
-func (h *Hook) IsUserAppTerminated() bool {
+func (h *Hook) IsUsrAppTerminateInitiated() bool {
 	return h.userAppShutdownInitiated
 }
 
