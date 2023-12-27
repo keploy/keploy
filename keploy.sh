@@ -15,7 +15,7 @@ installKeploy (){
     done
 
     get_current_docker_context() {
-        current_context=$(docker context ls --format '{{.Name}} {{if .Current}}{{end}}' | grep '' | awk '{print $1}')
+        current_context=$(docker context ls --format '{{.Name}} {{if .Current}}*{{end}}' | grep '*' | awk '{print $1}')
     }
 
     install_keploy_arm() {
