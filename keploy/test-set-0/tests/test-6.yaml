@@ -1,0 +1,72 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-6
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/static/products/boards/remote_entry.js?bt=1699278176909
+        url_params:
+            bt: "1699278176909"
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-US,en
+            Connection: keep-alive
+            Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2Bw5D0gWPBHARYs%2BooYLc6blV0S6Gz2uMoGP0T%2FgRV3x%2BHCiO3GreuX6lp6p0h3U0LKhWqvESSQwQ%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19qISIEo%2BWot8T2cgdBXNGKf6V0aAEwINY%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2B9pHDdyVZT%2Bm%2BEU%2FbGqDkLr0Gp32aBDbu6H6NWlnP0yL6AJYuHqL4I%22
+            Host: localhost:8065
+            If-Modified-Since: Fri, 10 Nov 2023 19:54:53 GMT
+            Sec-Ch-Ua: '"Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"Linux"'
+            Sec-Fetch-Dest: script
+            Sec-Fetch-Mode: no-cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-27T04:29:32.223102102Z
+        host: ""
+    resp:
+        status_code: 304
+        header:
+            Cache-Control: no-cache, max-age=31556926, public
+            Date: Wed, 27 Dec 2023 04:29:32 GMT
+            Last-Modified: Fri, 10 Nov 2023 19:54:53 GMT
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+        body: ""
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-27T04:29:32.347096288Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+            header.Last-Modified: []
+    created: 1703651372
+curl: |
+    curl --request GET \
+      --url http://localhost:8065/static/products/boards/remote_entry.js?bt=1699278176909 \
+      --header 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"' \
+      --header 'Accept: */*' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Connection: keep-alive' \
+      --header 'If-Modified-Since: Fri, 10 Nov 2023 19:54:53 GMT' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2Bw5D0gWPBHARYs%2BooYLc6blV0S6Gz2uMoGP0T%2FgRV3x%2BHCiO3GreuX6lp6p0h3U0LKhWqvESSQwQ%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19qISIEo%2BWot8T2cgdBXNGKf6V0aAEwINY%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2B9pHDdyVZT%2Bm%2BEU%2FbGqDkLr0Gp32aBDbu6H6NWlnP0yL6AJYuHqL4I%22' \
+      --header 'Sec-Ch-Ua-Platform: "Linux"' \
+      --header 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+      --header 'Sec-Fetch-Mode: no-cors' \
+      --header 'Accept-Language: en-US,en' \
+      --header 'Sec-Fetch-Dest: script' \
+      --header 'Host: localhost:8065' \
+      --header 'Sec-Gpc: 1' \

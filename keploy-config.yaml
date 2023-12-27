@@ -1,3 +1,16 @@
+record:
+    path: "."
+    command: "sudo docker compose -f docker-compose.yml -f docker-compose.without-nginx.yml up"
+    proxyport: 16789
+    containerName: "docker-mattermost-1"
+    networkName: ""
+    delay: 200
+    buildDelay: 2m
+    passThroughPorts: []
+    filters:
+        ReqHeader: []
+        urlMethods: {}
+
 test:
     path: "."
     command: "sudo docker compose -f docker-compose.yml -f docker-compose.without-nginx.yml up"
@@ -8,19 +21,23 @@ test:
     globalNoise:
         global:
             body: {}
+            # Add body fields here to ignore dynamic content
             header: {
-                timestamp: [],
-                Date: [],
-                X-Request-Id: [],
-                X-Version-Id: []  # Add this if the version ID is subject to change and is not relevant for test validation
-                # Add other headers here if needed
-            }
+                    "Date": [], # Ignore Date header as it changes
+                    "X-Request-Id": [], # Ignore Request ID
+                    "X-Version-Id": [], # Ignore Version ID
+                    "X-Frame-Options": [], # Example of another header to ignore
+                    "Set-Cookie": [], # Ignore Set-Cookie header
+                    # Add other dynamic headers here to be ignored
+                }
+
     delay: 200
     buildDelay: 30s
     apiTimeout: 5
     passThroughPorts: []
-    withCoverage: false
-    coverageReportPath: ""
+    withCoverage: true
+    coverageReportPath: "."
+
     # Example on using globalNoise
     # globalNoise:
     #    global:
