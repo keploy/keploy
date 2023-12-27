@@ -20,7 +20,7 @@ type TestReport struct {
 	Logger *zap.Logger
 }
 
-func NewTestReportFS(logger *zap.Logger) *TestReport {
+func NewTestReportFS(logger *zap.Logger) platform.TestReportDB {
 	return &TestReport{
 		tests:  make(map[string][]platform.KindSpecifier), // Correctly initialize the map
 		m:      sync.Mutex{},
