@@ -92,7 +92,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx)
+		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
 
 	}
 

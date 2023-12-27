@@ -163,7 +163,7 @@ func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context, filtersRead platform.KindSpecifier) error {
 	tc, ok := tcRead.(*models.TestCase)
 	if !ok {
-		return fmt.Errorf(Emoji, "failed to read testcase in WriteTestcase.")
+		return fmt.Errorf("%s failed to read testcase in WriteTestcase", Emoji)
 	}
 	filters, ok := filtersRead.(*models.Filters)
 
@@ -396,7 +396,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 		} else if mock.Version != "api.keploy.io/v1beta1" {
 			nonKeployMocks = append(nonKeployMocks, mock.Name)
 		}
-		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
+		if (mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{})) && mock.Kind != "SQL" {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
 			ys.Logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
 			filteredMocks = append(filteredMocks, mock)
