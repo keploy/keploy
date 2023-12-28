@@ -1,0 +1,84 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-38
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/api/v4/roles/names
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-US,en
+            Connection: keep-alive
+            Content-Length: "36"
+            Content-Type: application/json
+            Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19J%2FFVTnfr7wpbP41%2BgaL0xGfNL%2Fn50z53Giy6geJs%2BICqFLixVY5XPbxDpUwq%2FZ7%2BQga9%2F6s0n5Q%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19MbsFyYOIfVwQAVaTDhnfQ%2B9bNMLboIsQ%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2FPKd3vmwFpevV1%2FbJ5hjyTVWN0AOXoh3WAD%2BOSJyyB1%2Bi09rcCyOfa%22
+            Host: localhost:8065
+            Origin: http://localhost:8065
+            Sec-Ch-Ua: '"Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"Linux"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+            X-Csrf-Token: orq9qechqbduxbjkobnkj6gjpy
+            X-Requested-With: XMLHttpRequest
+        body: '["playbook_member","playbook_admin"]'
+        body_type: ""
+        timestamp: 2023-12-27T07:15:41.793673987Z
+        host: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "1042"
+            Content-Type: application/json
+            Date: Wed, 27 Dec 2023 07:15:41 GMT
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Request-Id: p3qq9mp4pfnuprebrsqdhyci3y
+            X-Version-Id: 7.8.15.7.8.15.11eb342b774c4fd6fb19b80592b3a86a.false
+        body: '[{"id":"hwcb9bf8tfftmjebgfoqi66nhc","name":"playbook_member","display_name":"authentication.roles.playbook_member.name","description":"authentication.roles.playbook_member.description","create_at":1703077207831,"update_at":1703077213952,"delete_at":0,"permissions":["run_create","playbook_public_view","playbook_public_manage_members","playbook_public_manage_properties","playbook_private_view","playbook_private_manage_members","playbook_private_manage_properties"],"scheme_managed":true,"built_in":true},{"id":"1dai7kqnhifeuxetih8sjypb8a","name":"playbook_admin","display_name":"authentication.roles.playbook_admin.name","description":"authentication.roles.playbook_admin.description","create_at":1703077207889,"update_at":1703077214006,"delete_at":0,"permissions":["playbook_private_manage_members","playbook_private_manage_roles","playbook_private_manage_properties","playbook_public_make_private","playbook_public_manage_members","playbook_public_manage_roles","playbook_public_manage_properties"],"scheme_managed":true,"built_in":true}]'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-27T07:15:42.565663852Z
+    objects: []
+    assertions:
+        noise:
+            body.built_in: []
+            body.id: []
+            body.name: []
+            body.scheme_managed: []
+            header.Content-Length: []
+            header.Date: []
+    created: 1703661342
+curl: |-
+    curl --request POST \
+      --url http://localhost:8065/api/v4/roles/names \
+      --header 'Content-Type: application/json' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Origin: http://localhost:8065' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19J%2FFVTnfr7wpbP41%2BgaL0xGfNL%2Fn50z53Giy6geJs%2BICqFLixVY5XPbxDpUwq%2FZ7%2BQga9%2F6s0n5Q%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19MbsFyYOIfVwQAVaTDhnfQ%2B9bNMLboIsQ%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2FPKd3vmwFpevV1%2FbJ5hjyTVWN0AOXoh3WAD%2BOSJyyB1%2Bi09rcCyOfa%22' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Sec-Gpc: 1' \
+      --header 'Accept: */*' \
+      --header 'Host: localhost:8065' \
+      --header 'Accept-Language: en-US,en' \
+      --header 'Connection: keep-alive' \
+      --header 'Sec-Ch-Ua-Platform: "Linux"' \
+      --header 'X-Csrf-Token: orq9qechqbduxbjkobnkj6gjpy' \
+      --header 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"' \
+      --header 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --data '["playbook_member","playbook_admin"]'

@@ -1,0 +1,80 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-86
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/api/v4/channels
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en
+            Connection: keep-alive
+            Content-Length: "277"
+            Content-Type: application/json
+            Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19J%2FFVTnfr7wpbP41%2BgaL0xGfNL%2Fn50z53Giy6geJs%2BICqFLixVY5XPbxDpUwq%2FZ7%2BQga9%2F6s0n5Q%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19MbsFyYOIfVwQAVaTDhnfQ%2B9bNMLboIsQ%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2FPKd3vmwFpevV1%2FbJ5hjyTVWN0AOXoh3WAD%2BOSJyyB1%2Bi09rcCyOfa%22
+            Host: localhost:8065
+            Origin: http://localhost:8065
+            Sec-Ch-Ua: '"Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"Linux"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+            X-Csrf-Token: orq9qechqbduxbjkobnkj6gjpy
+            X-Requested-With: XMLHttpRequest
+        body: '{"team_id":"sqcxekjiijbt7bgha66kpfpone","name":"more-channels","display_name":"more channels!","purpose":"","header":"","type":"O","create_at":0,"creator_id":"","delete_at":0,"group_constrained":false,"id":"","last_post_at":0,"last_root_post_at":0,"scheme_id":"","update_at":0}'
+        body_type: ""
+        timestamp: 2023-12-27T07:16:08.430832623Z
+        host: ""
+    resp:
+        status_code: 201
+        header:
+            Content-Length: "463"
+            Content-Type: application/json
+            Date: Wed, 27 Dec 2023 07:16:08 GMT
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Request-Id: mqqr8y83bfdb7q69dmgqtyf7co
+            X-Version-Id: 7.8.15.7.8.15.11eb342b774c4fd6fb19b80592b3a86a.false
+        body: |
+            {"id":"f9u7iwn75trb8qj4az8kah319c","create_at":1703661368434,"update_at":1703661368434,"delete_at":0,"team_id":"sqcxekjiijbt7bgha66kpfpone","type":"O","display_name":"more channels!","name":"more-channels","header":"","purpose":"","last_post_at":0,"total_msg_count":0,"extra_update_at":0,"creator_id":"r6jeh1ge9pg6ppj7db89mfyb8w","scheme_id":"","props":null,"group_constrained":false,"shared":null,"total_msg_count_root":0,"policy_id":null,"last_root_post_at":0}
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-27T07:16:08.510932737Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1703661368
+curl: |-
+    curl --request POST \
+      --url http://localhost:8065/api/v4/channels \
+      --header 'X-Csrf-Token: orq9qechqbduxbjkobnkj6gjpy' \
+      --header 'Accept: */*' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19J%2FFVTnfr7wpbP41%2BgaL0xGfNL%2Fn50z53Giy6geJs%2BICqFLixVY5XPbxDpUwq%2FZ7%2BQga9%2F6s0n5Q%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19MbsFyYOIfVwQAVaTDhnfQ%2B9bNMLboIsQ%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2FPKd3vmwFpevV1%2FbJ5hjyTVWN0AOXoh3WAD%2BOSJyyB1%2Bi09rcCyOfa%22' \
+      --header 'Host: localhost:8065' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Content-Type: application/json' \
+      --header 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+      --header 'Sec-Ch-Ua-Platform: "Linux"' \
+      --header 'Origin: http://localhost:8065' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Connection: keep-alive' \
+      --header 'Sec-Gpc: 1' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Accept-Language: en' \
+      --data '{"team_id":"sqcxekjiijbt7bgha66kpfpone","name":"more-channels","display_name":"more channels!","purpose":"","header":"","type":"O","create_at":0,"creator_id":"","delete_at":0,"group_constrained":false,"id":"","last_post_at":0,"last_root_post_at":0,"scheme_id":"","update_at":0}'

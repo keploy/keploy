@@ -1,0 +1,77 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-93
+spec:
+    metadata: {}
+    req:
+        method: DELETE
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/api/v4/users/me/channels/wun7b58niir79eqch635hp7u3o/drafts
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en
+            Connection: keep-alive
+            Connection-Id: ""
+            Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19t7pdiZ8nxE7oyaQmBhWKHBS0bQt5nJDpjPfbCwqFyMDXUaQOLapTVEcs1IV93qAE9tet2GdlLUQ%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19d2jgQaK79lRBxbSjpV8TvEFS08svHHQo%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX184Ugs4os%2BdH3p0GdYjdcE2AyypnpfCWM0WTF%2F348v5Do6SjIz%2BzDVi%22
+            Host: localhost:8065
+            Origin: http://localhost:8065
+            Sec-Ch-Ua: '"Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"Linux"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            Sec-Gpc: "1"
+            User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+            X-Csrf-Token: orq9qechqbduxbjkobnkj6gjpy
+            X-Requested-With: XMLHttpRequest
+        body: ""
+        body_type: ""
+        timestamp: 2023-12-28T05:43:20.383117834Z
+        host: ""
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "15"
+            Content-Type: application/json
+            Date: Thu, 28 Dec 2023 05:43:20 GMT
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Request-Id: zqaih4nchf8gfqz5si5waai5br
+            X-Version-Id: 7.8.15.7.8.15.11eb342b774c4fd6fb19b80592b3a86a.false
+        body: '{"status":"OK"}'
+        body_type: ""
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2023-12-28T05:43:22.413338268Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1703742202
+curl: |
+    curl --request DELETE \
+      --url http://localhost:8065/api/v4/users/me/channels/wun7b58niir79eqch635hp7u3o/drafts \
+      --header 'Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19t7pdiZ8nxE7oyaQmBhWKHBS0bQt5nJDpjPfbCwqFyMDXUaQOLapTVEcs1IV93qAE9tet2GdlLUQ%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19d2jgQaK79lRBxbSjpV8TvEFS08svHHQo%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX184Ugs4os%2BdH3p0GdYjdcE2AyypnpfCWM0WTF%2F348v5Do6SjIz%2BzDVi%22' \
+      --header 'Sec-Ch-Ua-Platform: "Linux"' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Connection: keep-alive' \
+      --header 'Origin: http://localhost:8065' \
+      --header 'Sec-Gpc: 1' \
+      --header 'Accept: */*' \
+      --header 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"' \
+      --header 'Connection-Id: ' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Host: localhost:8065' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Accept-Language: en' \
+      --header 'X-Csrf-Token: orq9qechqbduxbjkobnkj6gjpy' \

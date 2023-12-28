@@ -25,7 +25,9 @@ services:
       - POSTGRES_DB
 
   mattermost:
-
+    ports:
+      - 8065:8065
+    container_name: docker-mattermost-1
     depends_on:
       - postgres
     image: mattermost/${MATTERMOST_IMAGE}:${MATTERMOST_IMAGE_TAG}
@@ -33,16 +35,16 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 200
-    read_only: ${MATTERMOST_CONTAINER_READONLY}
+    # read_only: ${MATTERMOST_CONTAINER_READONLY}
     tmpfs:
       - /tmp
     volumes:
-      - ${MATTERMOST_CONFIG_PATH}:/mattermost/config:rw
-      - ${MATTERMOST_DATA_PATH}:/mattermost/data:rw
-      - ${MATTERMOST_LOGS_PATH}:/mattermost/logs:rw
-      - ${MATTERMOST_PLUGINS_PATH}:/mattermost/plugins:rw
-      - ${MATTERMOST_CLIENT_PLUGINS_PATH}:/mattermost/client/plugins:rw
-      - ${MATTERMOST_BLEVE_INDEXES_PATH}:/mattermost/bleve-indexes:rw
+      - ./volumes/app/mattermost/config:/mattermost/config:rw
+      - ./volumes/app/mattermost/data:/mattermost/data:rw
+      - ./volumes/app/mattermost/logs:/mattermost/logs:rw
+      - ./volumes/app/mattermost/plugins:/mattermost/plugins:rw
+      - ./volumes/app/mattermost/client/plugins:/mattermost/client/plugins:rw
+      - ./volumes/app/mattermost/bleve-indexes:/mattermost/bleve-indexes:rw
       # When you want to use SSO with GitLab, you have to add the cert pki chain of GitLab inside Alpine
       # to avoid Token request failed: certificate signed by unknown authority 
       # (link: https://github.com/mattermost/mattermost-server/issues/13059 and https://github.com/mattermost/docker/issues/34)
