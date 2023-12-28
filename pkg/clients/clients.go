@@ -14,8 +14,10 @@ type InternalDockerClient interface {
 	GetContainerID() string
 	SetContainerID(containerID string)
 	NetworkExists(network string) (bool, error)
+	CheckBindMounts(filePath string) bool
 	CheckNetworkInfo(filePath string) (bool, bool, string)
 	CreateCustomNetwork(network string) error
+	ReplaceRelativePaths(dockerComposeFilePath, newComposeFile string) error
 	MakeNetworkExternal(dockerComposeFilePath, newComposeFile string) error
 	AddNetworkToCompose(dockerComposeFilePath, newComposeFile string) error
 }

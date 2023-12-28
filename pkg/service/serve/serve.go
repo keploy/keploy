@@ -43,7 +43,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string) {
+func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
 	var ps *proxy.ProxySet
 
 	if port == 0 {
@@ -57,11 +57,10 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	models.SetMode(models.MODE_TEST)
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
-	teleFS := fs.NewTeleFS()
-	tele := telemetry.NewTelemetry(true, false, teleFS, s.logger, "", nil)
+	teleFS := fs.NewTeleFS(s.logger)
+	tele := telemetry.NewTelemetry(enableTele, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore("", "", "", "", s.logger, tele)
-
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
@@ -93,7 +92,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx)
+		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
 
 	}
 
@@ -163,7 +162,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, true); err != nil {
+			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, 30*time.Second, true); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					s.logger.Info("keploy terminated user application")

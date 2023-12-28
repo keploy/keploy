@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
-	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -365,12 +365,14 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			requestBuffer, err = util.ReadBytes(clientConn)
 			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
-				if err == io.EOF {
-					logger.Debug("recieved request buffer is empty in record mode for mongo call")
+				if !h.IsUsrAppTerminateInitiated() {
+					if err == io.EOF {
+						logger.Debug("recieved request buffer is empty in record mode for mongo call")
+						return
+					}
+					logger.Error("failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()))
 					return
 				}
-				logger.Error("failed to read request from the mongo client", zap.Error(err), zap.String("mongo client address", clientConn.RemoteAddr().String()))
-				return
 			}
 			readRequestDelay = time.Since(started)
 			// logStr += lstr
@@ -402,14 +404,17 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for {
 				requestBuffer1, err := util.ReadBytes(clientConn)
+
 				// logStr += tmpStr
 				if err != nil {
-					if err == io.EOF {
-						logger.Debug("recieved request buffer is empty in record mode for mongo request")
+					if !h.IsUsrAppTerminateInitiated() {
+						if err == io.EOF {
+							logger.Debug("recieved request buffer is empty in record mode for mongo request")
+							return
+						}
+						logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
 						return
 					}
-					logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
-					return
 				}
 
 				// write the reply to mongo client
@@ -597,10 +602,10 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoReq
 			Kind:    models.Mongo,
 			Name:    name,
 			Spec: models.MockSpec{
-				Metadata:       meta1,
-				MongoRequests:  mongoRequests,
-				MongoResponses: mongoResponses,
-				Created:        time.Now().Unix(),
+				Metadata:         meta1,
+				MongoRequests:    mongoRequests,
+				MongoResponses:   mongoResponses,
+				Created:          time.Now().Unix(),
 				ReqTimestampMock: reqTimestampMock,
 				ResTimestampMock: time.Now(),
 			},
@@ -711,7 +716,7 @@ func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logg
 		// // Find submatches using the regular expression
 
 		var actualMsgsStr string
-		actualMsgsStr, err = decodeOpMsgSectionSingle(actualSection)
+		actualMsgsStr, err = extractSectionSingle(actualSection)
 		if err != nil {
 			logger.Error("failed to fetch the msgs from the single section of incoming OpMsg", zap.Error(err))
 			return 0

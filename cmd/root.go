@@ -1,21 +1,24 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
+	"runtime"
 	"time"
-	"errors"
-	"bytes"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/buffer"
+	"go.uber.org/zap/zapcore"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -34,7 +37,7 @@ type colorConsoleEncoder struct {
 	*zapcore.EncoderConfig
 	zapcore.Encoder
 }
-  
+
 func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
 	return colorConsoleEncoder{
 		EncoderConfig: &cfg,
@@ -42,12 +45,12 @@ func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
 		Encoder: zapcore.NewConsoleEncoder(cfg),
 	}
 }
-  
+
 // EncodeEntry overrides ConsoleEncoder's EncodeEntry
 func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (buf *buffer.Buffer, err error) {
 	buff, err := c.Encoder.EncodeEntry(ent, fields) // Utilize the existing implementation of zap
 	if err != nil {
-		return nil, err	
+		return nil, err
 	}
 
 	bytesArr := bytes.Replace(buff.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
@@ -61,30 +64,30 @@ func (c colorConsoleEncoder) Clone() zapcore.Encoder {
 	clone := c.Encoder.Clone()
 	return colorConsoleEncoder{
 		EncoderConfig: c.EncoderConfig,
-		Encoder: clone,
+		Encoder:       clone,
 	}
 }
 
 func init() {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
-	  	return NewColorConsole(config), nil
-	}) 
+		return NewColorConsole(config), nil
+	})
 }
 
 func setupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
-	
+
 	logCfg.Encoding = "colorConsole"
 
 	// Customize the encoder config to put the emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
-  logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
 	logCfg.OutputPaths = []string{
 		"stdout",
 		"./keploy-logs.txt",
 	}
-  
+
 	if debugMode {
 		go func() {
 			defer utils.HandlePanic()
@@ -124,8 +127,35 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 	}
 
 	log = zapsentry.AttachCoreToLogger(core, log)
-
-	return log.With(zapsentry.NewScope())
+	kernelVersion := ""
+	if runtime.GOOS == "linux" {
+		cmd := exec.Command("uname", "-r")
+		kernelBytes, err := cmd.Output()
+		if err != nil {
+			log.Debug("failed to get kernel version", zap.Error(err))
+		} else {
+			kernelVersion = string(kernelBytes)
+		}
+	}
+	arch := runtime.GOARCH
+	installationID, err := fs.NewTeleFS(log).Get(false)
+	if err != nil {
+		log.Debug("failed to get installationID", zap.Error(err))
+	}
+	if installationID == "" {
+		installationID, err = fs.NewTeleFS(log).Get(true)
+		if err != nil {
+			log.Debug("failed to get installationID for new user.", zap.Error(err))
+		}
+	}
+	sentry.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetTag("Keploy Version", utils.KeployVersion)
+		scope.SetTag("Linux Kernel Version", kernelVersion)
+		scope.SetTag("Architecture", arch)
+		scope.SetTag("Installation ID", installationID)
+		// Add more context as needed
+	})
+	return log
 }
 
 func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
@@ -170,14 +200,14 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 `
 
 var rootExamples = `
-Record:
-keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1
+  Record:
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1 --buildDelay 1m
 
-Test:
-keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1
+  Test:
+	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1 --buildDelay 1m
 
-Generate-Config: 
-keploy generate-config -p "/path/to/localdir"
+  Generate-Config:
+	keploy generate-config -p "/path/to/localdir"
 `
 
 func checkForDebugFlag(args []string) bool {
@@ -190,7 +220,13 @@ func checkForDebugFlag(args []string) bool {
 }
 
 func deleteLogs(logger *zap.Logger) {
-	err := os.Remove("keploy-logs.txt")
+	//Check if keploy-log.txt exists
+	_, err := os.Stat("keploy-logs.txt")
+	if os.IsNotExist(err) {
+		return
+	}
+	//If it does, remove it.
+	err = os.Remove("keploy-logs.txt")
 	if err != nil {
 		logger.Error("Error removing log file: %v\n", zap.String("error", err.Error()))
 		return

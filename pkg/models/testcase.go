@@ -10,11 +10,11 @@ var (
 	currentVersion = V1Beta1
 )
 
-func SetVersion(V1 string){
+func SetVersion(V1 string) {
 	currentVersion = Version(V1)
 }
 
-func GetVersion() (V1 Version){
+func GetVersion() (V1 Version) {
 	return currentVersion
 }
 
@@ -48,4 +48,8 @@ type TestCase struct {
 	Noise    map[string][]string `json:"noise"`
 	Mocks    []*Mock             `json:"mocks"`
 	Type     string              `json:"type"`
+}
+
+func (tc *TestCase) GetKind() string {
+	return string(tc.Kind)
 }

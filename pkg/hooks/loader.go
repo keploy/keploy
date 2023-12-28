@@ -158,6 +158,10 @@ func (h *Hook) PopIndex(index int) {
 	h.mu.Unlock()
 }
 
+func (h *Hook) IsUsrAppTerminateInitiated() bool {
+	return h.userAppShutdownInitiated
+}
+
 func (h *Hook) FetchDep(indx int) *models.Mock {
 	h.mu.Lock()
 	dep := h.tcsMocks[indx]
@@ -321,7 +325,7 @@ func (h *Hook) killProcessesAndTheirChildren(parentPID int) {
 
 	for _, childPID := range pids {
 		if h.userAppCmd.ProcessState == nil {
-			err := syscall.Kill(childPID, syscall.SIGKILL)
+			err := syscall.Kill(childPID, syscall.SIGTERM)
 			if err != nil {
 				h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
 			}
@@ -515,7 +519,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 		defer utils.HandlePanic()
 		for {
 			connectionFactory.HandleReadyConnections(h.TestCaseDB, ctx, filters)
-			time.Sleep(1 * time.Second)
+			// time.Sleep(1 * time.Second)
 		}
 	}()
 

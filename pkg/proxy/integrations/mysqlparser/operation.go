@@ -134,7 +134,6 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn) (string, MySQLPacketHeader, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
-
 	var packetData interface{}
 	var packetType string
 	var err error
@@ -144,6 +143,28 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	}
 
 	switch {
+	case lastCommand == 0x03:
+		switch {
+		case data[0] == 0x00: // OK Packet
+			packetType = "MySQLOK"
+			packetData, err = decodeMySQLOK(data)
+			lastCommand = 0x00 // Reset the last command
+
+		case data[0] == 0xFF: // Error Packet
+			packetType = "MySQLErr"
+			packetData, err = decodeMySQLErr(data)
+			lastCommand = 0x00 // Reset the last command
+
+		case isLengthEncodedInteger(data[0]): // ResultSet Packet
+			packetType = "RESULT_SET_PACKET"
+			packetData, err = parseResultSet(data)
+			lastCommand = 0x00 // Reset the last command
+
+		default:
+			packetType = "Unknown"
+			packetData = data
+			logger.Debug("unknown packet type after COM_QUERY", zap.Int("unknownPacketTypeInt", int(data[0])))
+		}
 	case data[0] == 0x0e: // COM_PING
 		packetType = "COM_PING"
 		packetData, err = decodeComPing(data)
@@ -175,6 +196,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetType = "COM_CHANGE_USER"
 		packetData, err = decodeComChangeUser(data)
 		lastCommand = 0x11
+
 	case data[0] == 0x04: // Result Set Packet
 		packetType = "RESULT_SET_PACKET"
 		packetData, err = parseResultSet(data)
@@ -226,24 +248,40 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		packetType = "COM_STMT_RESET"
 		packetData, err = decodeComStmtReset(data)
 		lastCommand = 0x1a
-	case data[0] == 0x8d || expectingHandshakeResponse: // Handshake Response packet
+	case data[0] == 0x8d || expectingHandshakeResponse || expectingHandshakeResponseTest: // Handshake Response packet
 		packetType = "HANDSHAKE_RESPONSE"
 		packetData, err = decodeHandshakeResponse(data)
 		lastCommand = 0x8d // This value may differ depending on the handshake response protocol version
 	case data[0] == 0x01: // Handshake Response packet
-		packetType = "HANDSHAKE_RESPONSE_OK"
-		packetData, err = decodeHandshakeResponseOk(data)
+		if len(data) == 1 {
+			packetType = "COM_QUIT"
+			packetData = nil
+		} else {
+			packetType = "HANDSHAKE_RESPONSE_OK"
+			packetData, err = decodeHandshakeResponseOk(data)
+		}
 	default:
 		packetType = "Unknown"
 		packetData = data
-		logger.Warn("unknown packet type", zap.Int("unknownPacketTypeInt", int(data[0])))
+		logger.Debug("unknown packet type", zap.Int("unknownPacketTypeInt", int(data[0])))
 	}
 
 	if err != nil {
 		return "", MySQLPacketHeader{}, nil, err
 	}
-
+	if models.GetMode() != "test" {
+		logger.Debug("Packet Info",
+			zap.String("PacketType", packetType),
+			zap.ByteString("Data", data))
+	}
+	if (models.GetMode()) == "test" {
+		lastCommand = 0x00
+	}
 	return packetType, header, packetData, nil
+}
+func isLengthEncodedInteger(b byte) bool {
+	// This is a simplified check. You may need a more robust check based on MySQL protocol.
+	return b != 0x00 && b != 0xFF
 }
 
 func (p *MySQLPacket) Encode() ([]byte, error) {
@@ -302,44 +340,56 @@ func writeLengthEncodedString(buf *bytes.Buffer, s string) {
 	buf.WriteString(s)
 }
 
-func writeLengthEncodedInteger(buf *bytes.Buffer, val uint64) {
+func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) {
+	if val == nil {
+		// Write 0xFB to represent NULL
+		buf.WriteByte(0xFB)
+		return
+	}
+
 	switch {
-	case val <= 250:
-		buf.WriteByte(byte(val))
-	case val <= 0xFFFF:
+	case *val <= 250:
+		buf.WriteByte(byte(*val))
+	case *val <= 0xFFFF:
 		buf.WriteByte(0xFC)
-		binary.Write(buf, binary.LittleEndian, uint16(val))
-	case val <= 0xFFFFFF:
+		binary.Write(buf, binary.LittleEndian, uint16(*val))
+	case *val <= 0xFFFFFF:
 		buf.WriteByte(0xFD)
-		binary.Write(buf, binary.LittleEndian, uint32(val)&0xFFFFFF)
+		binary.Write(buf, binary.LittleEndian, uint32(*val)&0xFFFFFF)
 	default:
 		buf.WriteByte(0xFE)
-		binary.Write(buf, binary.LittleEndian, val)
+		binary.Write(buf, binary.LittleEndian, *val)
 	}
 }
 
-func writeLengthEncodedIntegers(buf *bytes.Buffer, value uint64) {
-	if value <= 250 {
-		buf.WriteByte(byte(value))
-	} else if value <= 0xffff {
+func writeLengthEncodedIntegers(buf *bytes.Buffer, value *uint64) {
+	if value == nil {
+		// Write 0xFB to represent NULL
+		buf.WriteByte(0xFB)
+		return
+	}
+
+	if *value <= 250 {
+		buf.WriteByte(byte(*value))
+	} else if *value <= 0xffff {
 		buf.WriteByte(0xfc)
-		buf.WriteByte(byte(value))
-		buf.WriteByte(byte(value >> 8))
-	} else if value <= 0xffffff {
+		buf.WriteByte(byte(*value))
+		buf.WriteByte(byte(*value >> 8))
+	} else if *value <= 0xffffff {
 		buf.WriteByte(0xfd)
-		buf.WriteByte(byte(value))
-		buf.WriteByte(byte(value >> 8))
-		buf.WriteByte(byte(value >> 16))
+		buf.WriteByte(byte(*value))
+		buf.WriteByte(byte(*value >> 8))
+		buf.WriteByte(byte(*value >> 16))
 	} else {
 		buf.WriteByte(0xfe)
-		binary.Write(buf, binary.LittleEndian, value)
+		binary.Write(buf, binary.LittleEndian, *value)
 	}
 }
 
 func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
 	data := []byte(value)
 	length := uint64(len(data))
-	writeLengthEncodedIntegers(buf, length)
+	writeLengthEncodedIntegers(buf, &length)
 	buf.Write(data)
 }
 
