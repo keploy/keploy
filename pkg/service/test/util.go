@@ -405,6 +405,7 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 			filteredMocks = append(filteredMocks, mock)
 		}
 	}
+	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", filteredMocks))
 	return filteredMocks
 }
 
