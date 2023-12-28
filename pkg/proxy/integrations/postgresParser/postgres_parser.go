@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
-	"errors"
 	"io"
 	"net"
 	"os"
@@ -483,8 +482,14 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
 
 		if !matched {
-			logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
-			return errors.New("failed to match the dependency call from user application")
+			_, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)
+
+			if err != nil {
+				logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
+				return err
+			}
+			continue
+
 		}
 
 		for _, pgResponse := range pgResponses {
