@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/pkg/hooks"
@@ -30,7 +32,7 @@ type InitialiseRunTestSetReturn struct {
 }
 
 type InitialiseTestReturn struct {
-	SessionsMap              map[string]string
+	Sessions                 []string
 	TestReportFS             *yaml.TestReport
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
@@ -42,17 +44,20 @@ type InitialiseTestReturn struct {
 }
 
 type TestConfig struct {
-	Path             string
-	Proxyport        uint32
-	TestReportPath   string
-	AppCmd           string
-	MongoPassword    string
-	Testsets         *[]string
-	AppContainer     string
-	AppNetwork       string
-	Delay            uint64
-	PassThroughPorts []uint
-	ApiTimeout       uint64
+	Path               string
+	Proxyport          uint32
+	TestReportPath     string
+	AppCmd             string
+	MongoPassword      string
+	AppContainer       string
+	AppNetwork         string
+	Delay              uint64
+	BuildDelay         time.Duration
+	PassThroughPorts   []uint
+	ApiTimeout         uint64
+	WithCoverage       bool
+	CoverageReportPath string
+	EnableTele         bool
 }
 
 type RunTestSetConfig struct {
@@ -63,10 +68,11 @@ type RunTestSetConfig struct {
 	AppContainer   string
 	AppNetwork     string
 	Delay          uint64
+	BuildDelay     time.Duration
 	Pid            uint32
 	YamlStore      platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
@@ -83,7 +89,7 @@ type SimulateRequestConfig struct {
 	Success      *int
 	Failure      *int
 	Status       *models.TestRunStatus
-	TestReportFS yaml.TestReportFS
+	TestReportFS platform.TestReportDB
 	TestReport   *models.TestReport
 	Path         string
 	DockerID     bool
@@ -91,7 +97,7 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   yaml.TestReportFS
+	TestReportFS   platform.TestReportDB
 	TestReport     *models.TestReport
 	Status         *models.TestRunStatus
 	TestSet        string
@@ -400,4 +406,15 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 		}
 	}
 	return filteredMocks
+}
+
+// creates a directory if not exists with all user access
+func makeDirectory(path string) error {
+	oldUmask := syscall.Umask(0)
+	err := os.MkdirAll(path, 0777)
+	if err != nil {
+		return err
+	}
+	syscall.Umask(oldUmask)
+	return nil
 }

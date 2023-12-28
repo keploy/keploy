@@ -7,7 +7,9 @@ package graph
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -61,7 +63,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, serveTest)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, nil, serveTest)
 	}()
 
 	testRunID := <-testRunChan
@@ -97,7 +99,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 // TestSetStatus is the resolver for the testSetStatus field.
 func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error) {
 	//Initiate the telemetry.
-	var store = fs.NewTeleFS()
+	var store = fs.NewTeleFS(r.Logger)
 	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
@@ -114,12 +116,17 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 		r.Logger.Error("failed to fetch testReport", zap.Any("testRunID", testRunID), zap.Error(err))
 		return nil, err
 	}
-	if testReport.Status == "PASSED" || testReport.Status == "FAILED" {
-		tele.Testrun(testReport.Success, testReport.Failure)
+	readTestReport, ok := testReport.(*models.TestReport)
+	if !ok {
+		r.Logger.Error("failed to read testReport from resolver")
+		return nil, fmt.Errorf(Emoji+"failed to read the test report for testRunID:%v", testRunID)
+	}
+	if readTestReport.Status == "PASSED" || readTestReport.Status == "FAILED" {
+		tele.Testrun(readTestReport.Success, readTestReport.Failure)
 	}
 
-	r.Logger.Debug("", zap.Any("testRunID", testRunID), zap.Any("testSetStatus", testReport.Status))
-	return &model.TestSetStatus{Status: testReport.Status}, nil
+	r.Logger.Debug("", zap.Any("testRunID", testRunID), zap.Any("testSetStatus", readTestReport.Status))
+	return &model.TestSetStatus{Status: readTestReport.Status}, nil
 }
 
 // Mutation returns MutationResolver implementation.

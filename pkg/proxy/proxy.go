@@ -33,16 +33,17 @@ import (
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 
+	"time"
+
 	"github.com/miekg/dns"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	genericparser "go.keploy.io/server/pkg/proxy/integrations/genericParser"
-	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/integrations/httpparser"
 	"go.keploy.io/server/pkg/proxy/integrations/mongoparser"
+	"go.keploy.io/server/pkg/proxy/integrations/mysqlparser"
 	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
-	"time"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -309,13 +310,13 @@ func Register(parserName string, parser DependencyHandler) {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context, delay uint64) *ProxySet {
 	//Register all the parsers in the map.
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
 	Register("mongo", mongoparser.NewMongoParser(logger, h, opt.MongoPassword))
 	Register("http", httpparser.NewHttpParser(logger, h))
-	Register("mysql", mysqlparser.NewMySqlParser(logger, h))
+	Register("mysql", mysqlparser.NewMySqlParser(logger, h, delay))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
@@ -372,20 +373,19 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		opt.Port = 16789
 	}
 	maxAttempts := 1000
-	attemptsDone:=0
+	attemptsDone := 0
 
-
-    if !isPortAvailable(opt.Port) {
+	if !isPortAvailable(opt.Port) {
 		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
 			if isPortAvailable(uint32(i)) {
 				opt.Port = uint32(i)
-				logger.Info("Found an available port to start proxy server",zap.Uint32("port",opt.Port));             
+				logger.Info("Found an available port to start proxy server", zap.Uint32("port", opt.Port))
 				break
 			}
 			attemptsDone++
 		}
 	}
-	
+
 	if maxAttempts <= attemptsDone {
 		logger.Error("Failed to find an available port to start proxy server")
 		return nil
