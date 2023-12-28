@@ -136,6 +136,7 @@ func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 }
 func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.mu.Lock()
+	h.logger.Debug("setting tcs mocks", zap.Any("tcs mocks", m))
 	h.tcsMocks = m
 	defer h.mu.Unlock()
 }
