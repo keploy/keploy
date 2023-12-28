@@ -489,6 +489,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		h.logger.Error("failed to lock memory for eBPF resources", zap.Error(err))
+		h.logger.Warn("Are you executing Keploy in privileged mode? Please try running Keploy using the 'sudo' command. Visit https://keploy.io/docs/ for further help")
 		return err
 	}
 

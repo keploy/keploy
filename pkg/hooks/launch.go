@@ -251,6 +251,9 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			defer h.Recover(pkg.GenerateRandomID())
 			err := h.runApp(appCmd, isUnitTestIntegration)
 			if err != nil {
+				if !isUnitTestIntegration {
+					h.logger.Warn(fmt.Sprintf(`Unable to run user application, try running the command "%s" without keploy to test if user application runs. Visit https://keploy.io/docs/ for further help`, appCmd))
+				}
 				return err
 			}
 		}
@@ -279,6 +282,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 			err := h.runApp(appCmd, true)
 			h.logger.Debug("Application stopped with the error", zap.Error(err))
+			if err != nil {
+				h.logger.Warn(fmt.Sprintf(`Unable to run user application, try running the command "%s" without keploy to test Docker container startup. Visit https://keploy.io/docs/ for further help`, appCmd))
+			}
 			if !stopApplicationErrors {
 				appErrCh <- err
 			}
