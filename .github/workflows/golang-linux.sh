@@ -23,7 +23,7 @@ sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 sudo rm -rf keploy/
 
 # Build the binary.
-go build -o ginApp
+go build -o ginApp -cover
 
 for i in {1..2}; do
 # Start the gin-mongo app in record mode and record testcases and mocks.
@@ -68,8 +68,26 @@ sudo kill $pid
 sleep 5
 done
 
-# Start the gin-mongo app in test omde.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+# Start the gin-mongo app in test mode.
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 --withCoverage
+
+go tool cover -func "keploy/coverage-reports/total-coverage.txt" -o cover.txt
+
+file_path="cover.txt"
+
+# Extracting the last percentage value from the file
+last_percentage=$(awk '/total:/ { print $(NF) }' "$file_path")
+
+percentage_value=${last_percentage%\%}
+
+# Checking if the last percentage is greater than zero
+if (( $(echo "$percentage_value > 0" | bc -l) )); then
+    echo "Last percentage is greater than zero: $last_percentage"
+    exit 0
+else
+    echo "Last percentage is not greater than zero: $last_percentage"
+    exit 1
+fi
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
