@@ -49,7 +49,10 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(ys, routineId, r.Logger)
+	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
+	if err != nil {
+		r.Logger.Error("error while creating hooks", zap.Error(err))
+	}
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)

@@ -518,7 +518,6 @@ func decodeOutgoingMySQL1(requestBuffer []byte, clientConn, destConn net.Conn, h
 					_, err = clientConn.Write(encodedResponseBinary)
 					doHandshakeAgain = false
 				}
-
 			}
 			if err != nil {
 				logger.Error("failed to write query response to mysql client", zap.Error(err))

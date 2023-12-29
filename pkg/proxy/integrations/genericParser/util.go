@@ -2,9 +2,11 @@ package genericparser
 
 import (
 	"encoding/base64"
+	"fmt"
+
 	// "fmt"
 	"unicode"
-	"sort"
+
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -22,41 +24,54 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 	return data, nil
 }
 
-func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
-	sort.Slice(tcsMocks, func(i, j int) bool {
-		return tcsMocks[i].Spec.ReqTimestampMock.Before(tcsMocks[j].Spec.ReqTimestampMock)
-	})
-	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
-			matched := true // Flag to track if all requests match
+func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
+	for {
+		tcsMocks, err := h.GetTcsMocks()
+		if err != nil {
+			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
+		}
+		index := -1
+		for idx, mock := range tcsMocks {
+			if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+				matched := true // Flag to track if all requests match
 
-			for requestIndex, reqBuff := range requestBuffers {
-				bufStr := string(reqBuff)
-				if !IsAsciiPrintable(string(reqBuff)) {
-					bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+				for requestIndex, reqBuff := range requestBuffers {
+
+					bufStr := string(reqBuff)
+					if !IsAsciiPrintable(string(reqBuff)) {
+						bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+						fmt.Println("not possible")
+						fmt.Println(bufStr)
+					}
+
+					// Compare the encoded data
+					if mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+						matched = false
+						break // Exit the loop if any request doesn't match
+					}
 				}
-
-				encoded := []byte(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-				if !IsAsciiPrintable(mock.Spec.GenericRequests[requestIndex].Message[0].Data) {
-					encoded, _ = PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				if matched {
+					index = idx
+					break
 				}
-
-				// Compare the encoded data
-				if string(encoded) != string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
-					matched = false
-					break // Exit the loop if any request doesn't match
-				}
-			}
-
-			if matched {
-				tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-				h.SetTcsMocks(tcsMocks)
-				return true, mock.Spec.GenericResponses
 			}
 		}
+		if index != -1 {
+			responseMock := make([]models.GenericPayload, len(tcsMocks[index].Spec.GenericResponses))
+			copy(responseMock, tcsMocks[index].Spec.GenericResponses)
+			isDeleted, err := h.DeleteTcsMock(tcsMocks[index])
+			if err != nil {
+				return false, nil, fmt.Errorf("error while deleting tcsMock %v", err)
+			}
+			if !isDeleted {
+				continue
+			}
+			return true, responseMock, nil
+		}
+		break
 	}
 
-	return false, nil
+	return false, nil, nil
 }
 
 // checks if s is ascii and printable, aka doesn't include tab, backspace, etc.

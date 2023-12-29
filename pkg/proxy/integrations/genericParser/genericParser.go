@@ -3,6 +3,7 @@ package genericparser
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 
 	"net"
@@ -62,11 +63,12 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			continue
 		}
 
-		tcsMocks := h.GetTcsMocks()
-
 		// bestMatchedIndx := 0
 		// fuzzy match gives the index for the best matched generic mock
-		matched, genericResponses := fuzzymatch(tcsMocks, genericRequests, h)
+		matched, genericResponses, err := fuzzymatch(genericRequests, h)
+		if err != nil {
+			logger.Error("error while fuzzy matching", zap.Error(err))
+		}
 
 		if !matched {
 			// logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
@@ -75,7 +77,9 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			for _, vgen := range genericRequests {
 				logger.Debug("the genericRequests are:", zap.Any("h", string(vgen)))
 			}
-			requestBuffer, err = util.Passthrough(clientConn, destConn, genericRequests, h.Recover, logger)
+			fmt.Println("passthrough")
+			fmt.Println(genericRequests)
+			requestBuffer, _ = util.Passthrough(clientConn, destConn, genericRequests, h.Recover, logger)
 			// if err != nil {
 			// 	return err
 			// }
