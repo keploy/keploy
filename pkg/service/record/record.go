@@ -52,6 +52,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
 	if err != nil {
 		r.Logger.Error("error while creating hooks", zap.Error(err))
+		return
 	}
 
 	// Recover from panic and gracfully shutdown

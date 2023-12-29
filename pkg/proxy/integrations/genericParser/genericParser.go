@@ -3,7 +3,6 @@ package genericparser
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"strings"
 
 	"net"
@@ -77,9 +76,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			for _, vgen := range genericRequests {
 				logger.Debug("the genericRequests are:", zap.Any("h", string(vgen)))
 			}
-			fmt.Println("passthrough")
-			fmt.Println(genericRequests)
-			requestBuffer, _ = util.Passthrough(clientConn, destConn, genericRequests, h.Recover, logger)
+			requestBuffer, err = util.Passthrough(clientConn, destConn, genericRequests, h.Recover, logger)
 			// if err != nil {
 			// 	return err
 			// }
@@ -194,6 +191,8 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// case <-start.C:
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
+				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
+				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
 					h.AppendMocks(&models.Mock{
 						Version: models.GetVersion(),
@@ -206,9 +205,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 							ResTimestampMock: resTimestampMock,
 						},
 					}, ctx)
-				}(genericRequests, genericResponses)
-				genericRequests = []models.GenericPayload{}
-				genericResponses = []models.GenericPayload{}
+				}(genericRequestsCopy, genericResponseCopy)
 				clientConn.Close()
 				destConn.Close()
 				return nil
@@ -223,6 +220,8 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
+				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
+				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
 					h.AppendMocks(&models.Mock{
 						Version: models.GetVersion(),
@@ -235,7 +234,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 							ResTimestampMock: resTimestampMock,
 						},
 					}, ctx)
-				}(genericRequests, genericResponses)
+				}(genericRequestsCopy, genericResponseCopy)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}

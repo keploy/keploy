@@ -122,7 +122,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	// Initiate the hooks
 	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
 	if err != nil {
-		t.logger.Error("error while creating hooks", zap.Error(err))
+		return returnVal, fmt.Errorf("error while creating hooks %v", err)
 	}
 
 	select {

@@ -151,7 +151,7 @@ func (h *Hook) SetTcsMocks(m []*models.Mock) error {
 		mock.Id = uuid.NewString()
 		err := h.localDb.insert(mockTable, mock)
 		if err != nil {
-			return fmt.Errorf("error while inserting mock into localDb: %v", err)
+			return fmt.Errorf("error while inserting tcs mock into localDb: %v", err)
 		}
 	}
 	return nil
@@ -172,7 +172,7 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) error {
 func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
 	it, err := h.localDb.getAll(mockTable, mockTableIndex)
 	if err != nil {
-		return nil, fmt.Errorf("error while getting all mocks from localDb %v", err)
+		return nil, fmt.Errorf("error while getting all tcs mocks from localDb %v", err)
 	}
 	var mocks []*models.Mock
 	for obj := it.Next(); obj != nil; obj = it.Next() {
@@ -209,7 +209,7 @@ func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 func (h *Hook) DeleteTcsMock(mock *models.Mock) (bool, error) {
 	isDeleted, err := h.localDb.delete(mockTable, mock)
 	if err != nil {
-		return isDeleted, fmt.Errorf("error while deleting mocks %v from localDb %v", mock, err)
+		return isDeleted, fmt.Errorf("error while deleting tcs mocks %v from localDb %v", mock, err)
 	}
 	return isDeleted, nil
 }

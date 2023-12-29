@@ -81,6 +81,7 @@ func FilterMocksBasedOnGrpcRequest(grpcReq models.GrpcReq, hook *hooks.Hook) (*m
 			if !isDeleted {
 				continue
 			}
+			return matchedMock, nil
 		}
 		return nil, nil
 	}

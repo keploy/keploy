@@ -66,6 +66,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
 	if err != nil {
 		s.logger.Error("error while creating hooks", zap.Error(err))
+		return
 	}
 
 	// Recover from panic and gracfully shutdown

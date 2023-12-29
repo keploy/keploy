@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/proxy/util"
 )
 
 func PostgresDecoder(encoded string) ([]byte, error) {
@@ -55,6 +56,11 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 				}
 			}
 		}
+
+		if index == -1 {
+			index = findBinaryMatch(tcsMocks, requestBuffers, h)
+		}
+
 		if index != -1 {
 			responseMock := make([]models.GenericPayload, len(tcsMocks[index].Spec.GenericResponses))
 			copy(responseMock, tcsMocks[index].Spec.GenericResponses)
@@ -71,6 +77,36 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 	}
 
 	return false, nil, nil
+}
+
+func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
+
+	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
+	mxSim := 0.5
+	mxIdx := -1
+	for idx, mock := range tcsMocks {
+		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+			for requestIndex, reqBuff := range requestBuffers {
+
+				// bufStr := string(reqBuff)
+				// if !IsAsciiPrintable(bufStr) {
+				_ = base64.StdEncoding.EncodeToString(reqBuff)
+				// }
+				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+
+				k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+				shingles1 := util.CreateShingles(encoded, k)
+				shingles2 := util.CreateShingles(reqBuff, k)
+				similarity := util.JaccardSimilarity(shingles1, shingles2)
+
+				if mxSim < similarity {
+					mxSim = similarity
+					mxIdx = idx
+				}
+			}
+		}
+	}
+	return mxIdx
 }
 
 // checks if s is ascii and printable, aka doesn't include tab, backspace, etc.

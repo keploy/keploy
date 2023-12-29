@@ -49,6 +49,7 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
 	if err != nil {
 		s.logger.Error("error while creating hooks", zap.Error(err))
+		return
 	}
 	
 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
