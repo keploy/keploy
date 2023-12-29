@@ -4,6 +4,8 @@
 git fetch origin
 git checkout native-linux
 
+cat main.go
+
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
