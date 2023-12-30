@@ -40,8 +40,6 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 					bufStr := string(reqBuff)
 					if !IsAsciiPrintable(string(reqBuff)) {
 						bufStr = base64.StdEncoding.EncodeToString(reqBuff)
-						fmt.Println("not possible")
-						fmt.Println(bufStr)
 					}
 
 					// Compare the encoded data
