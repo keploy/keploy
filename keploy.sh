@@ -1,221 +1,140 @@
 #!/bin/bash
 
-installKeploy (){
-    IS_CI=false
-    for arg in "$@"
-    do
-        case $arg in
-            -isCI)
-                IS_CI=true
-                shift
-            ;;
-            *)
-            ;;
-        esac
-    done
+# Function to display the menu and handle user selection
+platform="Linux"
+OS_NAME="$(uname -s)"
+IS_CI=false
 
-    get_current_docker_context() {
-        current_context=$(docker context ls --format '{{.Name}} {{if .Current}}*{{end}}' | grep '*' | awk '{print $1}')
-    }
+# Check for CI environment
+for arg in "$@"; do
+    case $arg in
+        -isCI)
+            IS_CI=true
+            shift
+        ;;
+        *)
+        ;;
+    esac
+done
 
-    install_keploy_arm() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
-
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-
-        set_alias
-    }
-
-    install_keploy_amd() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-
-        set_alias
-    }
-
-    set_alias() {
-        ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploybin'"
-        current_shell=$(ps -p $$ -ocomm=)
-        if [ "$current_shell" = "zsh" ]; then
-            if [ -f ~/.zshrc ]; then
-                if grep -q "alias keploy=" ~/.zshrc; then
-                    sed -i '/alias keploy/d' ~/.zshrc
-                fi
-                echo "$ALIAS_CMD" >> ~/.zshrc
-                source ~/.zshrc
-            else
-                alias keploy='sudo -E env PATH="$PATH" keploybin'
-            fi
-        elif [ "$current_shell" = "bash" ]; then
-            if [ -f ~/.bashrc ]; then
-                if grep -q "alias keploy=" ~/.bashrc; then
-                    sed -i '/alias keploy/d' ~/.bashrc
-                fi
-                echo "$ALIAS_CMD" >> ~/.bashrc
-                source ~/.bashrc
-            else
-                alias keploy='sudo -E env PATH="$PATH" keploybin'
-            fi
-        else
-            alias keploy='sudo -E env PATH="$PATH" keploybin'
+# Function to check and install fzf
+checkForfzf() {
+    if [[ $OS_NAME = "Linux" ]]; then
+        if ! command -v fzf &> /dev/null; then
+            echo "fzf is not installed. Installing fzf..."
+            sudo apt-get install fzf
         fi
-    }
-
-
-    install_colima_docker() {
-        if ! docker network ls | grep -q 'keploy-network'; then
-            docker network create keploy-network
-        fi
-        alias keploy='docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
-    }
-
-    install_docker() {
-        if ! docker network ls | grep -q 'keploy-network'; then
-            docker network create keploy-network
-        fi
-
-        if [ "$OS_NAME" = "Darwin" ]; then
-            if ! docker volume inspect debugfs &>/dev/null; then
-                docker volume create --driver local --opt type=debugfs --opt device=debugfs debugfs
-            fi
-            alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
-        else
-            alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
-        fi
-
-    }
-
-
-    ARCH=$(uname -m)
-
-    if [ "$IS_CI" = false ]; then
-        OS_NAME="$(uname -s)"
-        if [ "$OS_NAME" = "Darwin" ]; then
-            get_current_docker_context
-            if ! which docker &> /dev/null; then
-                echo -n "Docker not found on device, install docker? (y/n):"
-                read user_input
-                if [ "$user_input" = "y" ]; then
-                    echo "Installing docker via brew"
-                    if command -v brew &> /dev/null; then
-                       brew install docker
-                    else
-                        echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy docker installation\e]8;;\a"
-                        return
-                    fi
-                elif [ "$user_input" != "n" ]; then
-                    echo "Please enter a valid command"
-                    return
-                else
-                    echo "Please install docker to install keploy"
-                    return
-                fi
-            fi
-
-            
-            echo -n "Do you want to install keploy with Docker or Colima? (docker/colima): "
-            read user_input
-
-            if [ "$user_input" = "colima" ]; then
-                if [ "$current_context" = "default" ]; then
-                    echo -n
-                    echo 'Error: Docker is using the default context, set to colima using "docker context use colima"'
-                    return
-                fi
-                if ! which colima &> /dev/null; then
-                    echo
-                    echo -e "\e]8;;https://kumojin.com/en/colima-alternative-docker-desktop\aAlternate is to use colima(lightweight and performant alternative to Docker Desktop)\e]8;;\a"
-                    echo -n "Install colima (y/n):"
-                    read user_input
-                    if [ "$user_input" = "y" ]; then
-                        echo "Installing colima via brew"
-                        if command -v brew &> /dev/null; then
-                            brew install colima
-                        else
-                            echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy colima installation\e]8;;\a"
-                            return
-                        fi
-                    elif [ "$user_input" = "n" ]; then
-                        echo "Please install Colima to install Keploy."
-                        return
-                    else
-                        echo "Please enter a valid command"
-                        return
-                    fi
-                else
-                    echo -n "colima found on your system, would you like to proceed with it? (y/n):"
-                    read user_input
-                    if [ "$user_input" = "n" ]; then
-                        echo "Please allow Colima to run Keploy."
-                        return
-                    elif [ "$user_input" != "y" ]; then
-                        echo "Please enter a valid command"
-                        return
-                    fi
-                fi
-
-                if colima status | grep -q "Running"; then
-                    echo "colima is already running."
-                else
-                    colima start
-                fi
-                install_colima_docker
-
-            elif [ "$user_input" = "docker" ]; then
-                if [ "$current_context" = "colima" ]; then
-                    echo -n
-                    echo 'Error: Docker is using the colima context, set to default using "docker context use default"'
-                    return
-                fi
-                install_docker
-
-            else
-                echo "Please enter a valid command"
-            fi
-            return
-
-        elif [ "$OS_NAME" = "Linux" ]; then
-            echo -n "Do you want to install keploy with Linux or Docker? (linux/docker): "
-            read user_input
-            if ! sudo mountpoint -q /sys/kernel/debug; then
-                sudo mount -t debugfs debugfs /sys/kernel/debug
-            fi
-            if [ "$user_input" = "linux" ]; then
-                if [ "$ARCH" = "x86_64" ]; then
-                    install_keploy_amd
-                elif [ "$ARCH" = "aarch64" ]; then
-                    install_keploy_arm
-                else
-                    echo "Unsupported architecture: $ARCH"
-                    return
-                fi
-            elif [ "$user_input" = "docker" ]; then
-                install_docker
-            else
-                echo "Please enter a valid command"
-                return
-            fi
-        elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
-        elif [[ "$OS_NAME" == MINGW64_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
-        else
-            echo "Unknown OS, install Linux to run Keploy"
-        fi
-    else
-        if [ "$ARCH" = "x86_64" ]; then
-            install_keploy_amd
-        elif [ "$ARCH" = "aarch64" ]; then
-            install_keploy_arm
-        else
-            echo "Unsupported architecture: $ARCH"
-            return
+    elif [[ $OS_NAME = "Darwin" ]]; then
+        if ! command -v fzf &> /dev/null; then
+            echo "fzf is not installed. Installing fzf..."
+            brew install fzf
         fi
     fi
 }
 
-installKeploy
+# Function to display installation options menu
+displaymenu() {
+    echo "Do you want to install Keploy in Linux or Docker?"
+
+    local options=("Linux" "Docker" "Quit")
+    local choice=$(printf "%s\n" "${options[@]}" | fzf --height 20% --border --prompt 'Select installation method: ')
+
+    case "$choice" in
+        "Linux")
+            platform="Linux"
+            ;;
+        "Docker")
+            platform="Docker"
+            ;;
+        "Quit")
+            platform="Quit"
+            ;;
+        *)
+            echo "Invalid option selected."
+            return 1
+            ;;
+    esac
+}
+
+# Function to install Keploy for ARM architecture
+install_keploy_arm() {
+    curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+    sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
+}
+
+# Function to install Keploy for AMD architecture
+install_keploy_amd() {
+    curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+    sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
+}
+
+# Function to install Keploy on Linux
+installOnLinux() {
+    local ARCH=$(uname -m)
+    case "$ARCH" in
+        "x86_64")
+            install_keploy_amd
+            ;;
+        "aarch64")
+            install_keploy_arm
+            ;;
+        *)
+            echo "Unsupported architecture: $ARCH"
+            return 1
+            ;;
+    esac
+}
+
+# Function to install Keploy on Docker
+installOnDocker() {
+    # Check if Docker is installed
+    if ! command -v docker &> /dev/null; then
+        echo "Docker is not installed. Please install Docker first."
+        return 1
+    fi
+
+    # Create Keploy network if it doesn't exist
+    if ! docker network ls | grep -q 'keploy-network'; then
+        echo "Creating Keploy network..."
+        docker network create keploy-network
+    fi
+
+    # Set up the Keploy Docker alias depending on the OS
+    if [ "$OS_NAME" = "Linux" ]; then
+        alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --network keploy-network --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+    elif [ "$OS_NAME" = "Darwin" ]; then
+        alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
+    fi
+
+    echo "Keploy Docker setup is complete. You can now use 'keploy' command."
+}
+
+# Main function
+main() {
+    if [ "$OS_NAME" = "Darwin" ]; then
+        installOnDocker
+    elif [ "$IS_CI" = false ]; then
+        checkForfzf
+        displaymenu
+        
+        case "$platform" in
+            "Linux")
+                installOnLinux
+                ;;
+            "Docker")
+                installOnDocker
+                ;;
+            "Quit")
+                echo "Installation canceled."
+                return
+                ;;
+        esac
+    else
+        echo "Running in CI environment. Skipping interactive menu."
+    fi
+}
+
+main
 
 if command -v keploy &> /dev/null; then
     keploy example
