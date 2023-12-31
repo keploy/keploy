@@ -2,6 +2,7 @@ package mysqlparser
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 
 	"go.keploy.io/server/pkg/models"
@@ -10,7 +11,7 @@ import (
 type HandshakeResponseOk struct {
 	PacketIndicator string        `yaml:"packet_indicator"`
 	PluginDetails   PluginDetails `yaml:"plugin_details"`
-	RemainingBytes  []byte        `yaml:"remaining_bytes"`
+	RemainingBytes  string        `yaml:"remaining_bytes"`
 }
 
 func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {
@@ -65,15 +66,16 @@ func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {
 			Type:    authType,
 			Message: message,
 		},
-		RemainingBytes: remainingBytes,
+		RemainingBytes: base64.StdEncoding.EncodeToString(remainingBytes),
 	}, nil
 }
 
 func encodeHandshakeResponseOk(packet *models.MySQLHandshakeResponseOk) ([]byte, error) {
 	var buf bytes.Buffer
 	var payload []byte
+	RemainingBytesValue, _ := base64.StdEncoding.DecodeString(packet.RemainingBytes)
 	if packet.PluginDetails.Type == "PublicKeyAuthentication" {
-		publicKeydata := []byte(packet.RemainingBytes)
+		publicKeydata := []byte(RemainingBytesValue)
 
 		// Calculate the payload length
 		payloadLength := len(publicKeydata) + 1 // +1 for the MySQL protocol version byte
@@ -123,8 +125,8 @@ func encodeHandshakeResponseOk(packet *models.MySQLHandshakeResponseOk) ([]byte,
 		}
 
 		// Write remaining bytes if available
-		if len(packet.RemainingBytes) > 0 {
-			buf.Write(packet.RemainingBytes)
+		if len(RemainingBytesValue) > 0 {
+			buf.Write(RemainingBytesValue)
 		}
 
 		// Create header

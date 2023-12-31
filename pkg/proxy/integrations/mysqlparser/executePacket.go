@@ -1,6 +1,7 @@
 package mysqlparser
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 )
@@ -9,7 +10,7 @@ type ComStmtExecute struct {
 	StatementID    uint32           `yaml:"statement_id"`
 	Flags          byte             `yaml:"flags"`
 	IterationCount uint32           `yaml:"iteration_count"`
-	NullBitmap     []byte           `yaml:"null_bitmap"`
+	NullBitmap     string           `yaml:"null_bitmap"`
 	ParamCount     uint16           `yaml:"param_count"`
 	Parameters     []BoundParameter `yaml:"parameters"`
 }
@@ -24,6 +25,7 @@ func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
 	if len(packet) < 14 { // the minimal size of the packet without parameters should be 14, not 13
 		return ComStmtExecute{}, fmt.Errorf("packet length less than 14 bytes")
 	}
+	var NullBitmapValue []byte
 
 	stmtExecute := ComStmtExecute{}
 	stmtExecute.StatementID = binary.LittleEndian.Uint32(packet[1:5])
@@ -35,7 +37,8 @@ func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
 	if len(packet) > 14 {
 		nullBitmapLength := int((stmtExecute.ParamCount + 7) / 8)
 
-		stmtExecute.NullBitmap = packet[10 : 10+nullBitmapLength]
+		NullBitmapValue = packet[10 : 10+nullBitmapLength]
+		stmtExecute.NullBitmap = base64.StdEncoding.EncodeToString(NullBitmapValue)
 		stmtExecute.ParamCount = binary.LittleEndian.Uint16(packet[10+nullBitmapLength:])
 
 		// in case new parameters are bound, the new types and values are sent

@@ -2,6 +2,7 @@ package mysqlparser
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -19,8 +20,8 @@ type ResultSet struct {
 	EOFPresentFinal     bool                `yaml:"eofPresentFinal"`
 	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
 	OptionalPadding     bool                `yaml:"optionalPadding"`
-	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
-	EOFAfterColumns     []byte              `yaml:"eofAfterColumns"`
+	OptionalEOFBytes    string              `yaml:"optionalEOFBytes"`
+	EOFAfterColumns     string              `yaml:"eofAfterColumns"`
 }
 type Row struct {
 	Header  RowHeader             `yaml:"header"`
@@ -93,8 +94,8 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 		EOFPresentFinal:     eofFinal,
 		PaddingPresentFinal: paddingFinal,
 		OptionalPadding:     optionalPadding,
-		OptionalEOFBytes:    optionalEOFBytes,
-		EOFAfterColumns:     eofAfterColumns,
+		OptionalEOFBytes:    base64.StdEncoding.EncodeToString(optionalEOFBytes),
+		EOFAfterColumns:     base64.StdEncoding.EncodeToString(eofAfterColumns),
 	}
 
 	return resultSet, err
@@ -279,7 +280,8 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	// Write EOF packet header
 	if resultSet.EOFPresent {
 		sequenceID++
-		buf.Write(resultSet.EOFAfterColumns)
+		EOFAfterColumnsValue, _ := base64.StdEncoding.DecodeString(resultSet.EOFAfterColumns)
+		buf.Write(EOFAfterColumnsValue)
 		if resultSet.PaddingPresent {
 			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 		}
@@ -301,7 +303,8 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	sequenceID++
 	// Write EOF packet header again
 	// buf.Write([]byte{5, 0, 0, sequenceID})
-	buf.Write(resultSet.OptionalEOFBytes)
+	OptionalEOFBytesValue, _ := base64.StdEncoding.DecodeString(resultSet.OptionalEOFBytes)
+	buf.Write(OptionalEOFBytesValue)
 	if resultSet.PaddingPresentFinal {
 		buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 	}

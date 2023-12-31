@@ -25,7 +25,7 @@ type MySQLHandshakeV10Packet struct {
 	ProtocolVersion uint8  `yaml:"protocol_version"`
 	ServerVersion   string `yaml:"server_version"`
 	ConnectionID    uint32 `yaml:"connection_id"`
-	AuthPluginData  []byte `yaml:"auth_plugin_data"`
+	AuthPluginData  string `yaml:"auth_plugin_data"`
 	CapabilityFlags uint32 `yaml:"capability_flags"`
 	CharacterSet    uint8  `yaml:"character_set"`
 	StatusFlags     uint16 `yaml:"status_flags"`
@@ -39,7 +39,7 @@ type PluginDetails struct {
 type MySQLHandshakeResponseOk struct {
 	PacketIndicator string        `yaml:"packet_indicator"`
 	PluginDetails   PluginDetails `yaml:"plugin_details"`
-	RemainingBytes  []byte        `yaml:"remaining_bytes"`
+	RemainingBytes  string        `yaml:"remaining_bytes"`
 }
 type MySQLHandshakeResponse struct {
 	CapabilityFlags uint32   `yaml:"capability_flags"`
@@ -47,7 +47,7 @@ type MySQLHandshakeResponse struct {
 	CharacterSet    uint8    `yaml:"character_set"`
 	Reserved        [23]byte `yaml:"reserved"`
 	Username        string   `yaml:"username"`
-	AuthData        []byte   `yaml:"auth_data"`
+	AuthData        string   `yaml:"auth_data"`
 	Database        string   `yaml:"database"`
 	AuthPluginName  string   `yaml:"auth_plugin_name"`
 }
@@ -61,7 +61,7 @@ type MySQLComStmtExecute struct {
 	StatementID    uint32           `yaml:"statement_id"`
 	Flags          byte             `yaml:"flags"`
 	IterationCount uint32           `yaml:"iteration_count"`
-	NullBitmap     []byte           `yaml:"null_bitmap"`
+	NullBitmap     string           `yaml:"null_bitmap"`
 	ParamCount     uint16           `yaml:"param_count"`
 	Parameters     []BoundParameter `yaml:"parameters"`
 }
@@ -89,8 +89,8 @@ type MySQLResultSet struct {
 	EOFPresentFinal     bool                `yaml:"eofPresentFinal"`
 	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
 	OptionalPadding     bool                `yaml:"optionalPadding"`
-	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
-	EOFAfterColumns     []byte              `yaml:"eofAfterColumns"`
+	OptionalEOFBytes    string              `yaml:"optionalEOFBytes"`
+	EOFAfterColumns     string              `yaml:"eofAfterColumns"`
 }
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
@@ -144,7 +144,7 @@ type MySQLComStmtPreparePacket struct {
 type MySQLCOM_STMT_SEND_LONG_DATA struct {
 	StatementID uint32 `yaml:"statement_id"`
 	ParameterID uint16 `yaml:"parameter_id"`
-	Data        []byte `yaml:"data"`
+	Data        string `yaml:"data"`
 }
 
 type MySQLCOM_STMT_RESET struct {
@@ -159,7 +159,7 @@ type MySQLComStmtFetchPacket struct {
 
 type MySQLComChangeUserPacket struct {
 	User         string `yaml:"user"`
-	Auth         []byte `yaml:"auth"`
+	Auth         string `yaml:"auth"`
 	Db           string `yaml:"db"`
 	CharacterSet uint8  `yaml:"character_set"`
 	AuthPlugin   string `yaml:"auth_plugin"`

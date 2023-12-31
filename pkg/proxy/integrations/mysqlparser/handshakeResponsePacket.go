@@ -2,6 +2,7 @@ package mysqlparser
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 )
@@ -19,7 +20,7 @@ type HandshakeResponse struct {
 	CharacterSet         uint8             `yaml:"character_set"`
 	Reserved             [23]byte          `yaml:"reserved"`
 	Username             string            `yaml:"username"`
-	AuthData             []byte            `yaml:"auth_data"`
+	AuthData             string            `yaml:"auth_data"`
 	Database             string            `yaml:"database"`
 	AuthPluginName       string            `yaml:"auth_plugin_name"`
 	ConnectAttributes    map[string]string `yaml:"connect_attributes"`
@@ -32,7 +33,8 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 	}
 
 	packet := &HandshakeResponse{}
-
+	var authDataByte []byte
+	// var reservedBytes []byte
 	packet.CapabilityFlags = binary.LittleEndian.Uint32(data[:4])
 	data = data[4:]
 
@@ -60,13 +62,13 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 			if len(data) < length {
 				return nil, errors.New("handshake response packet too short for auth data")
 			}
-			packet.AuthData = data[:length]
+			authDataByte = data[:length]
 			data = data[length:]
 		}
 	} else {
 		idx = bytes.IndexByte(data, 0x00)
 		if idx != -1 {
-			packet.AuthData = data[:idx]
+			authDataByte = data[:idx]
 			data = data[idx+1:]
 		}
 	}
@@ -134,7 +136,8 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 			data = data[1:]
 		}
 	}
-
+	packet.AuthData = base64.StdEncoding.EncodeToString(authDataByte)
+	// packet.Reserved = base64.StdEncoding.EncodeToString(reservedBytes)
 	return packet, nil
 }
 func decodeLengthEncodedInteger(b []byte) (length int, isNull bool, bytesRead int) {
