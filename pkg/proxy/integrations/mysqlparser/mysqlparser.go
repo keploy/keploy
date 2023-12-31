@@ -474,6 +474,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	for {
 		configMocks, _ := h.GetConfigMocks()
 		tcsMocks, _ := h.GetTcsMocks()
+
 		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
 			if len(configMocks) == 0 {
