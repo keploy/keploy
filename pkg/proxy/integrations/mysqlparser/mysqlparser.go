@@ -568,19 +568,33 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	doHandshakeAgain := true
 	prevRequest := ""
 	var requestBuffers [][]byte
+
 	for {
 		configMocks := h.GetConfigMocks()
 		tcsMocks := h.GetTcsMocks()
+		firstSQLMock := func(configMocks []*models.Mock) (*models.Mock, bool) {
+			for _, mock := range configMocks {
+				if mock.Kind == "SQL" {
+					return mock, true
+				}
+			}
+			return nil, false
+		}
+
 		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
 			if len(configMocks) == 0 {
 				logger.Debug("No more config mocks available")
 				return
 			}
-
-			header := configMocks[0].Spec.MySqlResponses[0].Header
-			packet := configMocks[0].Spec.MySqlResponses[0].Message
-			opr := configMocks[0].Spec.MySqlResponses[0].Header.PacketType
+			sqlMock, found := firstSQLMock(configMocks)
+			if !found {
+				logger.Debug("No SQL mock found")
+				return
+			}
+			header := sqlMock.Spec.MySqlResponses[0].Header
+			packet := sqlMock.Spec.MySqlResponses[0].Message
+			opr := sqlMock.Spec.MySqlResponses[0].Header.PacketType
 
 			binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
 			if err != nil {
