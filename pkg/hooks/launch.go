@@ -472,8 +472,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 // It runs the application using the given command
 func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 	// Create a new command with your appCmd
-	parts := strings.Fields(appCmd)
-	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd := exec.Command("sh", "-c", appCmd)
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
