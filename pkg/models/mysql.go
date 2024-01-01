@@ -42,14 +42,14 @@ type MySQLHandshakeResponseOk struct {
 	RemainingBytes  string        `yaml:"remaining_bytes"`
 }
 type MySQLHandshakeResponse struct {
-	CapabilityFlags uint32   `yaml:"capability_flags"`
-	MaxPacketSize   uint32   `yaml:"max_packet_size"`
-	CharacterSet    uint8    `yaml:"character_set"`
-	Reserved        [23]byte `yaml:"reserved"`
-	Username        string   `yaml:"username"`
-	AuthData        string   `yaml:"auth_data"`
-	Database        string   `yaml:"database"`
-	AuthPluginName  string   `yaml:"auth_plugin_name"`
+	CapabilityFlags uint32 `yaml:"capability_flags"`
+	MaxPacketSize   uint32 `yaml:"max_packet_size"`
+	CharacterSet    uint8  `yaml:"character_set"`
+	Reserved        int    `yaml:"reserved"`
+	Username        string `yaml:"username"`
+	AuthData        string `yaml:"auth_data"`
+	Database        string `yaml:"database"`
+	AuthPluginName  string `yaml:"auth_plugin_name"`
 }
 
 type MySQLQueryPacket struct {

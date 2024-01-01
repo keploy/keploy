@@ -18,7 +18,7 @@ type HandshakeResponse struct {
 	CapabilityFlags      uint32            `yaml:"capability_flags"`
 	MaxPacketSize        uint32            `yaml:"max_packet_size"`
 	CharacterSet         uint8             `yaml:"character_set"`
-	Reserved             [23]byte          `yaml:"reserved"`
+	Reserved             int               `yaml:"reserved"`
 	Username             string            `yaml:"username"`
 	AuthData             string            `yaml:"auth_data"`
 	Database             string            `yaml:"database"`
@@ -31,10 +31,9 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 	if len(data) < 32 {
 		return nil, errors.New("handshake response packet too short")
 	}
-
 	packet := &HandshakeResponse{}
 	var authDataByte []byte
-	// var reservedBytes []byte
+	var reservedBytes [23]byte
 	packet.CapabilityFlags = binary.LittleEndian.Uint32(data[:4])
 	data = data[4:]
 
@@ -44,7 +43,7 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 	packet.CharacterSet = data[0]
 	data = data[1:]
 
-	copy(packet.Reserved[:], data[:23])
+	copy(reservedBytes[:], data[:23])
 	data = data[23:]
 
 	idx := bytes.IndexByte(data, 0x00)
@@ -137,7 +136,7 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 		}
 	}
 	packet.AuthData = base64.StdEncoding.EncodeToString(authDataByte)
-	// packet.Reserved = base64.StdEncoding.EncodeToString(reservedBytes)
+	packet.Reserved = len(reservedBytes)
 	return packet, nil
 }
 func decodeLengthEncodedInteger(b []byte) (length int, isNull bool, bytesRead int) {
