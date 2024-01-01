@@ -36,7 +36,7 @@ checkForfzf() {
 displaymenu() {
     echo "Do you want to install Keploy in Linux or Docker?"
 
-    local options=("Linux" "Docker" "Quit")
+    local options=("Linux" "Docker")
     local choice=$(printf "%s\n" "${options[@]}" | fzf --height 20% --border --prompt 'Select installation method: ')
 
     case "$choice" in
@@ -45,9 +45,6 @@ displaymenu() {
             ;;
         "Docker")
             platform="Docker"
-            ;;
-        "Quit")
-            platform="Quit"
             ;;
         *)
             echo "Invalid option selected."
@@ -110,7 +107,7 @@ installOnDocker() {
 }
 
 # Main function
-main() {
+installKeploy() {
     if [ "$OS_NAME" = "Darwin" ]; then
         installOnDocker
     elif [ "$IS_CI" = false ]; then
@@ -124,17 +121,13 @@ main() {
             "Docker")
                 installOnDocker
                 ;;
-            "Quit")
-                echo "Installation canceled."
-                return
-                ;;
         esac
     else
         echo "Running in CI environment. Skipping interactive menu."
     fi
 }
 
-main
+installKeploy
 
 if command -v keploy &> /dev/null; then
     keploy example
