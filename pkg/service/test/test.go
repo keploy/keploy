@@ -352,6 +352,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 					case hooks.ErrInterrupted:
 						t.logger.Info("keploy terminated user application")
 					case hooks.ErrCommandError:
+						t.logger.Warn(fmt.Sprintf(`Unable to run user application, try running the command "%s" without keploy to test if user application runs. Visit https://keploy.io/docs/ for further help`, cfg.AppCmd))
 					case hooks.ErrUnExpected:
 						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
 					default:
