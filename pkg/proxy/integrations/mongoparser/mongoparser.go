@@ -66,12 +66,14 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	requestBuffers := [][]byte{requestBuffer}
 	var readRequestDelay time.Duration
 	for {
-		configMocks := h.GetConfigMocks()
+		configMocks, err := h.GetConfigMocks()
+		if err != nil {
+			logger.Error("error while getting config mock", zap.Error(err))
+		}
 		logger.Debug(fmt.Sprintf("the config mocks are: %v", configMocks))
 
 		var (
 			mongoRequests = []models.MongoRequest{}
-			err           error
 		)
 		if string(requestBuffer) == "read form client connection" {
 			started := time.Now()
@@ -102,7 +104,6 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			Message:   mongoRequest,
 			ReadDelay: int64(readRequestDelay),
 		})
-		tcsMocks := h.GetTcsMocks()
 		if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 			for {
 				started := time.Now()
@@ -256,7 +257,6 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 							responseTo = requestId
 						}
 					} else {
-
 						_, err := clientConn.Write(message.Encode(responseTo, wiremessage.NextRequestID()))
 						if err != nil {
 							logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
@@ -267,41 +267,10 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				}
 			}
 		} else {
-			logger.Debug("recieved a command query call", zap.Any("length of tcsMocks", len(tcsMocks)))
-			maxMatchScore := 0.0
-			bestMatchIndex := -1
-			for tcsIndx, tcsMock := range tcsMocks {
-				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
-					for i, req := range tcsMock.Spec.MongoRequests {
-						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
-							logger.Debug("the recieved request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
-							continue
-						}
-						switch req.Header.Opcode {
-						case wiremessage.OpMsg:
-							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
-								logger.Debug("the recieved request is not of same flagbit with the tcmocks", zap.Any("at index", tcsIndx))
-								continue
-							}
-							scoreSum := 0.0
-							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-								if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
-									score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-									scoreSum += score
-								}
-							}
-							currentScore := scoreSum / float64(len(mongoRequests))
-							if currentScore > maxMatchScore {
-								maxMatchScore = currentScore
-								bestMatchIndex = tcsIndx
-							}
-						default:
-							logger.Error("the OpCode of the mongo wiremessage is invalid.")
-						}
-					}
-				}
-			}
-			if bestMatchIndex == -1 {
+
+			isMatched, matchedMock, err := match(h, mongoRequests, logger)
+
+			if !isMatched {
 				requestBuffer, err = util.Passthrough(clientConn, destConn, requestBuffers, h.Recover, logger)
 				if err != nil {
 					return
@@ -310,17 +279,13 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			}
 
 			responseTo := mongoRequests[0].Header.RequestID
-			logger.Debug("the index mostly matched with the current request", zap.Any("indx", bestMatchIndex), zap.Any("responseTo", responseTo))
-			if bestMatchIndex < 0 {
-				logger.Debug(fmt.Sprintf("the bestMatchIndex before looping on MongoResponses is:%d", bestMatchIndex))
-				continue
-			}
+			logger.Debug("the mock matched with the current request", zap.Any("mock", matchedMock), zap.Any("responseTo", responseTo))
 
-			for _, resp := range tcsMocks[bestMatchIndex].Spec.MongoResponses {
+			for _, resp := range matchedMock.Spec.MongoResponses {
 				respMessage := resp.Message.(*models.MongoOpMessage)
 				expectedRequestSections := []string{}
-				if len(tcsMocks[bestMatchIndex].Spec.MongoRequests) > 0 {
-					expectedRequestSections = tcsMocks[bestMatchIndex].Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
+				if len(matchedMock.Spec.MongoRequests) > 0 {
+					expectedRequestSections = matchedMock.Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 				}
 				message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, logger)
 				if err != nil {
@@ -335,12 +300,6 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				}
 				responseTo = requestId
 			}
-			logger.Debug(fmt.Sprintf("the length of tcsMocks before filtering matched: %v\n", len(tcsMocks)))
-			if maxMatchScore > 0.0 && bestMatchIndex >= 0 && bestMatchIndex < len(tcsMocks) {
-				tcsMocks = append(tcsMocks[:bestMatchIndex], tcsMocks[bestMatchIndex+1:]...)
-				h.SetTcsMocks(tcsMocks)
-			}
-			logger.Debug(fmt.Sprintf("the length of tcsMocks after filtering matched: %v\n", len(tcsMocks)))
 		}
 		logger.Debug("the length of the requestBuffer after matching: " + strconv.Itoa(len(requestBuffer)) + strconv.Itoa(len(requestBuffers[0])))
 		if len(requestBuffers) > 0 && len(requestBuffer) == len(requestBuffers[0]) {

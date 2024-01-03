@@ -452,113 +452,6 @@ var (
 	mockResponseRead = 0
 )
 
-func decodeOutgoingMySQL1(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
-	firstLoop := true
-	doHandshakeAgain := true
-	configResponseRead := 0
-	for {
-		configMocks := h.GetConfigMocks()
-		tcsMocks := h.GetTcsMocks()
-		logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
-		var (
-			mysqlRequests = []models.MySQLRequest{}
-		)
-		logger.Debug("MySQL requests", zap.Any("mysqlRequests", mysqlRequests))
-		if firstLoop || doHandshakeAgain {
-			header := configMocks[0].Spec.MySqlResponses[configResponseRead].Header
-			packet := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
-			opr := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-			binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
-			if err != nil {
-				logger.Error("Failed to encode to binary", zap.Error(err))
-				return
-			}
-			_, err = clientConn.Write(binaryPacket)
-			configResponseRead++
-			requestBuffer, err = util.ReadBytes(clientConn)
-			// oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
-			header = configMocks[0].Spec.MySqlResponses[configResponseRead].Header
-			handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
-			opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-			handshakeResponseBinary, err := encodeToBinary(&handshakeResponseFromConfig, header, opr2, 1)
-			// _, err = destConn.Write(requestBuffer)
-			//fmt.Println(oprRequest, requestHeader, mysqlRequest, handshakeResponseFromConfig, err1)
-			_, err = clientConn.Write(handshakeResponseBinary)
-
-			if doHandshakeAgain && ((configResponseRead + 1) == len(configMocks[0].Spec.MySqlResponses)) {
-				doHandshakeAgain = false
-			} else {
-				if opr2 == "AUTH_SWITCH_REQUEST" {
-					configResponseRead++
-					//Private Key
-					requestBuffer, err = util.ReadBytes(clientConn)
-					header = configMocks[0].Spec.MySqlResponses[configResponseRead].Header
-					handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
-					opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-					encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, header, opr2, 1)
-					_, err = clientConn.Write(encodedResponseBinary)
-				}
-				if doHandshakeAgain && ((configResponseRead + 1) == len(configMocks[0].Spec.MySqlResponses)) {
-					doHandshakeAgain = false
-				} else {
-					configResponseRead++
-					//Private Key
-					requestBuffer, err = util.ReadBytes(clientConn)
-					header := configMocks[0].Spec.MySqlResponses[configResponseRead].Header
-					handshakeResponseFromConfig := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
-					opr2 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-					encodedResponseBinary, _ := encodeToBinary(&handshakeResponseFromConfig, header, opr2, 1)
-					_, err = clientConn.Write(encodedResponseBinary)
-					configResponseRead++
-					//Encrypted Password
-					requestBuffer, err = util.ReadBytes(clientConn)
-					ResponseFromConfigNext := configMocks[0].Spec.MySqlResponses[configResponseRead].Message
-					opr3 := configMocks[0].Spec.MySqlResponses[configResponseRead].Header.PacketType
-					encodedResponseBinary, _ = encodeMySQLOKConnectionPhase(&ResponseFromConfigNext, opr3, 6)
-					_, err = clientConn.Write(encodedResponseBinary)
-					doHandshakeAgain = false
-				}
-
-			}
-			if err != nil {
-				logger.Error("failed to write query response to mysql client", zap.Error(err))
-				return
-			}
-		} else {
-			requestBuffer, _ = util.ReadBytes(clientConn)
-			if len(requestBuffer) == 0 {
-				return
-			}
-			oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
-			logger.Debug(oprRequest)
-			if oprRequest == "COM_STMT_CLOSE" {
-				if len(tcsMocks) == mockResponseRead {
-					mockResponseRead = 0
-				}
-				return
-			}
-			logger.Debug("Decoded MySQL packet details",
-				zap.String("oprRequest", oprRequest),
-				zap.Any("requestHeader", requestHeader),
-				zap.Any("mysqlRequest", mysqlRequest),
-				zap.Error(err))
-			if mockResponseRead >= len(tcsMocks) {
-				logger.Error("Mock response reading pointer out of bounds")
-				return
-			}
-			header := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header
-			handshakeResponseFromConfig := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Message
-			opr2 := tcsMocks[mockResponseRead].Spec.MySqlResponses[0].Header.PacketType
-			responseBinary, err := encodeToBinary(&handshakeResponseFromConfig, header, opr2, mockResponseRead+1)
-			logger.Debug("Logging response binary", zap.ByteString("response", responseBinary))
-			_, err = clientConn.Write(responseBinary)
-			mockResponseRead++
-			time.Sleep(1000 * time.Millisecond)
-		}
-		firstLoop = false
-	}
-}
-
 var (
 	expectingHandshakeResponseTest = false
 )
@@ -579,9 +472,8 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	var requestBuffers [][]byte
 
 	for {
-		configMocks := h.GetConfigMocks()
-		tcsMocks := h.GetTcsMocks()
-
+		configMocks, _ := h.GetConfigMocks()
+		tcsMocks, _ := h.GetTcsMocks()
 		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
 			if len(configMocks) == 0 {
@@ -719,38 +611,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		}
 	}
 }
-func matchRequestWithMock1(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, error) {
-	// Combine configMocks and tcsMocks for simplicity
-	allMocks := append(configMocks, tcsMocks...)
 
-	var bestMatch *models.MySQLResponse
-	maxMatchCount := 0
-
-	for i, mock := range allMocks {
-		for j, mockReq := range mock.Spec.MySqlRequests {
-			matchCount := compareMySQLRequests(mysqlRequest, mockReq)
-
-			if matchCount > maxMatchCount {
-				maxMatchCount = matchCount
-				if len(mock.Spec.MySqlResponses) > 0 {
-					if allMocks[i].Spec.Metadata["type"] == "config" {
-						bestMatch = &allMocks[i].Spec.MySqlResponses[j+1]
-
-					} else {
-						bestMatch = &allMocks[i].Spec.MySqlResponses[j]
-
-					}
-				}
-			}
-		}
-	}
-
-	if bestMatch == nil {
-		return nil, fmt.Errorf("no matching mock found")
-	}
-
-	return bestMatch, nil
-}
 func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock, h *hooks.Hook) (*models.MySQLResponse, int, string, error) {
 	allMocks := append([]*models.Mock(nil), configMocks...)
 	allMocks = append(allMocks, tcsMocks...)

@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -314,22 +313,21 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	//Matching algorithmm
 	//Get the mocks
 	for {
-		tcsMocks := h.GetTcsMocks()
-		var bestMatch *models.Mock
+
 		//Check if the expected header is present
 		if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
 			//Send the 100 continue response
-			_, err := clienConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+			_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 			if err != nil {
 				logger.Error("failed to write the 100 continue response to the user application", zap.Error(err))
 				return
 			}
 			//Read the request buffer again
-			newRequest, err := util.ReadBytes(clienConn)
+			newRequest, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request buffer from the user application", zap.Error(err))
 				return
@@ -337,7 +335,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			//Append the new request buffer to the old request buffer
 			requestBuffer = append(requestBuffer, newRequest...)
 		}
-		handleChunkedRequests(&requestBuffer, clienConn, destConn, logger)
+		handleChunkedRequests(&requestBuffer, clientConn, destConn, logger)
+
 		//Parse the request buffer
 		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
 		if err != nil {
@@ -345,7 +344,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			return
 		}
 
-		reqbody, err := ioutil.ReadAll(req.Body)
+		reqBody, err := ioutil.ReadAll(req.Body)
 		if err != nil {
 			logger.Error("failed to read from request body", zap.Error(err))
 
@@ -358,53 +357,15 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		}
 
 		//check if req body is a json
-		isReqBodyJSON := isJSON(reqbody)
+		isReqBodyJSON := isJSON(reqBody)
 
-		var eligibleMock []*models.Mock
+		isMatched, stub, err := match(req, reqBody, reqURL, isReqBodyJSON, h, logger, clientConn, destConn, requestBuffer, h.Recover)
 
-		for _, mock := range tcsMocks {
-			if mock.Kind == models.HTTP {
-				isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
-
-				//the body of mock and request aren't of same type
-				if isMockBodyJSON != isReqBodyJSON {
-					continue
-				}
-
-				//parse request body url
-				parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
-				if err != nil {
-					logger.Error("failed to parse mock url", zap.Error(err))
-					continue
-				}
-
-				//Check if the path matches
-				if parsedURL.Path != reqURL.Path {
-					//If it is not the same, continue
-					continue
-				}
-
-				//Check if the method matches
-				if mock.Spec.HttpReq.Method != models.Method(req.Method) {
-					//If it is not the same, continue
-					continue
-				}
-
-				// Check if the header keys match
-				if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
-					// Different headers, so not a match
-					continue
-				}
-
-				if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
-					// Different query params, so not a match
-					continue
-				}
-				eligibleMock = append(eligibleMock, mock)
-			}
+		if err != nil {
+			logger.Error("error while matching http mocks", zap.Error(err))
 		}
 
-		if len(eligibleMock) == 0 {
+		if !isMatched {
 			passthroughHost := false
 			for _, host := range models.PassThroughHosts {
 				if req.Host == host {
@@ -414,33 +375,9 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 			if !passthroughHost {
 				logger.Error("Didn't match any prexisting http mock")
 			}
-			util.Passthrough(clienConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
+			util.Passthrough(clientConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
 			return
 		}
-
-		_, bestMatch = util.Fuzzymatch(eligibleMock, requestBuffer, h)
-
-		var bestMatchIndex int
-		for idx, mock := range tcsMocks {
-			if reflect.DeepEqual(mock, bestMatch) {
-				bestMatchIndex = idx
-				break
-			}
-		}
-		if h.GetDepsSize() == 0 {
-			// logger.Error("failed to mock the output for unrecorded outgoing http call")
-			return
-		}
-
-		// var httpSpec spec.HttpSpec
-		// err := deps[0].Spec.Decode(&httpSpec)
-		// if err != nil {
-		// 	logger.Error("failed to decode the yaml spec for the outgoing http call")
-		// 	return
-		// }
-		// httpSpec := deps[0]
-		stub := h.FetchDep(bestMatchIndex)
-		// fmt.Println("http mock in test: ", stub)
 
 		statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
 
@@ -485,16 +422,13 @@ func decodeOutgoingHttp(requestBuffer []byte, clienConn, destConn net.Conn, h *h
 		responseString = statusLine + headers + "\r\n" + "" + respBody
 
 		logger.Debug("the content-length header" + headers)
-		_, err = clienConn.Write([]byte(responseString))
+		_, err = clientConn.Write([]byte(responseString))
 		if err != nil {
 			logger.Error("failed to write the mock output to the user application", zap.Error(err))
 			return
 		}
-		// pop the mocked output from the dependency queue
-		// deps = deps[1:]
-		h.PopIndex(bestMatchIndex)
 
-		requestBuffer, err = util.ReadBytes(clienConn)
+		requestBuffer, err = util.ReadBytes(clientConn)
 		if err != nil {
 			logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 			logger.Debug("This was the last response from the server: " + string(responseString))
