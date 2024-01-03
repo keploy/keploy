@@ -211,6 +211,16 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 				return errors.New("missing required -c flag or appCmd in config file")
 			}
+			//Check if app command starts with docker or sudo docker.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				utils.UpdateKeployToDocker("test", appCmd, isDockerCompose, appContainer, buildDelay.String())
+				return nil
+			}
 
 			if delay <= 5 {
 				t.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", delay))

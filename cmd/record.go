@@ -78,6 +78,8 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	return nil
 }
 
+
+
 type Record struct {
 	recorder record.Recorder
 	logger   *zap.Logger
@@ -207,6 +209,17 @@ func (r *Record) GetCmd() *cobra.Command {
 					r.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
+			}
+			//Check if app command starts with docker or sudo docker.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				// r.logger.Error("Please run the command with sudo -E env PATH=$PATH keploy record -c \"your command\"")
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				utils.UpdateKeployToDocker("record", appCmd, isDockerCompose, appContainer, buildDelay.String())
+				return nil
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))

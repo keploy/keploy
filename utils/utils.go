@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
@@ -72,4 +75,66 @@ func HandlePanic() {
 		log.Error(Emoji+"Recovered from:", r)
 		sentry.Flush(time.Second * 2)
 	}
+}
+
+// It checks if the cmd is related to docker or not, it also returns if its a docker compose file
+func IsDockerRelatedCmd(cmd string) (bool, string) {
+	// Check for Docker command patterns
+	dockerCommandPatterns := []string{
+		"docker-compose ",
+		"sudo docker-compose ",
+		"docker compose ",
+		"sudo docker compose ",
+		"docker ",
+		"sudo docker ",
+	}
+
+	for _, pattern := range dockerCommandPatterns {
+		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
+			if strings.Contains(pattern, "compose") {
+				return true, "docker-compose"
+			}
+			return true, "docker"
+		}
+	}
+
+	// Check for Docker Compose file extension
+	dockerComposeFileExtensions := []string{".yaml", ".yml"}
+	for _, extension := range dockerComposeFileExtensions {
+		if strings.HasSuffix(strings.ToLower(cmd), extension) {
+			return true, "docker-compose"
+		}
+	}
+
+	return false, ""
+}
+
+func UpdateKeployToDocker(cmdName string, appCmd string, isDockerCompose bool, appContainer string, buildDelay string) {
+	workingDir, _ := os.Getwd()
+	var cmd *exec.Cmd
+	if isDockerCompose {
+		cmd = exec.Command("sudo", "docker", "run", "--pull", "always", "--name", "keploy-v2", "-p", "16789:16789", "--privileged", "--pid=host", "-v", fmt.Sprintf("%s:/files", workingDir), "-v", "/sys/fs/cgroup:/sys/fs/cgroup", "-v", "/sys/kernel/debug:/sys/kernel/debug", "-v", "/sys/fs/bpf:/sys/fs/bpf", "-v", "/var/run/docker.sock:/var/run/docker.sock", "--rm", "ghcr.io/keploy/keploy", cmdName, "-c", "docker compose up -d", "--containerName", appContainer, "--buildDelay", buildDelay)
+		fmt.Println("This is the container name")
+		fmt.Println(appContainer)
+	} else {
+		cmd = exec.Command("sudo", "docker", "run", "--pull", "always", "--name", "keploy-v2", "-p", "16789:16789", "--privileged", "--pid=host", "-v", fmt.Sprintf("%s:/files", workingDir), "-v", "/sys/fs/cgroup:/sys/fs/cgroup", "-v", "/sys/kernel/debug:/sys/kernel/debug", "-v", "/sys/fs/bpf:/sys/fs/bpf", "-v", "/var/run/docker.sock:/var/run/docker.sock", "--rm", "ghcr.io/keploy/keploy", cmdName, "-c", appCmd)
+	}
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stderr
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT)
+	go func() {
+		err := cmd.Run()
+		if err != nil {
+			println(err.Error())
+			return
+		}
+	}()
+	<-sigChan
+	if cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil {
+			log.Error("failed to kill: ", err)
+		}
+	}
+
 }

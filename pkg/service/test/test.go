@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -386,7 +387,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	//check if the user application is running docker container using IDE
 	returnVal.DockerID = (cfg.AppCmd == "" && len(cfg.AppContainer) != 0)
 
-	ok, _ := cfg.LoadedHooks.IsDockerRelatedCmd(cfg.AppCmd)
+	ok, _ := utils.IsDockerRelatedCmd(cfg.AppCmd)
 	if ok || returnVal.DockerID {
 		returnVal.UserIP = cfg.LoadedHooks.GetUserIP()
 		t.logger.Debug("the userip of the user docker container", zap.Any("", returnVal.UserIP))
@@ -409,7 +410,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		started := time.Now().UTC()
 		t.logger.Debug("Before simulating the request", zap.Any("Test case", cfg.Tc))
 
-		ok, _ := cfg.LoadedHooks.IsDockerRelatedCmd(cfg.AppCmd)
+		ok, _ := utils.IsDockerRelatedCmd(cfg.AppCmd)
 		if ok || cfg.DockerID {
 			var err error
 			cfg.Tc.HttpReq.URL, err = replaceHostToIP(cfg.Tc.HttpReq.URL, cfg.UserIP)
