@@ -19,13 +19,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"unicode"
-
-	"github.com/agnivade/levenshtein"
-	"github.com/cloudflare/cfssl/log"
 
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/utils"
 )
@@ -341,34 +336,6 @@ func IsDockerRelatedCommand(cmd string) (bool, string) {
 	return false, ""
 }
 
-func findStringMatch(req string, mockString []string) int {
-	minDist := int(^uint(0) >> 1) // Initialize with max int value
-	bestMatch := -1
-	for idx, req := range mockString {
-		if !IsAsciiPrintable(mockString[idx]) {
-			continue
-		}
-
-		dist := levenshtein.ComputeDistance(req, mockString[idx])
-		if dist == 0 {
-			return 0
-		}
-
-		if dist < minDist {
-			minDist = dist
-			bestMatch = idx
-		}
-	}
-	return bestMatch
-}
-
-func HttpDecoder(encoded string) ([]byte, error) {
-	// decode the string to a buffer.
-
-	data := []byte(encoded)
-	return data, nil
-}
-
 func AdaptiveK(length, kMin, kMax, N int) int {
 	k := length / N
 	if k < kMin {
@@ -403,73 +370,4 @@ func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
 		return 0.0
 	}
 	return float64(intersectionSize) / float64(unionSize)
-}
-
-func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) int {
-
-	mxSim := -1.0
-	mxIdx := -1
-	// find the fuzzy hash of the mocks
-	for idx, mock := range configMocks {
-		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
-		k := AdaptiveK(len(reqBuff), 3, 8, 5)
-		shingles1 := CreateShingles(encoded, k)
-		shingles2 := CreateShingles(reqBuff, k)
-		similarity := JaccardSimilarity(shingles1, shingles2)
-
-		log.Debugf("Jaccard Similarity:%f\n", similarity)
-
-		if mxSim < similarity {
-			mxSim = similarity
-			mxIdx = idx
-		}
-	}
-	return mxIdx
-}
-
-func IsAsciiPrintable(s string) bool {
-	for _, r := range s {
-		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func HttpEncoder(buffer []byte) string {
-	//Encode the buffer to string
-	encoded := string(buffer)
-	return encoded
-}
-func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *models.Mock) {
-	com := HttpEncoder(reqBuff)
-	for _, mock := range tcsMocks {
-		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
-		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
-
-			log.Debug(Emoji, "matched in first loop")
-
-			return true, mock
-		}
-	}
-	// convert all the configmocks to string array
-	mockString := make([]string, len(tcsMocks))
-	for i := 0; i < len(tcsMocks); i++ {
-		mockString[i] = string(tcsMocks[i].Spec.HttpReq.Body)
-	}
-	// find the closest match
-	if IsAsciiPrintable(string(reqBuff)) {
-		idx := findStringMatch(string(reqBuff), mockString)
-		if idx != -1 {
-
-			log.Debug(Emoji, "Returning mock from String Match")
-
-			return true, tcsMocks[idx]
-		}
-	}
-	idx := findBinaryMatch(tcsMocks, reqBuff, h)
-	if idx != -1 {
-		return true, tcsMocks[idx]
-	}
-	return false, &models.Mock{}
 }
