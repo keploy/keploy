@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -104,6 +105,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 					r.Logger.Info("keploy terminated user application")
 					return
 				case hooks.ErrCommandError:
+					r.Logger.Warn(fmt.Sprintf(`Unable to run user application, try running the command "%s" without keploy to test if user application runs. Visit https://keploy.io/docs/ for further help`, appCmd))
 				case hooks.ErrUnExpected:
 					r.Logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
 				case hooks.ErrDockerError:

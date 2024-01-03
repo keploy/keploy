@@ -251,9 +251,6 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			defer h.Recover(pkg.GenerateRandomID())
 			err := h.runApp(appCmd, isUnitTestIntegration)
 			if err != nil {
-				if !isUnitTestIntegration {
-					h.logger.Warn(fmt.Sprintf(`Unable to run user application, try running the command "%s" without keploy to test if user application runs. Visit https://keploy.io/docs/ for further help`, appCmd))
-				}
 				return err
 			}
 		}
