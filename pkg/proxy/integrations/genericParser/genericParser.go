@@ -62,11 +62,12 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			continue
 		}
 
-		tcsMocks := h.GetTcsMocks()
-
 		// bestMatchedIndx := 0
 		// fuzzy match gives the index for the best matched generic mock
-		matched, genericResponses := fuzzymatch(tcsMocks, genericRequests, h)
+		matched, genericResponses, err := fuzzymatch(genericRequests, h)
+		if err != nil {
+			logger.Error("error while fuzzy matching", zap.Error(err))
+		}
 
 		if !matched {
 			// logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(genericRequests)))
@@ -190,19 +191,21 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		// case <-start.C:
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				h.AppendMocks(&models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.GENERIC,
-					Spec: models.MockSpec{
-						GenericRequests:  genericRequests,
-						GenericResponses: genericResponses,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-					},
-				}, ctx)
-				genericRequests = []models.GenericPayload{}
-				genericResponses = []models.GenericPayload{}
+				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
+				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
+				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+					h.AppendMocks(&models.Mock{
+						Version: models.GetVersion(),
+						Name:    "mocks",
+						Kind:    models.GENERIC,
+						Spec: models.MockSpec{
+							GenericRequests:  reqs,
+							GenericResponses: resps,
+							ReqTimestampMock: reqTimestampMock,
+							ResTimestampMock: resTimestampMock,
+						},
+					}, ctx)
+				}(genericRequestsCopy, genericResponseCopy)
 				clientConn.Close()
 				destConn.Close()
 				return nil
@@ -217,17 +220,21 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				h.AppendMocks(&models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.GENERIC,
-					Spec: models.MockSpec{
-						GenericRequests:  genericRequests,
-						GenericResponses: genericResponses,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-					},
-				}, ctx)
+				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
+				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
+				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+					h.AppendMocks(&models.Mock{
+						Version: models.GetVersion(),
+						Name:    "mocks",
+						Kind:    models.GENERIC,
+						Spec: models.MockSpec{
+							GenericRequests:  reqs,
+							GenericResponses: resps,
+							ReqTimestampMock: reqTimestampMock,
+							ResTimestampMock: resTimestampMock,
+						},
+					}, ctx)
+				}(genericRequestsCopy, genericResponseCopy)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}
