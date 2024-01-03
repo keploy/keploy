@@ -2,11 +2,11 @@ package genericparser
 
 import (
 	"encoding/base64"
+	"fmt"
+
 	// "fmt"
 	"unicode"
 
-	"github.com/agnivade/levenshtein"
-	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
@@ -24,53 +24,63 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 	return data, nil
 }
 
-func fuzzymatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload) {
-	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
-			matched := true // Flag to track if all requests match
+func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
+	for {
+		tcsMocks, err := h.GetTcsMocks()
+		if err != nil {
+			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
+		}
+		index := -1
+		for idx, mock := range tcsMocks {
+			if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+				matched := true // Flag to track if all requests match
 
-			for requestIndex, reqBuff := range requestBuffers {
-				bufStr := string(reqBuff)
-				if !IsAsciiPrintable(string(reqBuff)) {
-					bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+				for requestIndex, reqBuff := range requestBuffers {
+
+					bufStr := string(reqBuff)
+					if !IsAsciiPrintable(string(reqBuff)) {
+						bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+					}
+
+					// Compare the encoded data
+					if mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+						matched = false
+						break // Exit the loop if any request doesn't match
+					}
 				}
-
-				encoded := []byte(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
-				if !IsAsciiPrintable(mock.Spec.GenericRequests[requestIndex].Message[0].Data) {
-					encoded, _ = PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				if matched {
+					index = idx
+					break
 				}
-
-				// Compare the encoded data
-				if string(encoded) != string(reqBuff) || mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
-					matched = false
-					break // Exit the loop if any request doesn't match
-				}
-			}
-
-			if matched {
-				log.Debug("matched in first loop")
-				tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-				h.SetTcsMocks(tcsMocks)
-				return true, mock.Spec.GenericResponses
 			}
 		}
+
+		if index == -1 {
+			index = findBinaryMatch(tcsMocks, requestBuffers, h)
+		}
+
+		if index != -1 {
+			responseMock := make([]models.GenericPayload, len(tcsMocks[index].Spec.GenericResponses))
+			copy(responseMock, tcsMocks[index].Spec.GenericResponses)
+			isDeleted, err := h.DeleteTcsMock(tcsMocks[index])
+			if err != nil {
+				return false, nil, fmt.Errorf("error while deleting tcsMock %v", err)
+			}
+			if !isDeleted {
+				continue
+			}
+			return true, responseMock, nil
+		}
+		break
 	}
 
-	idx := findBinaryMatch(tcsMocks, requestBuffers, h)
-	if idx != -1 {
-		log.Debug("matched in binary match")
-		bestMatch := tcsMocks[idx].Spec.GenericResponses
-		tcsMocks = append(tcsMocks[:idx], tcsMocks[idx+1:]...)
-		h.SetTcsMocks(tcsMocks)
-		return true, bestMatch
-	}
-
-	return false, nil
+	return false, nil, nil
 }
 
 func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
 
-	mxSim := -1.0
+	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
+	mxSim := 0.5
 	mxIdx := -1
 	for idx, mock := range tcsMocks {
 		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
@@ -86,7 +96,6 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				shingles1 := util.CreateShingles(encoded, k)
 				shingles2 := util.CreateShingles(reqBuff, k)
 				similarity := util.JaccardSimilarity(shingles1, shingles2)
-				log.Debugf(hooks.Emoji, "Jaccard Similarity:%f\n", similarity)
 
 				if mxSim < similarity {
 					mxSim = similarity
@@ -106,25 +115,4 @@ func IsAsciiPrintable(s string) bool {
 		}
 	}
 	return true
-}
-
-func findStringMatch(req []string, mockString []string) int {
-	minDist := int(^uint(0) >> 1) // Initialize with max int value
-	bestMatch := -1
-	for idx, req := range mockString {
-		if !IsAsciiPrintable(mockString[idx]) {
-			continue
-		}
-
-		dist := levenshtein.ComputeDistance(req, mockString[idx])
-		if dist == 0 {
-			return 0
-		}
-
-		if dist < minDist {
-			minDist = dist
-			bestMatch = idx
-		}
-	}
-	return bestMatch
 }
