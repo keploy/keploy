@@ -393,7 +393,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						AuthType:                        pg.FrontendWrapper.AuthType,
 					}
 
-					after_encoded, _ := PostgresDecoderFrontend(*pg_mock)
+					after_encoded, err := PostgresDecoderFrontend(*pg_mock)
+					if err != nil {
+						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
+					}
 					if (len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R") || len(pg_mock.DataRows) > 0 {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
 						pg_mock.Payload = bufStr

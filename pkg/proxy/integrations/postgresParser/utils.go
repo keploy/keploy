@@ -312,19 +312,20 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 
 	mxSim := -1.0
 	mxIdx := -1
-	// sameHeader := -1
-	// add condition for header match that if mxIdx = -1 then return just matched header
 	for idx, mock := range tcsMocks {
 
-		// println("Inside findBinaryMatch", len(mock.Spec.GenericRequests), len(requestBuffers))
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
 				encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
 				if err != nil {
-
+					log.Debug("Error while decoding postgres request", zap.Error(err))
 				}
 				if mock.Spec.PostgresRequests[requestIndex].Payload != "" {
-					encoded, _ = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
+					encoded, err = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
+					if err != nil {
+						log.Debug("Error while decoding postgres request", zap.Error(err))
+						return -1
+					}
 				}
 				k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := util.CreateShingles(encoded, k)
@@ -339,10 +340,7 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 		}
 
 	}
-	// println("Max Similarity is ", mxSim)
-	// if mxIdx == -1 {
-	// 	return sameHeader
-	// }
+
 	return mxIdx
 }
 
@@ -412,9 +410,8 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 				for requestIndex, reqBuff := range requestBuffers {
 					bufStr := base64.StdEncoding.EncodeToString(reqBuff)
 					encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
-					if err != nil || encoded == nil {
+					if err != nil {
 						logger.Debug("Error while decoding postgres request", zap.Error(err))
-						return false, nil, fmt.Errorf("error while decoding postgres request %v", err)
 					}
 					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
 						log.Debug("CHANGING TO MD5 for Response")
