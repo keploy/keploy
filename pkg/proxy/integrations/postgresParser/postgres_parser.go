@@ -211,13 +211,13 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 				if !isStartupPacket(buffer) && len(buffer) > 5 {
 					bufferCopy := buffer
-					for i := 0; i < len(bufferCopy); {
+					for i := 0; i < len(bufferCopy)-5; {
 						logger.Debug("Inside the if condition")
 						pg.BackendWrapper.MsgType = buffer[i]
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
 							logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
-							continue
+							break
 						}
 						msg, err = pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
@@ -315,10 +315,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					ps := make([]pgproto3.ParameterStatus, 0)
 					dataRows := []pgproto3.DataRow{}
 
-					for i := 0; i < len(bufferCopy); {
+					for i := 0; i < len(bufferCopy)-5; {
 						pg.FrontendWrapper.MsgType = buffer[i]
 						pg.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
-						msg, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger) // arre yeh index leta hai length nhi
+						msg, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger) 
 						if err != nil {
 							logger.Error("failed to translate the response message to readable", zap.Error(err))
 						}
@@ -476,20 +476,18 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 		}
 
-		matched, pgResponses, err := matchingReadablePG(pgRequests, h)
+		matched, pgResponses, err := matchingReadablePG(pgRequests,logger,h)
 		if err != nil {
 			return fmt.Errorf("error while matching tcs mocks %v", err)
 		}
 
 		if !matched {
 			_, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)
-
 			if err != nil {
 				logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
 				return err
 			}
 			continue
-
 		}
 		for _, pgResponse := range pgResponses {
 			encoded, err := PostgresDecoder(pgResponse.Payload)
