@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	_ "net/http/pprof"
 	"time"
 
@@ -34,7 +35,9 @@ func main() {
 		version = "2-dev"
 	}
 	utils.KeployVersion = version
-	fmt.Println(logo, " ")
+	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER");binaryToDocker != "true" {
+		fmt.Println(logo, " ")
+	}
 	fmt.Printf("version: %v\n\n", version)
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{

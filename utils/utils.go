@@ -7,9 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
@@ -113,28 +111,18 @@ func UpdateKeployToDocker(cmdName string, appCmd string, isDockerCompose bool, a
 	workingDir, _ := os.Getwd()
 	var cmd *exec.Cmd
 	if isDockerCompose {
-		cmd = exec.Command("sudo", "docker", "run", "--pull", "always", "--name", "keploy-v2", "-p", "16789:16789", "--privileged", "--pid=host", "-v", fmt.Sprintf("%s:/files", workingDir), "-v", "/sys/fs/cgroup:/sys/fs/cgroup", "-v", "/sys/kernel/debug:/sys/kernel/debug", "-v", "/sys/fs/bpf:/sys/fs/bpf", "-v", "/var/run/docker.sock:/var/run/docker.sock", "--rm", "ghcr.io/keploy/keploy", cmdName, "-c", "docker compose up -d", "--containerName", appContainer, "--buildDelay", buildDelay)
-		fmt.Println("This is the container name")
-		fmt.Println(appContainer)
+		cmd = exec.Command("sudo", "docker", "run", "-e", "BINARY_TO_DOCKER=true", "--pull", "always", "--name", "keploy-v2", "-p", "16789:16789", "--privileged", "--pid=host", "-it", "-v", fmt.Sprintf("%s:/files", workingDir), "-v", "/sys/fs/cgroup:/sys/fs/cgroup", "-v", "/sys/kernel/debug:/sys/kernel/debug", "-v", "/sys/fs/bpf:/sys/fs/bpf", "-v", "/var/run/docker.sock:/var/run/docker.sock", "--rm", "ghcr.io/keploy/keploy", cmdName, "-c", appCmd, "--containerName", appContainer, "--buildDelay", buildDelay)
 	} else {
-		cmd = exec.Command("sudo", "docker", "run", "--pull", "always", "--name", "keploy-v2", "-p", "16789:16789", "--privileged", "--pid=host", "-v", fmt.Sprintf("%s:/files", workingDir), "-v", "/sys/fs/cgroup:/sys/fs/cgroup", "-v", "/sys/kernel/debug:/sys/kernel/debug", "-v", "/sys/fs/bpf:/sys/fs/bpf", "-v", "/var/run/docker.sock:/var/run/docker.sock", "--rm", "ghcr.io/keploy/keploy", cmdName, "-c", appCmd)
+		cmd = exec.Command("sudo", "docker", "run", "-e", "BINARY_TO_DOCKER=true", "--pull", "always", "--name", "keploy-v2", "-p", "16789:16789", "--privileged", "--pid=host", "-it", "-v", fmt.Sprintf("%s:/files", workingDir), "-v", "/sys/fs/cgroup:/sys/fs/cgroup", "-v", "/sys/kernel/debug:/sys/kernel/debug", "-v", "/sys/fs/bpf:/sys/fs/bpf", "-v", "/var/run/docker.sock:/var/run/docker.sock", "--rm", "ghcr.io/keploy/keploy", cmdName, "-c", appCmd)
 	}
-	// cmd.Stdout = os.Stdout
-	// cmd.Stderr = os.Stderr
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT)
-	go func() {
-		err := cmd.Run()
-		if err != nil {
-			println(err.Error())
-			return
-		}
-	}()
-	<-sigChan
-	if cmd.Process != nil {
-		if err := cmd.Process.Kill(); err != nil {
-			log.Error("failed to kill: ", err)
-		}
+	cmd.Stdout = os.Stdout
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
+	if err != nil {
+		log.Error("Failed to start keploy in docker", err.Error())
+		return
 	}
 
 }
