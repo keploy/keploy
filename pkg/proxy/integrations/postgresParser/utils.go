@@ -5,8 +5,6 @@ import (
 
 	"errors"
 	"fmt"
-
-	"github.com/cloudflare/cfssl/log"
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -308,7 +306,7 @@ func PostgresEncoder(buffer []byte) string {
 	return encoded
 }
 
-func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
+func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) int {
 
 	mxSim := -1.0
 	mxIdx := -1
@@ -318,12 +316,12 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *
 			for requestIndex, reqBuff := range requestBuffers {
 				encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
 				if err != nil {
-					log.Debug("Error while decoding postgres request", zap.Error(err))
+					logger.Debug("Error while decoding postgres request", zap.Error(err))
 				}
 				if mock.Spec.PostgresRequests[requestIndex].Payload != "" {
 					encoded, err = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
 					if err != nil {
-						log.Debug("Error while decoding postgres request", zap.Error(err))
+						logger.Debug("Error while decoding postgres request", zap.Error(err))
 						return -1
 					}
 				}
@@ -414,12 +412,12 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 						logger.Debug("Error while decoding postgres request", zap.Error(err))
 					}
 					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
-						log.Debug("CHANGING TO MD5 for Response")
+						logger.Debug("CHANGING TO MD5 for Response")
 						mock.Spec.PostgresResponses[requestIndex].AuthType = 5
 						continue
 					} else {
 						if len(encoded) > 0 && encoded[0] == 'p' {
-							log.Debug("CHANGING TO MD5 for Request and Response")
+							logger.Debug("CHANGING TO MD5 for Request and Response")
 							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
 
 							mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
@@ -494,7 +492,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			}
 		}
 
-		idx := findBinaryStreamMatch(tcsMocks, requestBuffers, h)
+		idx := findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h)
 		if idx != -1 {
 			isMatched = true
 			matchedMock = tcsMocks[idx]

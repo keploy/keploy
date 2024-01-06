@@ -318,9 +318,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					for i := 0; i < len(bufferCopy)-5; {
 						pg.FrontendWrapper.MsgType = buffer[i]
 						pg.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
-						msg, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger) 
+						msg, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger)
 						if err != nil {
 							logger.Error("failed to translate the response message to readable", zap.Error(err))
+							break
 						}
 
 						pg.FrontendWrapper.PacketTypes = append(pg.FrontendWrapper.PacketTypes, string(pg.FrontendWrapper.MsgType))
@@ -459,13 +460,15 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 		for {
 			buffer, err := util.ReadBytes(clientConn)
-			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-				if err == io.EOF {
-					logger.Debug("EOF error received from client. Closing connection in postgres !!")
+			if !h.IsUsrAppTerminateInitiated() && err != nil {
+				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+					if err == io.EOF {
+						logger.Debug("EOF error received from client. Closing connection in postgres !!")
+						return err
+					}
+					logger.Error("failed to read the request message in proxy for postgres dependency", zap.Error(err))
 					return err
 				}
-				logger.Error("failed to read the request message in proxy for postgres dependency", zap.Error(err))
-				return err
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				logger.Debug("the timeout for the client read in pg")
@@ -479,7 +482,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 		}
 
-		matched, pgResponses, err := matchingReadablePG(pgRequests,logger,h)
+		matched, pgResponses, err := matchingReadablePG(pgRequests, logger, h)
 		if err != nil {
 			return fmt.Errorf("error while matching tcs mocks %v", err)
 		}
