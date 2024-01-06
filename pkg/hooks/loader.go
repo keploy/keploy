@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/google/uuid"
 
 	"go.uber.org/zap"
 
@@ -49,8 +51,7 @@ type Hook struct {
 
 	logger                   *zap.Logger
 	proxyPort                uint32
-	tcsMocks                 []*models.Mock
-	configMocks              []*models.Mock
+	localDb                  *localDb
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
@@ -95,19 +96,35 @@ type Hook struct {
 	idc clients.InternalDockerClient
 }
 
-func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) *Hook {
+func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Hook, error) {
 	idc, err := docker.NewInternalDockerClient(logger)
 	if err != nil {
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
 	}
+
+	schemaMap := map[string]map[string]string{
+		mockTable: {
+			mockTableIndex: mockTableIndexField,
+		},
+		configMockTable: {
+			configMockTableIndex: configMockTableIndexField,
+		},
+	}
+
+	ldb, err := NewLocalDb(schemaMap)
+	if err != nil {
+		return nil, fmt.Errorf("error while creating new LocalDb: %v", err)
+	}
+
 	return &Hook{
 		logger:        logger,
 		TestCaseDB:    db,
+		localDb:       ldb,
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
 		idc:           idc,
 		mainRoutineId: mainRoutineId,
-	}
+	}, nil
 }
 
 func (h *Hook) SetProxyPort(port uint32) {
@@ -116,13 +133,6 @@ func (h *Hook) SetProxyPort(port uint32) {
 
 func (h *Hook) GetProxyPort() uint32 {
 	return h.proxyPort
-}
-
-func (h *Hook) GetDepsSize() int {
-	h.mu.Lock()
-	size := len(h.tcsMocks)
-	defer h.mu.Unlock()
-	return size
 }
 
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
@@ -134,55 +144,86 @@ func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	}
 	return nil
 }
-func (h *Hook) SetTcsMocks(m []*models.Mock) {
-	h.mu.Lock()
-	h.tcsMocks = m
-	defer h.mu.Unlock()
+
+func (h *Hook) SetTcsMocks(m []*models.Mock) error {
+	h.localDb.deleteAll(mockTable, mockTableIndex)
+	for _, mock := range m {
+		mock.Id = uuid.NewString()
+		err := h.localDb.insert(mockTable, mock)
+		if err != nil {
+			return fmt.Errorf("error while inserting tcs mock into localDb: %v", err)
+		}
+	}
+	return nil
 }
 
-func (h *Hook) SetConfigMocks(m []*models.Mock) {
-	h.mu.Lock()
-	h.configMocks = m
-	defer h.mu.Unlock()
+func (h *Hook) SetConfigMocks(m []*models.Mock) error {
+	h.localDb.deleteAll(configMockTable, configMockTableIndex)
+	for _, mock := range m {
+		mock.Id = uuid.NewString()
+		err := h.localDb.insert(configMockTable, mock)
+		if err != nil {
+			return fmt.Errorf("error while inserting config-mock into localDb: %v", err)
+		}
+	}
+	return nil
 }
 
-func (h *Hook) PopFront() {
-	h.mu.Lock()
-	h.tcsMocks = h.tcsMocks[1:]
-	h.mu.Unlock()
+func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
+	it, err := h.localDb.getAll(mockTable, mockTableIndex)
+	if err != nil {
+		return nil, fmt.Errorf("error while getting all tcs mocks from localDb %v", err)
+	}
+	var mocks []*models.Mock
+	for obj := it.Next(); obj != nil; obj = it.Next() {
+		p := obj.(*models.Mock)
+		mocks = append(mocks, p)
+	}
+	sort.Slice(mocks, func(i, j int) bool {
+		return mocks[i].Spec.ReqTimestampMock.Before(mocks[j].Spec.ReqTimestampMock)
+	})
+	return mocks, nil
 }
 
-func (h *Hook) PopIndex(index int) {
-	h.mu.Lock()
-	h.tcsMocks = append(h.tcsMocks[:index], h.tcsMocks[index+1:]...)
-	h.mu.Unlock()
+func (h *Hook) IsUsrAppTerminateInitiated() bool {
+	return h.userAppShutdownInitiated
 }
 
-func (h *Hook) FetchDep(indx int) *models.Mock {
-	h.mu.Lock()
-	dep := h.tcsMocks[indx]
-	defer h.mu.Unlock()
-	return dep
+
+func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
+	it, err := h.localDb.getAll(configMockTable, configMockTableIndex)
+	if err != nil {
+		return nil, fmt.Errorf("error while getting all config-mocks from localDb %v", err)
+	}
+	var mocks []*models.Mock
+	for obj := it.Next(); obj != nil; obj = it.Next() {
+		p := obj.(*models.Mock)
+		mocks = append(mocks, p)
+	}
+	sort.Slice(mocks, func(i, j int) bool {
+		return mocks[i].Spec.ReqTimestampMock.Before(mocks[j].Spec.ReqTimestampMock)
+	})
+	return mocks, nil
 }
 
-func (h *Hook) GetTcsMocks() []*models.Mock {
-	h.mu.Lock()
-	tcsMocks := h.tcsMocks
-	defer h.mu.Unlock()
-	return tcsMocks
+func (h *Hook) DeleteTcsMock(mock *models.Mock) (bool, error) {
+	isDeleted, err := h.localDb.delete(mockTable, mock)
+	if err != nil {
+		return isDeleted, fmt.Errorf("error while deleting tcs mocks %v from localDb %v", mock, err)
+	}
+	return isDeleted, nil
 }
 
-func (h *Hook) GetConfigMocks() []*models.Mock {
-	h.mu.Lock()
-	configMocks := h.configMocks
-	defer h.mu.Unlock()
-	return configMocks
+func (h *Hook) DeleteConfigMock(mock *models.Mock) (bool, error) {
+	isDeleted, err := h.localDb.delete(configMockTable, configMockTableIndex)
+	if err != nil {
+		return isDeleted, fmt.Errorf("error while deleting config-mocks %v from localDb %v", mock, err)
+	}
+	return isDeleted, nil
 }
 
 func (h *Hook) ResetDeps() int {
-	h.mu.Lock()
-	h.tcsMocks = []*models.Mock{}
-	defer h.mu.Unlock()
+	h.localDb.deleteAll(mockTable, mockTableIndex)
 	return 1
 }
 

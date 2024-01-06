@@ -44,13 +44,18 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	routineId := pkg.GenerateRandomID()
 	ctx := context.Background()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
+	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
+	if err != nil {
+		s.logger.Error("error while creating hooks", zap.Error(err))
+		return
+	}
+
 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx, 0)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
@@ -102,7 +107,17 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
-	usedMocks := mocksBefore - (len(loadedHooks.GetConfigMocks()) + len(loadedHooks.GetTcsMocks()))
+
+	currentConfigMocks, err := loadedHooks.GetConfigMocks()
+	if err != nil {
+		s.logger.Error("Failed to get config-mocks", zap.Error(err))
+	}
+	currentMocks, err := loadedHooks.GetTcsMocks()
+	if err != nil {
+		s.logger.Error("Failed to get mocks", zap.Error(err))
+	}
+
+	usedMocks := mocksBefore - (len(currentConfigMocks) + len(currentMocks))
 	//Call the telemetry events.
 	if usedMocks != 0 {
 		tele.MockTestRun(usedMocks)

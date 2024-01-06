@@ -46,12 +46,17 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 	//Add the name of the cmd to context.
 	ctx = context.WithValue(ctx, "cmd", "mockrecord")
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
+	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
+	if err != nil {
+		s.logger.Error("error while creating hooks", zap.Error(err))
+		return
+	}
+	
 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx)
+	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx, 0)
 
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program

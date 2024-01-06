@@ -60,6 +60,7 @@ func NewTester(logger *zap.Logger) Tester {
 
 func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	var returnVal InitialiseTestReturn
+	var err error
 
 	// capturing the code coverage for go bianries built by go-version 1.20^
 	if cfg.WithCoverage {
@@ -119,7 +120,10 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	returnVal.YamlStore = yamlStore
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	returnVal.LoadedHooks = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
+	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
+	if err != nil {
+		return returnVal, fmt.Errorf("error while creating hooks %v", err)
+	}
 
 	select {
 	case <-stopper:
@@ -137,7 +141,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// start the proxy
-		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background())
+		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
 	}
 
 	// proxy update its state in the ProxyPorts map
