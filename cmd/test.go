@@ -300,7 +300,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 			}
 
-			//flags like lang, pid, port cannot be used unless called the serve command
+			//flags like lang, pid, port cannot be used unless called the serve method
 			// Check if the coverage flag is set
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
