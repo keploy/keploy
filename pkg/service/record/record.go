@@ -55,7 +55,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	}
 
-	// Recover from panic and gracfully shutdown
+	// Recover from panic and gracefully shutdown
 	defer loadedHooks.Recover(routineId)
 
 	mocksTotal := make(map[string]int)
