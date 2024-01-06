@@ -193,6 +193,8 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
 				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
+				copy(genericResponseCopy, genericResponses)
+				copy(genericRequestsCopy, genericRequests)
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
 					h.AppendMocks(&models.Mock{
 						Version: models.GetVersion(),
@@ -222,6 +224,8 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 			if !isPreviousChunkRequest && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
 				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
+				copy(genericResponseCopy, genericResponses)
+				copy(genericRequestsCopy, genericRequests)
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
 					h.AppendMocks(&models.Mock{
 						Version: models.GetVersion(),
