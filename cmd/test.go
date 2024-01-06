@@ -3,17 +3,18 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/service/serve"
-	"go.keploy.io/server/pkg/service/test"
-	"go.keploy.io/server/utils"
-	"go.uber.org/zap"
-	yamlLib "gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/graph"
+	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/service/test"
+	"go.keploy.io/server/utils"
+	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func NewCmdTest(logger *zap.Logger) *Test {
@@ -23,6 +24,7 @@ func NewCmdTest(logger *zap.Logger) *Test {
 		logger: logger,
 	}
 }
+
 
 func readTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
@@ -92,7 +94,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 type Test struct {
 	tester test.Tester
 	logger *zap.Logger
-	server serve.Server
+
 }
 
 func (t *Test) GetCmd() *cobra.Command {
@@ -310,9 +312,10 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
-
+            
 			if coverage {
-				t.server.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+				g := graph.NewGraph(t.logger)
+				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
 				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
 					Tests:              tests,
