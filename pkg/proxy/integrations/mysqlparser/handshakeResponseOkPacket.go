@@ -9,9 +9,9 @@ import (
 )
 
 type HandshakeResponseOk struct {
-	PacketIndicator string        `yaml:"packet_indicator"`
-	PluginDetails   PluginDetails `yaml:"plugin_details"`
-	RemainingBytes  string        `yaml:"remaining_bytes"`
+	PacketIndicator string        `json:"packet_indicator,omitempty" yaml:"packet_indicator,omitempty,flow"`
+	PluginDetails   PluginDetails `json:"plugin_details,omitempty" yaml:"plugin_details,omitempty,flow"`
+	RemainingBytes  string        `json:"remaining_bytes,omitempty" yaml:"remaining_bytes,omitempty,flow"`
 }
 
 func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {

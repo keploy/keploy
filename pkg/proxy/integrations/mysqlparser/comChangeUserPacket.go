@@ -7,11 +7,11 @@ import (
 )
 
 type ComChangeUserPacket struct {
-	User         string `yaml:"user"`
-	Auth         string `yaml:"auth"`
-	Db           string `yaml:"db"`
-	CharacterSet uint8  `yaml:"character_set"`
-	AuthPlugin   string `yaml:"auth_plugin"`
+	User         string `json:"user,omitempty" yaml:"user,omitempty,flow"`
+	Auth         string `json:"auth,omitempty" yaml:"auth,omitempty,flow"`
+	Db           string `json:"db,omitempty" yaml:"db,omitempty,flow"`
+	CharacterSet uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow"`
+	AuthPlugin   string `json:"auth_plugin,omitempty" yaml:"auth_plugin,omitempty,flow"`
 }
 
 func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {

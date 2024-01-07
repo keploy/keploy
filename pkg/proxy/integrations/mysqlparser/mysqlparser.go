@@ -458,7 +458,7 @@ var (
 
 func getfirstSQLMock(configMocks []*models.Mock) (*models.Mock, bool) {
 	for _, mock := range configMocks {
-		if mock.Kind == "SQL" && mock.Spec.MySqlResponses[0].Header.PacketType == "MySQLHandshakeV10" {
+		if len(mock.Spec.MySqlResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySqlResponses[0].Header.PacketType == "MySQLHandshakeV10" {
 			return mock, true
 		}
 	}
@@ -470,10 +470,9 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	doHandshakeAgain := true
 	prevRequest := ""
 	var requestBuffers [][]byte
-
+	configMocks, _ := h.GetConfigMocks()
+	tcsMocks, _ := h.GetTcsMocks()
 	for {
-		configMocks, _ := h.GetConfigMocks()
-		tcsMocks, _ := h.GetTcsMocks()
 
 		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
@@ -507,7 +506,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
 				configMocks = (append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...))
 			}
-			h.SetConfigMocks(configMocks)
+			//h.SetConfigMocks(configMocks)
 			firstLoop = false
 			doHandshakeAgain = false
 			logger.Debug("BINARY PACKET SENT HANDSHAKE", zap.ByteString("binaryPacketKey", binaryPacket))
@@ -656,7 +655,7 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
 			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
 		}
-		h.SetConfigMocks(configMocks)
+		//h.SetConfigMocks(configMocks)
 	} else {
 		realIndex := matchedIndex - len(configMocks)
 		if realIndex < 0 || realIndex >= len(tcsMocks) {
@@ -668,7 +667,7 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if len(tcsMocks[realIndex].Spec.MySqlResponses) == 0 {
 			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
 		}
-		h.SetTcsMocks(tcsMocks)
+		//h.SetTcsMocks(tcsMocks)
 	}
 
 	return bestMatch, matchedIndex, mockType, nil

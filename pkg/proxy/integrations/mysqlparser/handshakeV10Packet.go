@@ -11,14 +11,14 @@ import (
 )
 
 type HandshakeV10Packet struct {
-	ProtocolVersion uint8  `yaml:"protocol_version"`
-	ServerVersion   string `yaml:"server_version"`
-	ConnectionID    uint32 `yaml:"connection_id"`
-	AuthPluginData  string `yaml:"auth_plugin_data"`
-	CapabilityFlags uint32 `yaml:"capability_flags"`
-	CharacterSet    uint8  `yaml:"character_set"`
-	StatusFlags     uint16 `yaml:"status_flags"`
-	AuthPluginName  string `yaml:"auth_plugin_name"`
+	ProtocolVersion uint8  `json:"protocol_version,omitempty" yaml:"protocol_version,omitempty,flow"`
+	ServerVersion   string `json:"server_version,omitempty" yaml:"server_version,omitempty,flow"`
+	ConnectionID    uint32 `json:"connection_id,omitempty" yaml:"connection_id,omitempty,flow"`
+	AuthPluginData  string `json:"auth_plugin_data,omitempty" yaml:"auth_plugin_data,omitempty,flow"`
+	CapabilityFlags uint32 `json:"capability_flags,omitempty" yaml:"capability_flags,omitempty,flow"`
+	CharacterSet    uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow"`
+	StatusFlags     uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow"`
+	AuthPluginName  string `json:"auth_plugin_name,omitempty" yaml:"auth_plugin_name,omitempty,flow"`
 }
 
 func decodeMySQLHandshakeV10(data []byte) (*HandshakeV10Packet, error) {

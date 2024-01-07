@@ -15,16 +15,16 @@ const (
 )
 
 type HandshakeResponse struct {
-	CapabilityFlags      uint32            `yaml:"capability_flags"`
-	MaxPacketSize        uint32            `yaml:"max_packet_size"`
-	CharacterSet         uint8             `yaml:"character_set"`
-	Reserved             int               `yaml:"reserved"`
-	Username             string            `yaml:"username"`
-	AuthData             string            `yaml:"auth_data"`
-	Database             string            `yaml:"database"`
-	AuthPluginName       string            `yaml:"auth_plugin_name"`
-	ConnectAttributes    map[string]string `yaml:"connect_attributes"`
-	ZstdCompressionLevel byte              `yaml:"zstdcompressionlevel"`
+	CapabilityFlags      uint32            `json:"capability_flags,omitempty" yaml:"capability_flags,omitempty,flow"`
+	MaxPacketSize        uint32            `json:"max_packet_size,omitempty" yaml:"max_packet_size,omitempty,flow"`
+	CharacterSet         uint8             `json:"character_set,omitempty" yaml:"character_set,omitempty,flow"`
+	Reserved             int               `json:"reserved,omitempty" yaml:"reserved,omitempty,flow"`
+	Username             string            `json:"username,omitempty" yaml:"username,omitempty,flow"`
+	AuthData             string            `json:"auth_data,omitempty" yaml:"auth_data,omitempty,flow"`
+	Database             string            `json:"database,omitempty" yaml:"database,omitempty,flow"`
+	AuthPluginName       string            `json:"auth_plugin_name,omitempty" yaml:"auth_plugin_name,omitempty,flow"`
+	ConnectAttributes    map[string]string `json:"connect_attributes,omitempty" yaml:"connect_attributes,omitempty,flow"`
+	ZstdCompressionLevel byte              `json:"zstdcompressionlevel,omitempty" yaml:"zstdcompressionlevel,omitempty,flow"`
 }
 
 func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
