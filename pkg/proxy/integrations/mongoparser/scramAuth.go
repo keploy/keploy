@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/pkg/proxy/integrations/scram"
+	"go.keploy.io/server/pkg/proxy/util"
 	"go.uber.org/zap"
 )
 
@@ -22,14 +23,19 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 			return false
 		}
 
+		conversationId, _ := extractConversationId(actualMsg)
 		// Check if the message is for starting the SASL (authentication) process
 		if _, exists := actualMsg["saslStart"]; exists {
-			logger.Info("the recieved request is saslStart", zap.Any("OpMsg", actualMsg))
+			logger.Info("the recieved request is saslStart",
+				zap.Any("OpMsg", actualMsg),
+				zap.Any("conversationId", conversationId))
 			return true
 			// Check if the message is for final request of the SASL (authentication) process
 		} else if _, exists := actualMsg["saslContinue"]; exists {
-			logger.Info("the recieved request is saslContinue", zap.Any("OpMsg", actualMsg))
-
+			logger.Info("the recieved request is saslContinue",
+				zap.Any("OpMsg", actualMsg),
+				zap.Any("conversationId", conversationId),
+			)
 			return true
 		}
 
@@ -163,6 +169,26 @@ func extractConversationId(data interface{}) (string, error) {
 	return numberIntStr, nil
 }
 
+// updateConversationId updates the 'conversationId' in a given data structure. Example: {"conversationId":{"$numberInt":"113"}}
+func updateConversationId(actualMsg map[string]interface{}, newConversationId int) (map[string]interface{}, error) {
+	// Check if conversationId exists and is a map
+	conversationId, exists := actualMsg["conversationId"]
+	if !exists {
+		return actualMsg, errors.New("'conversationId' not found")
+	}
+
+	conversationIdMap, ok := conversationId.(map[string]interface{})
+	if !ok {
+		return actualMsg, errors.New("expected 'conversationId' to be a map")
+	}
+
+	// Update the "$numberInt" field with the new value
+	conversationIdMap["$numberInt"] = fmt.Sprintf("%d", newConversationId)
+	actualMsg["conversationId"] = conversationIdMap
+	return actualMsg, nil
+}
+
+
 // decodeBase64Str is a function variable that wraps the standard Base64 decoding method,
 // taking a Base64 encoded string and returning its decoded byte array and any error.
 var decodeBase64Str func(s string) ([]byte, error) = base64.StdEncoding.DecodeString
@@ -266,6 +292,11 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	logger.Debug("after replacing the new client nonce in auth response", zap.String("first response", newFirstAuthResponse))
 	// replace the payload with new first response auth
 	responseMsg["payload"].(map[string]interface{})["$binary"].(map[string]interface{})["base64"] = base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
+	responseMsg, err = updateConversationId(responseMsg, int(util.GetNextID()))
+	if err != nil {
+		logger.Error("failed to update conversationId in the sasl start auth message", zap.Error(err))
+		return "", false, err
+	}
 
 	// fetch the conversation id
 	conversationId, err := extractConversationId(responseMsg)
@@ -334,7 +365,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 	logger.Debug("the recorded verifier of the auth request", zap.Any("verifier/server-signature", string(verifier)))
 
 	// fetch the conversation id
-	conversationId, err := extractConversationId(responseMsg)
+	conversationId, err := extractConversationId(actualMsg)
 	if err != nil {
 		logger.Error("failed to fetch the conversationId for the SCRAM auth from the recorded final response", zap.Error(err))
 		return "", false, err

@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
@@ -47,13 +46,6 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
-
-// idCounter is used to generate random ID for each request
-var idCounter int64 = -1
-
-func getNextID() int64 {
-	return atomic.AddInt64(&idCounter, 1)
-}
 
 type DependencyHandler interface {
 	OutgoingType(buffer []byte) bool
@@ -826,7 +818,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		ParsersMap["mysql"].ProcessOutgoing([]byte{}, conn, dst, ctx)
 
 	} else {
-		clientConnId := getNextID()
+		clientConnId := util.GetNextID()
 		reader := bufio.NewReader(conn)
 		initialData := make([]byte, 5)
 		testBuffer, err := reader.Peek(len(initialData))
@@ -884,7 +876,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		}
 
 		//Dialing for tls connection
-		destConnId := getNextID()
+		destConnId := util.GetNextID()
 		logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 		if isTLS {
 			logger.Debug("", zap.Any("isTLS", isTLS))

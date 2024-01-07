@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"path/filepath"
@@ -28,6 +29,13 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 var sendLogs = true
+
+// idCounter is used to generate random ID for each request
+var idCounter int64 = -1
+
+func GetNextID() int64 {
+	return atomic.AddInt64(&idCounter, 1)
+}
 
 func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger) error {
 	for {
