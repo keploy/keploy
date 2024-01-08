@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -422,7 +423,10 @@ func (h *Hook) StopUserApplication() {
 func (h *Hook) Recover(id int) {
 
 	if r := recover(); r != nil {
-		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId))
+		// Get the stack trace
+		stackTrace := debug.Stack()
+
+		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId), zap.Any("stack trace", string(stackTrace)))
 		h.Stop(true)
 		// stop the user application cmd
 		h.StopUserApplication()
