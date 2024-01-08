@@ -26,13 +26,13 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 		conversationId, _ := extractConversationId(actualMsg)
 		// Check if the message is for starting the SASL (authentication) process
 		if _, exists := actualMsg["saslStart"]; exists {
-			logger.Info("the recieved request is saslStart",
+			logger.Debug("the recieved request is saslStart",
 				zap.Any("OpMsg", actualMsg),
 				zap.Any("conversationId", conversationId))
 			return true
 			// Check if the message is for final request of the SASL (authentication) process
 		} else if _, exists := actualMsg["saslContinue"]; exists {
-			logger.Info("the recieved request is saslContinue",
+			logger.Debug("the recieved request is saslContinue",
 				zap.Any("OpMsg", actualMsg),
 				zap.Any("conversationId", conversationId),
 			)
