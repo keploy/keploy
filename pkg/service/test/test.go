@@ -13,9 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
 	"net/url"
-
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/pkg"
@@ -216,7 +214,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		EnableTele:         enableTele,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
-	// Recover from panic and gracfully shutdown
+	// Recover from panic and gracefully shutdown
 	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
 	if err != nil {
 		t.logger.Error("failed to initialise the test", zap.Error(err))
@@ -562,7 +560,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	}
 
 	isApplicationStopped := false
-	// Recover from panic and gracfully shutdown
+	// Recover from panic and gracefully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 	defer func() {
 		if len(appCmd) == 0 && pid != 0 {
