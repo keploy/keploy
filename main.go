@@ -33,7 +33,6 @@ func main() {
 	if version == "" {
 		version = "2-dev"
 	}
-	utils.KeployVersion = version
 	fmt.Println(logo, " ")
 	fmt.Printf("version: %v\n\n", version)
 	//Initialise sentry.
