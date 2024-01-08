@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/graph"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
@@ -23,6 +24,7 @@ func NewCmdTest(logger *zap.Logger) *Test {
 		logger: logger,
 	}
 }
+
 
 func readTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
@@ -92,6 +94,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 type Test struct {
 	tester test.Tester
 	logger *zap.Logger
+
 }
 
 func (t *Test) GetCmd() *cobra.Command {
@@ -142,6 +145,36 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			coverage, err := cmd.Flags().GetBool("coverage")
+			if err != nil {
+				t.logger.Error("Failed to get the coverage flag", zap.Error((err)))
+				return err
+			}
+			var lang string
+			var pid uint32
+			var port uint32
+			if !coverage {
+
+				lang, err = cmd.Flags().GetString("language")
+				if err != nil {
+					t.logger.Error("failed to read the programming language")
+					return err
+				}
+
+				pid, err = cmd.Flags().GetUint32("pid")
+				if err != nil {
+					t.logger.Error("Failed to get the pid of the application", zap.Error((err)))
+					return err
+				}
+
+				port, err = cmd.Flags().GetUint32("port")
+				if err != nil {
+					t.logger.Error("Failed to get the port of keploy server", zap.Error((err)))
+					return err
+				}
+
+			}
+
 			buildDelay, err := cmd.Flags().GetDuration("buildDelay")
 			if err != nil {
 				t.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
@@ -159,6 +192,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
+
+			// port, err := cmd.Flags().GetUint32("port")
+			// if err != nil {
+			// 	t.logger.Error("failed to read the port of keploy server")
+			// 	return err
+			// }
 
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
@@ -292,29 +331,60 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			testReportPath := path + "/testReports"
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
+
+			var hasContainerName bool
+			if isDockerCmd {
+				if strings.Contains(appCmd, "--name") {
+					hasContainerName = true
+				}
+				if !hasContainerName && appContainer == "" {
+					t.logger.Error("Couldn't find containerName")
+					t.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					return errors.New("missing required --containerName flag or containerName in config file")
+				}
+			}
+
+			//flags like lang, pid, port cannot be used unless called the serve method
+			// Check if the coverage flag is set
+
+			t.logger.Debug("the ports are", zap.Any("ports", ports))
+
+			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
+			if err != nil {
+				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
+				return err
+			}
+
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-				Tests:              tests,
-				AppContainer:       appContainer,
-				AppNetwork:         networkName,
-				MongoPassword:      mongoPassword,
-				Delay:              delay,
-				BuildDelay:         buildDelay,
-				PassThroughPorts:   ports,
-				ApiTimeout:         apiTimeout,
-				ProxyPort:          proxyPort,
-				GlobalNoise:        globalNoise,
-				TestsetNoise:       testsetNoise,
-				WithCoverage:       withCoverage,
-				CoverageReportPath: coverageReportPath,
-			}, enableTele)
+			if coverage {
+				g := graph.NewGraph(t.logger)
+				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+			} else {
+				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+					Tests:              tests,
+					AppContainer:       appContainer,
+					AppNetwork:         networkName,
+					MongoPassword:      mongoPassword,
+					Delay:              delay,
+					BuildDelay:         buildDelay,
+					PassThroughPorts:   ports,
+					ApiTimeout:         apiTimeout,
+					ProxyPort:          proxyPort,
+					GlobalNoise:        globalNoise,
+					TestsetNoise:       testsetNoise,
+					WithCoverage:       withCoverage,
+					CoverageReportPath: coverageReportPath,
+				}, enableTele)
+			}
 
 			return nil
 		},
 	}
 
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+
+	testCmd.Flags().Uint32("port", 6789, "Port at which you want to run graphql Server")
 
 	testCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
@@ -339,11 +409,19 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().String("coverageReportPath", "", "Write a go coverage profile to the file in the given directory.")
 
+	testCmd.Flags().StringP("language", "l", "", "application programming language")
+
+	testCmd.Flags().Uint32("pid", 0, "Process id of your application.")
+
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+
 	testCmd.Flags().MarkHidden("enableTele")
 
 	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"
+
+	testCmd.Flags().Bool("coverage", false, "Capture the code coverage of the go binary in the command flag.")
+	testCmd.Flags().Lookup("coverage").NoOptDefVal = "true"
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
 
