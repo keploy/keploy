@@ -55,8 +55,9 @@ func (m *MongoParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn
 		m.logger.Debug("the outgoing mongo in record mode")
 		encodeOutgoingMongo(requestBuffer, clientConn, destConn, m.hooks, m.logger, ctx)
 	case models.MODE_TEST:
+		logger := m.logger.With(zap.Any("Client IP Address", clientConn.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 		m.logger.Debug("the outgoing mongo in test mode")
-		decodeOutgoingMongo(requestBuffer, clientConn, destConn, m.hooks, m.logger)
+		decodeOutgoingMongo(requestBuffer, clientConn, destConn, m.hooks, logger)
 	default:
 	}
 }
@@ -269,10 +270,14 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		} else {
 
 			isMatched, matchedMock, err := match(h, mongoRequests, logger)
-
+			if err != nil {
+				logger.Error("failed to match the mongo request with recorded tcsMocks", zap.Error(err))
+			}
 			if !isMatched {
+				logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
 				requestBuffer, err = util.Passthrough(clientConn, destConn, requestBuffers, h.Recover, logger)
 				if err != nil {
+					logger.Error("failed to passthrough the mongo request to the actual database server", zap.Error(err))
 					return
 				}
 				continue
@@ -596,7 +601,9 @@ func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest
 	case wiremessage.OpMsg:
 		_, ok := mongoRequest.(*models.MongoOpMessage)
 		if ok {
-			return (opReq.IsIsAdminDB() && (strings.Contains(opReq.String(), "hello") || (isScramAuthRequest(mongoRequest.(*models.MongoOpMessage).Sections, logger)))) || opReq.IsIsMaster()
+			return (opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")) ||
+				opReq.IsIsMaster() ||
+				isScramAuthRequest(mongoRequest.(*models.MongoOpMessage).Sections, logger)
 		}
 	default:
 		return false

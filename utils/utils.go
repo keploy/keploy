@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -69,7 +70,10 @@ func HandlePanic() {
 	if r := recover(); r != nil {
 		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
-		log.Error(Emoji+"Recovered from:", r)
+		// Get the stack trace
+		stackTrace := debug.Stack()
+
+		log.Error(Emoji+"Recovered from:", r, "\nstack trace:\n", string(stackTrace))
 		sentry.Flush(time.Second * 2)
 	}
 }
