@@ -211,16 +211,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 				return errors.New("missing required -c flag or appCmd in config file")
 			}
-			//Check if app command starts with docker or sudo docker.
-			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
-			if !isDockerCmd && dockerRelatedCmd {
-				isDockerCompose := false
-				if dockerCmd == "docker-compose" {
-					isDockerCompose = true
-				}
-				utils.UpdateKeployToDocker("test", appCmd, isDockerCompose, appContainer, buildDelay.String())
-				return nil
-			}
 
 			if delay <= 5 {
 				t.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", delay))
@@ -235,29 +225,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", buildDelay))
 				t.logger.Info(`Example usage:keploy test -c "docker-compose up --build" --buildDelay 35s`)
 			}
-
-			//if user provides relative path
-			if len(path) > 0 && path[0] != '/' {
-				absPath, err := filepath.Abs(path)
-				if err != nil {
-					t.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
-				}
-				path = absPath
-			} else if len(path) == 0 { // if user doesn't provide any path
-				cdirPath, err := os.Getwd()
-				if err != nil {
-					t.logger.Error("failed to get the path of current directory", zap.Error(err))
-				}
-				path = cdirPath
-			} else {
-				// user provided the absolute path
-			}
-
-			path += "/keploy"
-
-			testReportPath := path + "/testReports"
-
-			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			var hasContainerName bool
 			if isDockerCmd {
@@ -278,6 +245,53 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
+			//Check if app command starts with docker or  docker-compose.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				testCfg := utils.TestFlags{
+					Path:               path,
+					Proxyport:          proxyPort,
+					Command:            appCmd,
+					Testsets:           testsets,
+					ContainerName:      appContainer,
+					NetworkName:        networkName,
+					Delay:              delay,
+					BuildDelay:         buildDelay,
+					ApiTimeout:         apiTimeout,
+					PassThroughPorts:   ports,
+					ConfigPath:         configPath,
+					MongoPassword:      mongoPassword,
+					CoverageReportPath: coverageReportPath,
+					EnableTele:         enableTele,
+				}
+				utils.UpdateKeployToDocker("test", isDockerCompose, utils.RecordFlags{}, testCfg)
+				return nil
+			}
+			//if user provides relative path
+			if len(path) > 0 && path[0] != '/' {
+				absPath, err := filepath.Abs(path)
+				if err != nil {
+					t.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
+				}
+				path = absPath
+			} else if len(path) == 0 { // if user doesn't provide any path
+				cdirPath, err := os.Getwd()
+				if err != nil {
+					t.logger.Error("failed to get the path of current directory", zap.Error(err))
+				}
+				path = cdirPath
+			} else {
+				// user provided the absolute path
+			}
+
+			path += "/keploy"
+
+			testReportPath := path + "/testReports"
+			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
 			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
