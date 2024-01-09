@@ -85,6 +85,7 @@ func (u *updater) UpdateBinary(binaryFilePath string) {
 }
 
 // getLatestGitHubRelease fetches the latest version from GitHub releases.
+
 func getLatestGitHubRelease() (string, error) {
 	// GitHub repository details
 	repoOwner := "keploy"
