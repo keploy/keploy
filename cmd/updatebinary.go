@@ -24,20 +24,15 @@ type UpdateBinary struct {
 }
 
 func (u *UpdateBinary) GetCmd() *cobra.Command {
+	var binaryPath string // declare binaryPath outside of the RunE function scope
+
 	var updateBinaryCmd = &cobra.Command{
 		Use:     "update",
 		Short:   "update the Keploy binary file",
 		Example: "keploy update --path /path/to/localdir",
 		RunE: func(cmd *cobra.Command, args []string) error {
-
-			binaryPath, err := cmd.Flags().GetString("path")
-			fmt.Println("binaryPath is" + binaryPath) //prints . is that a good thing?
-			if err != nil {
-				u.logger.Error("failed to read the binary path")
-				return err
-			}
-
-			binaryFilePath := filepath.Join(binaryPath, "keploy-binary")
+			// Access the binaryPath value from the parent scope
+			binaryFilePath := filepath.Join(binaryPath, "keploybin")
 
 			// Logic to check and update the binary file using the updater
 			u.updater.UpdateBinary(binaryFilePath)
@@ -46,7 +41,16 @@ func (u *UpdateBinary) GetCmd() *cobra.Command {
 		},
 	}
 
-	updateBinaryCmd.Flags().StringP("path", "p", ".", "Path to the local directory where Keploy binary file will be stored")
+	updateBinaryCmd.Flags().StringVarP(&binaryPath, "path", "p", ".", "Path to the local directory where Keploy binary file will be stored")
+	updateBinaryCmd.MarkFlagRequired("path") // Mark the path flag as required
+
+	// Validate the flag before executing the command
+	updateBinaryCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		if binaryPath == "" {
+			return fmt.Errorf("path is required")
+		}
+		return nil
+	}
 
 	return updateBinaryCmd
 }
