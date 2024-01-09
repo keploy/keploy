@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"go.keploy.io/server/pkg/service/updateBinary" // Import the updateBinary package
-
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/service/updateBinary" // Import the updateBinary package
 	"go.uber.org/zap"
 )
 
+// NewCmdUpdateBinary initializes a new command to update the Keploy binary file.
 func NewCmdUpdateBinary(logger *zap.Logger) *UpdateBinary {
 	updater := updateBinary.NewUpdater(logger)
 	return &UpdateBinary{
@@ -18,10 +18,14 @@ func NewCmdUpdateBinary(logger *zap.Logger) *UpdateBinary {
 	}
 }
 
+// UpdateBinary holds the updater instance for managing binary updates.
+
 type UpdateBinary struct {
 	updater updateBinary.Updater
 	logger  *zap.Logger
 }
+
+// GetCmd retrieves the command to update the Keploy binary file.
 
 func (u *UpdateBinary) GetCmd() *cobra.Command {
 	var binaryPath string // declare binaryPath outside of the RunE function scope
