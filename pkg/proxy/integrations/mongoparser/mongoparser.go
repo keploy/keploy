@@ -314,6 +314,11 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	}
 }
 
+func GetPacketLength(src []byte) (length int32) {
+	length = (int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16 | int32(src[3])<<24)
+	return length
+}
+
 func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	rand.Seed(time.Now().UnixNano())
 	for {
@@ -417,7 +422,27 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		// tmpStr := ""
 		reqTimestampMock := time.Now()
 		started := time.Now()
-		responseBuffer, err := util.ReadBytes(destConn)
+		responsePckLengthBuffer, err := util.ReadRequiredBytes(destConn, 4)
+		if err != nil {
+			if err == io.EOF {
+				logger.Debug("recieved response buffer is empty in record mode for mongo call")
+				destConn.Close()
+				return
+			}
+			logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
+			return
+		}
+
+		logger.Debug("recieved these pck length packets", zap.Any("packets", responsePckLengthBuffer))
+
+		pckLength := GetPacketLength(responsePckLengthBuffer)
+		logger.Debug("recieved pck length ", zap.Any("packet length", pckLength))
+
+		responsePckDataBuffer, err := util.ReadRequiredBytes(destConn, int(pckLength)-4)
+
+		logger.Debug("recieved these packets", zap.Any("packets", responsePckDataBuffer))
+
+		responseBuffer := append(responsePckLengthBuffer, responsePckDataBuffer...)
 		logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
 		// logStr += tmpStr
 		if err != nil {

@@ -881,7 +881,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		if isTLS {
 			logger.Debug("", zap.Any("isTLS", isTLS))
 			config := &tls.Config{
-				InsecureSkipVerify: false,
+				InsecureSkipVerify: true,
 				ServerName:         destinationUrl,
 			}
 			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
