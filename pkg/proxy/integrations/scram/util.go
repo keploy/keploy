@@ -29,7 +29,11 @@ func extractClientNonce(firstMsg string) (string, error) {
 	for _, part := range parts {
 		if strings.HasPrefix(part, "r=") {
 			// Split based on "=" and get the value of "r"
-			value := strings.Split(part, "=")[1]
+			// value := strings.Split(part, "=")[1]
+			value := strings.TrimPrefix(part, "r=")
+			if value == part {
+				return "", fmt.Errorf("error parsing '%s' for fetching client nonce", part, )
+			}
 			return value, nil
 		}
 	}
