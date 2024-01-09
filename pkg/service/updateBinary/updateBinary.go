@@ -39,7 +39,7 @@ func (u *updater) UpdateBinary(binaryFilePath string) {
 
 	// Fetch the latest version from GitHub releases
 	latestVersion, err := getLatestGitHubRelease()
-	fmt.Println("latestVersion is: ", latestVersion)
+
 	if err != nil {
 		u.logger.Error("Failed to fetch latest GitHub release version", zap.Error(err))
 		return
@@ -50,6 +50,7 @@ func (u *updater) UpdateBinary(binaryFilePath string) {
 		return
 	}
 
+	u.logger.Info("Updating to Version: " + latestVersion)
 	// Execute the curl command to download keploy.sh and run it with bash
 	curlCommand := `curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && bash keploy.sh`
 
