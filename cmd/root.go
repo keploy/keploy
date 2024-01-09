@@ -242,6 +242,7 @@ func (r *Root) execute() {
 		Example: rootExamples,
 	}
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
+
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
