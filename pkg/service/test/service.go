@@ -16,5 +16,4 @@ type Tester interface {
 	InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn
 	SimulateRequest(cfg *SimulateRequestConfig)
 	FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunStatus
-
 }
