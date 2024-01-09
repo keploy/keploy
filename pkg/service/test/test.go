@@ -51,6 +51,12 @@ type TestOptions struct {
 	CoverageReportPath string
 }
 
+var (
+	totalTests int
+	totalTestPassed int
+	totalTestFailed int
+)
+
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
 		logger: logger,
@@ -254,6 +260,9 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			break
 		}
 	}
+
+	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", totalTests, totalTestPassed, totalTestFailed)
+
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {
@@ -523,6 +532,10 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	} else {
 		pp.SetColorScheme(models.PassingColorScheme)
 	}
+
+	totalTests += cfg.TestReport.Total
+	totalTestPassed += cfg.TestReport.Success
+	totalTestFailed += cfg.TestReport.Failure
 
 	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
 
