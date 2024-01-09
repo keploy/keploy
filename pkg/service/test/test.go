@@ -222,6 +222,10 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		t.logger.Error("failed to initialise the test", zap.Error(err))
 		return false
 	}
+	// Check if no testset found
+	if len(initialisedValues.Sessions) == 0 {
+		t.logger.Info("no testcases found. Use record mode to record testcases.")
+	}
 	for _, sessionIndex := range initialisedValues.Sessions {
 		// checking whether the provided testset match with a recorded testset.
 		testcases := ArrayToMap(options.Tests[sessionIndex])
