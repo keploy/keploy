@@ -6,6 +6,14 @@ on:
 
 jobs:
 
+  verify_cla:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if CLA is signed
+        uses: cla-assistant/github-action@v2.1.3-beta
+      - name: Proceed only if CLA signed
+        if: failure()
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -13,7 +21,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go
+      - - name: Import CLA files and entities
+        uses: cla-assistant/setup@v2
         uses: actions/setup-go@v2
         with:
           go-version: "1.21"
