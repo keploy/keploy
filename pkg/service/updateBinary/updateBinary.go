@@ -54,7 +54,7 @@ func (u *updater) UpdateBinary(binaryFilePath string) {
 	// Execute the curl command to download keploy.sh and run it with bash
 	curlCommand := `curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && bash keploy.sh`
 
-	// Create the command
+	// Execute the combined curl command to download and execute keploy.sh with bash
 	cmd := exec.Command("sh", "-c", curlCommand)
 
 	// Set up input for the command
