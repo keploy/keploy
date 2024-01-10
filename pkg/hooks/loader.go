@@ -190,7 +190,6 @@ func (h *Hook) IsUsrAppTerminateInitiated() bool {
 	return h.userAppShutdownInitiated
 }
 
-
 func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 	it, err := h.localDb.getAll(configMockTable, configMockTableIndex)
 	if err != nil {

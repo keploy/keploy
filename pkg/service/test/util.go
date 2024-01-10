@@ -58,6 +58,8 @@ type TestConfig struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	EnableTele         bool
+	MockAssert         bool
+	BaseUrl            string
 }
 
 type RunTestSetConfig struct {

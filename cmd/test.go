@@ -178,6 +178,18 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			mockAssert, err := cmd.Flags().GetBool("mockAssert")
+			if err != nil {
+				t.logger.Error("failed to read the mock asserion flag")
+				return err
+			}
+
+			baseUrl, err := cmd.Flags().GetString("baseUrl")
+			if err != nil {
+				t.logger.Error("failed to read the base url flag for mock asserion")
+				return err
+			}
+
 			tests := map[string][]string{}
 
 			testsets, err := cmd.Flags().GetStringSlice("testsets")
@@ -275,6 +287,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				AppContainer:       appContainer,
 				AppNetwork:         networkName,
 				MongoPassword:      mongoPassword,
+				BaseUrl:            baseUrl, // for mock assertion
 				Delay:              delay,
 				BuildDelay:         buildDelay,
 				PassThroughPorts:   ports,
@@ -284,7 +297,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
-			}, enableTele)
+			}, enableTele, mockAssert)
 
 			return nil
 		},
@@ -308,6 +321,11 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	testCmd.Flags().Bool("mockAssert", false, "Mock Assert")
+	testCmd.Flags().MarkHidden("mockAssert")
+
+	testCmd.Flags().String("baseUrl", "", "Base Url for mock assertion")
 
 	testCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
