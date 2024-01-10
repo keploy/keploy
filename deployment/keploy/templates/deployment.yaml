@@ -1,18 +1,30 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "verification-server.fullname" . }}
+  name: verification-server
+  labels:
+    app: verification-server
+metadata:
+  name: verification-server
+  labels:
+    app: verification-server
+metadata:
+  name: verification-server
+  labels:
+    app: verification-server
   labels:
     {{- include "verification-server.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
+  replicas: 3
   {{- end }}
   selector:
     matchLabels:
-      {{- include "verification-server.selectorLabels" . | nindent 6 }}
+      app: verification-server
   template:
     metadata:
+      labels:
+        app: verification-server
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -22,13 +34,13 @@ spec:
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      secretName: my-secret
       {{- end }}
-      serviceAccountName: {{ include "verification-server.serviceAccountName" . }}
+      serviceAccountName: default
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        runAsUser: 1000
       containers:
-        - name: {{ .Chart.Name }}
+        - name: server-container
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
