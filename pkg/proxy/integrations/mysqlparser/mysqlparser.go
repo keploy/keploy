@@ -456,24 +456,37 @@ var (
 	expectingHandshakeResponseTest = false
 )
 
+func getfirstSQLMock(configMocks []*models.Mock) (*models.Mock, bool) {
+	for _, mock := range configMocks {
+		if len(mock.Spec.MySqlResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySqlResponses[0].Header.PacketType == "MySQLHandshakeV10" {
+			return mock, true
+		}
+	}
+	return nil, false
+}
+
 func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context, delay uint64) {
 	firstLoop := true
 	doHandshakeAgain := true
 	prevRequest := ""
 	var requestBuffers [][]byte
+	configMocks, _ := h.GetConfigMocks()
+	tcsMocks, _ := h.GetTcsMocks()
 	for {
-		configMocks, _ := h.GetConfigMocks()
-		tcsMocks, _ := h.GetTcsMocks()
 		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
 			if len(configMocks) == 0 {
 				logger.Debug("No more config mocks available")
 				return
 			}
-
-			header := configMocks[0].Spec.MySqlResponses[0].Header
-			packet := configMocks[0].Spec.MySqlResponses[0].Message
-			opr := configMocks[0].Spec.MySqlResponses[0].Header.PacketType
+			sqlMock, found := getfirstSQLMock(configMocks)
+			if !found {
+				logger.Debug("No SQL mock found")
+				return
+			}
+			header := sqlMock.Spec.MySqlResponses[0].Header
+			packet := sqlMock.Spec.MySqlResponses[0].Message
+			opr := sqlMock.Spec.MySqlResponses[0].Header.PacketType
 
 			binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
 			if err != nil {
@@ -492,7 +505,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
 				configMocks = (append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...))
 			}
-			h.SetConfigMocks(configMocks)
+			//h.SetConfigMocks(configMocks)
 			firstLoop = false
 			doHandshakeAgain = false
 			logger.Debug("BINARY PACKET SENT HANDSHAKE", zap.ByteString("binaryPacketKey", binaryPacket))
@@ -641,7 +654,7 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
 			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
 		}
-		h.SetConfigMocks(configMocks)
+		//h.SetConfigMocks(configMocks)
 	} else {
 		realIndex := matchedIndex - len(configMocks)
 		if realIndex < 0 || realIndex >= len(tcsMocks) {
@@ -653,7 +666,7 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if len(tcsMocks[realIndex].Spec.MySqlResponses) == 0 {
 			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
 		}
-		h.SetTcsMocks(tcsMocks)
+		//h.SetTcsMocks(tcsMocks)
 	}
 
 	return bestMatch, matchedIndex, mockType, nil

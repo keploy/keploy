@@ -2,6 +2,7 @@ package mysqlparser
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,28 +13,31 @@ import (
 )
 
 type ResultSet struct {
-	Columns             []*ColumnDefinition `yaml:"columns"`
-	Rows                []*Row              `yaml:"rows"`
-	EOFPresent          bool                `yaml:"eofPresent"`
-	PaddingPresent      bool                `yaml:"paddingPresent"`
-	EOFPresentFinal     bool                `yaml:"eofPresentFinal"`
-	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
-	OptionalPadding     bool                `yaml:"optionalPadding"`
-	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
-	EOFAfterColumns     []byte              `yaml:"eofAfterColumns"`
+	Columns             []*ColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow"`
+	Rows                []*Row              `json:"rows,omitempty" yaml:"rows,omitempty,flow"`
+	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow"`
+	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow"`
+	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow"`
+	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow"`
+	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow"`
+	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow"`
+	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow"`
 }
+
 type Row struct {
-	Header  RowHeader             `yaml:"header"`
-	Columns []RowColumnDefinition `yaml:"row_column_definition"`
+	Header  RowHeader             `json:"header,omitempty" yaml:"header,omitempty,flow"`
+	Columns []RowColumnDefinition `json:"columns,omitempty" yaml:"row_column_definition,omitempty,flow"`
 }
+
 type RowColumnDefinition struct {
-	Type  models.FieldType `yaml:"type"`
-	Name  string           `yaml:"name"`
-	Value interface{}      `yaml:"value"`
+	Type  models.FieldType `json:"type,omitempty" yaml:"type,omitempty,flow"`
+	Name  string           `json:"name,omitempty" yaml:"name,omitempty,flow"`
+	Value interface{}      `json:"value,omitempty" yaml:"value,omitempty,flow"`
 }
+
 type RowHeader struct {
-	PacketLength int   `yaml:"packet_length"`
-	SequenceID   uint8 `yaml:"sequence_id"`
+	PacketLength int   `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow"`
+	SequenceID   uint8 `json:"sequence_id,omitempty" yaml:"sequence_id,omitempty,flow"`
 }
 
 func parseResultSet(b []byte) (*ResultSet, error) {
@@ -93,8 +97,8 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 		EOFPresentFinal:     eofFinal,
 		PaddingPresentFinal: paddingFinal,
 		OptionalPadding:     optionalPadding,
-		OptionalEOFBytes:    optionalEOFBytes,
-		EOFAfterColumns:     eofAfterColumns,
+		OptionalEOFBytes:    base64.StdEncoding.EncodeToString(optionalEOFBytes),
+		EOFAfterColumns:     base64.StdEncoding.EncodeToString(eofAfterColumns),
 	}
 
 	return resultSet, err
@@ -279,7 +283,8 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	// Write EOF packet header
 	if resultSet.EOFPresent {
 		sequenceID++
-		buf.Write(resultSet.EOFAfterColumns)
+		EOFAfterColumnsValue, _ := base64.StdEncoding.DecodeString(resultSet.EOFAfterColumns)
+		buf.Write(EOFAfterColumnsValue)
 		if resultSet.PaddingPresent {
 			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 		}
@@ -301,7 +306,8 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	sequenceID++
 	// Write EOF packet header again
 	// buf.Write([]byte{5, 0, 0, sequenceID})
-	buf.Write(resultSet.OptionalEOFBytes)
+	OptionalEOFBytesValue, _ := base64.StdEncoding.DecodeString(resultSet.OptionalEOFBytes)
+	buf.Write(OptionalEOFBytesValue)
 	if resultSet.PaddingPresentFinal {
 		buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 	}

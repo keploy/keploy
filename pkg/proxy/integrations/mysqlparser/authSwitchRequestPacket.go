@@ -8,9 +8,9 @@ import (
 )
 
 type AuthSwitchRequestPacket struct {
-	StatusTag      byte   `yaml:"status_tag"`
-	PluginName     string `yaml:"plugin_name"`
-	PluginAuthData string `yaml:"plugin_authdata"`
+	StatusTag      byte   `json:"status_tag,omitempty" yaml:"status_tag,omitempty"`
+	PluginName     string `json:"plugin_name,omitempty" yaml:"plugin_name,omitempty"`
+	PluginAuthData string `json:"plugin_authdata,omitempty" yaml:"plugin_authdata,omitempty"`
 }
 
 func decodeAuthSwitchRequest(data []byte) (*AuthSwitchRequestPacket, error) {
