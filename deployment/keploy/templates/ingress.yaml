@@ -2,13 +2,13 @@
 {{- $fullName := include "verification-server.fullname" . -}}
 {{- $svcPort := .Values.service.port -}}
 {{- if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion -}}
-apiVersion: networking.k8s.io/v1
+apiVersion: networking.k8s.io/v1beta1
 {{- else -}}
 apiVersion: extensions/v1beta1
 {{- end }}
-kind: Ingress
+kind: IngressV1V1
 metadata:
-  name: {{ $fullName }}
+  name: verification-server
   labels:
     {{- include "verification-server.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
@@ -17,7 +17,7 @@ metadata:
   {{- end }}
 spec:
   {{- if .Values.ingress.tls }}
-  tls:
+tls:
     {{- range .Values.ingress.tls }}
     - hosts:
         {{- range .hosts }}
@@ -29,10 +29,16 @@ spec:
   rules:
     {{- range .Values.ingress.hosts }}
     - host: {{ .host | quote }}
-      http:
-        paths:
+        http:
+            paths:
           {{- range .paths }}
-          - path: {{ .path }}
+            - path: {{ .path }}
+            pathType: Prefix
+            backend:
+              service:
+                  name: verification-server
+                  port:
+                    number: 80
             pathType: Prefix
             backend:
               service:
