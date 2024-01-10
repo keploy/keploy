@@ -55,8 +55,9 @@ func (m *MongoParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn
 		m.logger.Debug("the outgoing mongo in record mode")
 		encodeOutgoingMongo(requestBuffer, clientConn, destConn, m.hooks, m.logger, ctx)
 	case models.MODE_TEST:
+		logger := m.logger.With(zap.Any("Client IP Address", clientConn.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 		m.logger.Debug("the outgoing mongo in test mode")
-		decodeOutgoingMongo(requestBuffer, clientConn, destConn, m.hooks, m.logger)
+		decodeOutgoingMongo(requestBuffer, clientConn, destConn, m.hooks, logger)
 	default:
 	}
 }
@@ -269,10 +270,14 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		} else {
 
 			isMatched, matchedMock, err := match(h, mongoRequests, logger)
-
+			if err != nil {
+				logger.Error("failed to match the mongo request with recorded tcsMocks", zap.Error(err))
+			}
 			if !isMatched {
+				logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
 				requestBuffer, err = util.Passthrough(clientConn, destConn, requestBuffers, h.Recover, logger)
 				if err != nil {
+					logger.Error("failed to passthrough the mongo request to the actual database server", zap.Error(err))
 					return
 				}
 				continue
@@ -307,6 +312,11 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		}
 		requestBuffers = [][]byte{}
 	}
+}
+
+func GetPacketLength(src []byte) (length int32) {
+	length = (int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16 | int32(src[3])<<24)
+	return length
 }
 
 func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
@@ -412,7 +422,27 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 		// tmpStr := ""
 		reqTimestampMock := time.Now()
 		started := time.Now()
-		responseBuffer, err := util.ReadBytes(destConn)
+		responsePckLengthBuffer, err := util.ReadRequiredBytes(destConn, 4)
+		if err != nil {
+			if err == io.EOF {
+				logger.Debug("recieved response buffer is empty in record mode for mongo call")
+				destConn.Close()
+				return
+			}
+			logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", destConn.RemoteAddr().String()))
+			return
+		}
+
+		logger.Debug("recieved these pck length packets", zap.Any("packets", responsePckLengthBuffer))
+
+		pckLength := GetPacketLength(responsePckLengthBuffer)
+		logger.Debug("recieved pck length ", zap.Any("packet length", pckLength))
+
+		responsePckDataBuffer, err := util.ReadRequiredBytes(destConn, int(pckLength)-4)
+
+		logger.Debug("recieved these packets", zap.Any("packets", responsePckDataBuffer))
+
+		responseBuffer := append(responsePckLengthBuffer, responsePckDataBuffer...)
 		logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
 		// logStr += tmpStr
 		if err != nil {
@@ -596,7 +626,9 @@ func isHeartBeat(opReq Operation, requestHeader models.MongoHeader, mongoRequest
 	case wiremessage.OpMsg:
 		_, ok := mongoRequest.(*models.MongoOpMessage)
 		if ok {
-			return (opReq.IsIsAdminDB() && (strings.Contains(opReq.String(), "hello") || (isScramAuthRequest(mongoRequest.(*models.MongoOpMessage).Sections, logger)))) || opReq.IsIsMaster()
+			return (opReq.IsIsAdminDB() && strings.Contains(opReq.String(), "hello")) ||
+				opReq.IsIsMaster() ||
+				isScramAuthRequest(mongoRequest.(*models.MongoOpMessage).Sections, logger)
 		}
 	default:
 		return false
