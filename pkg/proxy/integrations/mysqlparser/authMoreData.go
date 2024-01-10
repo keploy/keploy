@@ -5,7 +5,7 @@ import (
 )
 
 type NextAuthPacket struct {
-	PluginData byte `yaml:"plugin_data"`
+	PluginData byte `json:"plugin_data,omitempty" yaml:"plugin_data,omitempty"`
 }
 
 func decodeAuthMoreData(data []byte) (*NextAuthPacket, error) {
