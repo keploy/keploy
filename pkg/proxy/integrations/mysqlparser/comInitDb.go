@@ -5,8 +5,8 @@ import (
 )
 
 type ComInitDbPacket struct {
-	Status byte
-	DbName string
+	Status byte   `json:"status,omitempty" yaml:"status,omitempty"`
+	DbName string `json:"db_name,omitempty" yaml:"db_name,omitempty"`
 }
 
 func decodeComInitDb(data []byte) (*ComInitDbPacket, error) {
