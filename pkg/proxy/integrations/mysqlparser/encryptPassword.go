@@ -6,9 +6,9 @@ import (
 )
 
 type PasswordData struct {
-	PayloadLength uint32 `yaml:"payload_length"`
-	SequenceID    byte   `yaml:"sequence_id"`
-	Payload       []byte `yaml:"payload"`
+	PayloadLength uint32 `json:"payload_length,omitempty" yaml:"payload_length,omitempty,flow"`
+	SequenceID    byte   `json:"sequence_id,omitempty" yaml:"sequence_id,omitempty,flow"`
+	Payload       []byte `json:"payload,omitempty" yaml:"payload,omitempty,flow"`
 }
 
 func decodeEncryptPassword(data []byte) (string, *PasswordData, error) {
