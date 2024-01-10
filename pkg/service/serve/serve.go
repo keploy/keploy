@@ -69,7 +69,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	}
 
-	// Recover from panic and gracfully shutdown
+	// Recover from panic and gracefully shutdown
 	defer loadedHooks.Recover(routineId)
 
 	ctx := context.Background()
