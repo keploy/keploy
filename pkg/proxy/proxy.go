@@ -69,6 +69,9 @@ type ProxySet struct {
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
 	MongoPassword     string // password to mock the mongo connection and pass the authentication requests
+	MtlsKeyPath       string
+	MtlsCertPath      string
+	MtlsHostName      string
 }
 
 type CustomConn struct {
@@ -307,7 +310,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
 	Register("mongo", mongoparser.NewMongoParser(logger, h, opt.MongoPassword))
-	Register("http", httpparser.NewHttpParser(logger, h))
+	Register("http", httpparser.NewHttpParser(logger, h, opt.BaseUrl, opt.MockAssert))
 	Register("mysql", mysqlparser.NewMySqlParser(logger, h, delay))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
@@ -412,6 +415,9 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		PassThroughPorts:  passThroughPorts,
 		hook:              h,
 		MongoPassword:     opt.MongoPassword,
+		MtlsCertPath:      opt.MtlsCertPath,
+		MtlsKeyPath:       opt.MtlsKeyPath,
+		MtlsHostName:      opt.MtlsHostName,
 	}
 
 	//setting the proxy port field in hook
@@ -849,23 +855,24 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		// attempt to read the conn until buffer is either filled or connection is closed
 		var buffer []byte
 		buffer, err = util.ReadBytes(conn)
-		if err != nil && err != io.EOF {
-			ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-			return
-		}
+		if !ps.hook.IsUsrAppTerminateInitiated() {
+			if err != nil && err != io.EOF {
+				ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+				return
+			}
 
-		if err == io.EOF && len(buffer) == 0 {
-			ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
-			return
-		}
+			if err == io.EOF && len(buffer) == 0 {
+				ps.logger.Debug("received EOF, closing connection", zap.Error(err), zap.Any("connectionID", clientConnId))
+				return
+			}
 
-		ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
-		ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
-		if err != nil {
-			ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
-			return
+			ps.logger.Debug("received buffer", zap.Any("size", len(buffer)), zap.Any("buffer", buffer), zap.Any("connectionID", clientConnId))
+			ps.logger.Debug(fmt.Sprintf("the clientConnId: %v", clientConnId))
+			if err != nil {
+				ps.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", port))
+				return
+			}
 		}
-
 		// dst stores the connection with actual destination for the outgoing network call
 		var dst net.Conn
 		var actualAddress = ""
@@ -873,6 +880,13 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 			actualAddress = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.DestIp4), destInfo.DestPort)
 		} else if destInfo.IpVersion == 6 {
 			actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
+		}
+		// also add a host name as well to filter out if it's tha same IP
+		certFile := ps.MtlsCertPath
+		keyFile := ps.MtlsKeyPath
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil && models.GetMode() != models.MODE_TEST && ps.MtlsHostName != "" {
+			ps.logger.Error("failed to load the certificate and key pair", zap.Error(err))
 		}
 
 		//Dialing for tls connection
@@ -883,8 +897,13 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 			config := &tls.Config{
 				InsecureSkipVerify: true,
 				ServerName:         destinationUrl,
+				Certificates:       []tls.Certificate{cert},
 			}
-			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			if ps.MtlsHostName != "" {
+				dst, err = tls.Dial("tcp", ps.MtlsHostName, config)
+			} else {
+				dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			}
 			if err != nil && models.GetMode() != models.MODE_TEST {
 				logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()

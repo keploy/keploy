@@ -8,15 +8,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
+	"github.com/fatih/color"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -25,8 +28,10 @@ import (
 )
 
 type HttpParser struct {
-	logger *zap.Logger
-	hooks  *hooks.Hook
+	logger     *zap.Logger
+	hooks      *hooks.Hook
+	baseUrl    string
+	MockAssert bool
 }
 
 // ProcessOutgoing implements proxy.DepInterface.
@@ -40,17 +45,19 @@ func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net
 		}
 
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger)
+		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger, http.baseUrl, http.MockAssert)
 	default:
 		http.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
 
-func NewHttpParser(logger *zap.Logger, h *hooks.Hook) *HttpParser {
+func NewHttpParser(logger *zap.Logger, h *hooks.Hook, baseUrl string, mockAssert bool) *HttpParser {
 	return &HttpParser{
-		logger: logger,
-		hooks:  h,
+		logger:     logger,
+		hooks:      h,
+		baseUrl:    baseUrl,
+		MockAssert: mockAssert,
 	}
 }
 
@@ -76,6 +83,33 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	if len(map1) != len(map2) {
 		return false
 	}
+	var rv, rv2 string
+	for key, v := range map1 {
+		// if _, exists := map2[key]; !exists {
+		// 	return false
+		// }
+		if key == "Keploy-Header" {
+			rv = v
+		}
+	}
+
+	for key, v := range map2 {
+		// if _, exists := map1[key]; !exists {
+		// 	return false
+		// }
+		if key == "Keploy-Header" {
+			rv2 = v[0]
+		}
+	}
+	if rv != rv2 {
+		return mapsHaveSameKeys2(map1, map2)
+	}
+	return true
+}
+func mapsHaveSameKeys2(map1 map[string]string, map2 map[string][]string) bool {
+	if len(map1) != len(map2) {
+		return false
+	}
 
 	for key := range map1 {
 		if _, exists := map2[key]; !exists {
@@ -92,27 +126,10 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	return true
 }
 
-func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
-	switch models.GetMode() {
-	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h, ctx)
-		if err != nil {
-			logger.Error("failed to encode the http message into the yaml", zap.Error(err))
-			return
-		}
-
-	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
-	default:
-		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
-	}
-
-}
-
 // Handled chunked requests when content-length is given.
 func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
 	for contentLength > 0 {
-		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		requestChunked, err := util.ReadBytes(clientConn)
 		if err != nil {
 			if err == io.EOF {
@@ -135,13 +152,14 @@ func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logge
 			return
 		}
 	}
+	clientConn.SetReadDeadline(time.Time{})
 }
 
 // Handled chunked requests when transfer-encoding is given.
 func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
 	if transferEncodingHeader == "chunked" {
 		for {
-			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 			requestChunked, err := util.ReadBytes(clientConn)
 			if err != nil && err != io.EOF {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -195,10 +213,11 @@ func contentLengthResponse(finalResp *[]byte, clientConn, destConn net.Conn, log
 			return
 		}
 	}
+	destConn.SetReadDeadline(time.Time{})
 }
 
 // Handled chunked responses when transfer-encoding is given.
-func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
+func chunkedResponse(chunkedTime *[]int64, chunkedLength *[]int, finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, transferEncodingHeader string) {
 	if transferEncodingHeader == "chunked" {
 		for {
 			resp, err := util.ReadBytes(destConn)
@@ -211,8 +230,28 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 					break
 				}
 			}
+
+			// get all the chunks mapped with that time at least get the number of chunks at that time
+			if len(resp) != 0 {
+				fmt.Println("resp::::", string(resp))
+				t := time.Now().UnixMilli()
+				fmt.Println("THIS IS TIME ---", t)
+				//Get the length of the chunk <- check this
+
+				count, err := countHTTPChunks(resp)
+				if err != nil {
+					fmt.Println("Error extracting length:", err)
+				}
+				fmt.Println("Count ", count)
+				*chunkedTime = append(*chunkedTime, t)
+				*chunkedLength = append(*chunkedLength, count)
+			}
+
+			//get the hexa decimal and then convert it to length
 			*finalResp = append(*finalResp, resp...)
+			logger.Debug("This is a chunk of response[chunked]: " + string(resp))
 			// write the response message to the user client
+
 			_, err = clientConn.Write(resp)
 			if err != nil {
 				logger.Error("failed to write response message to the user client", zap.Error(err))
@@ -224,7 +263,6 @@ func chunkedResponse(finalResp *[]byte, clientConn, destConn net.Conn, logger *z
 		}
 	}
 }
-
 func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger) {
 	lines := strings.Split(string(*finalReq), "\n")
 	var contentLengthHeader string
@@ -260,7 +298,7 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 	}
 }
 
-func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, resp []byte) {
+func handleChunkedResponses(chunkedTime *[]int64, chunkedLength *[]int, finalResp *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, resp []byte) {
 	//Getting the content-length or the transfer-encoding header
 	var contentLengthHeader, transferEncodingHeader string
 	lines := strings.Split(string(resp), "\n")
@@ -273,6 +311,7 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 			break
 		}
 	}
+
 	//Handle chunked responses
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
@@ -290,7 +329,8 @@ func handleChunkedResponses(finalResp *[]byte, clientConn, destConn net.Conn, lo
 		if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
 			return
 		}
-		chunkedResponse(finalResp, clientConn, destConn, logger, transferEncodingHeader)
+
+		chunkedResponse(chunkedTime, chunkedLength, finalResp, clientConn, destConn, logger, transferEncodingHeader)
 	}
 }
 
@@ -313,9 +353,35 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, baseUrl string, mockAssert bool) {
 	//Matching algorithmm
 	//Get the mocks
+	tcsMocks, err := h.GetTcsMocks()
+	if err != nil {
+		logger.Error("failed to get the mocks from the yamls", zap.Error(err))
+		return
+	}
+
+	var basePoints int
+	if baseUrl != "" {
+		fmt.Println("baseUrl::::", baseUrl)
+		// sort the mocks based on the timestamp in the metadata
+		// and then send the response to the user in the same order application
+		// and as soon as the mocks of the base url gets empty just exit the loop
+
+		var baseMocks []*models.Mock
+		var Basetimeline []int64
+		for _, mock := range tcsMocks {
+			if mock.Spec.HttpReq.URL == baseUrl {
+				baseMocks = append(baseMocks, mock)
+				strArray := mock.Spec.Metadata["chunkedTime"]
+				Basetimeline = getChunkTime(strArray)
+			}
+		}
+		fmt.Println("timeline::::", Basetimeline)
+		basePoints = len(baseMocks)
+	}
+
 	for {
 
 		//Check if the expected header is present
@@ -344,7 +410,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			return
 		}
 
-		reqBody, err := ioutil.ReadAll(req.Body)
+		reqBody, err := io.ReadAll(req.Body)
 		if err != nil {
 			logger.Error("failed to read from request body", zap.Error(err))
 
@@ -359,7 +425,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		//check if req body is a json
 		isReqBodyJSON := isJSON(reqBody)
 
-		isMatched, stub, err := match(req, reqBody, reqURL, isReqBodyJSON, h, logger, clientConn, destConn, requestBuffer, h.Recover)
+		isMatched, stub, err := match(req, reqBody, reqURL, isReqBodyJSON, h, logger, clientConn, destConn, requestBuffer, h.Recover, mockAssert)
 
 		if err != nil {
 			logger.Error("error while matching http mocks", zap.Error(err))
@@ -374,6 +440,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			}
 			if !passthroughHost {
 				logger.Error("Didn't match any prexisting http mock")
+				logger.Error("Cannot Find eligible mocks for the outgoing http call", zap.Any("request", string(requestBuffer)))
 			}
 			util.Passthrough(clientConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
 			return
@@ -384,6 +451,69 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		body := stub.Spec.HttpResp.Body
 		var respBody string
 		var responseString string
+		// TODO: Handle the case when reqBody is empty but stub.Spec.HttpReq.Body is not empty
+		if string(reqBody) != "" {
+			diffs, err := assertJSONReqBody(stub.Spec.HttpReq.Body, string(reqBody))
+			if err != nil {
+				logger.Error("failed to assert the json request body for the url", zap.String("url", stub.Spec.HttpReq.URL), zap.Error(err))
+				// return
+			}
+
+			// Print the differences
+			if len(diffs) > 0 {
+				fmt.Println("Differences found URL: ", req.Method, ":", req.URL.String(), "Audit-id:: ", stub.Spec.HttpResp.Header["Audit-Id"], ":", color.RedString("MISMATCH"))
+				for _, diff := range diffs {
+					fmt.Println(diff)
+				}
+			} else {
+				fmt.Println("No differences found.")
+			}
+		}
+		var prevTime int64
+		prevTime = getUnixMilliTime(stub.Spec.ReqTimestampMock)
+		//calculate chunk time
+
+		var chunkedResponses []string
+		var chunkedTime []int64
+		if stub.Spec.Metadata["chunkedLength"] != "" {
+			chunkedTime = getChunkTime(stub.Spec.Metadata["chunkedTime"])
+			// fmt.Println("chunkedLength Array:::", stub.Spec.Metadata["chunkedLength"])
+			// v.Spec.HttpResp.Body = ""
+
+			// Split the JSON input by newline
+			jsonObjects := strings.Split(stub.Spec.HttpResp.Body, "\n")
+			// fmt.Println("jsonObjects::::", jsonObjects)
+			// Process each JSON object
+			for i, jsonObject := range jsonObjects {
+				// Skip empty lines
+				if jsonObject == "" {
+					continue
+				}
+				// Unmarshal the JSON object
+				var data map[string]interface{}
+				err := json.Unmarshal([]byte(jsonObject), &data)
+				if err != nil {
+					fmt.Printf("Error decoding JSON object %d: %v\n", i+1, err)
+					continue
+				}
+				// Print or process the JSON object as needed
+				// fmt.Println("json is here for ", i, " ", jsonObject)
+				jsonSize := strconv.FormatInt(int64(len(jsonObject)), 16)
+				chunkedResponse := fmt.Sprintf("%s\r\n%s\r\n", jsonSize, jsonObject)
+				chunkedResponses = append(chunkedResponses, chunkedResponse)
+			}
+		}
+
+		delay := make([]int64, len(chunkedTime))
+
+		for _, chunktime := range chunkedTime {
+			// Calculate the difference in milliseconds
+			differenceInMilliseconds := chunktime - prevTime
+			// Convert the difference to seconds
+			delay = append(delay, differenceInMilliseconds/1000)
+			prevTime = chunktime
+		}
+		fmt.Println("delay::::", delay)
 
 		// Fetching the response headers
 		header := pkg.ToHttpHeader(stub.Spec.HttpResp.Header)
@@ -419,15 +549,69 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				headers += headerLine
 			}
 		}
-		responseString = statusLine + headers + "\r\n" + "" + respBody
 
-		logger.Debug("the content-length header" + headers)
-		_, err = clientConn.Write([]byte(responseString))
-		if err != nil {
-			logger.Error("failed to write the mock output to the user application", zap.Error(err))
-			return
+		if len(chunkedResponses) == 0 {
+			responseString = statusLine + headers + "\r\n" + "" + respBody
+			logger.Debug("the content-length header" + headers)
+			_, err = clientConn.Write([]byte(responseString))
+			if err != nil {
+				logger.Error("failed to write the mock output to the user application", zap.Error(err))
+				return
+			}
+		} else {
+			// calculate responsebody length for each chunk , and at last append 0 also.
+			headers = "Transfer-Encoding: chunked\r\n"
+			for key, values := range header {
+				if key == "Content-Length" {
+					continue
+				}
+				for _, value := range values {
+					headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+					headers += headerLine
+				}
+			}
+
+			for idx, v := range chunkedResponses {
+				if idx == 0 {
+					responseString = statusLine + headers + "\r\n" + v
+				} else {
+					responseString = v
+				}
+				if idx == len(chunkedResponses)-1 {
+					responseString = responseString + "0\r\n\r\n"
+				}
+				// time.Sleep(time.Duration(delay[idx]) * time.Millisecond)
+				// _, err = clienConn.Write([]byte(responseString))
+				// TODO: read from the mocks and set the delay time according to chunkedTime array
+				if reqURL.String() == "/apis/apps/v1/deployments?limit=500&resourceVersion=0" || reqURL.String() == "/apis/samplecontroller.k8s.io/v1alpha1/foos?limit=500&resourceVersion=0" {
+					time.Sleep(500 * time.Millisecond)
+					_, err = clientConn.Write([]byte(responseString))
+				} else {
+					_, err = clientConn.Write([]byte(responseString))
+					time.Sleep(10 * time.Second)
+				}
+
+				if err != nil {
+					logger.Error("failed to write the mock output to the user application", zap.Error(err))
+					return
+				}
+			}
 		}
 
+		if reqURL.String() == baseUrl && baseUrl != "" {
+			basePoints--
+			if basePoints == 0 {
+				sigChan := make(chan os.Signal, 1)
+				signal.Notify(sigChan, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+				go func() {
+					select {
+					case <-sigChan:
+						logger.Info("Received SIGTERM, exiting")
+						h.StopUserApplication()
+					}
+				}()
+			}
+		}
 		requestBuffer, err = util.ReadBytes(clientConn)
 		if err != nil {
 			logger.Debug("failed to read the request buffer from the client", zap.Error(err))
@@ -444,6 +628,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	var resp []byte
 	var finalResp []byte
 	var finalReq []byte
+	var chunkedLength []int
+	var chunkedTime []int64
 	var err error
 	defer destConn.Close()
 	//Writing the request to the server.
@@ -454,6 +640,28 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	}
 	logger.Debug("This is the initial request: " + string(request))
 	finalReq = append(finalReq, request...)
+	var reqTimestampMock, resTimestampcMock time.Time
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+	go func() {
+		select {
+		case <-sigChan:
+			logger.Debug("Received SIGTERM, exiting")
+			if finalReq == nil || finalResp == nil {
+				logger.Debug("Sorry request and response are nil")
+				return
+			} else {
+				fmt.Println("Signal-finalReq:\n", string(finalReq))
+				fmt.Println("Signal-finalResp:\n", string(finalResp))
+				logger.Debug("Length of finalReq and finalResp"+"", zap.Any("finalReq", len(finalReq)), zap.Any("finalResp", len(finalResp)))
+				err := ParseFinalHttp(chunkedTime, chunkedLength, finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
+				if err != nil {
+					logger.Error("failed to parse the final http request and response", zap.Error(err))
+					return
+				}
+			}
+		}
+	}()
 	for {
 		//check if the expect : 100-continue header is present
 		lines := strings.Split(string(finalReq), "\n")
@@ -498,7 +706,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 
 		// Capture the request timestamp
-		reqTimestampMock := time.Now()
+		reqTimestampMock = time.Now()
 
 		handleChunkedRequests(&finalReq, clientConn, destConn, logger)
 		// read the response from the actual server
@@ -514,7 +722,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 
 		// Capturing the response timestamp
-		resTimestampcMock := time.Now()
+		resTimestampcMock = time.Now()
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
@@ -523,102 +731,20 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		}
 		finalResp = append(finalResp, resp...)
 		logger.Debug("This is the initial response: " + string(resp))
-		handleChunkedResponses(&finalResp, clientConn, destConn, logger, resp)
+		handleChunkedResponses(&chunkedTime, &chunkedLength, &finalResp, clientConn, destConn, logger, resp)
 		logger.Debug("This is the final response: " + string(finalResp))
-
-		var req *http.Request
-		// converts the request message buffer to http request
-		req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
+		//Parse the finalReq and finalResp
+		err := ParseFinalHttp(chunkedTime, chunkedLength, finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
 		if err != nil {
-			logger.Error("failed to parse the http request message", zap.Error(err))
+			logger.Error("failed to parse the final http request and response", zap.Error(err))
 			return err
 		}
-		var reqBody []byte
-		if req.Body != nil { // Read
-			var err error
-			reqBody, err = io.ReadAll(req.Body)
-			if err != nil {
-				// TODO right way to log errors
-				logger.Error("failed to read the http request body", zap.Error(err))
-				return err
-			}
-		}
-		// converts the response message buffer to http response
-		respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResp)), req)
-		if err != nil {
-			logger.Error("failed to parse the http response message", zap.Error(err))
-			return err
-		}
-		//Add the content length to the headers.
-		var respBody []byte
-		//Checking if the body of the response is empty or does not exist.
 
-		if respParsed.Body != nil { // Read
-			if respParsed.Header.Get("Content-Encoding") == "gzip" {
-				check := respParsed.Body
-				ok, reader := checkIfGzipped(check)
-				logger.Debug("The body is gzip or not" + strconv.FormatBool(ok))
-				logger.Debug("", zap.Any("isGzipped", ok))
-				if ok {
-					gzipReader, err := gzip.NewReader(reader)
-					if err != nil {
-						logger.Error("failed to create a gzip reader", zap.Error(err))
-						return err
-					}
-					respParsed.Body = gzipReader
-				}
-			}
-			respBody, err = io.ReadAll(respParsed.Body)
-			if err != nil {
-				logger.Error("failed to read the the http response body", zap.Error(err))
-				return err
-			}
-			logger.Debug("This is the response body: " + string(respBody))
-			//Add the content length to the headers.
-			respParsed.Header.Add("Content-Length", strconv.Itoa(len(respBody)))
-		}
-		// store the request and responses as mocks
-		meta := map[string]string{
-			"name":      "Http",
-			"type":      models.HttpClient,
-			"operation": req.Method,
-		}
-		passthroughHost := false
-		for _, host := range models.PassThroughHosts {
-			if req.Host == host {
-				passthroughHost = true
-			}
-		}
-		if !passthroughHost {
-			h.AppendMocks(&models.Mock{
-				Version: models.GetVersion(),
-				Name:    "mocks",
-				Kind:    models.HTTP,
-				Spec: models.MockSpec{
-					Metadata: meta,
-					HttpReq: &models.HttpReq{
-						Method:     models.Method(req.Method),
-						ProtoMajor: req.ProtoMajor,
-						ProtoMinor: req.ProtoMinor,
-						URL:        req.URL.String(),
-						Header:     pkg.ToYamlHttpHeader(req.Header),
-						Body:       string(reqBody),
-						URLParams:  pkg.UrlParams(req),
-						Host:       req.Host,
-					},
-					HttpResp: &models.HttpResp{
-						StatusCode: respParsed.StatusCode,
-						Header:     pkg.ToYamlHttpHeader(respParsed.Header),
-						Body:       string(respBody),
-					},
-					Created:          time.Now().Unix(),
-					ReqTimestampMock: reqTimestampMock,
-					ResTimestampMock: resTimestampcMock,
-				},
-			}, ctx)
-		}
-		finalReq = []byte("")
-		finalResp = []byte("")
+		//Resetting the finalReq and finalResp
+		finalReq = nil
+		finalResp = nil
+		chunkedLength = nil
+		chunkedTime = nil
 
 		finalReq, err = util.ReadBytes(clientConn)
 		if err != nil {
@@ -635,5 +761,106 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			return err
 		}
 	}
+	return nil
+}
+
+func ParseFinalHttp(chunkedTime []int64, chunkedLength []int, finalReq []byte, finalResp []byte, reqTimestampMock, resTimestampcMock time.Time, ctx context.Context, logger *zap.Logger, h *hooks.Hook) error {
+	var req *http.Request
+	// converts the request message buffer to http request
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
+	if err != nil {
+		logger.Error("failed to parse the http request message", zap.Error(err))
+		return err
+	}
+	var reqBody []byte
+	if req.Body != nil { // Read
+		var err error
+		reqBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			// TODO right way to log errors
+			logger.Error("failed to read the http request body", zap.Error(err))
+			return err
+		}
+	}
+	// converts the response message buffer to http response
+	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResp)), req)
+	logger.Debug("PARSED RESPONSE" + fmt.Sprint(respParsed))
+	if err != nil {
+		logger.Error("failed to parse the http response message", zap.Error(err))
+		return err
+	}
+	//Add the content length to the headers.
+	var respBody []byte
+	//Checking if the body of the response is empty or does not exist.
+
+	if respParsed.Body != nil { // Read
+		if respParsed.Header.Get("Content-Encoding") == "gzip" {
+			check := respParsed.Body
+			ok, reader := checkIfGzipped(check)
+			logger.Debug("fmt.Sprint(PerConncounter) " + "The body is gzip or not" + strconv.FormatBool(ok))
+			logger.Debug("fmt.Sprint(PerConncounter) "+"", zap.Any("isGzipped", ok))
+			if ok {
+				gzipReader, err := gzip.NewReader(reader)
+				if err != nil {
+					logger.Error("failed to create a gzip reader", zap.Error(err))
+					return err
+				}
+				respParsed.Body = gzipReader
+			}
+		}
+		respBody, err = io.ReadAll(respParsed.Body)
+		// logger.Debug("fmt.Sprint(PerConncounter) " + fmt.Sprint(PerConncounter) + " OverallCounter " + fmt.Sprint(atomic.LoadInt64(&Overallcounter)) + "This is the response body after reading: " + string(respBody))
+		if err != nil && err.Error() != "unexpected EOF" {
+			logger.Error("failed to read the the http response body", zap.Error(err))
+			return err
+		}
+
+		logger.Debug("This is the response body: " + string(respBody))
+		//Add the content length to the headers.
+		respParsed.Header.Add("Content-Length", strconv.Itoa(len(respBody)))
+	}
+	// store the request and responses as mocks
+	meta := map[string]string{
+		"name":      "Http",
+		"type":      models.HttpClient,
+		"operation": req.Method,
+	}
+
+	if chunkedLength != nil || chunkedTime != nil || len(chunkedLength) != 0 || len(chunkedTime) != 0 {
+		meta["chunkedLength"] = fmt.Sprint(chunkedLength)
+		meta["chunkedTime"] = fmt.Sprint(chunkedTime)
+	}
+
+	err = h.AppendMocks(&models.Mock{
+		Version: models.GetVersion(),
+		Name:    "mocks",
+		Kind:    models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: meta,
+			HttpReq: &models.HttpReq{
+				Method:     models.Method(req.Method),
+				ProtoMajor: req.ProtoMajor,
+				ProtoMinor: req.ProtoMinor,
+				URL:        req.URL.String(),
+				Header:     pkg.ToYamlHttpHeader(req.Header),
+				Body:       string(reqBody),
+				URLParams:  pkg.UrlParams(req),
+			},
+			HttpResp: &models.HttpResp{
+				StatusCode: respParsed.StatusCode,
+				Header:     pkg.ToYamlHttpHeader(respParsed.Header),
+				Body:       string(respBody),
+			},
+			Created:          time.Now().UnixMilli(),
+			ReqTimestampMock: reqTimestampMock,
+			ResTimestampMock: resTimestampcMock,
+		},
+	}, ctx)
+
+	if err != nil {
+		logger.Error("failed to store the http mock", zap.Error(err))
+		return err
+	}
+
 	return nil
 }
