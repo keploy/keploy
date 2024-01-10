@@ -75,17 +75,13 @@ func (srv *transcoder) ProcessDataFrame(dataFrame *http2.DataFrame) error {
 		defer srv.sic.ResetStream(dataFrame.StreamID)
 	}
 
-	// Note that the entire testcase would be blocked if any unrecorded dependency is present.
-	// If we don't want to crash the entire application, we can add code later to send placeholder data.
-	if srv.hook.GetDepsSize() == 0 {
-		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
-	}
-
 	grpcReq := srv.sic.FetchRequestForStream(id)
 
 	// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
-	mocks := srv.hook.GetTcsMocks()
-	mock := FilterMocksBasedOnGrpcRequest(grpcReq, mocks)
+	mock, err := FilterMocksBasedOnGrpcRequest(grpcReq, srv.hook)
+	if err != nil {
+		return fmt.Errorf("failed match mocks: %v", err)
+	}
 	if mock == nil {
 		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
 	}
@@ -122,7 +118,7 @@ func (srv *transcoder) ProcessDataFrame(dataFrame *http2.DataFrame) error {
 
 	// The headers are prepared. Write the frame.
 	srv.logger.Info("Writing the first set of headers in a new HEADER frame.")
-	err := srv.framer.WriteHeaders(http2.HeadersFrameParam{
+	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      id,
 		BlockFragment: buf.Bytes(),
 		EndStream:     false,

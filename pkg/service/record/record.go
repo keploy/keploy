@@ -29,8 +29,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters, enableTele bool) {
-
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters, enableTele bool, mtlsCertPath, mtlsKeyPath, mtlsHostName string) {
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
@@ -49,7 +48,11 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks := hooks.NewHook(ys, routineId, r.Logger)
+	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
+	if err != nil {
+		r.Logger.Error("error while creating hooks", zap.Error(err))
+		return
+	}
 
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(routineId)
@@ -75,7 +78,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// start the BootProxy
-		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx, 0)
+		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: proxyPort, MtlsCertPath: mtlsCertPath, MtlsKeyPath: mtlsKeyPath, MtlsHostName: mtlsHostName}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx, 0)
 	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map

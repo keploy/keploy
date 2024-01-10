@@ -48,6 +48,7 @@ type TestOptions struct {
 	GlobalNoise        models.GlobalNoise
 	TestsetNoise       models.TestsetNoise
 	WithCoverage       bool
+	BaseUrl            string
 	CoverageReportPath string
 }
 
@@ -60,9 +61,10 @@ func NewTester(logger *zap.Logger) Tester {
 
 func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	var returnVal InitialiseTestReturn
+	var err error
 
 	// capturing the code coverage for go bianries built by go-version 1.20^
-	if cfg.WithCoverage {
+	if cfg.WithCoverage && !cfg.MockAssert {
 
 		// report path is provided via cmd flag by user
 		if cfg.CoverageReportPath != "" {
@@ -119,7 +121,10 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	returnVal.YamlStore = yamlStore
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	returnVal.LoadedHooks = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
+	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
+	if err != nil {
+		return returnVal, fmt.Errorf("error while creating hooks %v", err)
+	}
 
 	select {
 	case <-stopper:
@@ -137,7 +142,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// start the proxy
-		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
+		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword, BaseUrl: cfg.BaseUrl,MockAssert: cfg.MockAssert}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -189,7 +194,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, enableTele, mockAssert bool) bool {
 
 	testRes := false
 	result := true
@@ -207,10 +212,13 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		PassThroughPorts:   options.PassThroughPorts,
 		ApiTimeout:         options.ApiTimeout,
 		MongoPassword:      options.MongoPassword,
+		BaseUrl:            options.BaseUrl,
 		WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
 		EnableTele:         enableTele,
+		MockAssert:         mockAssert,
 	}
+
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracfully shutdown
 	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
@@ -229,47 +237,52 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
+		if !mockAssert {
+			testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
+			switch testRunStatus {
+			case models.TestRunStatusAppHalted:
+				testRes = false
+				exitLoop = true
+			case models.TestRunStatusFaultUserApp:
+				testRes = false
+				exitLoop = true
+			case models.TestRunStatusUserAbort:
+				return false
+			case models.TestRunStatusFailed:
+				testRes = false
+			case models.TestRunStatusPassed:
+				testRes = true
+			}
+			result = result && testRes
+			if exitLoop {
+				break
+			}
+			t.logger.Info("test run completed", zap.Bool("passed overall", result))
+		} else {
+			t.logger.Info("running mock assert for testset", zap.Any("testset", sessionIndex))
+			t.RunMockAssert(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, cfg.BaseUrl)
+		}
 
-		switch testRunStatus {
-		case models.TestRunStatusAppHalted:
-			testRes = false
-			exitLoop = true
-		case models.TestRunStatusFaultUserApp:
-			testRes = false
-			exitLoop = true
-		case models.TestRunStatusUserAbort:
-			return false
-		case models.TestRunStatusFailed:
-			testRes = false
-		case models.TestRunStatusPassed:
-			testRes = true
-		}
-		result = result && testRes
-		if exitLoop {
-			break
-		}
-	}
-	t.logger.Info("test run completed", zap.Bool("passed overall", result))
-	// log the overall code coverage for the test run of go binaries
-	if options.WithCoverage {
-		t.logger.Info("there is a opportunity to get the coverage here")
-		// logs the coverage using covdata
-		coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
-		output, err := coverCmd.Output()
-		if err != nil {
-			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
-		}
-		t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
+		// log the overall code coverage for the test run of go binaries
+		if options.WithCoverage && !mockAssert {
+			t.logger.Info("there is a opportunity to get the coverage here")
+			// logs the coverage using covdata
+			coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
+			output, err := coverCmd.Output()
+			if err != nil {
+				t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+			}
+			t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
 
-		// merges the coverage files into a single txt file which can be merged with the go-test coverage
-		generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-		output, err = generateCovTxtCmd.Output()
-		if err != nil {
-			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
-		}
-		if len(output) > 0 {
-			t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
+			// merges the coverage files into a single txt file which can be merged with the go-test coverage
+			generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+			output, err = generateCovTxtCmd.Output()
+			if err != nil {
+				t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+			}
+			if len(output) > 0 {
+				t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
+			}
 		}
 	}
 
@@ -285,7 +298,6 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	<-initialisedValues.ExitCmd
 	return false
 }
-
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
 	var returnVal InitialiseRunTestSetReturn
 	var err error

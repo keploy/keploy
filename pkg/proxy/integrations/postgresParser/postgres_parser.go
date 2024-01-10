@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -474,12 +475,11 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			logger.Debug("the postgres request buffer is empty")
 			continue
 		}
-		tcsMocks := h.GetTcsMocks()
-		// change auth to md5 instead of scram
-		// CheckValidEncode(tcsMocks, h, logger)
-		ChangeAuthToMD5(tcsMocks, h, logger)
 
-		matched, pgResponses := matchingReadablePG(tcsMocks, pgRequests, h)
+		matched, pgResponses, err := matchingReadablePG(pgRequests, h)
+		if err != nil {
+			return fmt.Errorf("error while matching tcs mocks %v", err)
+		}
 
 		if !matched {
 			_, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)
@@ -491,18 +491,15 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 
 		}
-
 		for _, pgResponse := range pgResponses {
 			encoded, err := PostgresDecoder(pgResponse.Payload)
 			if len(pgResponse.PacketTypes) > 0 && len(pgResponse.Payload) == 0 {
 				encoded, err = PostgresDecoderFrontend(pgResponse)
 			}
-
 			if err != nil {
 				logger.Error("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 				return err
 			}
-
 			_, err = clientConn.Write([]byte(encoded))
 			if err != nil {
 				logger.Error("failed to write request message to the client application", zap.Error(err))
