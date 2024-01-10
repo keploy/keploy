@@ -9,11 +9,11 @@ import (
 )
 
 type OKPacket struct {
-	AffectedRows uint64 `json:"affected_rows,omitempty" yaml:"affected_rows"`
-	LastInsertID uint64 `json:"last_insert_id,omitempty" yaml:"last_insert_id"`
-	StatusFlags  uint16 `json:"status_flags,omitempty" yaml:"status_flags"`
-	Warnings     uint16 `json:"warnings,omitempty" yaml:"warnings"`
-	Info         string `json:"info,omitempty" yaml:"info"`
+	AffectedRows uint64 `json:"affected_rows,omitempty" yaml:"affected_rows,omitempty,flow"`
+	LastInsertID uint64 `json:"last_insert_id,omitempty" yaml:"last_insert_id,omitempty,flow"`
+	StatusFlags  uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow"`
+	Warnings     uint16 `json:"warnings,omitempty" yaml:"warnings,omitempty,flow"`
+	Info         string `json:"info,omitempty" yaml:"info,omitempty,flow"`
 }
 
 func decodeMySQLOK(data []byte) (*OKPacket, error) {
