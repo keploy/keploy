@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"path/filepath"
@@ -28,6 +29,13 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 var sendLogs = true
+
+// idCounter is used to generate random ID for each request
+var idCounter int64 = -1
+
+func GetNextID() int64 {
+	return atomic.AddInt64(&idCounter, 1)
+}
 
 func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger) error {
 	for {
@@ -221,6 +229,45 @@ func ReadBytes(reader io.Reader) ([]byte, error) {
 
 		if n < len(buf) {
 			break
+		}
+	}
+
+	return buffer, nil
+}
+
+// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
+// It returns the content as a byte array.
+func ReadRequiredBytes(reader io.Reader, numBytes int) ([]byte, error) {
+	var buffer []byte
+	const maxEmptyReads = 5
+	emptyReads := 0
+
+	for {
+		buf := make([]byte, numBytes)
+
+		n, err := reader.Read(buf)
+
+		if n == numBytes {
+			buffer = append(buffer, buf...)
+			break
+		}
+
+		if n > 0 {
+			buffer = append(buffer, buf[:n]...)
+			numBytes = numBytes - n
+			emptyReads = 0 // reset the counter because we got some data
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				emptyReads++
+				if emptyReads >= maxEmptyReads {
+					return buffer, err // multiple EOFs in a row, probably a true EOF
+				}
+				time.Sleep(time.Millisecond * 100) // sleep before trying again
+				continue
+			}
+			return buffer, err
 		}
 	}
 
