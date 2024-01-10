@@ -2,6 +2,7 @@ package mysqlparser
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,21 +11,21 @@ import (
 )
 
 type HandshakeV10Packet struct {
-	ProtocolVersion uint8  `yaml:"protocol_version"`
-	ServerVersion   string `yaml:"server_version"`
-	ConnectionID    uint32 `yaml:"connection_id"`
-	AuthPluginData  []byte `yaml:"auth_plugin_data"`
-	CapabilityFlags uint32 `yaml:"capability_flags"`
-	CharacterSet    uint8  `yaml:"character_set"`
-	StatusFlags     uint16 `yaml:"status_flags"`
-	AuthPluginName  string `yaml:"auth_plugin_name"`
+	ProtocolVersion uint8  `json:"protocol_version,omitempty" yaml:"protocol_version,omitempty,flow"`
+	ServerVersion   string `json:"server_version,omitempty" yaml:"server_version,omitempty,flow"`
+	ConnectionID    uint32 `json:"connection_id,omitempty" yaml:"connection_id,omitempty,flow"`
+	AuthPluginData  string `json:"auth_plugin_data,omitempty" yaml:"auth_plugin_data,omitempty,flow"`
+	CapabilityFlags uint32 `json:"capability_flags,omitempty" yaml:"capability_flags,omitempty,flow"`
+	CharacterSet    uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow"`
+	StatusFlags     uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow"`
+	AuthPluginName  string `json:"auth_plugin_name,omitempty" yaml:"auth_plugin_name,omitempty,flow"`
 }
 
 func decodeMySQLHandshakeV10(data []byte) (*HandshakeV10Packet, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("handshake packet too short")
 	}
-
+	var authPluginDataBytes []byte
 	packet := &HandshakeV10Packet{}
 	packet.ProtocolVersion = data[0]
 
@@ -44,7 +45,7 @@ func decodeMySQLHandshakeV10(data []byte) (*HandshakeV10Packet, error) {
 	if len(data) < 9 { // 8 bytes of AuthPluginData + 1 byte filler
 		return nil, fmt.Errorf("handshake packet too short for AuthPluginData")
 	}
-	packet.AuthPluginData = append([]byte{}, data[:8]...)
+	authPluginDataBytes = append([]byte{}, data[:8]...)
 	data = data[9:] // Skip 8 bytes of AuthPluginData and 1 byte filler
 
 	if len(data) < 5 { // Capability flags (2 bytes), character set (1 byte), status flags (2 bytes)
@@ -73,7 +74,7 @@ func decodeMySQLHandshakeV10(data []byte) (*HandshakeV10Packet, error) {
 
 		if authPluginDataLen > 8 {
 			lenToRead := min(authPluginDataLen-8, len(data))
-			packet.AuthPluginData = append(packet.AuthPluginData, data[:lenToRead]...)
+			authPluginDataBytes = append(authPluginDataBytes, data[:lenToRead]...)
 			data = data[lenToRead:]
 		}
 	} else {
@@ -89,7 +90,7 @@ func decodeMySQLHandshakeV10(data []byte) (*HandshakeV10Packet, error) {
 		return nil, fmt.Errorf("malformed handshake packet: missing null terminator for AuthPluginName")
 	}
 	packet.AuthPluginName = string(data[:idx])
-
+	packet.AuthPluginData = base64.StdEncoding.EncodeToString(authPluginDataBytes)
 	return packet, nil
 }
 
@@ -102,7 +103,7 @@ func min(a, b int) int {
 }
 func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, error) {
 	buf := new(bytes.Buffer)
-
+	AuthPluginDataValue, _ := base64.StdEncoding.DecodeString(string(packet.AuthPluginData))
 	// Protocol version
 	buf.WriteByte(packet.ProtocolVersion)
 
@@ -114,10 +115,10 @@ func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, erro
 	binary.Write(buf, binary.LittleEndian, packet.ConnectionID)
 
 	// Auth-plugin-data-part-1 (first 8 bytes)
-	if len(packet.AuthPluginData) < 8 {
+	if len(AuthPluginDataValue) < 8 {
 		return nil, errors.New("auth plugin data too short")
 	}
-	buf.Write(packet.AuthPluginData[:8])
+	buf.Write(AuthPluginDataValue[:8])
 
 	// Filler
 	buf.WriteByte(0x00)
@@ -134,8 +135,8 @@ func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, erro
 	binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags>>16))
 
 	// Length of auth-plugin-data
-	if packet.CapabilityFlags&0x800000 != 0 && len(packet.AuthPluginData) >= 21 {
-		buf.WriteByte(byte(len(packet.AuthPluginData))) // Length of entire auth plugin data
+	if packet.CapabilityFlags&0x800000 != 0 && len(AuthPluginDataValue) >= 21 {
+		buf.WriteByte(byte(len(AuthPluginDataValue))) // Length of entire auth plugin data
 	} else {
 		buf.WriteByte(0x00)
 	}
@@ -143,8 +144,9 @@ func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, erro
 	buf.Write(make([]byte, 10))
 
 	// Auth-plugin-data-part-2 (remaining auth data)
-	if packet.CapabilityFlags&0x800000 != 0 && len(packet.AuthPluginData) >= 21 {
-		buf.Write(packet.AuthPluginData[8:]) // Write all remaining bytes of auth plugin data
+	if packet.CapabilityFlags&0x800000 != 0 && len(AuthPluginDataValue) >= 21 {
+
+		buf.Write(AuthPluginDataValue[8:]) // Write all remaining bytes of auth plugin data
 	}
 	// Auth-plugin name
 	if packet.CapabilityFlags&0x800000 != 0 {
