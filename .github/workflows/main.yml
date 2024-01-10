@@ -12,11 +12,11 @@ jobs:
         - name: Check CLA Status
           uses: cla-assistant/github-action@v2.1.3-beta
           with:
-            pull-request: 1332
-        - name: Check PR 1332 CLA Status
+            pull-request: 1333
+        - name: Check PR 1333 CLA Status
           uses: cla-assistant/github-action@v2.1.3-beta
           with:
-            pull-request: 1332
+            pull-request: 1333
         - name: Fail on CLA Status Failure
           run: |
             echo 'CLA status check failed'
