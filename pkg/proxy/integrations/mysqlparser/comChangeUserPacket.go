@@ -1,16 +1,17 @@
 package mysqlparser
 
 import (
+	"encoding/base64"
 	"errors"
 	"strings"
 )
 
 type ComChangeUserPacket struct {
-	User         string `yaml:"user"`
-	Auth         []byte `yaml:"auth"`
-	Db           string `yaml:"db"`
-	CharacterSet uint8  `yaml:"character_set"`
-	AuthPlugin   string `yaml:"auth_plugin"`
+	User         string `json:"user,omitempty" yaml:"user,omitempty,flow"`
+	Auth         string `json:"auth,omitempty" yaml:"auth,omitempty,flow"`
+	Db           string `json:"db,omitempty" yaml:"db,omitempty,flow"`
+	CharacterSet uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow"`
+	AuthPlugin   string `json:"auth_plugin,omitempty" yaml:"auth_plugin,omitempty,flow"`
 }
 
 func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {
@@ -32,7 +33,7 @@ func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {
 
 	return ComChangeUserPacket{
 		User:         user,
-		Auth:         auth,
+		Auth:         base64.StdEncoding.EncodeToString(auth),
 		Db:           db,
 		CharacterSet: characterSet,
 		AuthPlugin:   authPlugin,

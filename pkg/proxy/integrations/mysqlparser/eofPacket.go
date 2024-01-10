@@ -6,9 +6,9 @@ import (
 )
 
 type EOFPacket struct {
-	Header      byte   `yaml:"header"`
-	Warnings    uint16 `yaml:"warnings"`
-	StatusFlags uint16 `yaml:"status_flags"`
+	Header      byte   `json:"header,omitempty" yaml:"header,omitempty,flow"`
+	Warnings    uint16 `json:"warnings,omitempty" yaml:"warnings,omitempty,flow"`
+	StatusFlags uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow"`
 }
 
 func decodeMYSQLEOF(data []byte) (*EOFPacket, error) {
