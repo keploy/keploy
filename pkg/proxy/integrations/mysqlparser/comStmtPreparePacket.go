@@ -6,7 +6,7 @@ import (
 )
 
 type ComStmtPreparePacket struct {
-	Query string
+	Query string `json:"query,omitempty" yaml:"query,omitempty,flow"`
 }
 
 func decodeComStmtPrepare(data []byte) (*ComStmtPreparePacket, error) {

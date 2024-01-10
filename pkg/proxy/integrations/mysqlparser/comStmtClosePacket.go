@@ -6,8 +6,8 @@ import (
 )
 
 type ComStmtClosePacket struct {
-	Status      byte
-	StatementID uint32
+	Status      byte   `json:"status,omitempty" yaml:"status,omitempty"`
+	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty"`
 }
 
 func decodeComStmtClose(data []byte) (*ComStmtClosePacket, error) {
