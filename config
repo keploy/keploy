@@ -1,0 +1,32 @@
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /home/newsarthak.linux/.minikube/ca.crt
+    extensions:
+    - extension:
+        last-update: Thu, 28 Dec 2023 19:25:41 UTC
+        provider: minikube.sigs.k8s.io
+        version: v1.32.0
+      name: cluster_info
+    server: https://192.168.49.2:8443
+  name: minikube
+contexts:
+- context:
+    cluster: minikube
+    extensions:
+    - extension:
+        last-update: Thu, 28 Dec 2023 19:25:41 UTC
+        provider: minikube.sigs.k8s.io
+        version: v1.32.0
+      name: context_info
+    namespace: default
+    user: minikube
+  name: minikube
+current-context: minikube
+kind: Config
+preferences: {}
+users:
+- name: minikube
+  user:
+    client-certificate: /home/newsarthak.linux/.minikube/profiles/minikube/client.crt
+    client-key: /home/newsarthak.linux/.minikube/profiles/minikube/client.key
