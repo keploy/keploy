@@ -399,6 +399,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			return false, nil, fmt.Errorf("error while fetching tcs mocks %v", err)
 		}
 
+		isConfig := false
 		for _, mock := range tcsMocks {
 			if mock == nil {
 				continue
@@ -414,10 +415,12 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
 						logger.Debug("CHANGING TO MD5 for Response")
 						mock.Spec.PostgresResponses[requestIndex].AuthType = 5
+						isConfig = true
 						continue
 					} else {
 						if len(encoded) > 0 && encoded[0] == 'p' {
 							logger.Debug("CHANGING TO MD5 for Request and Response")
+							isConfig = true
 							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
 
 							mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
@@ -492,10 +495,16 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			}
 		}
 
-		idx := findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h)
-		if idx != -1 {
-			isMatched = true
-			matchedMock = tcsMocks[idx]
+		if !isMatched {
+			idx := findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h)
+			if idx != -1 {
+				isMatched = true
+				matchedMock = tcsMocks[idx]
+			}
+		}
+
+		if isConfig {
+			return true, matchedMock.Spec.PostgresResponses, nil
 		}
 
 		if isMatched {
