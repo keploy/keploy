@@ -473,6 +473,9 @@ func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 }
 
 func (ys *Yaml) SeparateMocksByResourceVersion(mock *models.Mock) {
+	if mock == nil || mock.Spec.HttpReq == nil {
+		return
+	}
 	if keployHeader, ok := mock.Spec.HttpReq.Header["Keploy-Header"]; ok && keployHeader != "" {
 		mock.Name += "_" + keployHeader
 	}
@@ -493,46 +496,26 @@ func (ys *Yaml) ReadResourceVersionMocks(path string) ([]platform.KindSpecifier,
 		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", path))
 		return nil, err
 	}
-	filenames := []string{}
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" || !strings.Contains(j.Name(), "mocks_") {
 			continue
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		filenames = append(filenames, name)
-	}
-
-	if len(filenames) == 0 {
-		return configMocks, nil
-	}
-
-	if path == "" {
-		path = ys.MockPath
-	}
-	for _, fileName := range filenames {
-		mockPath, err := util.ValidatePath(path + "/" + fileName + ".yaml")
+		yamls, err := read(path, name)
 		if err != nil {
+			ys.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
+			return nil, err
+		}
+		mocks, err := decodeMocks(yamls, ys.Logger)
+		if err != nil {
+			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 
-		if _, err := os.Stat(mockPath); err == nil {
-
-			yamls, err := read(path, fileName)
-			if err != nil {
-				ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
-				return nil, err
-			}
-			mocks, err := decodeMocks(yamls, ys.Logger)
-			if err != nil {
-				ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
-				return nil, err
-			}
-
-			for _, mock := range mocks {
-				if mock.Spec.Metadata["type"] != "config" {
-					configMocks = append(configMocks, mock)
-				}
+		for _, mock := range mocks {
+			if mock.Spec.Metadata["type"] != "config" {
+				configMocks = append(configMocks, mock)
 			}
 		}
 	}
