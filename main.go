@@ -45,7 +45,7 @@ func main() {
 		log.Debug("Failed to fetch latest release version", err2)
 	}
 	graytext := color.New(color.FgHiBlack)
-	updatetext := graytext.Sprintln("keploy update")
+	updatetext := graytext.Sprint("keploy update")
 	const msg string = `
 	   ╭─────────────────────────────────────╮
 	   │ New version available:              │		
