@@ -253,6 +253,7 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", path))
 		return nil, err
 	}
+
 	for _, j := range files {
 		if filepath.Ext(j.Name()) != ".yaml" || strings.Contains(j.Name(), "mocks") {
 			continue
@@ -327,6 +328,8 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	if mock.Name == "" {
 		mock.Name = "mocks"
 	}
+
+	ys.SeparateMocksByResourceVersion(mock)
 
 	err = ys.Write(ys.MockPath, mock.Name, mockYaml)
 	if err != nil {
@@ -467,4 +470,71 @@ func (ys *Yaml) UpdateTest(mock *models.Mock, ctx context.Context) error {
 
 func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 	return nil
+}
+
+func (ys *Yaml) SeparateMocksByResourceVersion(mock *models.Mock) {
+	if keployHeader, ok := mock.Spec.HttpReq.Header["Keploy-Header"]; ok && keployHeader != "" {
+		mock.Name += "_" + keployHeader
+	}
+}
+
+func (ys *Yaml) ReadResourceVersionMocks(path string) ([]platform.KindSpecifier, error) {
+	var (
+		configMocks = make([]platform.KindSpecifier, 0)
+	)
+	dir, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", path))
+		return nil, err
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", path))
+		return nil, err
+	}
+	filenames := []string{}
+	for _, j := range files {
+		if filepath.Ext(j.Name()) != ".yaml" || !strings.Contains(j.Name(), "mocks_") {
+			continue
+		}
+
+		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
+		filenames = append(filenames, name)
+	}
+
+	if len(filenames) == 0 {
+		return configMocks, nil
+	}
+
+	if path == "" {
+		path = ys.MockPath
+	}
+	for _, fileName := range filenames {
+		mockPath, err := util.ValidatePath(path + "/" + fileName + ".yaml")
+		if err != nil {
+			return nil, err
+		}
+
+		if _, err := os.Stat(mockPath); err == nil {
+
+			yamls, err := read(path, fileName)
+			if err != nil {
+				ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
+				return nil, err
+			}
+			mocks, err := decodeMocks(yamls, ys.Logger)
+			if err != nil {
+				ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
+				return nil, err
+			}
+
+			for _, mock := range mocks {
+				if mock.Spec.Metadata["type"] != "config" {
+					configMocks = append(configMocks, mock)
+				}
+			}
+		}
+	}
+	return configMocks, nil
 }

@@ -19,7 +19,7 @@ func (t *tester) MockAssertion(cfg *TestConfig) (InitialiseTestReturn, error) {
 }
 
 // have to look gracefully exiting of mock assertion this can be done by two ways either the total mocks get finish or the mocks of the baseline gets finished
-func (t *tester) RunMockAssert(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool,baseUrl string) models.TestRunStatus {
+func (t *tester) RunMockAssert(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, baseUrl string) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -43,18 +43,16 @@ func (t *tester) RunMockAssert(testSet, path, testReportPath, appCmd, appContain
 		return initialisedValues.InitialStatus
 	}
 
-
 	// Recover from panic and gracfully shutdown
 	defer loadedHooks.Recover(pkg.GenerateRandomID())
 	defer func() {
 		if len(appCmd) == 0 && pid != 0 {
 			t.logger.Debug("no need to stop the user application when running keploy tests along with unit tests")
-		} 
+		}
 	}()
 
-	
 	var (
-		status  = models.TestRunStatusPassed
+		status = models.TestRunStatusPassed
 	)
 
 	var userIp string
@@ -83,11 +81,9 @@ func (t *tester) RunMockAssert(testSet, path, testReportPath, appCmd, appContain
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
 			nonKeployTcs = append(nonKeployTcs, tc.Name)
 		}
-		
 
 	}
-	
-	
+
 	status = models.TestRunStatusPassed
 	return status
 }
@@ -95,23 +91,6 @@ func (t *tester) RunMockAssert(testSet, path, testReportPath, appCmd, appContain
 func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
 	var returnVal InitialiseRunTestSetReturn
 	var err error
-	var readTcs []*models.TestCase
-	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil, nil)
-	for _, mock := range tcsMocks {
-		tcs, ok := mock.(*models.TestCase)
-		if !ok {
-			continue
-		}
-		readTcs = append(readTcs, tcs)
-	}
-	if err != nil {
-		t.logger.Error("Error in reading the testcase", zap.Error(err))
-		returnVal.InitialStatus = models.TestRunStatusFailed
-		return returnVal
-	}
-	returnVal.Tcs = readTcs
-
-
 	var readConfigMocks []*models.Mock
 	configMocks, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
 	for _, mock := range configMocks {
@@ -121,21 +100,37 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		}
 		readConfigMocks = append(readConfigMocks, configMock)
 	}
-	
+
 	var readTcsMocks []*models.Mock
-	readTcsMockss, err := cfg.YamlStore.ReadTcsMocks(nil, filepath.Join(cfg.Path, cfg.TestSet))
-	for _, mock := range readTcsMockss {
+	tcsMocks, err := cfg.YamlStore.ReadTcsMocks(nil, filepath.Join(cfg.Path, cfg.TestSet))
+
+	if err != nil {
+		t.logger.Error(err.Error())
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
+
+	for _, mock := range tcsMocks {
 		configMock, ok := mock.(*models.Mock)
 		if !ok {
 			continue
 		}
 		readTcsMocks = append(readTcsMocks, configMock)
 	}
+	tcsMocks, err = cfg.YamlStore.ReadResourceVersionMocks(filepath.Join(cfg.Path, cfg.TestSet))
 	if err != nil {
 		t.logger.Error(err.Error())
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
+	for _, mock := range tcsMocks {
+		configMock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readTcsMocks = append(readTcsMocks, configMock)
+	}
+
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
 	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
@@ -165,7 +160,6 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		}
 	}
 
-	
 	// //check if the user application is running docker container using IDE
 	// returnVal.DockerID = (cfg.AppCmd == "" && len(cfg.AppContainer) != 0)
 
