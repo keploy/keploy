@@ -1,14 +1,10 @@
 package updateBinary
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
-	"time"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -36,7 +32,6 @@ type Updater interface {
 	UpdateBinary()
 }
 
-// ErrGitHubAPIUnresponsive is an error indicating that the GitHub API is unresponsive.
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 // UpdateBinary initiates the update process for the Keploy binary file.
@@ -44,7 +39,9 @@ func (u *updater) UpdateBinary() {
 	currentVersion := utils.KeployVersion
 
 	// Fetch the latest version and release body from GitHub releases with a timeout
-	latestVersion, releaseBody, err := getLatestGitHubReleaseWithTimeout()
+	releaseInfo, err := utils.GetLatestGitHubRelease()
+	latestVersion := releaseInfo.TagName
+	changelog := releaseInfo.Body
 
 	if err != nil {
 		if err == ErrGitHubAPIUnresponsive {
@@ -92,44 +89,5 @@ func (u *updater) UpdateBinary() {
 	}
 
 	u.logger.Info("Updated Keploy binary to version " + latestVersion)
-	u.logger.Info("Release Notes:\n" + releaseBody)
-}
-
-// getLatestGitHubReleaseWithTimeout fetches the latest version and release body from GitHub releases with a timeout.
-func getLatestGitHubReleaseWithTimeout() (string, string, error) {
-	// GitHub repository details
-	repoOwner := "keploy"
-	repoName := "keploy"
-
-	// GitHub API URL for latest release
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
-
-	// Create an HTTP client with a timeout
-	client := http.Client{
-		Timeout: 10 * time.Second, // Adjust the timeout duration as needed
-	}
-
-	// Create a GET request to the GitHub API
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return "", "", err
-	}
-
-	// Send the request
-	resp, err := client.Do(req)
-	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return "", "", ErrGitHubAPIUnresponsive
-		}
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	// Decode the response JSON
-	var release GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", "", err
-	}
-
-	return release.TagName, release.Body, nil
+	u.logger.Info("Release Notes:\n" + changelog)
 }
