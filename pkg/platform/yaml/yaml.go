@@ -504,7 +504,7 @@ func (ys *Yaml) ReadResourceVersionMocks(path string) ([]platform.KindSpecifier,
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
 		yamls, err := read(path, name)
 		if err != nil {
-			ys.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
+			ys.Logger.Error("failed to read the mock from yaml", zap.Error(err))
 			return nil, err
 		}
 		mocks, err := decodeMocks(yamls, ys.Logger)
