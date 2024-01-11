@@ -2,11 +2,13 @@ package updateBinary
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
-
+	"time"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -14,6 +16,7 @@ import (
 // GitHubRelease holds information about the GitHub release.
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
+	Body    string `json:"body"`
 }
 
 // updater manages the updating process of the Keploy binary.
@@ -30,18 +33,25 @@ func NewUpdater(logger *zap.Logger) Updater {
 
 // Updater defines the contract for updating the Keploy binary.
 type Updater interface {
-	UpdateBinary(binaryFilePath string)
+	UpdateBinary()
 }
 
+// ErrGitHubAPIUnresponsive is an error indicating that the GitHub API is unresponsive.
+var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
+
 // UpdateBinary initiates the update process for the Keploy binary file.
-func (u *updater) UpdateBinary(binaryFilePath string) {
+func (u *updater) UpdateBinary() {
 	currentVersion := utils.KeployVersion
 
-	// Fetch the latest version from GitHub releases
-	latestVersion, err := getLatestGitHubRelease()
+	// Fetch the latest version and release body from GitHub releases with a timeout
+	latestVersion, releaseBody, err := getLatestGitHubReleaseWithTimeout()
 
 	if err != nil {
-		u.logger.Error("Failed to fetch latest GitHub release version", zap.Error(err))
+		if err == ErrGitHubAPIUnresponsive {
+			u.logger.Error("GitHub API is unresponsive. Update process cannot continue.")
+		} else {
+			u.logger.Error("Failed to fetch latest GitHub release version", zap.Error(err))
+		}
 		return
 	}
 
@@ -82,12 +92,11 @@ func (u *updater) UpdateBinary(binaryFilePath string) {
 	}
 
 	u.logger.Info("Updated Keploy binary to version " + latestVersion)
-
+	u.logger.Info("Release Notes:\n" + releaseBody)
 }
 
-// getLatestGitHubRelease fetches the latest version from GitHub releases.
-
-func getLatestGitHubRelease() (string, error) {
+// getLatestGitHubReleaseWithTimeout fetches the latest version and release body from GitHub releases with a timeout.
+func getLatestGitHubReleaseWithTimeout() (string, string, error) {
 	// GitHub repository details
 	repoOwner := "keploy"
 	repoName := "keploy"
@@ -95,27 +104,32 @@ func getLatestGitHubRelease() (string, error) {
 	// GitHub API URL for latest release
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
 
-	// Create an HTTP client
-	client := http.Client{}
+	// Create an HTTP client with a timeout
+	client := http.Client{
+		Timeout: 10 * time.Second, // Adjust the timeout duration as needed
+	}
 
 	// Create a GET request to the GitHub API
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// Send the request
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return "", "", ErrGitHubAPIUnresponsive
+		}
+		return "", "", err
 	}
 	defer resp.Body.Close()
 
 	// Decode the response JSON
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	return release.TagName, nil
+	return release.TagName, release.Body, nil
 }
