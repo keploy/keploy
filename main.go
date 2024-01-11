@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
+	"github.com/fatih/color"
 	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/cmd"
 	"go.keploy.io/server/utils"
@@ -43,14 +44,16 @@ func main() {
 	if err2 != nil {
 		log.Debug("Failed to fetch latest release version", err2)
 	}
+	graytext := color.New(color.FgHiBlack)
+	updatetext := graytext.Sprintln("keploy update")
 	const msg string = `
-	   ╭─────────────────────────────────────────────────────╮
-	   │ New version available:                              │		
-	   │ %v  ---->   %v                       │
-	   │ Run 'keploy update' to update to the latest version.│
-	   ╰─────────────────────────────────────────────────────╯
+	   ╭─────────────────────────────────────╮
+	   │ New version available:              │		
+	   │ %v  ---->   %v       │
+	   │ Run %v to update         │
+	   ╰─────────────────────────────────────╯
 	`
-	versionmsg := fmt.Sprintf(msg, strings.TrimSpace(version), strings.TrimSpace(latestVersion))
+	versionmsg := fmt.Sprintf(msg, strings.TrimSpace(version), strings.TrimSpace(latestVersion), updatetext)
 	if latestVersion != version {
 		fmt.Printf(versionmsg)
 	}
@@ -76,7 +79,6 @@ type GitHubRelease struct {
 }
 
 // getLatestGitHubRelease fetches the latest version from GitHub releases.
-
 func getLatestGitHubRelease() (string, error) {
 	// GitHub repository details
 	repoOwner := "keploy"
