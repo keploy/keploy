@@ -36,6 +36,7 @@ done
 # Get the pid of the application.
 pid=$(pgrep keploy)
 
+for j in {1..10}; do
 # Start making curl calls to record the testcases and mocks.
 curl -X GET http://localhost:9966/petclinic/api/pettypes
 
@@ -59,6 +60,7 @@ curl -X GET http://localhost:9966/petclinic/api/pettypes
 --url http://localhost:9966/petclinic/api/pettypes/1
 
 curl -X GET http://localhost:9966/petclinic/api/pettypes
+done
 
 # Wait for 5 seconds for keploy to record the tcs and mocks.
 sleep 5
