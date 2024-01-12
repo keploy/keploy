@@ -58,7 +58,7 @@ func GenerateServerFinalMessage(authMessage, mechanism, password, salt string, i
 
 	// Compute the server signature (server proof) using HMAC with the server key and the provided authMessage.
 	serverSignature := computeHMAC(hashGen, serverKey, []byte(authMessage))
-	logger.Debug("the new server proof for the second auth request", zap.Any("server signature", base64.StdEncoding.EncodeToString(serverSignature)))
+	logger.Debug("the new server proof for the second auth request", zap.Any("server signature", base64.StdEncoding.EncodeToString(serverSignature)), zap.Any("derived from auth message", authMessage))
 
 	return base64.StdEncoding.EncodeToString(serverSignature), nil
 }

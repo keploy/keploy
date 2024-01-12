@@ -99,6 +99,7 @@ func setupLogger() *zap.Logger {
 	} else {
 		logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 		logCfg.DisableStacktrace = true
+		logCfg.EncoderConfig.EncodeCaller = nil
 	}
 
 	logger, err := logCfg.Build()

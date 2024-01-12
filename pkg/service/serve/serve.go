@@ -63,9 +63,13 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	ys := yaml.NewYamlStore(path, path, "", "", s.logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks := hooks.NewHook(ys, routineId, s.logger)
+	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
+	if err != nil {
+		s.logger.Error("error while creating hooks", zap.Error(err))
+		return
+	}
 
-	// Recover from panic and gracfully shutdown
+	// Recover from panic and gracefully shutdown
 	defer loadedHooks.Recover(routineId)
 
 	ctx := context.Background()
