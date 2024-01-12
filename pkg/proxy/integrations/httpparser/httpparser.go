@@ -775,8 +775,8 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 			return err
 		}
 		logger.Debug("This is the response body: " + string(respBody))
-		//Add the content length to the headers.
-		respParsed.Header.Add("Content-Length", strconv.Itoa(len(respBody)))
+		//Set the content length to the headers.
+		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 	}
 	// store the request and responses as mocks
 	meta := map[string]string{
