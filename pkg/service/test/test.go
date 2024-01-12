@@ -125,7 +125,10 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	if err != nil {
 		return returnVal, fmt.Errorf("error while creating hooks %v", err)
 	}
+<<<<<<< HEAD
 	returnVal.LoadedHooks.SetPassThroughHosts(cfg.PassThroughHosts)
+=======
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 
 	select {
 	case <-stopper:

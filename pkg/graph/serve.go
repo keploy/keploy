@@ -60,9 +60,15 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	ys := yaml.NewYamlStore(path, path, "", "", s.logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
+<<<<<<< HEAD:pkg/graph/serve.go
 	loadedHooks, err := hooks.NewHook(ys, routineId, g.logger)
 	if err != nil {
 		g.logger.Error("error while creating hooks", zap.Error(err))
+=======
+	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
+	if err != nil {
+		s.logger.Error("error while creating hooks", zap.Error(err))
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts):pkg/service/serve/serve.go
 		return
 	}
 

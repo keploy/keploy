@@ -3,7 +3,10 @@ package genericparser
 import (
 	"encoding/base64"
 	"fmt"
+<<<<<<< HEAD
 	"math"
+=======
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 
 	// "fmt"
 	"unicode"
@@ -27,6 +30,7 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
 	for {
+<<<<<<< HEAD
 		tcsMocks, err := h.GetConfigMocks()
 		if err != nil {
 			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
@@ -109,6 +113,56 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 		}
 		break
 	}
+=======
+		tcsMocks, err := h.GetTcsMocks()
+		if err != nil {
+			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
+		}
+		index := -1
+		for idx, mock := range tcsMocks {
+			if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+				matched := true // Flag to track if all requests match
+
+				for requestIndex, reqBuff := range requestBuffers {
+
+					bufStr := string(reqBuff)
+					if !IsAsciiPrintable(string(reqBuff)) {
+						bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+					}
+
+					// Compare the encoded data
+					if mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+						matched = false
+						break // Exit the loop if any request doesn't match
+					}
+				}
+				if matched {
+					index = idx
+					break
+				}
+			}
+		}
+
+		if index == -1 {
+			index = findBinaryMatch(tcsMocks, requestBuffers, h)
+		}
+
+		if index != -1 {
+			responseMock := make([]models.GenericPayload, len(tcsMocks[index].Spec.GenericResponses))
+			copy(responseMock, tcsMocks[index].Spec.GenericResponses)
+			isDeleted, err := h.DeleteTcsMock(tcsMocks[index])
+			if err != nil {
+				return false, nil, fmt.Errorf("error while deleting tcsMock %v", err)
+			}
+			if !isDeleted {
+				continue
+			}
+			return true, responseMock, nil
+		}
+		break
+	}
+
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	return false, nil, nil
 }
 

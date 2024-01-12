@@ -475,7 +475,11 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 		for {
 			buffer, err := util.ReadBytes(clientConn)
+<<<<<<< HEAD
 			if !h.IsUserAppTerminateInitiated() && err != nil {
+=======
+			if !h.IsUsrAppTerminateInitiated() && err != nil {
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 					if err == io.EOF {
 						logger.Debug("EOF error received from client. Closing connection in postgres !!")
