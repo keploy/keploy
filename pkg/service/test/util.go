@@ -434,6 +434,8 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 		unFilteredMocks = append(unFilteredMocks, mock)
 	}
 	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", filteredMocks))
+	// TODO change this to debug
+	logger.Info("number of filtered mocks", zap.Any("testcase", tc.Name), zap.Any("number of filtered mocks", len(filteredMocks)))
 	return filteredMocks, unFilteredMocks
 }
 

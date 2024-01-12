@@ -189,6 +189,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
+				metadata := make(map[string]string)
+				metadata["type"] = "config"
 				h.AppendMocks(&models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
@@ -198,6 +200,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresResponses: pgResponses,
 						ReqTimestampMock:  reqTimestampMock,
 						ResTimestampMock:  resTimestampMock,
+						Metadata:          metadata,
 					},
 				}, ctx)
 				pgRequests = []models.Backend{}
