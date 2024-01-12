@@ -6,6 +6,13 @@ import (
 	"net"
 )
 
+const mockTable string = "mock"
+const configMockTable string = "configMock"
+const mockTableIndex string = "id"
+const configMockTableIndex string = "id"
+const mockTableIndexField string = "Id"
+const configMockTableIndexField string = "Id"
+
 // ConvertIPToUint32 converts a string representation of an IPv4 address to a 32-bit integer.
 func ConvertIPToUint32(ipStr string) (uint32, error) {
 	ipAddr := net.ParseIP(ipStr)

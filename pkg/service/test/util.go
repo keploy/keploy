@@ -449,9 +449,13 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 		unFilteredMocks = append(unFilteredMocks, mock)
 	}
 	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", filteredMocks))
+<<<<<<< HEAD
 	// TODO change this to debug
 	logger.Debug("number of filtered mocks", zap.Any("testcase", tc.Name), zap.Any("number of filtered mocks", len(filteredMocks)))
 	return filteredMocks, unFilteredMocks
+=======
+	return filteredMocks
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 }
 
 // creates a directory if not exists with all user access

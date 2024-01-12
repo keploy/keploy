@@ -12,7 +12,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+<<<<<<< HEAD
 	"regexp"
+=======
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	"strconv"
 	"strings"
 	"time"
@@ -435,8 +438,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	//Matching algorithmm
 	//Get the mocks
 	for {
+<<<<<<< HEAD
 		remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 		sourcePort := remoteAddr.Port
+=======
+
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 		//Check if the expected header is present
 		if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
 			//Send the 100 continue response
@@ -454,6 +461,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			//Append the new request buffer to the old request buffer
 			requestBuffer = append(requestBuffer, newRequest...)
 		}
+<<<<<<< HEAD
 
 		err := handleChunkedRequests(&requestBuffer, clientConn, destConn, logger)
 		if err != nil {
@@ -462,6 +470,9 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		}
 
 		logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(requestBuffer)))
+=======
+		handleChunkedRequests(&requestBuffer, clientConn, destConn, logger)
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 
 		//Parse the request buffer
 		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
@@ -489,8 +500,14 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		isMatched, stub, err := match(req, reqBody, reqURL, isReqBodyJSON, h, logger, clientConn, destConn, requestBuffer, h.Recover)
 
 		if err != nil {
+<<<<<<< HEAD
 			logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 		}
+=======
+			logger.Error("error while matching http mocks", zap.Error(err))
+		}
+
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 		if !isMatched {
 			passthroughHost := false
 			for _, filters := range h.GetPassThroughHosts().Filters {
@@ -531,6 +548,10 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			if err != nil {
 				logger.Error("failed to passthrough http request", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			}
+<<<<<<< HEAD
+=======
+			util.Passthrough(clientConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 			return
 		}
 
@@ -576,8 +597,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		}
 		responseString = statusLine + headers + "\r\n" + "" + respBody
 
+<<<<<<< HEAD
 		logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
 
+=======
+		logger.Debug("the content-length header" + headers)
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 		_, err = clientConn.Write([]byte(responseString))
 		if err != nil {
 			logger.Error("failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(req)), zap.Error(err))

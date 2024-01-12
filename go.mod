@@ -6,7 +6,6 @@ replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.2
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
-	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/cilium/ebpf v0.10.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
@@ -74,9 +73,10 @@ require (
 	github.com/99designs/gqlgen v0.17.36
 	github.com/TheZeroSlave/zapsentry v1.18.0
 	github.com/agnivade/levenshtein v1.1.1
-	github.com/emirpasic/gods v1.18.1
 	github.com/charmbracelet/glamour v0.6.0
+	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.17.0
+	github.com/hashicorp/go-memdb v1.3.4
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/vektah/gqlparser/v2 v2.5.8
 	github.com/xdg-go/pbkdf2 v1.0.0
@@ -92,6 +92,8 @@ require (
 	github.com/dlclark/regexp2 v1.4.0 // indirect
 	github.com/gorilla/css v1.0.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/hashicorp/go-immutable-radix v1.3.0 // indirect
+	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.3 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.21 // indirect
@@ -101,7 +103,6 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/urfave/cli/v2 v2.25.5 // indirect
-	github.com/writeas/go-strip-markdown v2.0.1+incompatible // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect

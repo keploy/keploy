@@ -188,6 +188,10 @@ func updateConversationId(actualMsg map[string]interface{}, newConversationId in
 	return actualMsg, nil
 }
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 // decodeBase64Str is a function variable that wraps the standard Base64 decoding method,
 // taking a Base64 encoded string and returning its decoded byte array and any error.
 var decodeBase64Str func(s string) ([]byte, error) = base64.StdEncoding.DecodeString

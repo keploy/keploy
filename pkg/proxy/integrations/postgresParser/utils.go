@@ -7,7 +7,6 @@ import (
 
 	"errors"
 	"fmt"
-
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -308,20 +307,40 @@ func PostgresEncoder(buffer []byte) string {
 	return encoded
 }
 
+<<<<<<< HEAD
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, isSorted bool) int {
 
 	mxSim := -1.0
 	mxIdx := -1
 
+=======
+func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) int {
+
+	mxSim := -1.0
+	mxIdx := -1
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	for idx, mock := range tcsMocks {
 
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuff := range requestBuffers {
+<<<<<<< HEAD
 
 				expectedPgReq := mock.Spec.PostgresRequests[requestIndex]
 				encoded, err := PostgresDecoderBackend(expectedPgReq)
 				if err != nil {
 					logger.Debug("Error while decoding postgres request", zap.Error(err))
+=======
+				encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+				if err != nil {
+					logger.Debug("Error while decoding postgres request", zap.Error(err))
+				}
+				if mock.Spec.PostgresRequests[requestIndex].Payload != "" {
+					encoded, err = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
+					if err != nil {
+						logger.Debug("Error while decoding postgres request", zap.Error(err))
+						return -1
+					}
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 				}
 				var encoded64 []byte
 				if expectedPgReq.Payload != "" {
@@ -349,6 +368,7 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 			}
 		}
 	}
+<<<<<<< HEAD
 
 	if isSorted {
 		if mxIdx != -1 && mxSim >= 0.78 {
@@ -364,6 +384,12 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 	return mxIdx
 }
 
+=======
+
+	return mxIdx
+}
+
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	for _, mock := range tcsMocks {
 		for _, reqBuff := range mock.Spec.PostgresRequests {
@@ -410,6 +436,7 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	h.SetTcsMocks(tcsMocks)
 }
 
+<<<<<<< HEAD
 func IfBeginOnlyQuery(reqBuff []byte, logger *zap.Logger, expectedPgReq *models.Backend, h *hooks.Hook) (*models.Backend, bool) {
 	actualreq := decodePgRequest(reqBuff, logger, h)
 	if actualreq == nil {
@@ -478,6 +505,43 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 							logger.Debug("CHANGING TO MD5 for Request and Response")
 							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
 
+=======
+func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) (bool, []models.Frontend, error) {
+
+	for {
+		var isMatched bool
+		var matchedMock *models.Mock
+
+		tcsMocks, err := h.GetTcsMocks()
+		if err != nil {
+			return false, nil, fmt.Errorf("error while fetching tcs mocks %v", err)
+		}
+
+		isConfig := false
+		for _, mock := range tcsMocks {
+			if mock == nil {
+				continue
+			}
+
+			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+				for requestIndex, reqBuff := range requestBuffers {
+					bufStr := base64.StdEncoding.EncodeToString(reqBuff)
+					encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+					if err != nil {
+						logger.Debug("Error while decoding postgres request", zap.Error(err))
+					}
+					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
+						logger.Debug("CHANGING TO MD5 for Response")
+						mock.Spec.PostgresResponses[requestIndex].AuthType = 5
+						isConfig = true
+						continue
+					} else {
+						if len(encoded) > 0 && encoded[0] == 'p' {
+							logger.Debug("CHANGING TO MD5 for Request and Response")
+							isConfig = true
+							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
+
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 							mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
 							mock.Spec.PostgresResponses[requestIndex].AuthType = 0
 							mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
@@ -531,7 +595,10 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 									Value: "Etc/UTC",
 								},
 							}
+<<<<<<< HEAD
 
+=======
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 						}
 					}
 
@@ -539,12 +606,24 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 						ssl := models.Frontend{
 							Payload: "Tg==",
 						}
+<<<<<<< HEAD
 						return true, []models.Frontend{ssl}, nil
 					}
+=======
+						// println("Matched SSL")
+						return true, []models.Frontend{ssl}, nil
+					}
+
+					if string(encoded) == string(reqBuff) || bufStr == mock.Spec.PostgresRequests[requestIndex].Payload {
+						matchedMock = mock
+						isMatched = true
+					}
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 				}
 			}
 		}
 
+<<<<<<< HEAD
 		logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 		isSorted := false
@@ -565,12 +644,17 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 		if !isMatched {
 			isSorted = false
 			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
+=======
+		if !isMatched {
+			idx := findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h)
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 			if idx != -1 {
 				isMatched = true
 				matchedMock = tcsMocks[idx]
 			}
 		}
 
+<<<<<<< HEAD
 		if isMatched {
 			logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
 			if matchedMock.TestModeInfo.IsFiltered {
@@ -682,4 +766,24 @@ func max(a, b float64) float64 {
 		return a
 	}
 	return b
+=======
+		if isConfig {
+			return true, matchedMock.Spec.PostgresResponses, nil
+		}
+
+		if isMatched {
+			isDeleted, err := h.DeleteTcsMock(matchedMock)
+			if err != nil {
+				return false, nil, fmt.Errorf("error while deleting tcs mock: %v", err)
+			}
+			if !isDeleted {
+				continue
+			} else {
+				return true, matchedMock.Spec.PostgresResponses, nil
+			}
+		}
+
+		return false, nil, nil
+	}
+>>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 }
