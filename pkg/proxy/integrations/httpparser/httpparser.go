@@ -264,7 +264,7 @@ func chunkedResponse(chunkedTime *[]int64, chunkedLength *[]int, finalResp *[]by
 		}
 	}
 }
-func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger) {
+func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, writeDest bool) {
 	lines := strings.Split(string(*finalReq), "\n")
 	var contentLengthHeader string
 	var transferEncodingHeader string
@@ -287,7 +287,7 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 		//Get the length of the body in the request.
 		bodyLength := len(*finalReq) - strings.Index(string(*finalReq), "\r\n\r\n") - 4
 		contentLength -= bodyLength
-		if contentLength > 0 {
+		if contentLength > 0 && writeDest {
 			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
 		}
 	} else if transferEncodingHeader != "" {
@@ -365,21 +365,16 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 	var basePoints int
 	if baseUrl != "" {
-		fmt.Println("baseUrl::::", baseUrl)
 		// sort the mocks based on the timestamp in the metadata
 		// and then send the response to the user in the same order application
 		// and as soon as the mocks of the base url gets empty just exit the loop
 
 		var baseMocks []*models.Mock
-		var Basetimeline []int64
 		for _, mock := range tcsMocks {
 			if mock.Spec.HttpReq.URL == baseUrl {
 				baseMocks = append(baseMocks, mock)
-				strArray := mock.Spec.Metadata["chunkedTime"]
-				Basetimeline = getChunkTime(strArray)
 			}
 		}
-		fmt.Println("timeline::::", Basetimeline)
 		basePoints = len(baseMocks)
 	}
 
@@ -402,7 +397,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			//Append the new request buffer to the old request buffer
 			requestBuffer = append(requestBuffer, newRequest...)
 		}
-		handleChunkedRequests(&requestBuffer, clientConn, destConn, logger)
+		handleChunkedRequests(&requestBuffer, clientConn, destConn, logger, false)
 
 		//Parse the request buffer
 		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBuffer)))
@@ -439,14 +434,14 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 					passthroughHost = true
 				}
 			}
-			if !passthroughHost {
+			if !passthroughHost && !mockAssert {
 				logger.Error("Didn't match any prexisting http mock")
 				logger.Error("Cannot Find eligible mocks for the outgoing http call", zap.Any("request", string(requestBuffer)))
+				util.Passthrough(clientConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
 			}
-			util.Passthrough(clientConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
+
 			return
 		}
-
 		statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
 
 		body := stub.Spec.HttpResp.Body
@@ -476,6 +471,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 		var chunkedResponses []string
 		var chunkedTime []int64
+		var watchCall bool
 		if stub.Spec.Metadata["chunkedLength"] != "" {
 			chunkedTime = getChunkTime(stub.Spec.Metadata["chunkedTime"])
 			// fmt.Println("chunkedLength Array:::", stub.Spec.Metadata["chunkedLength"])
@@ -503,18 +499,24 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				chunkedResponse := fmt.Sprintf("%s\r\n%s\r\n", jsonSize, jsonObject)
 				chunkedResponses = append(chunkedResponses, chunkedResponse)
 			}
+			watchCall = true
 		}
-
-		delay := make([]int64, len(chunkedTime))
+		var totalSum float64
 
 		for _, chunktime := range chunkedTime {
-			// Calculate the difference in milliseconds
-			differenceInMilliseconds := chunktime - prevTime
-			// Convert the difference to seconds
-			delay = append(delay, differenceInMilliseconds/1000)
+			// Add to total sum
+			totalSum += float64(chunktime - prevTime)
+			// Update prevTime for the next iteration
 			prevTime = chunktime
 		}
-		fmt.Println("delay::::", delay)
+
+		// Calculate average
+		var averageDuration time.Duration
+		if len(chunkedTime) > 0 {
+			averageDuration = time.Duration(totalSum / float64(len(chunkedTime)))
+		} else {
+			averageDuration = 0 // or handle the case of no elements as you see fit
+		}
 
 		// Fetching the response headers
 		header := pkg.ToHttpHeader(stub.Spec.HttpResp.Header)
@@ -581,17 +583,11 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				if idx == len(chunkedResponses)-1 {
 					responseString = responseString + "0\r\n\r\n"
 				}
-				// time.Sleep(time.Duration(delay[idx]) * time.Millisecond)
-				// _, err = clienConn.Write([]byte(responseString))
-				// TODO: read from the mocks and set the delay time according to chunkedTime array
-				if reqURL.String() == "/apis/apps/v1/deployments?limit=500&resourceVersion=0" || reqURL.String() == "/apis/samplecontroller.k8s.io/v1alpha1/foos?limit=500&resourceVersion=0" {
-					time.Sleep(500 * time.Millisecond)
-					_, err = clientConn.Write([]byte(responseString))
-				} else {
-					_, err = clientConn.Write([]byte(responseString))
-					time.Sleep(10 * time.Second)
-				}
 
+				if watchCall {
+					time.Sleep(averageDuration * time.Second)
+				}
+				_, err = clientConn.Write([]byte(responseString))
 				if err != nil {
 					logger.Error("failed to write the mock output to the user application", zap.Error(err))
 					return
@@ -709,7 +705,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 		// Capture the request timestamp
 		reqTimestampMock = time.Now()
 
-		handleChunkedRequests(&finalReq, clientConn, destConn, logger)
+		handleChunkedRequests(&finalReq, clientConn, destConn, logger, true)
 		// read the response from the actual server
 		resp, err = util.ReadBytes(destConn)
 		if err != nil {
