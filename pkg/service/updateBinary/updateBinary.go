@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -89,5 +90,4 @@ func (u *updater) UpdateBinary() {
 	}
 
 	u.logger.Info("Updated Keploy binary to version " + latestVersion)
-	u.logger.Info("Release Notes:\n" + changelog)
 }
