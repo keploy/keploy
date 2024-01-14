@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"fmt"
-	"path/filepath"
-  "github.com/spf13/cobra"
+	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/updateBinary" // Import the updateBinary package
 	"go.uber.org/zap"
 )
