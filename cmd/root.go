@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -233,6 +234,14 @@ func deleteLogs(logger *zap.Logger) {
 		return
 	}
 }
+func checkForVersionFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--version" {
+			return true
+		}
+	}
+	return false
+}
 
 func (r *Root) execute() {
 	// Root command
@@ -247,9 +256,19 @@ func (r *Root) execute() {
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	// Manually parse flags to determine debug mode early
+	rootCmd.PersistentFlags().Bool("version", false, "Fetch the latest version")
+
+	// Manually parse flags to determine debug mode and version flag early
 	debugMode = checkForDebugFlag(os.Args[1:])
-	// Now that flags are parsed, set up the l722ogger
+	versionFlag := checkForVersionFlag(os.Args[1:])
+	if versionFlag {
+		// Fetch the version and print it
+		currentVersion := utils.KeployVersion
+		fmt.Println("Current version:", currentVersion)
+		return
+	}
+
+	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
 	defer deleteLogs(r.logger)

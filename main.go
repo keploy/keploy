@@ -38,7 +38,7 @@ func main() {
 	}
 	utils.KeployVersion = version
 	fmt.Println(logo, " ")
-	fmt.Printf("version: %v\n\n", version)
+	// fmt.Printf("version: %v\n\n", version)  We will no longer print the version on startup.
 	releaseInfo, err2 := utils.GetLatestGitHubRelease()
 	if err2 != nil {
 		log.Debug("Failed to fetch latest release version", err2)
