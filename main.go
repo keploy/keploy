@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	_ "net/http/pprof"
 	"strings"
 	"time"
@@ -20,7 +18,7 @@ import (
 
 var version string
 var dsn string
-
+// var HighlightString = color.New(orangeColorSGR...).SprintFunc() 
 const logo string = `
        ▓██▓▄
     ▓▓▓▓██▓█▓▄

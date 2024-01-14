@@ -41,7 +41,7 @@ func (u *updater) UpdateBinary() {
 	// Fetch the latest version and release body from GitHub releases with a timeout
 	releaseInfo, err := utils.GetLatestGitHubRelease()
 	latestVersion := releaseInfo.TagName
-	changelog := releaseInfo.Body
+	// changelog := releaseInfo.Body
 
 	if err != nil {
 		if err == ErrGitHubAPIUnresponsive {
