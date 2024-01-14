@@ -8,6 +8,7 @@ type Mock struct {
 	Kind    Kind     `json:"Kind,omitempty"`
 	Spec    MockSpec `json:"Spec,omitempty"`
 	Id      string   `json:"Id,omitempty"`
+	SortOrder int64 `json:"SortOrder,omitempty"`
 }
 
 func (m *Mock) GetKind() string {

@@ -2,6 +2,7 @@ package postgresparser
 
 import (
 	"encoding/base64"
+	"sort"
 
 	"errors"
 	"fmt"
@@ -309,7 +310,7 @@ func PostgresEncoder(buffer []byte) string {
 
 func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) int {
 
-	mxSim := -1.0
+	mxSim := -0.0001
 	mxIdx := -1
 	for idx, mock := range tcsMocks {
 
@@ -391,134 +392,122 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 
 func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) (bool, []models.Frontend, error) {
 
-	for {
-		var isMatched bool
-		var matchedMock *models.Mock
-		tcsMocks, err := h.GetConfigMocks()
-		if err != nil {
-			return false, nil, fmt.Errorf("error while fetching tcs mocks %v", err)
+	tcsMocks, err := h.GetConfigMocks()
+	sort.Slice(tcsMocks, func(i, j int) bool {
+		return tcsMocks[i].SortOrder < tcsMocks[j].SortOrder
+	})
+
+	if err != nil {
+		return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
+	}
+	var isMatched bool
+	var matchedMock *models.Mock
+
+	for _, mock := range tcsMocks {
+		if mock == nil {
+			continue
 		}
 
-		isConfig := false
-		for _, mock := range tcsMocks {
-			if mock == nil {
-				continue
-			}
+		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+			for requestIndex, reqBuff := range requestBuffers {
+				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
+				encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+				if err != nil {
+					logger.Debug("Error while decoding postgres request", zap.Error(err))
+				}
+				if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
+					logger.Debug("CHANGING TO MD5 for Response")
+					mock.Spec.PostgresResponses[requestIndex].AuthType = 5
+					continue
+				} else {
+					if len(encoded) > 0 && encoded[0] == 'p' {
+						logger.Debug("CHANGING TO MD5 for Request and Response")
+						mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
 
-			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
-				for requestIndex, reqBuff := range requestBuffers {
-					bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-					encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
-					if err != nil {
-						logger.Debug("Error while decoding postgres request", zap.Error(err))
-					}
-					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
-						logger.Debug("CHANGING TO MD5 for Response")
-						mock.Spec.PostgresResponses[requestIndex].AuthType = 5
-						isConfig = true
-						continue
-					} else {
-						if len(encoded) > 0 && encoded[0] == 'p' {
-							logger.Debug("CHANGING TO MD5 for Request and Response")
-							isConfig = true
-							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
-
-							mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
-							mock.Spec.PostgresResponses[requestIndex].AuthType = 0
-							mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
-								ProcessID: 2613,
-								SecretKey: 824670820,
-							}
-							mock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
-							mock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
-								{
-									Name:  "application_name",
-									Value: "",
-								},
-								{
-									Name:  "client_encoding",
-									Value: "UTF8",
-								},
-								{
-									Name:  "DateStyle",
-									Value: "ISO, MDY",
-								},
-								{
-									Name:  "integer_datetimes",
-									Value: "on",
-								},
-								{
-									Name:  "IntervalStyle",
-									Value: "postgres",
-								},
-								{
-									Name:  "is_superuser",
-									Value: "UTF8",
-								},
-								{
-									Name:  "server_version",
-									Value: "13.12 (Debian 13.12-1.pgdg120+1)",
-								},
-								{
-									Name:  "session_authorization",
-									Value: "keploy-user",
-								},
-								{
-									Name:  "standard_conforming_strings",
-									Value: "on",
-								},
-								{
-									Name:  "TimeZone",
-									Value: "Etc/UTC",
-								},
-								{
-									Name:  "TimeZone",
-									Value: "Etc/UTC",
-								},
-							}
+						mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
+						mock.Spec.PostgresResponses[requestIndex].AuthType = 0
+						mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
+							ProcessID: 2613,
+							SecretKey: 824670820,
 						}
-					}
-
-					if bufStr == "AAAACATSFi8=" {
-						ssl := models.Frontend{
-							Payload: "Tg==",
+						mock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
+						mock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
+							{
+								Name:  "application_name",
+								Value: "",
+							},
+							{
+								Name:  "client_encoding",
+								Value: "UTF8",
+							},
+							{
+								Name:  "DateStyle",
+								Value: "ISO, MDY",
+							},
+							{
+								Name:  "integer_datetimes",
+								Value: "on",
+							},
+							{
+								Name:  "IntervalStyle",
+								Value: "postgres",
+							},
+							{
+								Name:  "is_superuser",
+								Value: "UTF8",
+							},
+							{
+								Name:  "server_version",
+								Value: "13.12 (Debian 13.12-1.pgdg120+1)",
+							},
+							{
+								Name:  "session_authorization",
+								Value: "keploy-user",
+							},
+							{
+								Name:  "standard_conforming_strings",
+								Value: "on",
+							},
+							{
+								Name:  "TimeZone",
+								Value: "Etc/UTC",
+							},
+							{
+								Name:  "TimeZone",
+								Value: "Etc/UTC",
+							},
 						}
-						// println("Matched SSL")
-						return true, []models.Frontend{ssl}, nil
-					}
 
-					if string(encoded) == string(reqBuff) || bufStr == mock.Spec.PostgresRequests[requestIndex].Payload {
-						matchedMock = mock
-						isMatched = true
 					}
+				}
+
+				if bufStr == "AAAACATSFi8=" {
+					ssl := models.Frontend{
+						Payload: "Tg==",
+					}
+					return true, []models.Frontend{ssl}, nil
+				}
+
+				if string(encoded) == string(reqBuff) || bufStr == mock.Spec.PostgresRequests[requestIndex].Payload {
+					matchedMock = mock
+					isMatched = true
 				}
 			}
 		}
-
-		if !isMatched {
-			idx := findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h)
-			if idx != -1 {
-				isMatched = true
-				matchedMock = tcsMocks[idx]
-			}
-		}
-
-		if isConfig {
-			return true, matchedMock.Spec.PostgresResponses, nil
-		}
-
-		if isMatched {
-			isDeleted, err := h.DeleteTcsMock(matchedMock)
-			if err != nil {
-				return false, nil, fmt.Errorf("error while deleting tcs mock: %v", err)
-			}
-			if !isDeleted {
-				continue
-			} else {
-				return true, matchedMock.Spec.PostgresResponses, nil
-			}
-		}
-
-		return false, nil, nil
 	}
+
+	if !isMatched {
+		idx := findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h)
+		if idx != -1 {
+			isMatched = true
+			matchedMock = tcsMocks[idx]
+		}
+	}
+
+	if isMatched {
+		logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
+		return true, matchedMock.Spec.PostgresResponses, nil
+	}
+	return false, nil, nil
+
 }

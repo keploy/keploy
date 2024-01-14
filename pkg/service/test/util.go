@@ -390,17 +390,14 @@ func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*mod
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
 	})
 
-	// calculate the middle timestamp of the test's request and response timestamp
-	middleTimestamp := tc.HttpReq.Timestamp.Add(tc.HttpResp.Timestamp.Sub(tc.HttpReq.Timestamp) / 2)
-
-	// Sort the unfiltered mocks based on the closest request timestamp to the middle timestamp
-	sort.SliceStable(unFilteredMocks, func(i, j int) bool {
-		return middleTimestamp.Sub(unFilteredMocks[i].Spec.ReqTimestampMock) < middleTimestamp.Sub(unFilteredMocks[j].Spec.ReqTimestampMock)
-	})
-
 	// Append the unfiltered mocks to the filtered mocks
 	sortedMocks := append(filteredMocks, unFilteredMocks...)
-	logger.Debug("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
+	// logger.Info("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
+	for idx, v := range sortedMocks {
+		logger.Debug("sorted mocks", zap.Any("testcase", tc.Name), zap.Any("mocks", v))
+		sortedMocks[idx].SortOrder = int64(idx) + 1
+	}
+
 	return sortedMocks
 }
 
@@ -435,7 +432,7 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 	}
 	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", filteredMocks))
 	// TODO change this to debug
-	logger.Info("number of filtered mocks", zap.Any("testcase", tc.Name), zap.Any("number of filtered mocks", len(filteredMocks)))
+	logger.Debug("number of filtered mocks", zap.Any("testcase", tc.Name), zap.Any("number of filtered mocks", len(filteredMocks)))
 	return filteredMocks, unFilteredMocks
 }
 
