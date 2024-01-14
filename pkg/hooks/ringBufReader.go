@@ -125,7 +125,7 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 
 		if event.Direction == structs.IngressTraffic {
 			event.EntryTimestampNano += settings.GetRealTimeOffset()
-			logger.Debug(fmt.Sprintf("Entrytimestamp(elapsed boot time) :%v\n", event.EntryTimestampNano))
+			logger.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 		}
 
 		connectionFactory.GetOrCreate(event.ConnID).AddDataEvent(event)

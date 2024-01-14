@@ -31,23 +31,3 @@ func InitRealTimeOffset() error {
 func GetRealTimeOffset() uint64 {
 	return realTimeOffset
 }
-
-// BootTime the System boot time
-var BootTime time.Time
-
-func init() {
-	var ts unix.Timespec
-	err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
-	now := time.Now()
-	if err != nil {
-		panic(fmt.Errorf("init boot time error: %v", err))
-	}
-	bootTimeNano := now.UnixNano() - ts.Nano()
-	BootTime = time.Unix(bootTimeNano/1e9, bootTimeNano%1e9)
-}
-
-func GetRealTime(bpfTime uint64) time.Time {
-	fmt.Printf("BootTimeCopy:%v\n", BootTime)
-	timeCopy := time.Unix(BootTime.Unix(), int64(BootTime.Nanosecond()))
-	return timeCopy.Add(time.Duration(bpfTime))
-}

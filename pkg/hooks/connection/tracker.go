@@ -2,11 +2,13 @@ package connection
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	structs2 "go.keploy.io/server/pkg/hooks/structs"
+	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 	// "log"
 )
@@ -218,7 +220,13 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			// Pop the timestamp of current request
 			conn.reqTimestampTest = conn.reqTimestampTest[1:]
 		} else {
-			conn.logger.Debug("no request timestamp found, skipping recording")
+			conn.logger.Debug("no request timestamp found")
+			if len(requestBuf) > 0 {
+				reqLine := strings.Split(string(requestBuf), "\n")
+				if models.GetMode() == models.MODE_RECORD && len(reqLine) > 0 && reqLine[0] != "" {
+					conn.logger.Warn(fmt.Sprintf("failed to capture request timestamp for a request. Please record it again if important:%v", reqLine[0]))
+				}
+			}
 			recordTraffic = false
 		}
 
@@ -228,7 +236,13 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			// Pop the timestamp of current request
 			conn.resTimestampTest = conn.resTimestampTest[1:]
 		} else {
-			conn.logger.Debug("no response timestamp found, skipping recording")
+			conn.logger.Debug("no response timestamp found")
+			if len(requestBuf) > 0 {
+				reqLine := strings.Split(string(requestBuf), "\n")
+				if models.GetMode() == models.MODE_RECORD && len(reqLine) > 0 && reqLine[0] != "" {
+					conn.logger.Warn(fmt.Sprintf("failed to capture response timestamp for a request. Please record it again if important:%v", reqLine[0]))
+				}
+			}
 			recordTraffic = false
 		}
 		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestampTest, resTimestampTest))
@@ -318,7 +332,6 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		// Capturing the timestamp of request as the request just started to come.
 		if conn.isNewRequest {
 			conn.reqTimestampTest = append(conn.reqTimestampTest, ConvertUnixNanoToTime(event.EntryTimestampNano))
-			// conn.reqTimestampTest = append(conn.reqTimestampTest, settings.GetRealTime(event.EntryTimestampNano))
 			conn.isNewRequest = false
 		}
 
