@@ -113,7 +113,7 @@ var Version string
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
 	if err != nil {
-		errors.New(fmt.Sprintf("Error opening log file: %s", err.Error()))
+		log.Errorf("Error opening log file: %s", err.Error())
 		return
 	}
 	defer file.Close()

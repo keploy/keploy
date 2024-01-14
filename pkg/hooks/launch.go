@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cloudflare/cfssl/log"
 
 	"github.com/cilium/ebpf"
 	"github.com/docker/docker/api/types"
@@ -626,6 +627,7 @@ func getInodeNumber(pid int) uint64 {
 
 	f, err := os.Stat(filepath)
 	if err != nil {
+		log.Errorf("%v failed to get the inode number or namespace Id: %w", Emoji, err)
 		return 0
 	}
 	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
