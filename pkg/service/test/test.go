@@ -114,6 +114,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	// fetch the recorded testcases with their mocks
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
+	var err error
 	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.Storage, routineId, t.logger)
 	if err != nil {
 		return returnVal, fmt.Errorf("error while creating hooks %v", err)

@@ -43,7 +43,7 @@ type PluginDetails struct {
 type MySQLHandshakeResponseOk struct {
 	PacketIndicator string        `json:"packet_indicator,omitempty" yaml:"packet_indicator,omitempty,flow" bson:"packet_indicator,omitempty"`
 	PluginDetails   PluginDetails `json:"plugin_details,omitempty" yaml:"plugin_details,omitempty,flow" bson:"plugin_details,omitempty"`
-	RemainingBytes  []byte        `json:"remaining_bytes,omitempty" yaml:"remaining_bytes,omitempty,flow" bson:"remaining_bytes,omitempty"`
+	RemainingBytes  string        `json:"remaining_bytes,omitempty" yaml:"remaining_bytes,omitempty,flow" bson:"remaining_bytes,omitempty"`
 }
 
 type MySQLHandshakeResponse struct {
@@ -94,8 +94,8 @@ type MySQLResultSet struct {
 	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow" bson:"eof_present_final,omitempty"`
 	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow" bson:"padding_present_final,omitempty"`
 	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow" bson:"optional_padding,omitempty"`
-	OptionalEOFBytes    []byte              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optional_eof_bytes,omitempty"`
-	EOFAfterColumns     []byte              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eof_after_columns,omitempty"`
+	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optional_eof_bytes,omitempty"`
+	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eof_after_columns,omitempty"`
 }
 
 type PacketHeader struct {
