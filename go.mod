@@ -94,6 +94,7 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/urfave/cli/v2 v2.25.5 // indirect
+	github.com/writeas/go-strip-markdown v2.0.1+incompatible // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-
+	"github.com/writeas/go-strip-markdown"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -42,7 +42,7 @@ func (u *updater) UpdateBinary() {
 	// Fetch the latest version and release body from GitHub releases with a timeout
 	releaseInfo, err := utils.GetLatestGitHubRelease()
 	latestVersion := releaseInfo.TagName
-	// changelog := releaseInfo.Body
+	changelog := releaseInfo.Body
 
 	if err != nil {
 		if err == ErrGitHubAPIUnresponsive {
@@ -88,6 +88,7 @@ func (u *updater) UpdateBinary() {
 		}
 		return
 	}
-
 	u.logger.Info("Updated Keploy binary to version " + latestVersion)
+	u.logger.Info("Release notes: ")
+	u.logger.Info(stripmd.Strip(changelog))
 }

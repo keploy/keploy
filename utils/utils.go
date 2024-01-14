@@ -97,7 +97,7 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
 
 	client := http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: 4 * time.Second,
 	}
 
 	req, err := http.NewRequest("GET", apiURL, nil)
@@ -114,11 +114,9 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 	}
 	defer resp.Body.Close()
 
-	// Decode the response JSON
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return GitHubRelease{}, err
 	}
-
 	return release, nil
 }

@@ -18,7 +18,8 @@ import (
 
 var version string
 var dsn string
-// var HighlightString = color.New(orangeColorSGR...).SprintFunc() 
+
+// var HighlightString = color.New(orangeColorSGR...).SprintFunc()
 const logo string = `
        ▓██▓▄
     ▓▓▓▓██▓█▓▄
