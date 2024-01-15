@@ -180,3 +180,8 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 	}
 	return curl
 }
+
+func GetUnixMilliTime(parsedTime time.Time) int64 {
+	unixTimestamp := parsedTime.UnixMilli()
+	return unixTimestamp
+}

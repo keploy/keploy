@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/fatih/color"
 )
@@ -97,12 +96,6 @@ func ExtractChunkLength(chunkStr string) (int, error) {
 		chunkStr = chunkStr[pos+2+size*2+2:] // +2 for \r\n after size, +size*2 for the chunk data, +2 for \r\n after data
 	}
 	return Totalsize, nil
-}
-
-func getUnixMilliTime(parsedTime time.Time) int64 {
-	// Convert to Unix timestamp
-	unixTimestamp := parsedTime.UnixMilli()
-	return unixTimestamp
 }
 
 func getChunkTime(strArray string) []int64 {

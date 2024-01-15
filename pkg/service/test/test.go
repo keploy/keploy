@@ -50,6 +50,7 @@ type TestOptions struct {
 	WithCoverage       bool
 	BaseUrl            string
 	CoverageReportPath string
+	ReplaySession      uint64
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -141,8 +142,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		returnVal.LoadedHooks.Stop(true)
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
-		// start the proxy
-		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword, BaseUrl: cfg.BaseUrl,MockAssert: cfg.MockAssert}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
+		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword, BaseUrl: cfg.BaseUrl, MockAssert: cfg.MockAssert}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -260,7 +260,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			t.logger.Info("test run completed", zap.Bool("passed overall", result))
 		} else {
 			t.logger.Info("running mock assert for testset", zap.Any("testset", sessionIndex))
-			t.RunMockAssert(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, cfg.BaseUrl)
+			t.RunMockAssert(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.ReplaySession, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, cfg.BaseUrl)
 		}
 
 		// log the overall code coverage for the test run of go binaries

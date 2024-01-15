@@ -468,7 +468,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			}
 		}
 		var prevTime int64
-		prevTime = getUnixMilliTime(stub.Spec.ReqTimestampMock)
+		prevTime = pkg.GetUnixMilliTime(stub.Spec.ReqTimestampMock)
 		//calculate chunk time
 
 		var chunkedResponses []string

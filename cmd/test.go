@@ -172,6 +172,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			replaySession, err := cmd.Flags().GetUint64("replaySession")
+			if err != nil {
+				t.logger.Error("failed to read the replaySession")
+				return err
+			}
+
 			enableTele, err := cmd.Flags().GetBool("enableTele")
 			if err != nil {
 				t.logger.Error("failed to read the disable telemetry flag")
@@ -297,6 +303,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
+				ReplaySession:      replaySession,
 			}, enableTele, mockAssert)
 
 			return nil
@@ -315,6 +322,8 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+
+	testCmd.Flags().Uint64("replaySession", 0, "Duration to repeat the recorded session")
 
 	testCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build")
 

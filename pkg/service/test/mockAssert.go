@@ -51,41 +51,7 @@ func (t *tester) RunMockAssert(testSet, path, testReportPath, appCmd, appContain
 		}
 	}()
 
-	var (
-		status = models.TestRunStatusPassed
-	)
-
-	var userIp string
-	userIp = initialisedValues.UserIP
-	t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
-
-	var entTcs, nonKeployTcs []string
-	for _, tc := range initialisedValues.Tcs {
-		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
-			continue
-		}
-		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
-		filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
-		readTcsMocks := []*models.Mock{}
-		for _, mock := range filteredTcsMocks {
-			tcsmock, ok := mock.(*models.Mock)
-			if !ok {
-				continue
-			}
-			readTcsMocks = append(readTcsMocks, tcsmock)
-		}
-		readTcsMocks = FilterTcsMocks(tc, readTcsMocks, t.logger)
-		loadedHooks.SetTcsMocks(readTcsMocks)
-		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
-			entTcs = append(entTcs, tc.Name)
-		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
-			nonKeployTcs = append(nonKeployTcs, tc.Name)
-		}
-
-	}
-
-	status = models.TestRunStatusPassed
-	return status
+	return models.TestRunStatusPassed
 }
 
 func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -93,6 +59,11 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 	var err error
 	var readConfigMocks []*models.Mock
 	configMocks, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+	if err != nil {
+		t.logger.Error(err.Error())
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
 	for _, mock := range configMocks {
 		configMock, ok := mock.(*models.Mock)
 		if !ok {
@@ -109,13 +80,12 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
-
 	for _, mock := range tcsMocks {
-		configMock, ok := mock.(*models.Mock)
+		tcsMock, ok := mock.(*models.Mock)
 		if !ok {
 			continue
 		}
-		readTcsMocks = append(readTcsMocks, configMock)
+		readTcsMocks = append(readTcsMocks, tcsMock)
 	}
 	tcsMocks, err = cfg.YamlStore.ReadResourceVersionMocks(filepath.Join(cfg.Path, cfg.TestSet))
 	if err != nil {
@@ -123,12 +93,25 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
+	var sessionStartTime, sessionEndTime int64
+	sessionStartTime = pkg.GetUnixMilliTime(time.Now())
 	for _, mock := range tcsMocks {
-		configMock, ok := mock.(*models.Mock)
+		resourceVersionMock, ok := mock.(*models.Mock)
 		if !ok {
 			continue
 		}
-		readTcsMocks = append(readTcsMocks, configMock)
+		if sessionStartTime > pkg.GetUnixMilliTime(resourceVersionMock.Spec.ReqTimestampMock) {
+			sessionStartTime = pkg.GetUnixMilliTime(resourceVersionMock.Spec.ReqTimestampMock)
+		}
+		if sessionEndTime < pkg.GetUnixMilliTime(resourceVersionMock.Spec.ResTimestampMock) {
+			sessionEndTime = pkg.GetUnixMilliTime(resourceVersionMock.Spec.ResTimestampMock)
+		}
+		readTcsMocks = append(readTcsMocks, resourceVersionMock)
+	}
+
+	if (uint64(sessionEndTime-sessionStartTime) / 1000) < cfg.Delay {
+		t.logger.Error(fmt.Sprintf("Replay session duration exceeds the recorded session duration. Recorded session is %ds, replay session should be within this limit", (sessionEndTime-sessionStartTime)/1000))
+		return returnVal
 	}
 
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
@@ -160,22 +143,6 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		}
 	}
 
-	// //check if the user application is running docker container using IDE
-	// returnVal.DockerID = (cfg.AppCmd == "" && len(cfg.AppContainer) != 0)
-
-	// ok, _ := cfg.LoadedHooks.IsDockerRelatedCmd(cfg.AppCmd)
-	// if ok || returnVal.DockerID {
-	// 	returnVal.UserIP = cfg.LoadedHooks.GetUserIP()
-	// 	t.logger.Debug("the userip of the user docker container", zap.Any("", returnVal.UserIP))
-	// 	t.logger.Debug("", zap.Any("User Ip", returnVal.UserIP))
-	// }
-
-	// t.logger.Info("", zap.Any("no of test cases", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
-	// t.logger.Debug(fmt.Sprintf("the delay is %v", time.Duration(time.Duration(cfg.Delay)*time.Second)))
-	// t.logger.Debug(fmt.Sprintf("the buildDelay is %v", time.Duration(time.Duration(cfg.BuildDelay)*time.Second)))
-
-	// // added delay to hold running keploy tests until application starts
-	// t.logger.Debug("the number of testcases for the test set", zap.Any("count", len(returnVal.Tcs)), zap.Any("test-set", cfg.TestSet))
 	time.Sleep(time.Duration(cfg.Delay) * time.Second)
 	return returnVal
 }
