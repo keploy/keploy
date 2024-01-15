@@ -540,7 +540,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		t.logger.Error(err.Error())
 		return models.TestRunStatusAppHalted
 	}
-	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, readConfigMocks, readTcsMocks))
+	t.logger.Info(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", testSet, readConfigMocks, readTcsMocks))
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
