@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -381,18 +382,40 @@ func Contains(elems []string, v string) bool {
 	return false
 }
 
+// Sort the mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
+// and are order by the request timestamp in ascending order
+// Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
+func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
+	filteredMocks, unFilteredMocks := FilterMocks(tc, m, logger)
+	// Sort the filtered mocks based on the request timestamp
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	// Append the unfiltered mocks to the filtered mocks
+	sortedMocks := append(filteredMocks, unFilteredMocks...)
+	// logger.Info("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
+	for idx, v := range sortedMocks {
+		logger.Debug("sorted mocks", zap.Any("testcase", tc.Name), zap.Any("mocks", v))
+		sortedMocks[idx].SortOrder = int64(idx) + 1
+	}
+
+	return sortedMocks
+}
+
 // Filter the mocks based on req and res timestamp of test
-func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
+func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*models.Mock, []*models.Mock) {
 	filteredMocks := make([]*models.Mock, 0)
+	unFilteredMocks := make([]*models.Mock, 0)
 
 	if tc.HttpReq.Timestamp == (time.Time{}) {
 		logger.Warn("request timestamp is missing for " + tc.Name)
-		return m
+		return m, filteredMocks
 	}
 
 	if tc.HttpResp.Timestamp == (time.Time{}) {
 		logger.Warn("response timestamp is missing for " + tc.Name)
-		return m
+		return m, filteredMocks
 	}
 	for _, mock := range m {
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
@@ -405,10 +428,14 @@ func FilterTcsMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) [
 		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
 		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
 			filteredMocks = append(filteredMocks, mock)
+			continue
 		}
+		unFilteredMocks = append(unFilteredMocks, mock)
 	}
 	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", filteredMocks))
-	return filteredMocks
+	// TODO change this to debug
+	logger.Debug("number of filtered mocks", zap.Any("testcase", tc.Name), zap.Any("number of filtered mocks", len(filteredMocks)))
+	return filteredMocks, unFilteredMocks
 }
 
 // creates a directory if not exists with all user access

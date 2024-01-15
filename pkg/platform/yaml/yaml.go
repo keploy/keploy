@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/pkg"
@@ -27,24 +28,26 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type Yaml struct {
-	TcsPath  string
-	MockPath string
-	MockName string
-	TcsName  string
-	Logger   *zap.Logger
-	tele     *telemetry.Telemetry
-	mutex    sync.RWMutex
+	TcsPath     string
+	MockPath    string
+	MockName    string
+	TcsName     string
+	Logger      *zap.Logger
+	tele        *telemetry.Telemetry
+	nameCounter int
+	mutex       sync.RWMutex
 }
 
 func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) platform.TestCaseDB {
 	return &Yaml{
-		TcsPath:  tcsPath,
-		MockPath: mockPath,
-		MockName: mockName,
-		TcsName:  tcsName,
-		Logger:   Logger,
-		tele:     tele,
-		mutex:    sync.RWMutex{},
+		TcsPath:     tcsPath,
+		MockPath:    mockPath,
+		MockName:    mockName,
+		TcsName:     tcsName,
+		Logger:      Logger,
+		tele:        tele,
+		nameCounter: 0,
+		mutex:       sync.RWMutex{},
 	}
 }
 
@@ -315,16 +318,17 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 		mock.Name = ys.MockName
 	}
 
+	mock.Name = fmt.Sprint("mock-", getNextID())
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
 
-	if mock.Name == "" {
-		mock.Name = "mocks"
-	}
+	// if mock.Name == "" {
+	// 	mock.Name = "mocks"
+	// }
 
-	err = ys.Write(ys.MockPath, mock.Name, mockYaml)
+	err = ys.Write(ys.MockPath, "mocks", mockYaml)
 	if err != nil {
 		return err
 	}
@@ -460,4 +464,9 @@ func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 
 func (ys *Yaml) ReadTestSessionIndices() ([]string, error) {
 	return pkg.ReadSessionIndices(ys.MockPath, ys.Logger)
+}
+var idCounter int64 = -1
+
+func getNextID() int64 {
+	return atomic.AddInt64(&idCounter, 1)
 }
