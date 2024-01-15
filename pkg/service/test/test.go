@@ -65,7 +65,7 @@ func NewTester(logger *zap.Logger) Tester {
 func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	var (
 		returnVal TestEnvironmentSetup
-		err error
+		err       error
 	)
 	returnVal.Storage = cfg.Storage
 	// capturing the code coverage for go bianries built by go-version 1.20^
@@ -211,7 +211,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		TestReport:         testReportStorage,
 		Storage:            tcsStorage,
 		PassThroughHosts:   options.PassthroughHosts,
-		IgnoreOrdering: options.IgnoreOrdering,
+		IgnoreOrdering:     options.IgnoreOrdering,
 	}
 	sessions, err := cfg.Storage.ReadTestSessionIndices()
 	if err != nil {
@@ -576,7 +576,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		Ctx:            initialisedValues.Ctx,
 		ServeTest:      serveTest,
 	}
-	
+
 	initialisedTestSets := t.InitialiseRunTestSet(cfg)
 	if initialisedTestSets.InitialStatus != "" {
 		return initialisedTestSets.InitialStatus
@@ -611,7 +611,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
 			continue
 		}
-		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
+		// Filter the TCS Mocks based on the test case's request and response
+		// timestamp such that mock's timestamps lies between the test's timestamp
+		// and then, set the TCS Mocks.
 		filteredTcsMocks, _ := cfg.Storage.ReadTcsMocks(tc, cfg.TestSet)
 		readTcsMocks := []*models.Mock{}
 		for _, mock := range filteredTcsMocks {
@@ -630,7 +632,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
 		// and are order by the request timestamp in ascending order
 		// Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
-		rec, err := cfg.Storage.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+		rec, err := cfg.Storage.ReadConfigMocks(cfg.TestSet)
 		if err != nil {
 			t.logger.Error("failed to read the config mocks", zap.Error(err))
 			return models.TestRunStatusFailed
