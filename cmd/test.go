@@ -270,7 +270,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+			if !t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
 				Tests:              tests,
 				AppContainer:       appContainer,
 				AppNetwork:         networkName,
@@ -284,7 +284,10 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
-			}, enableTele)
+			}, enableTele) {
+				t.logger.Error("failed to run the test")
+				return errors.New("failed to run the test")
+			}
 
 			return nil
 		},
