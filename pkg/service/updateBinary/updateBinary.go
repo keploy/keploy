@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/exec"
 
-	stripmd "github.com/writeas/go-strip-markdown"
+	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -84,6 +84,24 @@ func (u *updater) UpdateBinary() {
 		}
 		return
 	}
-	u.logger.Info("Updated Keploy binary to version " + latestVersion)
-	u.logger.Info("Release notes: \n\n" + stripmd.Strip(changelog))
+	u.logger.Info("Updated to version " + latestVersion)
+
+	changelog = "\n" + string(changelog)
+	var renderer *glamour.TermRenderer
+
+	var termRendererOpts []glamour.TermRendererOption
+	termRendererOpts = append(termRendererOpts, glamour.WithAutoStyle(), glamour.WithWordWrap(0))
+
+	renderer, err = glamour.NewTermRenderer(termRendererOpts...)
+	if err != nil {
+		u.logger.Error("Failed to initialize renderer", zap.Error(err))
+		return
+	}
+	changelog, err = renderer.Render(changelog)
+	if err != nil {
+		u.logger.Error("Failed to render release notes", zap.Error(err))
+		return
+	}	
+	fmt.Println(changelog)
+
 }
