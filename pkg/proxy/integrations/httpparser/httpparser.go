@@ -129,10 +129,14 @@ func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logge
 		logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
 		*finalReq = append(*finalReq, requestChunked...)
 		contentLength -= len(requestChunked)
-		_, err = destConn.Write(requestChunked)
-		if err != nil {
-			logger.Error("failed to write request message to the destination server")
-			return err
+
+		// destConn is nil in case of test mode.
+		if destConn != nil {
+			_, err = destConn.Write(requestChunked)
+			if err != nil {
+				logger.Error("failed to write request message to the destination server")
+				return err
+			}
 		}
 	}
 	return nil
@@ -156,10 +160,13 @@ func chunkedRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap
 			}
 
 			*finalReq = append(*finalReq, requestChunked...)
-			_, err = destConn.Write(requestChunked)
-			if err != nil {
-				logger.Error("failed to write request message to the destination server")
-				return err
+			// destConn is nil in case of test mode.
+			if destConn != nil {
+				_, err = destConn.Write(requestChunked)
+				if err != nil {
+					logger.Error("failed to write request message to the destination server")
+					return err
+				}
 			}
 
 			//check if the intial request is completed
@@ -267,10 +274,13 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 			logger.Error("failed to read the request message from the client")
 			return err
 		} else {
-			_, err = destConn.Write(reqHeader)
-			if err != nil {
-				logger.Error("failed to write request message to the destination server")
-				return err
+			// destConn is nil in case of test mode
+			if destConn != nil {
+				_, err = destConn.Write(reqHeader)
+				if err != nil {
+					logger.Error("failed to write request message to the destination server")
+					return err
+				}
 			}
 		}
 
