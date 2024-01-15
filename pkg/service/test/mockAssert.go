@@ -114,6 +114,10 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		return returnVal
 	}
 
+	if cfg.Delay == 0 {
+		cfg.Delay = uint64(sessionEndTime-sessionStartTime) / 1000
+	}
+
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
 	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
