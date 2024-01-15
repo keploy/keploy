@@ -94,7 +94,8 @@ type Hook struct {
 	writev        link.Link
 	writevRet     link.Link
 
-	idc clients.InternalDockerClient
+	idc         clients.InternalDockerClient
+	configMocks []*models.Mock
 }
 
 func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Hook, error) {
@@ -189,7 +190,6 @@ func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
 func (h *Hook) IsUsrAppTerminateInitiated() bool {
 	return h.userAppShutdownInitiated
 }
-
 
 func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 	it, err := h.localDb.getAll(configMockTable, configMockTableIndex)
