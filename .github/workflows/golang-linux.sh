@@ -68,8 +68,16 @@ sudo kill $pid
 sleep 5
 done
 
-# Start the gin-mongo app in test omde.
+# Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+
+# Run go test to test mockrecord
+cat main_test.go
+go test
+
+sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
+cat main_test.go
+go test
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/report-1.yaml"
