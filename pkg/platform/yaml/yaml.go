@@ -329,13 +329,11 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 		return err
 	}
 
-	// if mock.Name == "" {
-	// 	mock.Name = "mocks"
-	// }
+	mockName := "mocks"
 
-	ys.SeparateMocksByResourceVersion(mock)
+	ys.SeparateMocksByResourceVersion(mock, &mockName)
 
-	err = ys.Write(ys.MockPath, "mocks", mockYaml)
+	err = ys.Write(ys.MockPath, mockName, mockYaml)
 
 	if err != nil {
 		return err
@@ -477,12 +475,12 @@ func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 	return nil
 }
 
-func (ys *Yaml) SeparateMocksByResourceVersion(mock *models.Mock) {
+func (ys *Yaml) SeparateMocksByResourceVersion(mock *models.Mock, mockName *string) {
 	if mock == nil || mock.Spec.HttpReq == nil {
 		return
 	}
 	if keployHeader, ok := mock.Spec.HttpReq.Header["Keploy-Header"]; ok && keployHeader != "" {
-		mock.Name += "_" + keployHeader
+		*mockName += "_" + keployHeader
 	}
 }
 
