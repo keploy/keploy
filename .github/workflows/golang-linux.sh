@@ -80,7 +80,6 @@ sed -i 's/\/home\/pranshu.linux\/samples-go\/gin-mongo/\/home\/runner\/work\/kep
 go test
 
 sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
-cat main_test.go
 # run in mocktest mode
 go test
 
