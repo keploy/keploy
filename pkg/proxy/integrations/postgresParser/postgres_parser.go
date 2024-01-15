@@ -72,7 +72,6 @@ func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destC
 }
 
 // This is the encoding function for the streaming postgres wiremessage
-
 func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	logger.Debug("Inside the encodePostgresOutgoing function")
 	pgRequests := []models.Backend{}
@@ -160,6 +159,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		select {
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
+				metadata := make(map[string]string)
+				metadata["type"] = "config"
 				h.AppendMocks(&models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
@@ -169,6 +170,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresResponses: pgResponses,
 						ReqTimestampMock:  reqTimestampMock,
 						ResTimestampMock:  resTimestampMock,
+						Metadata:          metadata,
 					},
 				}, ctx)
 				pgRequests = []models.Backend{}
@@ -189,6 +191,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
+				metadata := make(map[string]string)
+				metadata["type"] = "config"
 				h.AppendMocks(&models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
@@ -198,6 +202,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresResponses: pgResponses,
 						ReqTimestampMock:  reqTimestampMock,
 						ResTimestampMock:  resTimestampMock,
+						Metadata:          metadata,
 					},
 				}, ctx)
 				pgRequests = []models.Backend{}
@@ -489,11 +494,11 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		}
 
 		if !matched {
-			_, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)
-			if err != nil {
-				logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
-				return err
-			}
+			// _, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)
+			// if err != nil {
+			// 	logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
+			// 	return err
+			// }
 			continue
 		}
 		for _, pgResponse := range pgResponses {

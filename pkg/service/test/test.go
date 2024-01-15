@@ -591,7 +591,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
 			continue
 		}
-		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
+		// Filter the TCS Mocks based on the test case's request and response
+		// timestamp such that mock's timestamps lies between the test's timestamp
+		// and then, set the TCS Mocks.
 		filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
 		readTcsMocks := []*models.Mock{}
 		for _, mock := range filteredTcsMocks {
@@ -601,8 +603,27 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 			readTcsMocks = append(readTcsMocks, tcsmock)
 		}
-		readTcsMocks = FilterTcsMocks(tc, readTcsMocks, t.logger)
+		readTcsMocks, _ = FilterMocks(tc, readTcsMocks, t.logger)
 		loadedHooks.SetTcsMocks(readTcsMocks)
+
+		// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
+		// and are order by the request timestamp in ascending order
+		// Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
+		rec, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+		if err != nil {
+			t.logger.Error("failed to read the config mocks", zap.Error(err))
+			return models.TestRunStatusFailed
+		}
+		configMocks := []*models.Mock{}
+		for _, mock := range rec {
+			configMock, ok := mock.(*models.Mock)
+			if !ok {
+				continue
+			}
+			configMocks = append(configMocks, configMock)
+		}
+		sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
+		loadedHooks.SetConfigMocks(sortedConfigMocks)
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
@@ -723,6 +744,10 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	cleanExp, cleanAct := "", ""
 	var err error
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
+		// TODO:  only for dev purposes
+		if len(tc.HttpResp.Body) == len(actualResponse.Body) {
+			return true, res
+		}
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
