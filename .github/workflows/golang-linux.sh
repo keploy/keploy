@@ -71,13 +71,14 @@ done
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 
-pwd
-# Run go test to test mockrecord
-cat main_test.go
+sed -i 's/\/home\/pranshu.linux\/samples-go\/gin-mongo/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
+
+# run in mockrecord mode
 go test
 
 sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
 cat main_test.go
+# run in mocktest mode
 go test
 
 # Get the test results from the testReport file.
