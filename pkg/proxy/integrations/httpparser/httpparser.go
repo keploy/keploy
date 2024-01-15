@@ -128,7 +128,7 @@ func mapsHaveSameKeys2(map1 map[string]string, map2 map[string][]string) bool {
 }
 
 // Handled chunked requests when content-length is given.
-func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int) {
+func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger, contentLength int, writeDest bool) {
 	for contentLength > 0 {
 		clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		requestChunked, err := util.ReadBytes(clientConn)
@@ -147,10 +147,12 @@ func contentLengthRequest(finalReq *[]byte, clientConn, destConn net.Conn, logge
 		logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
 		*finalReq = append(*finalReq, requestChunked...)
 		contentLength -= len(requestChunked)
-		_, err = destConn.Write(requestChunked)
-		if err != nil {
-			logger.Error("failed to write request message to the destination server", zap.Error(err))
-			return
+		if writeDest {
+			_, err = destConn.Write(requestChunked)
+			if err != nil {
+				logger.Error("failed to write request message to the destination server", zap.Error(err))
+				return
+			}
 		}
 	}
 	clientConn.SetReadDeadline(time.Time{})
@@ -287,8 +289,8 @@ func handleChunkedRequests(finalReq *[]byte, clientConn, destConn net.Conn, logg
 		//Get the length of the body in the request.
 		bodyLength := len(*finalReq) - strings.Index(string(*finalReq), "\r\n\r\n") - 4
 		contentLength -= bodyLength
-		if contentLength > 0 && writeDest {
-			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength)
+		if contentLength > 0 {
+			contentLengthRequest(finalReq, clientConn, destConn, logger, contentLength, writeDest)
 		}
 	} else if transferEncodingHeader != "" {
 		// check if the intial request is the complete request.
