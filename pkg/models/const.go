@@ -23,6 +23,7 @@ var orangeColorSGR = []color.Attribute{38, 5, 208}
 var HighlightString = color.New(orangeColorSGR...).SprintFunc()
 var HighlightPassingString = color.New(color.FgGreen).SprintFunc()
 var HighlightFailingString = color.New(color.FgRed).SprintFunc()
+var GrayString = color.New(color.FgHiBlack)
 
 var PassingColorScheme = pp.ColorScheme{
 	String:          pp.Green,
