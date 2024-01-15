@@ -515,7 +515,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
 func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
 	var readConfigMocks []*models.Mock
-	configMocks, err := initialisedValues.Storage.ReadConfigMocks(filepath.Join(path, testSet))
+	configMocks, err := initialisedValues.Storage.ReadConfigMocks(testSet)
 	for _, mock := range configMocks {
 		configMock, ok := mock.(*models.Mock)
 		if !ok {
@@ -528,7 +528,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		return models.TestRunStatusAppHalted
 	}
 	var readTcsMocks []*models.Mock
-	tcsMocks, err := initialisedValues.Storage.ReadTcsMocks(nil, filepath.Join(path, testSet))
+	tcsMocks, err := initialisedValues.Storage.ReadTcsMocks(nil, testSet)
 	for _, mock := range tcsMocks {
 		tcsMock, ok := mock.(*models.Mock)
 		if !ok {
