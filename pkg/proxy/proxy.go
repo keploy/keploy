@@ -586,7 +586,7 @@ func (ps *ProxySet) startDnsServer() {
 	ps.DnsServerTimeout = 1 * time.Second
 
 	handler := ps
-	server := &dns.Server{
+	udpServer := &dns.Server{
 		Addr:      dnsServerAddr,
 		Net:       "udp",
 		Handler:   handler,
@@ -595,12 +595,31 @@ func (ps *ProxySet) startDnsServer() {
 		// DisableBackground: true,
 	}
 
-	ps.DnsServer = server
+	ps.DnsServer = udpServer
 
-	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", server.Addr))
-	err := server.ListenAndServe()
-	if err != nil {
-		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", udpServer.Addr))
+	udpErr := udpServer.ListenAndServe()
+	if udpErr != nil {
+		ps.logger.Error("failed to start dns server", zap.Any("addr", udpServer.Addr), zap.Error(udpErr))
+	}
+
+	// DNS server to handle tcp requests
+
+	tcpServer := &dns.Server{
+		Addr:      dnsServerAddr,
+		Net:       "tcp",
+		Handler:   handler,
+		UDPSize:   65535,
+		ReusePort: true,
+		// DisableBackground: true,
+	}
+
+	ps.DnsServer = tcpServer
+
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", tcpServer.Addr))
+	tcpErr := tcpServer.ListenAndServe()
+	if tcpErr != nil {
+		ps.logger.Error("failed to start dns server", zap.Any("addr", tcpServer.Addr), zap.Error(tcpErr))
 	}
 }
 
