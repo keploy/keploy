@@ -441,17 +441,25 @@ func decodeOpMsgSectionSequence(section string) (string, string, error) {
 
 func extractSectionSingle(data string) (string, error) {
 	// Look for the prefix before the actual content
-	prefix := "{ SectionSingle msg: "
-	startIndex := strings.Index(data, prefix)
+	prefix1 := "{ SectionSingle msg: "
+	prefix2 := "{ SectionSingle identifier: updates , msgs: [ "
+
+	var startIndex int
+	var endIndex int
+
+	switch {
+	case strings.HasPrefix(data, prefix1):
+		startIndex = strings.Index(data, prefix1) + len(prefix1)
+		endIndex = strings.LastIndex(data[startIndex:], " }")
+	case strings.HasPrefix(data, prefix2):
+		startIndex = strings.Index(data, prefix2) + len(prefix2)
+		endIndex = strings.LastIndex(data[startIndex:], " ] }")
+	} 
+
 	if startIndex == -1 {
 		return "", fmt.Errorf("start not found")
 	}
 
-	// Adjust the start index to skip the prefix
-	startIndex += len(prefix)
-
-	// We'll assume the content ends with " }" that closes the sectionSingle
-	endIndex := strings.LastIndex(data[startIndex:], " }")
 	if endIndex == -1 {
 		return "", fmt.Errorf("end not found")
 	}
