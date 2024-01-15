@@ -127,7 +127,7 @@ func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) err
 	return nil
 }
 
-func containsMatchingUrl(urlMethods map[string][]string, urlStr string, requestMethod models.Method) bool {
+func ContainsMatchingUrl(urlMethods map[string][]string, urlStr string, requestMethod models.Method) bool {
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
 		return false
@@ -150,7 +150,7 @@ func containsMatchingUrl(urlMethods map[string][]string, urlStr string, requestM
 	return false
 }
 
-func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
+func HasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
 	for headerName, _ := range object {
 		for _, bannedHeader := range bannedHeaders {
 			if headerName == bannedHeader {
@@ -171,9 +171,9 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 	var bypassTestCase = false
 
 	if ok {
-		if containsMatchingUrl(filters.URLMethods, tc.HttpReq.URL, tc.HttpReq.Method) {
+		if ContainsMatchingUrl(filters.URLMethods, tc.HttpReq.URL, tc.HttpReq.Method) {
 			bypassTestCase = true
-		} else if hasBannedHeaders(tc.HttpReq.Header, filters.ReqHeader) {
+		} else if HasBannedHeaders(tc.HttpReq.Header, filters.ReqHeader) {
 			bypassTestCase = true
 		}
 	}

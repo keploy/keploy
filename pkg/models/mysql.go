@@ -1,187 +1,188 @@
 package models
 
 type MySQLPacketHeader struct {
-	PacketLength uint32 `json:"packet_length" yaml:"packet_length" bson:"packet_length"`
-	PacketNumber uint8  `json:"packet_number" yaml:"packet_number" bson:"packet_number"`
-	PacketType   string `json:"packet_type" yaml:"packet_type" bson:"packet_type"`
+	PacketLength uint32 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
+	PacketNumber uint8  `json:"packet_number,omitempty" yaml:"packet_number,omitempty,flow" bson:"packet_number,omitempty"`
+	PacketType   string `json:"packet_type,omitempty" yaml:"packet_type,omitempty,flow" bson:"packet_type,omitempty"`
 }
 
 type MySQLRequest struct {
-	Header    *MySQLPacketHeader `json:"header" yaml:"header" bson:"header"`
-	Message   interface{}        `json:"message" yaml:"message" bson:"message"`
-	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay" bson:"read_delay,omitempty"`
+	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header,omitempty,flow" bson:"header,omitempty"`
+	Message   interface{}        `json:"message,omitempty" yaml:"message,omitempty,flow" bson:"message,omitempty"`
+	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty,flow" bson:"read_delay,omitempty"`
 }
+
 type RowColumnDefinition struct {
-	Type  FieldType   `yaml:"type" bson:"type"`
-	Name  string      `yaml:"name" bson:"name"`
-	Value interface{} `yaml:"value" bson:"value"`
+	Type  FieldType   `json:"type,omitempty" yaml:"type,omitempty,flow" bson:"type,omitempty"`
+	Name  string      `json:"name,omitempty" yaml:"name,omitempty,flow" bson:"name,omitempty"`
+	Value interface{} `json:"value,omitempty" yaml:"value,omitempty,flow" bson:"value,omitempty"`
 }
 
 type MySQLResponse struct {
-	Header    *MySQLPacketHeader `json:"header" yaml:"header" bson:"header"`
-	Message   interface{}        `json:"message" yaml:"message" bson:"message"`
-	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay" bson:"read_delay,omitempty"`
+	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header,omitempty,flow" bson:"header,omitempty"`
+	Message   interface{}        `json:"message,omitempty" yaml:"message,omitempty,flow" bson:"message,omitempty"`
+	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty,flow" bson:"read_delay,omitempty"`
 }
 
 type MySQLHandshakeV10Packet struct {
-	ProtocolVersion uint8  `yaml:"protocol_version" bson:"protocol_version"`
-	ServerVersion   string `yaml:"server_version" bson:"server_version"`
-	ConnectionID    uint32 `yaml:"connection_id" bson:"connection_id"`
-	AuthPluginData  []byte `yaml:"auth_plugin_data" bson:"auth_plugin_data"`
-	CapabilityFlags uint32 `yaml:"capability_flags" bson:"capability_flags"`
-	CharacterSet    uint8  `yaml:"character_set" bson:"character_set"`
-	StatusFlags     uint16 `yaml:"status_flags" bson:"status_flags"`
-	AuthPluginName  string `yaml:"auth_plugin_name" bson:"auth_plugin_name"`
+	ProtocolVersion uint8  `json:"protocol_version,omitempty" yaml:"protocol_version,omitempty,flow" bson:"protocol_version,omitempty"`
+	ServerVersion   string `json:"server_version,omitempty" yaml:"server_version,omitempty,flow" bson:"server_version,omitempty"`
+	ConnectionID    uint32 `json:"connection_id,omitempty" yaml:"connection_id,omitempty,flow" bson:"connection_id,omitempty"`
+	AuthPluginData  []byte `json:"auth_plugin_data,omitempty" yaml:"auth_plugin_data,omitempty,flow" bson:"auth_plugin_data,omitempty"`
+	CapabilityFlags uint32 `json:"capability_flags,omitempty" yaml:"capability_flags,omitempty,flow" bson:"capability_flags,omitempty"`
+	CharacterSet    uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow" bson:"character_set,omitempty"`
+	StatusFlags     uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow" bson:"status_flags,omitempty"`
+	AuthPluginName  string `json:"auth_plugin_name,omitempty" yaml:"auth_plugin_name,omitempty,flow" bson:"auth_plugin_name,omitempty"`
 }
 
 type PluginDetails struct {
-	Type    string `yaml:"type" bson:"type"`
-	Message string `yaml:"message" bson:"message"`
+	Type    string `json:"type,omitempty" yaml:"type,omitempty,flow" bson:"type,omitempty"`
+	Message string `json:"message,omitempty" yaml:"message,omitempty,flow" bson:"message,omitempty"`
 }
 
 type MySQLHandshakeResponseOk struct {
-	PacketIndicator string        `yaml:"packet_indicator" bson:"packet_indicator"`
-	PluginDetails   PluginDetails `yaml:"plugin_details" bson:"plugin_details"`
-	RemainingBytes  []byte        `yaml:"remaining_bytes" bson:"remaining_bytes"`
+	PacketIndicator string        `json:"packet_indicator,omitempty" yaml:"packet_indicator,omitempty,flow" bson:"packet_indicator,omitempty"`
+	PluginDetails   PluginDetails `json:"plugin_details,omitempty" yaml:"plugin_details,omitempty,flow" bson:"plugin_details,omitempty"`
+	RemainingBytes  string        `json:"remaining_bytes,omitempty" yaml:"remaining_bytes,omitempty,flow" bson:"remaining_bytes,omitempty"`
 }
 
 type MySQLHandshakeResponse struct {
-	CapabilityFlags uint32   `yaml:"capability_flags" bson:"capability_flags"`
-	MaxPacketSize   uint32   `yaml:"max_packet_size" bson:"max_packet_size"`
-	CharacterSet    uint8    `yaml:"character_set" bson:"character_set"`
-	Reserved        [23]byte `yaml:"reserved" bson:"reserved"`
-	Username        string   `yaml:"username" bson:"username"`
-	AuthData        []byte   `yaml:"auth_data" bson:"auth_data"`
-	Database        string   `yaml:"database" bson:"database"`
-	AuthPluginName  string   `yaml:"auth_plugin_name" bson:"auth_plugin_name"`
+	CapabilityFlags uint32   `json:"capability_flags,omitempty" yaml:"capability_flags,omitempty,flow" bson:"capability_flags,omitempty"`
+	MaxPacketSize   uint32   `json:"max_packet_size,omitempty" yaml:"max_packet_size,omitempty,flow" bson:"max_packet_size,omitempty"`
+	CharacterSet    uint8    `json:"character_set,omitempty" yaml:"character_set,omitempty,flow" bson:"character_set,omitempty"`
+	Reserved        [23]byte `json:"reserved,omitempty" yaml:"reserved,omitempty,flow" bson:"reserved,omitempty"`
+	Username        string   `json:"username,omitempty" yaml:"username,omitempty,flow" bson:"username,omitempty"`
+	AuthData        []byte   `json:"auth_data,omitempty" yaml:"auth_data,omitempty,flow" bson:"auth_data,omitempty"`
+	Database        string   `json:"database,omitempty" yaml:"database,omitempty,flow" bson:"database,omitempty"`
+	AuthPluginName  string   `json:"auth_plugin_name,omitempty" yaml:"auth_plugin_name,omitempty,flow" bson:"auth_plugin_name,omitempty"`
 }
 
 type MySQLQueryPacket struct {
-	Command byte   `yaml:"command" bson:"command"`
-	Query   string `yaml:"query" bson:"query"`
+	Command byte   `json:"command,omitempty" yaml:"command,omitempty,flow" bson:"command,omitempty"`
+	Query   string `json:"query,omitempty" yaml:"query,omitempty,flow" bson:"query,omitempty"`
 }
 
 type MySQLComStmtExecute struct {
-	StatementID    uint32           `yaml:"statement_id" bson:"statement_id"`
-	Flags          byte             `yaml:"flags" bson:"flags"`
-	IterationCount uint32           `yaml:"iteration_count" bson:"iteration_count"`
-	NullBitmap     []byte           `yaml:"null_bitmap" bson:"null_bitmap"`
-	ParamCount     uint16           `yaml:"param_count" bson:"param_count"`
-	Parameters     []BoundParameter `yaml:"parameters" bson:"parameters"`
+	StatementID    uint32           `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
+	Flags          byte             `json:"flags,omitempty" yaml:"flags,omitempty,flow" bson:"flags,omitempty"`
+	IterationCount uint32           `json:"iteration_count,omitempty" yaml:"iteration_count,omitempty,flow" bson:"iteration_count,omitempty"`
+	NullBitmap     []byte           `json:"null_bitmap,omitempty" yaml:"null_bitmap,omitempty,flow" bson:"null_bitmap,omitempty"`
+	ParamCount     uint16           `json:"param_count,omitempty" yaml:"param_count,omitempty,flow" bson:"param_count,omitempty"`
+	Parameters     []BoundParameter `json:"parameters,omitempty" yaml:"parameters,omitempty,flow" bson:"parameters,omitempty"`
 }
 
 type BoundParameter struct {
-	Type     byte   `yaml:"type" bson:"type"`
-	Unsigned byte   `yaml:"unsigned" bson:"unsigned"`
-	Value    []byte `yaml:"value" bson:"value"`
+	Type     byte   `json:"type,omitempty" yaml:"type,omitempty,flow" bson:"type,omitempty"`
+	Unsigned byte   `json:"unsigned,omitempty" yaml:"unsigned,omitempty,flow" bson:"unsigned,omitempty"`
+	Value    []byte `json:"value,omitempty" yaml:"value,omitempty,flow" bson:"value,omitempty"`
 }
 
 type MySQLStmtPrepareOk struct {
-	Status       byte               `yaml:"status" bson:"status"`
-	StatementID  uint32             `yaml:"statement_id" bson:"statement_id"`
-	NumColumns   uint16             `yaml:"num_columns" bson:"num_columns"`
-	NumParams    uint16             `yaml:"num_params" bson:"num_params"`
-	WarningCount uint16             `yaml:"warning_count" bson:"warning_count"`
-	ColumnDefs   []ColumnDefinition `yaml:"column_definitions" bson:"column_definitions"`
-	ParamDefs    []ColumnDefinition `yaml:"param_definitions" bson:"param_definitions"`
+	Status       byte               `json:"status,omitempty" yaml:"status,omitempty,flow" bson:"status,omitempty"`
+	StatementID  uint32             `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
+	NumColumns   uint16             `json:"num_columns,omitempty" yaml:"num_columns,omitempty,flow" bson:"num_columns,omitempty"`
+	NumParams    uint16             `json:"num_params,omitempty" yaml:"num_params,omitempty,flow" bson:"num_params,omitempty"`
+	WarningCount uint16             `json:"warning_count,omitempty" yaml:"warning_count,omitempty,flow" bson:"warning_count,omitempty"`
+	ColumnDefs   []ColumnDefinition `json:"column_definitions,omitempty" yaml:"column_definitions,omitempty,flow" bson:"column_definitions,omitempty"`
+	ParamDefs    []ColumnDefinition `json:"param_definitions,omitempty" yaml:"param_definitions,omitempty,flow" bson:"param_definitions,omitempty"`
 }
 type MySQLResultSet struct {
-	Columns             []*ColumnDefinition `yaml:"columns" bson:"columns"`
-	Rows                []*Row              `yaml:"rows" bson:"rows"`
-	EOFPresent          bool                `yaml:"eofPresent" bson:"eof_present"`
-	PaddingPresent      bool                `yaml:"paddingPresent" bson:"padding_present"`
-	EOFPresentFinal     bool                `yaml:"eofPresentFinal" bson:"eof_present_final"`
-	PaddingPresentFinal bool                `yaml:"paddingPresentFinal" bson:"padding_present_final"`
-	OptionalPadding     bool                `yaml:"optionalPadding" bson:"optional_padding"`
-	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes" bson:"optional_eof_bytes"`
-	EOFAfterColumns     []byte              `yaml:"eofAfterColumns" bson:"eof_after_columns"`
+	Columns             []*ColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow" bson:"columns,omitempty"`
+	Rows                []*Row              `json:"rows,omitempty" yaml:"rows,omitempty,flow" bson:"rows,omitempty"`
+	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow" bson:"eof_present,omitempty"`
+	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow" bson:"padding_present,omitempty"`
+	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow" bson:"eof_present_final,omitempty"`
+	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow" bson:"padding_present_final,omitempty"`
+	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow" bson:"optional_padding,omitempty"`
+	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optional_eof_bytes,omitempty"`
+	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eof_after_columns,omitempty"`
 }
 
 type PacketHeader struct {
-	PacketLength     uint8 `yaml:"packet_length" bson:"packet_length"`
-	PacketSequenceId uint8 `yaml:"packet_sequence_id" bson:"packet_sequence_id"`
+	PacketLength     uint8 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
+	PacketSequenceId uint8 `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
 }
 
 type RowHeader struct {
-	PacketLength     uint8 `yaml:"packet_length" bson:"packet_length"`
-	PacketSequenceId uint8 `yaml:"packet_sequence_id" bson:"packet_sequence_id"`
+	PacketLength     uint8 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
+	PacketSequenceId uint8 `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
 }
 
 type ColumnDefinition struct {
-	Catalog      string       `yaml:"catalog" bson:"catalog"`
-	Schema       string       `yaml:"schema" bson:"schema"`
-	Table        string       `yaml:"table" bson:"table"`
-	OrgTable     string       `yaml:"org_table" bson:"org_table"`
-	Name         string       `yaml:"name" bson:"name"`
-	OrgName      string       `yaml:"org_name" bson:"org_name"`
-	NextLength   uint64       `yaml:"next_length" bson:"next_length"`
-	CharacterSet uint16       `yaml:"character_set" bson:"character_set"`
-	ColumnLength uint32       `yaml:"column_length" bson:"column_length"`
-	ColumnType   byte         `yaml:"column_type" bson:"column_type"`
-	Flags        uint16       `yaml:"flags" bson:"flags"`
-	Decimals     byte         `yaml:"decimals" bson:"decimals"`
-	PacketHeader PacketHeader `yaml:"packet_header" bson:"packet_header"`
+	Catalog      string       `json:"catalog,omitempty" yaml:"catalog,omitempty,flow" bson:"catalog,omitempty"`
+	Schema       string       `json:"schema,omitempty" yaml:"schema,omitempty,flow" bson:"schema,omitempty"`
+	Table        string       `json:"table,omitempty" yaml:"table,omitempty,flow" bson:"table,omitempty"`
+	OrgTable     string       `json:"org_table,omitempty" yaml:"org_table,omitempty,flow" bson:"org_table,omitempty"`
+	Name         string       `json:"name,omitempty" yaml:"name,omitempty,flow" bson:"name,omitempty"`
+	OrgName      string       `json:"org_name,omitempty" yaml:"org_name,omitempty,flow" bson:"org_name,omitempty"`
+	NextLength   uint64       `json:"next_length,omitempty" yaml:"next_length,omitempty,flow" bson:"next_length,omitempty"`
+	CharacterSet uint16       `json:"character_set,omitempty" yaml:"character_set,omitempty,flow" bson:"character_set,omitempty"`
+	ColumnLength uint32       `json:"column_length,omitempty" yaml:"column_length,omitempty,flow" bson:"column_length,omitempty"`
+	ColumnType   byte         `json:"column_type,omitempty" yaml:"column_type,omitempty,flow" bson:"column_type,omitempty"`
+	Flags        uint16       `json:"flags,omitempty" yaml:"flags,omitempty,flow" bson:"flags,omitempty"`
+	Decimals     byte         `json:"decimals,omitempty" yaml:"decimals,omitempty,flow" bson:"decimals,omitempty"`
+	PacketHeader PacketHeader `json:"packet_header,omitempty" yaml:"packet_header,omitempty,flow" bson:"packet_header,omitempty"`
 }
 
 type Row struct {
-	Header  RowHeader             `yaml:"header" bson:"header"`
-	Columns []RowColumnDefinition `yaml:"row_column_definition" bson:"row_column_definition"`
+	Header  RowHeader             `json:"header,omitempty" yaml:"header,omitempty,flow" bson:"header,omitempty"`
+	Columns []RowColumnDefinition `json:"row_column_definition,omitempty" yaml:"row_column_definition,omitempty,flow" bson:"row_column_definition,omitempty"`
 }
 
 type MySQLOKPacket struct {
-	AffectedRows uint64 `json:"affected_rows,omitempty" yaml:"affected_rows" bson:"affected_rows,omitempty"`
-	LastInsertID uint64 `json:"last_insert_id,omitempty" yaml:"last_insert_id" bson:"last_insert_id,omitempty"`
-	StatusFlags  uint16 `json:"status_flags,omitempty" yaml:"status_flags" bson:"status_flags,omitempty"`
-	Warnings     uint16 `json:"warnings,omitempty" yaml:"warnings" bson:"warnings,omitempty"`
-	Info         string `json:"info,omitempty" yaml:"info" bson:"info,omitempty"`
+	AffectedRows uint64 `json:"affected_rows,omitempty" yaml:"affected_rows,omitempty,flow" bson:"affected_rows,omitempty"`
+	LastInsertID uint64 `json:"last_insert_id,omitempty" yaml:"last_insert_id,omitempty,flow" bson:"last_insert_id,omitempty"`
+	StatusFlags  uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow" bson:"status_flags,omitempty"`
+	Warnings     uint16 `json:"warnings,omitempty" yaml:"warnings,omitempty,flow" bson:"warnings,omitempty"`
+	Info         string `json:"info,omitempty" yaml:"info,omitempty,flow" bson:"info,omitempty"`
 }
 
 type MySQLERRPacket struct {
-	Header         byte   `yaml:"header" bson:"header"`
-	ErrorCode      uint16 `yaml:"error_code" bson:"error_code"`
-	SQLStateMarker string `yaml:"sql_state_marker" bson:"sql_state_marker"`
-	SQLState       string `yaml:"sql_state" bson:"sql_state"`
-	ErrorMessage   string `yaml:"error_message" bson:"error_message"`
+	Header         byte   `json:"header,omitempty" yaml:"header,omitempty,flow" bson:"header,omitempty"`
+	ErrorCode      uint16 `json:"error_code,omitempty" yaml:"error_code,omitempty,flow" bson:"error_code,omitempty"`
+	SQLStateMarker string `json:"sql_state_marker,omitempty" yaml:"sql_state_marker,omitempty,flow" bson:"sql_state_marker,omitempty"`
+	SQLState       string `json:"sql_state,omitempty" yaml:"sql_state,omitempty,flow" bson:"sql_state,omitempty"`
+	ErrorMessage   string `json:"error_message,omitempty" yaml:"error_message,omitempty,flow" bson:"error_message,omitempty"`
 }
 
 type MySQLComStmtPreparePacket struct {
-	Query string `bson:"query"`
+	Query string `bson:"query,omitempty"`
 }
 
 type MySQLCOM_STMT_SEND_LONG_DATA struct {
-	StatementID uint32 `yaml:"statement_id" bson:"statement_id"`
-	ParameterID uint16 `yaml:"parameter_id" bson:"parameter_id"`
-	Data        []byte `yaml:"data" bson:"data"`
+	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
+	ParameterID uint16 `json:"parameter_id,omitempty" yaml:"parameter_id,omitempty,flow" bson:"parameter_id,omitempty"`
+	Data        []byte `json:"data,omitempty" yaml:"data,omitempty,flow" bson:"data,omitempty"`
 }
 
 type MySQLCOM_STMT_RESET struct {
-	StatementID uint32 `yaml:"statement_id" bson:"statement_id"`
+	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
 }
 
 type MySQLComStmtFetchPacket struct {
-	StatementID uint32 `yaml:"statement_id" bson:"statement_id"`
-	RowCount    uint32 `yaml:"row_count" bson:"row_count"`
-	Info        string `yaml:"info" bson:"info"`
+	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
+	RowCount    uint32 `json:"row_count,omitempty" yaml:"row_count,omitempty,flow" bson:"row_count,omitempty"`
+	Info        string `json:"info,omitempty" yaml:"info,omitempty,flow" bson:"info,omitempty"`
 }
 
 type MySQLComChangeUserPacket struct {
-	User         string `yaml:"user" bson:"user"`
-	Auth         []byte `yaml:"auth" bson:"auth"`
-	Db           string `yaml:"db" bson:"db"`
-	CharacterSet uint8  `yaml:"character_set" bson:"character_set"`
-	AuthPlugin   string `yaml:"auth_plugin" bson:"auth_plugin"`
+	User         string `json:"user,omitempty" yaml:"user,omitempty,flow" bson:"user,omitempty"`
+	Auth         []byte `json:"auth,omitempty" yaml:"auth,omitempty,flow" bson:"auth,omitempty"`
+	Db           string `json:"db,omitempty" yaml:"db,omitempty,flow" bson:"db,omitempty"`
+	CharacterSet uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow" bson:"character_set,omitempty"`
+	AuthPlugin   string `json:"auth_plugin,omitempty" yaml:"auth_plugin,omitempty,flow" bson:"auth_plugin,omitempty"`
 }
 
 type MySQLComStmtClosePacket struct {
-	StatementID uint32 `bson:"statement_id"`
+	StatementID uint32 `bson:"statement_id,omitempty"`
 }
 
 type AuthSwitchResponsePacket struct {
-	AuthResponseData string `yaml:"auth_response_data" bson:"auth_response_data"`
+	AuthResponseData string `json:"auth_response_data,omitempty" yaml:"auth_response_data,omitempty,flow" bson:"auth_response_data,omitempty"`
 }
 
 type AuthSwitchRequestPacket struct {
-	StatusTag      byte   `yaml:"status_tag" bson:"status_tag"`
-	PluginName     string `yaml:"plugin_name" bson:"plugin_name"`
-	PluginAuthData string `yaml:"plugin_authdata" bson:"plugin_authdata"`
+	StatusTag      byte   `json:"status_tag,omitempty" yaml:"status_tag,omitempty,flow" bson:"status_tag,omitempty"`
+	PluginName     string `json:"plugin_name,omitempty" yaml:"plugin_name,omitempty,flow" bson:"plugin_name,omitempty"`
+	PluginAuthData string `json:"plugin_authdata,omitempty" yaml:"plugin_authdata,omitempty,flow" bson:"plugin_authdata,omitempty"`
 }

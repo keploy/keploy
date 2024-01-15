@@ -114,7 +114,11 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	// fetch the recorded testcases with their mocks
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	returnVal.LoadedHooks = hooks.NewHook(returnVal.Storage, routineId, t.logger)
+	var err error
+	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.Storage, routineId, t.logger)
+	if err != nil {
+		return returnVal, fmt.Errorf("error while creating hooks %v", err)
+	}
 
 	select {
 	case <-stopper:
@@ -205,7 +209,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		return false
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
-	// Recover from panic and gracfully shutdown
+	// Recover from panic and gracefully shutdown
 	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
 	if err != nil {
 		t.logger.Error("failed to initialise the test", zap.Error(err))

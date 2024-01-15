@@ -6,9 +6,9 @@ import (
 )
 
 type ComStmtFetchPacket struct {
-	StatementID uint32 `yaml:"statement_id"`
-	RowCount    uint32 `yaml:"row_count"`
-	Info        string `yaml:"info"`
+	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty"`
+	RowCount    uint32 `json:"row_count,omitempty" yaml:"row_count,omitempty"`
+	Info        string `json:"info,omitempty" yaml:"info,omitempty"`
 }
 
 func decodeComStmtFetch(data []byte) (ComStmtFetchPacket, error) {
