@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/exec"
 
-	stripmd "github.com/writeas/go-strip-markdown"
+	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -84,13 +84,24 @@ func (u *updater) UpdateBinary() {
 		// If there was an error during the update, return here.
 		return
 	}
+	u.logger.Info("Updated to version " + latestVersion)
 
-	// Check if the update was successful before logging the update information.
-	// Assuming the keploy.sh script itself returns a success code upon successful update.
-	if cmd.ProcessState.Success() {
-		u.logger.Info("Updated Keploy binary to version " + latestVersion)
-		u.logger.Info("Release notes: \n\n" + stripmd.Strip(changelog))
-	} else {
-		u.logger.Error("Failed to update Keploy binary.")
+	changelog = "\n" + string(changelog)
+	var renderer *glamour.TermRenderer
+
+	var termRendererOpts []glamour.TermRendererOption
+	termRendererOpts = append(termRendererOpts, glamour.WithAutoStyle(), glamour.WithWordWrap(0))
+
+	renderer, err = glamour.NewTermRenderer(termRendererOpts...)
+	if err != nil {
+		u.logger.Error("Failed to initialize renderer", zap.Error(err))
+		return
 	}
+	changelog, err = renderer.Render(changelog)
+	if err != nil {
+		u.logger.Error("Failed to render release notes", zap.Error(err))
+		return
+	}	
+	fmt.Println(changelog)
+
 }
