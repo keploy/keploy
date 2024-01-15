@@ -13,7 +13,7 @@ if [ -f "./keploy-config.yaml" ]; then
 fi
 
 # Generate the keploy-config file.
-./../../keployV2 generate-config
+./../../keployv2 generate-config
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"
@@ -27,7 +27,7 @@ go build -o ginApp
 
 for i in {1..2}; do
 # Start the gin-mongo app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../keployV2 record -c "./ginApp" &
+sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &
 
 # Wait for the application to start.
 app_started=false
@@ -69,10 +69,10 @@ sleep 5
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployV2 test -c "./ginApp" --delay 7
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 
-# move keployV2 to /usr/local/bin/keploy
-mv ./../../keployV2 /usr/local/bin/keploy
+# move keployv2 to /usr/local/bin/keploy
+mv ./../../keployv2 /usr/local/bin/keploy
 
 sed -i 's/\/home\/pranshu.linux\/samples-go\/gin-mongo/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
 
