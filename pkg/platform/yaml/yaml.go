@@ -397,7 +397,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 		mock := readMock.(*models.Mock)
 		if mock.Version == "api.keploy-enterprise.io/v1beta1" {
 			entMocks = append(entMocks, mock.Name)
-		} else if mock.Version != "api.keploy.io/v1beta1" {
+		} else if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
 			nonKeployMocks = append(nonKeployMocks, mock.Name)
 		}
 		if (mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{})) && mock.Kind != "SQL" {
@@ -456,7 +456,7 @@ func (ys *Yaml) ReadConfigMocks(path string) ([]platform.KindSpecifier, error) {
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] == "config" {
+			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" {
 				configMocks = append(configMocks, mock)
 			}
 		}
