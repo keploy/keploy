@@ -335,7 +335,6 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 
 	ys.SeparateMocksByResourceVersion(mock)
 
-
 	err = ys.Write(ys.MockPath, "mocks", mockYaml)
 
 	if err != nil {
@@ -478,7 +477,6 @@ func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 	return nil
 }
 
-
 func (ys *Yaml) SeparateMocksByResourceVersion(mock *models.Mock) {
 	if mock == nil || mock.Spec.HttpReq == nil {
 		return
@@ -525,9 +523,9 @@ func (ys *Yaml) ReadResourceVersionMocks(path string) ([]platform.KindSpecifier,
 				configMocks = append(configMocks, mock)
 			}
 		}
-    return configMocks, nil
 	}
-	
+	return configMocks, nil
+}
 
 var idCounter int64 = -1
 
