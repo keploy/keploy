@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"github.com/writeas/go-strip-markdown"
+
+	stripmd "github.com/writeas/go-strip-markdown"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -54,13 +55,13 @@ func (u *updater) UpdateBinary() {
 	}
 
 	if currentVersion == latestVersion {
-		u.logger.Info("No updates available. Version " + latestVersion + " is the latest.")
+		u.logger.Info("No updates available. Current Version " + currentVersion + " " + latestVersion + " is the latest.")
 		return
 	}
 
 	u.logger.Info("Updating to Version: " + latestVersion)
 	// Execute the curl command to download keploy.sh and run it with bash
-	curlCommand := `curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && bash keploy.sh`
+	curlCommand := `curl -s -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && bash keploy.sh`
 
 	// Execute the combined curl command to download and execute keploy.sh with bash
 	cmd := exec.Command("sh", "-c", curlCommand)
@@ -89,6 +90,5 @@ func (u *updater) UpdateBinary() {
 		return
 	}
 	u.logger.Info("Updated Keploy binary to version " + latestVersion)
-	u.logger.Info("Release notes: ")
-	u.logger.Info(stripmd.Strip(changelog))
+	u.logger.Info("Release notes: \n\n" + stripmd.Strip(changelog))
 }
