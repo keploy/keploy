@@ -42,7 +42,7 @@ func main() {
 	if err2 != nil {
 		log.Debug("Failed to fetch latest release version", err2)
 	}
-	updatetext := models.GrayString.Sprint("keploy update")
+	updatetext := models.HighlightStringGray("keploy update")
 	const msg string = `
 	   ╭─────────────────────────────────────╮
 	   │ New version available:              │		

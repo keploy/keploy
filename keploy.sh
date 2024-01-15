@@ -1,8 +1,15 @@
 #!/bin/bash
 
-installKeploy (){
+installKeploy() {
     IS_CI=false
-    for arg in "$@"
+    CACHE_FILE="$HOME/.keploy_cache"
+
+    # Declare variables to store different input values
+    DOCKER_INPUT=""
+    COLIMA_INPUT=""
+    LINUX_INPUT=""
+
+    for arg in "$@";
     do
         case $arg in
             -isCI)
@@ -13,6 +20,24 @@ installKeploy (){
             ;;
         esac
     done
+
+    # Read user input from the cache file
+    if [ -f "$CACHE_FILE" ]; then
+        source "$CACHE_FILE"
+    fi
+
+    prompt_and_store_input() {
+        local input_var_name=$1
+        local prompt_message=$2
+
+        if [ -z "${!input_var_name}" ]; then
+            echo -n "$prompt_message"
+            read user_input
+            eval "$input_var_name=$user_input"
+            echo "$input_var_name=\"$user_input\"" >>"$CACHE_FILE"
+        fi
+    }
+
 
     get_current_docker_context() {
         current_context=$(docker context ls --format '{{.Name}} {{if .Current}}*{{end}}' | grep '*' | awk '{print $1}')
@@ -93,18 +118,17 @@ installKeploy (){
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
             get_current_docker_context
-            if ! which docker &> /dev/null; then
-                echo -n "Docker not found on device, install docker? (y/n):"
-                read user_input
-                if [ "$user_input" = "y" ]; then
+            if ! which docker &>/dev/null; then
+                prompt_and_store_input "DOCKER_INPUT" "Docker not found on device, install docker? (y/n): "
+                if [ "$DOCKER_INPUT" = "y" ]; then
                     echo "Installing docker via brew"
-                    if command -v brew &> /dev/null; then
-                       brew install docker
+                    if command -v brew &>/dev/null; then
+                        brew install docker
                     else
                         echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy docker installation\e]8;;\a"
                         return
                     fi
-                elif [ "$user_input" != "n" ]; then
+                elif [ "$DOCKER_INPUT" != "n" ]; then
                     echo "Please enter a valid command"
                     return
                 else
@@ -113,30 +137,25 @@ installKeploy (){
                 fi
             fi
 
-            
-            echo -n "Do you want to install keploy with Docker or Colima? (docker/colima): "
-            read user_input
+            prompt_and_store_input "COLIMA_INPUT" "Do you want to install keploy with Docker or Colima? (docker/colima): "
 
-            if [ "$user_input" = "colima" ]; then
+            if [ "$COLIMA_INPUT" = "colima" ]; then
                 if [ "$current_context" = "default" ]; then
-                    echo -n
                     echo 'Error: Docker is using the default context, set to colima using "docker context use colima"'
                     return
                 fi
-                if ! which colima &> /dev/null; then
-                    echo
-                    echo -e "\e]8;;https://kumojin.com/en/colima-alternative-docker-desktop\aAlternate is to use colima(lightweight and performant alternative to Docker Desktop)\e]8;;\a"
-                    echo -n "Install colima (y/n):"
-                    read user_input
-                    if [ "$user_input" = "y" ]; then
+                if ! which colima &>/dev/null; then
+                    echo -e "\e]8;;https://kumojin.com/en/colima-alternative-docker-desktop\aAlternate is to use colima (lightweight and performant alternative to Docker Desktop)\e]8;;\a"
+                    prompt_and_store_input "COLIMA_INSTALL" "Install colima (y/n): "
+                    if [ "$COLIMA_INSTALL" = "y" ]; then
                         echo "Installing colima via brew"
-                        if command -v brew &> /dev/null; then
+                        if command -v brew &>/dev/null; then
                             brew install colima
                         else
                             echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy colima installation\e]8;;\a"
                             return
                         fi
-                    elif [ "$user_input" = "n" ]; then
+                    elif [ "$COLIMA_INSTALL" = "n" ]; then
                         echo "Please install Colima to install Keploy."
                         return
                     else
@@ -144,12 +163,11 @@ installKeploy (){
                         return
                     fi
                 else
-                    echo -n "colima found on your system, would you like to proceed with it? (y/n):"
-                    read user_input
-                    if [ "$user_input" = "n" ]; then
+                    prompt_and_store_input "COLIMA_PROCEED" "colima found on your system, would you like to proceed with it? (y/n): "
+                    if [ "$COLIMA_PROCEED" = "n" ]; then
                         echo "Please allow Colima to run Keploy."
                         return
-                    elif [ "$user_input" != "y" ]; then
+                    elif [ "$COLIMA_PROCEED" != "y" ]; then
                         echo "Please enter a valid command"
                         return
                     fi
@@ -162,9 +180,8 @@ installKeploy (){
                 fi
                 install_colima_docker
 
-            elif [ "$user_input" = "docker" ]; then
+            elif [ "$COLIMA_INPUT" = "docker" ]; then
                 if [ "$current_context" = "colima" ]; then
-                    echo -n
                     echo 'Error: Docker is using the colima context, set to default using "docker context use default"'
                     return
                 fi
@@ -176,12 +193,12 @@ installKeploy (){
             return
 
         elif [ "$OS_NAME" = "Linux" ]; then
-            echo -n "Do you want to install keploy with Linux or Docker? (linux/docker): "
-            read user_input
+            prompt_and_store_input "LINUX_INPUT" "Do you want to install keploy with Linux or Docker? (linux/docker): "
             if ! sudo mountpoint -q /sys/kernel/debug; then
                 sudo mount -t debugfs debugfs /sys/kernel/debug
             fi
-            if [ "$user_input" = "linux" ]; then
+
+            if [ "$LINUX_INPUT" = "linux" ]; then
                 if [ "$ARCH" = "x86_64" ]; then
                     install_keploy_amd
                 elif [ "$ARCH" = "aarch64" ]; then
@@ -190,7 +207,7 @@ installKeploy (){
                     echo "Unsupported architecture: $ARCH"
                     return
                 fi
-            elif [ "$user_input" = "docker" ]; then
+            elif [ "$LINUX_INPUT" = "docker" ]; then
                 install_docker
             else
                 echo "Please enter a valid command"
@@ -217,7 +234,7 @@ installKeploy (){
 
 installKeploy
 
-if command -v keploy &> /dev/null; then
+if command -v keploy &>/dev/null; then
     keploy example
     rm keploy.sh
 fi

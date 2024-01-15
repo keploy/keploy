@@ -66,24 +66,31 @@ func (u *updater) UpdateBinary() {
 	cmd := exec.Command("sh", "-c", curlCommand)
 
 	cmd.Stdin = os.Stdin
-
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err := cmd.Start(); err != nil {
-		u.logger.Error("Failed to start command", zap.Error(err))
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			u.logger.Error(fmt.Sprintf("Failed to update binary file. Exit status: %v", exitErr.ExitCode()))
+			if status, ok := exitErr.Sys().(interface{ ExitStatus() int }); ok {
+				if exitStatus := status.ExitStatus(); exitStatus != 0 {
+					u.logger.Error(fmt.Sprintf("Command exited with status: %v", exitStatus))
+				}
+			}
+		} else {
+			u.logger.Error(fmt.Sprintf("Failed to update binary file: %v", err))
+		}
+
+		// If there was an error during the update, return here.
 		return
 	}
 
-	if err := cmd.Wait(); err != nil {
-		// Handle non-zero exit status here if required
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			u.logger.Error(fmt.Sprintf("Failed to update binary file: %v", exitErr))
-		} else {
-			u.logger.Error(fmt.Sprintf("Failed to wait for command: %v", err))
-		}
-		return
+	// Check if the update was successful before logging the update information.
+	// Assuming the keploy.sh script itself returns a success code upon successful update.
+	if cmd.ProcessState.Success() {
+		u.logger.Info("Updated Keploy binary to version " + latestVersion)
+		u.logger.Info("Release notes: \n\n" + stripmd.Strip(changelog))
+	} else {
+		u.logger.Error("Failed to update Keploy binary.")
 	}
-	u.logger.Info("Updated Keploy binary to version " + latestVersion)
-	u.logger.Info("Release notes: \n\n" + stripmd.Strip(changelog))
 }
