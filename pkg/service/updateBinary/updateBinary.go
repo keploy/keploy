@@ -39,7 +39,6 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 func (u *updater) UpdateBinary() {
 	currentVersion := utils.KeployVersion
 
-	// Fetch the latest version and release body from GitHub releases with a timeout
 	releaseInfo, err := utils.GetLatestGitHubRelease()
 	latestVersion := releaseInfo.TagName
 	changelog := releaseInfo.Body
@@ -65,20 +64,16 @@ func (u *updater) UpdateBinary() {
 	// Execute the combined curl command to download and execute keploy.sh with bash
 	cmd := exec.Command("sh", "-c", curlCommand)
 
-	// Set up input for the command
 	cmd.Stdin = os.Stdin
 
-	// Set output and error
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Start the command
 	if err := cmd.Start(); err != nil {
 		u.logger.Error("Failed to start command", zap.Error(err))
 		return
 	}
 
-	// Wait for command to finish
 	if err := cmd.Wait(); err != nil {
 		// Handle non-zero exit status here if required
 		if exitErr, ok := err.(*exec.ExitError); ok {
