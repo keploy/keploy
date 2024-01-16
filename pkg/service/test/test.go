@@ -833,7 +833,11 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 		t.mutex.Lock()
 		logger.Printf(logs)
-		logDiffs.Render()
+		err := logDiffs.Render()
+		if err != nil {
+			t.logger.Error("failed to render the diffs", zap.Error(err))
+		}
+
 		t.mutex.Unlock()
 
 	} else {
