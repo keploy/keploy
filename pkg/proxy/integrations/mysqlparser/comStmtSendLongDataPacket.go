@@ -1,14 +1,15 @@
 package mysqlparser
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 )
 
 type COM_STMT_SEND_LONG_DATA struct {
-	StatementID uint32 `yaml:"statement_id"`
-	ParameterID uint16 `yaml:"parameter_id"`
-	Data        []byte `yaml:"data"`
+	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow"`
+	ParameterID uint16 `json:"parameter_id,omitempty" yaml:"parameter_id,omitempty,flow"`
+	Data        string `json:"data,omitempty" yaml:"data,omitempty,flow"`
 }
 
 func decodeComStmtSendLongData(packet []byte) (COM_STMT_SEND_LONG_DATA, error) {
@@ -21,6 +22,6 @@ func decodeComStmtSendLongData(packet []byte) (COM_STMT_SEND_LONG_DATA, error) {
 	return COM_STMT_SEND_LONG_DATA{
 		StatementID: stmtID,
 		ParameterID: paramID,
-		Data:        data,
+		Data:        base64.StdEncoding.EncodeToString(data),
 	}, nil
 }

@@ -1,22 +1,24 @@
 package mysqlparser
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 )
 
 type ComStmtExecute struct {
-	StatementID    uint32           `yaml:"statement_id"`
-	Flags          byte             `yaml:"flags"`
-	IterationCount uint32           `yaml:"iteration_count"`
-	NullBitmap     []byte           `yaml:"null_bitmap"`
-	ParamCount     uint16           `yaml:"param_count"`
-	Parameters     []BoundParameter `yaml:"parameters"`
+	StatementID    uint32           `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow"`
+	Flags          byte             `json:"flags,omitempty" yaml:"flags,omitempty,flow"`
+	IterationCount uint32           `json:"iteration_count,omitempty" yaml:"iteration_count,omitempty,flow"`
+	NullBitmap     string           `json:"null_bitmap,omitempty" yaml:"null_bitmap,omitempty,flow"`
+	ParamCount     uint16           `json:"param_count,omitempty" yaml:"param_count,omitempty,flow"`
+	Parameters     []BoundParameter `json:"parameters,omitempty" yaml:"parameters,omitempty,flow"`
 }
+
 type BoundParameter struct {
-	Type     byte   `yaml:"type"`
-	Unsigned byte   `yaml:"unsigned"`
-	Value    []byte `yaml:"value"`
+	Type     byte   `json:"type,omitempty" yaml:"type,omitempty,flow"`
+	Unsigned byte   `json:"unsigned,omitempty" yaml:"unsigned,omitempty,flow"`
+	Value    []byte `json:"value,omitempty" yaml:"value,omitempty,flow"`
 }
 
 func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
@@ -24,6 +26,7 @@ func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
 	if len(packet) < 14 { // the minimal size of the packet without parameters should be 14, not 13
 		return ComStmtExecute{}, fmt.Errorf("packet length less than 14 bytes")
 	}
+	var NullBitmapValue []byte
 
 	stmtExecute := ComStmtExecute{}
 	stmtExecute.StatementID = binary.LittleEndian.Uint32(packet[1:5])
@@ -35,7 +38,8 @@ func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
 	if len(packet) > 14 {
 		nullBitmapLength := int((stmtExecute.ParamCount + 7) / 8)
 
-		stmtExecute.NullBitmap = packet[10 : 10+nullBitmapLength]
+		NullBitmapValue = packet[10 : 10+nullBitmapLength]
+		stmtExecute.NullBitmap = base64.StdEncoding.EncodeToString(NullBitmapValue)
 		stmtExecute.ParamCount = binary.LittleEndian.Uint16(packet[10+nullBitmapLength:])
 
 		// in case new parameters are bound, the new types and values are sent

@@ -75,7 +75,7 @@ require (
 	github.com/TheZeroSlave/zapsentry v1.18.0
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/getsentry/sentry-go v0.17.0
-	github.com/google/uuid v1.3.0
+	github.com/google/uuid v1.5.0
 	github.com/hashicorp/go-memdb v1.3.4
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/vektah/gqlparser/v2 v2.5.8

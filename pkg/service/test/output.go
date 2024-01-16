@@ -45,7 +45,7 @@ func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) 
 }
 
 // Will display and colorize diffs side-by-side
-func (d *DiffsPrinter) Render() {
+func (d *DiffsPrinter) Render() error {
 	diffs := []string{}
 
 	if d.statusExp != d.statusAct {
@@ -77,6 +77,7 @@ func (d *DiffsPrinter) Render() {
 		table.Append([]string{e})
 	}
 	table.Render()
+	return nil
 }
 
 /*
@@ -175,10 +176,13 @@ func diffIndex(s1, s2 string) (int, bool) {
  */
 func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 	var diff = gojsondiff.New()
-	dObj, _ := diff.Compare(json1, json2)
+	dObj, err := diff.Compare(json1, json2)
+	if err != nil {
+		return "", err
+	}
 
 	var jsonObject map[string]interface{}
-	err := json.Unmarshal([]byte(json1), &jsonObject)
+	err = json.Unmarshal([]byte(json1), &jsonObject)
 	if err != nil {
 		return "", err
 	}
