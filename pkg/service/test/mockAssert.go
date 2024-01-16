@@ -81,6 +81,7 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		return returnVal
 	}
 	var maxTime int64
+	maxTime = 10000000
 	var hasChunkResponse bool
 	var numberOfChunkedMocks int64
 	for _, mock := range tcsMocks {
@@ -99,8 +100,8 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 			prevTime = chunkedTime[0]
 		}
 		for _, chunktime := range chunkedTime {
-			chunkGap := (chunktime - prevTime) / int64(len(chunkedTime))
-			if chunkGap > maxTime {
+			chunkGap := (chunktime - prevTime)
+			if chunkGap < maxTime && chunkGap != 0 {
 				maxTime = chunkGap
 				prevTime = chunktime
 			}
@@ -131,13 +132,11 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 
 	if hasChunkResponse {
 		if cfg.Delay > 0 {
-			if int64(cfg.Delay) > maxTime*numberOfChunkedMocks/1000 {
-				t.logger.Warn(fmt.Sprintf("Replaysession duration provided is %ds, suggested duration is %ds", int64(cfg.Delay), maxTime*numberOfChunkedMocks/1000))
-			}
+
 			sleepTime = time.Duration(cfg.Delay)
 
 		} else {
-			sleepTime = time.Duration(maxTime * numberOfChunkedMocks / 1000)
+			sleepTime = time.Duration(60 * time.Second)
 		}
 	} else {
 		if cfg.Delay > 0 {

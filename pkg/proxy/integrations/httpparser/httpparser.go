@@ -469,7 +469,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		}
 		var minTime int64
 		var prevTime int64
-
+		minTime = 1000000
 		prevTime = pkg.GetUnixMilliTime(stub.Spec.ReqTimestampMock)
 		//calculate chunk time
 
@@ -503,11 +503,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		}
 
 		for _, chunktime := range chunkedTime {
-			if (chunktime-prevTime) < minTime && chunktime != 0 && minTime != 0 {
+			if (chunktime-prevTime) < minTime && chunktime != 0 && (chunktime-prevTime) != 0 {
 				minTime = (chunktime - prevTime)
 				prevTime = chunktime
 			}
 		}
+
 		// Calculate average
 		var averageDuration time.Duration
 		if len(chunkedTime) > 0 {
