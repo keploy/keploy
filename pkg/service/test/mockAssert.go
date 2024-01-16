@@ -136,7 +136,7 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 			sleepTime = time.Duration(cfg.Delay)
 
 		} else {
-			sleepTime = time.Duration(60 * time.Second)
+			sleepTime = time.Duration(60)
 		}
 	} else {
 		if cfg.Delay > 0 {
