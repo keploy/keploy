@@ -256,7 +256,7 @@ func (r *Root) execute() {
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	rootCmd.PersistentFlags().Bool("version", false, "Fetch the latest version")
+	rootCmd.Flags().Bool("version", false, "Fetch the latest version")
 
 	// Manually parse flags to determine debug mode and version flag early
 	debugMode = checkForDebugFlag(os.Args[1:])
@@ -264,7 +264,7 @@ func (r *Root) execute() {
 	if versionFlag {
 		// Fetch the version and print it
 		currentVersion := utils.KeployVersion
-		fmt.Println("Current version:", currentVersion)
+		fmt.Println("Keploy: ", currentVersion)
 		return
 	}
 
