@@ -132,7 +132,7 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 	if hasChunkResponse {
 		if cfg.Delay > 0 {
 			if int64(cfg.Delay) > maxTime*numberOfChunkedMocks/1000 {
-				t.logger.Info(fmt.Sprintf("Replaysession duration provided is %ds, suggested duration to close controller after session end is %ds", int64(cfg.Delay), maxTime*numberOfChunkedMocks/1000))
+				t.logger.Warn(fmt.Sprintf("Replaysession duration provided is %ds, suggested duration is %ds", int64(cfg.Delay), maxTime*numberOfChunkedMocks/1000))
 			}
 			sleepTime = time.Duration(cfg.Delay)
 
