@@ -236,16 +236,14 @@ func chunkedResponse(chunkedTime *[]int64, chunkedLength *[]int, finalResp *[]by
 
 			// get all the chunks mapped with that time at least get the number of chunks at that time
 			if len(resp) != 0 {
-				fmt.Println("resp::::", string(resp))
 				t := time.Now().UnixMilli()
-				fmt.Println("THIS IS TIME ---", t)
 				//Get the length of the chunk <- check this
 
 				count, err := countHTTPChunks(resp)
 				if err != nil {
-					fmt.Println("Error extracting length:", err)
+					logger.Error("Error extracting length: %s", zap.Any("countHTTPChunks", err.Error()))
 				}
-				fmt.Println("Count ", count)
+				logger.Debug("Count ", zap.Any("count", count))
 				*chunkedTime = append(*chunkedTime, t)
 				*chunkedLength = append(*chunkedLength, count)
 			}
@@ -459,12 +457,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 			// Print the differences
 			if len(diffs) > 0 {
-				fmt.Println("Differences found URL: ", req.Method, ":", req.URL.String(), "Audit-id:: ", stub.Spec.HttpResp.Header["Audit-Id"], ":", color.RedString("MISMATCH"))
+				logger.Debug("Differences found URL: ", zap.Any("", req.Method+":"+req.URL.String()+"Audit-id:: "+stub.Spec.HttpResp.Header["Audit-Id"]+":"+color.RedString("MISMATCH")))
 				for _, diff := range diffs {
-					fmt.Println(diff)
+					logger.Info("difference between", zap.Any("difference", diff))
 				}
 			} else {
-				fmt.Println("No differences found.")
+				logger.Debug("No differences found")
 			}
 		}
 		var prevTime int64
@@ -476,14 +474,11 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		var watchCall bool
 		if stub.Spec.Metadata["chunkedLength"] != "" {
 			chunkedTime = getChunkTime(stub.Spec.Metadata["chunkedTime"])
-			// fmt.Println("chunkedLength Array:::", stub.Spec.Metadata["chunkedLength"])
-			// v.Spec.HttpResp.Body = ""
 
 			// Split the JSON input by newline
 			jsonObjects := strings.Split(stub.Spec.HttpResp.Body, "\n")
-			// fmt.Println("jsonObjects::::", jsonObjects)
 			// Process each JSON object
-			for i, jsonObject := range jsonObjects {
+			for _, jsonObject := range jsonObjects {
 				// Skip empty lines
 				if jsonObject == "" {
 					continue
@@ -492,11 +487,10 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				var data map[string]interface{}
 				err := json.Unmarshal([]byte(jsonObject), &data)
 				if err != nil {
-					fmt.Printf("Error decoding JSON object %d: %v\n", i+1, err)
+					logger.Error("Error decoding JSON object ", zap.Any("chunkedTime unmarshal", err.Error()))
 					continue
 				}
 				// Print or process the JSON object as needed
-				// fmt.Println("json is here for ", i, " ", jsonObject)
 				jsonSize := strconv.FormatInt(int64(len(jsonObject)), 16)
 				chunkedResponse := fmt.Sprintf("%s\r\n%s\r\n", jsonSize, jsonObject)
 				chunkedResponses = append(chunkedResponses, chunkedResponse)
@@ -650,8 +644,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 				logger.Debug("Sorry request and response are nil")
 				return
 			} else {
-				fmt.Println("Signal-finalReq:\n", string(finalReq))
-				fmt.Println("Signal-finalResp:\n", string(finalResp))
+				logger.Debug("Signal-finalReq:\n", zap.Any("finalRequest", finalReq))
+				logger.Debug("Signal-finalResp:\n", zap.Any("finalResponse", finalResp))
 				logger.Debug("Length of finalReq and finalResp"+"", zap.Any("finalReq", len(finalReq)), zap.Any("finalResp", len(finalResp)))
 				err := ParseFinalHttp(chunkedTime, chunkedLength, finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
 				if err != nil {
