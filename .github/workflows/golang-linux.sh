@@ -74,9 +74,8 @@ sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 # move keployv2 to /usr/local/bin/keploy
 mv ./../../keployv2 /usr/local/bin/keploy
 
-# replace <path for storing stubs> with /home/runner/work/keploy/keploy/samples-go/gin-mongo
 sed -i 's/<path for storing stubs>/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
-cat main_test.go
+
 # run in mockrecord mode
 go test
 
