@@ -500,18 +500,18 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			watchCall = true
 		}
 
+		var prevTime int64
+
 		for _, chunktime := range chunkedTime {
-			if chunktime < minTime {
-				minTime = chunktime
+			if (chunktime-prevTime)/int64(len(chunkedTime)) > minTime {
+				minTime = (chunktime - prevTime) / int64(len(chunkedTime))
+				prevTime = chunktime
 			}
 		}
-
 		// Calculate average
 		var averageDuration time.Duration
-		if replaySession > 0 && len(chunkedTime) > 0 {
-			averageDuration = time.Duration(replaySession / uint64(len(chunkedTime)))
-		} else if len(chunkedTime) > 0 {
-			averageDuration = time.Duration(minTime / int64(len(chunkedTime)))
+		if len(chunkedTime) > 0 {
+			averageDuration = time.Duration(minTime)
 		} else {
 			averageDuration = 0
 		}

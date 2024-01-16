@@ -80,53 +80,73 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
+	var maxTime int64
+	var hasChunkResponse bool
+	var numberOfChunkedMocks int64
 	for _, mock := range tcsMocks {
+		var chunkedTime []int64
 		tcsMock, ok := mock.(*models.Mock)
 		if !ok {
 			continue
 		}
+		if tcsMock.Spec.Metadata["chunkedLength"] != "" {
+			chunkedTime = pkg.GetChunkTime(t.logger, tcsMock.Spec.Metadata["chunkedTime"])
+			numberOfChunkedMocks++
+		}
+		var prevTime int64
+
+		if len(chunkedTime) > 0 {
+			prevTime = chunkedTime[0]
+		}
+		for _, chunktime := range chunkedTime {
+			chunkGap := (chunktime - prevTime) / int64(len(chunkedTime))
+			if chunkGap > maxTime {
+				maxTime = chunkGap
+				prevTime = chunktime
+			}
+			if !hasChunkResponse {
+				hasChunkResponse = true
+			}
+		}
 		readTcsMocks = append(readTcsMocks, tcsMock)
 	}
+
 	tcsMocks, err = cfg.YamlStore.ReadResourceVersionMocks(filepath.Join(cfg.Path, cfg.TestSet))
 	if err != nil {
 		t.logger.Error(err.Error())
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
-	var chunkedTime []int64
-	var minTime int64
+
 	for _, mock := range tcsMocks {
 		resourceVersionMock, ok := mock.(*models.Mock)
 		if !ok {
 			continue
 		}
-		if resourceVersionMock.Spec.Metadata["chunkedLength"] != "" {
-			chunkedTime = pkg.GetChunkTime(t.logger, resourceVersionMock.Spec.Metadata["chunkedTime"])
-		}
 		readTcsMocks = append(readTcsMocks, resourceVersionMock)
-	}
-
-	for _, chunktime := range chunkedTime {
-		if chunktime < minTime {
-			minTime = chunktime
-		}
 	}
 
 	// Calculate average
 	var sleepTime time.Duration
-	if cfg.Delay > 0 && len(chunkedTime) > 0 {
-		if minTime/int64(len(chunkedTime)) < int64(cfg.Delay) {
-			t.logger.Error(fmt.Sprintf("Replay session duration provided is too long. Session duration replay can maximum be %ds", minTime/(int64(len(chunkedTime)*1000))))
+
+	if hasChunkResponse {
+		if cfg.Delay > 0 {
+			if int64(cfg.Delay) > maxTime*numberOfChunkedMocks/1000 {
+				t.logger.Info(fmt.Sprintf("Replaysession duration provided is %ds, suggested duration to close controller after session end is %ds", int64(cfg.Delay), maxTime*numberOfChunkedMocks/1000))
+			}
+			sleepTime = time.Duration(cfg.Delay)
+
+		} else {
+			sleepTime = time.Duration(maxTime * numberOfChunkedMocks / 1000)
+		}
+	} else {
+		if cfg.Delay > 0 {
+			t.logger.Error("No chunk response found kindly record")
 			return returnVal
 		} else {
-			sleepTime = time.Duration(cfg.Delay / uint64(len(chunkedTime)))
+			sleepTime = time.Duration(5 * numberOfChunkedMocks)
 		}
-	} else if len(chunkedTime) > 0 {
-		sleepTime = time.Duration(minTime / int64(len(chunkedTime)))
-	} else {
-		sleepTime = 10
 	}
-
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
 	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
