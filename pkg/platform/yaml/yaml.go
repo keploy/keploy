@@ -377,6 +377,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 			if mock.Spec.Metadata["type"] != "config" {
 				tcsMocks = append(tcsMocks, mock)
 			}
+			//if postgres type confgi
 		}
 	}
 	filteredMocks := make([]platform.KindSpecifier, 0)
