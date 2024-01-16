@@ -19,6 +19,7 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
+			fmt.Println("reached here")
 			logger.Error("failed to extract the section of the recieved mongo request message", zap.Error(err), zap.Any("the section", v))
 			return false
 		}
@@ -71,6 +72,7 @@ func handleScramAuth(actualRequestSections, expectedRequestSections []string, re
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
+			fmt.Println("reached there")
 			logger.Error("failed to extract the section of the recieved mongo request message", zap.Error(err))
 			return "", false, err
 		}
@@ -211,7 +213,7 @@ func extractMsgFromSection(section string) (map[string]interface{}, error) {
 			return nil, err
 		}
 	}
-	
+
 	var result map[string]interface{}
 	err = json.Unmarshal([]byte(sectionStr), &result)
 	if err != nil {
