@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,4 +185,20 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 func GetUnixMilliTime(parsedTime time.Time) int64 {
 	unixTimestamp := parsedTime.UnixMilli()
 	return unixTimestamp
+}
+
+func GetChunkTime(logger *zap.Logger, strArray string) []int64 {
+
+	// Remove brackets and split the string into individual elements
+	strArray = strings.Trim(strArray, "[]")
+	elements := strings.Fields(strArray)
+	var timeline []int64
+	for _, element := range elements {
+		num, err := strconv.ParseInt(element, 10, 64)
+		if err != nil {
+			logger.Error("Error parsing element:", zap.Any("numberParseError", err.Error()))
+		}
+		timeline = append(timeline, num)
+	}
+	return timeline
 }

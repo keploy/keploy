@@ -98,22 +98,6 @@ func ExtractChunkLength(chunkStr string) (int, error) {
 	return Totalsize, nil
 }
 
-func getChunkTime(strArray string) []int64 {
-
-	// Remove brackets and split the string into individual elements
-	strArray = strings.Trim(strArray, "[]")
-	elements := strings.Fields(strArray)
-	var timeline []int64
-	for _, element := range elements {
-		num, err := strconv.ParseInt(element, 10, 64)
-		if err != nil {
-			fmt.Println("Error parsing element:", err)
-		}
-		timeline = append(timeline, num)
-	}
-	return timeline
-}
-
 // countHTTPChunks takes a buffer containing a chunked HTTP response and returns the total number of chunks.
 func countHTTPChunks(buffer []byte) (int, error) {
 	reader := bufio.NewReader(bytes.NewReader(buffer))

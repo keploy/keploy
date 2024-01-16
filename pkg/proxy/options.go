@@ -9,5 +9,6 @@ type Option struct {
 	MtlsKeyPath   string
 	MtlsHostName  string
 	BaseUrl       string
-	MockAssert	bool
+	MockAssert    bool
+	ReplaySession uint64
 }

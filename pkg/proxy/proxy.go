@@ -310,7 +310,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
 	Register("mongo", mongoparser.NewMongoParser(logger, h, opt.MongoPassword))
-	Register("http", httpparser.NewHttpParser(logger, h, opt.BaseUrl, opt.MockAssert))
+	Register("http", httpparser.NewHttpParser(logger, h, opt.BaseUrl, opt.MockAssert, opt.ReplaySession))
 	Register("mysql", mysqlparser.NewMySqlParser(logger, h, delay))
 	// assign default values if not provided
 	caPaths, err := getCaPaths()

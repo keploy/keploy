@@ -93,29 +93,38 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		returnVal.InitialStatus = models.TestRunStatusFailed
 		return returnVal
 	}
-	var sessionStartTime, sessionEndTime int64
-	sessionStartTime = pkg.GetUnixMilliTime(time.Now())
+	var chunkedTime []int64
+	var minTime int64
 	for _, mock := range tcsMocks {
 		resourceVersionMock, ok := mock.(*models.Mock)
 		if !ok {
 			continue
 		}
-		if sessionStartTime > pkg.GetUnixMilliTime(resourceVersionMock.Spec.ReqTimestampMock) {
-			sessionStartTime = pkg.GetUnixMilliTime(resourceVersionMock.Spec.ReqTimestampMock)
-		}
-		if sessionEndTime < pkg.GetUnixMilliTime(resourceVersionMock.Spec.ResTimestampMock) {
-			sessionEndTime = pkg.GetUnixMilliTime(resourceVersionMock.Spec.ResTimestampMock)
+		if resourceVersionMock.Spec.Metadata["chunkedLength"] != "" {
+			chunkedTime = pkg.GetChunkTime(t.logger, resourceVersionMock.Spec.Metadata["chunkedTime"])
 		}
 		readTcsMocks = append(readTcsMocks, resourceVersionMock)
 	}
 
-	if (uint64(sessionEndTime-sessionStartTime) / 1000) < cfg.Delay {
-		t.logger.Error(fmt.Sprintf("Replay session duration exceeds the recorded session duration. Recorded session is %ds, replay session should be within this limit", (sessionEndTime-sessionStartTime)/1000))
-		return returnVal
+	for _, chunktime := range chunkedTime {
+		if chunktime < minTime {
+			minTime = chunktime
+		}
 	}
 
-	if cfg.Delay == 0 {
-		cfg.Delay = uint64(sessionEndTime-sessionStartTime) / 1000
+	// Calculate average
+	var sleepTime time.Duration
+	if cfg.Delay > 0 && len(chunkedTime) > 0 {
+		if minTime/int64(len(chunkedTime)) < int64(cfg.Delay) {
+			t.logger.Error(fmt.Sprintf("Replay session duration provided is too long. Session duration replay can maximum be %ds", minTime/(int64(len(chunkedTime)*1000))))
+			return returnVal
+		} else {
+			sleepTime = time.Duration(cfg.Delay / uint64(len(chunkedTime)))
+		}
+	} else if len(chunkedTime) > 0 {
+		sleepTime = time.Duration(minTime / int64(len(chunkedTime)))
+	} else {
+		sleepTime = 10
 	}
 
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
@@ -147,6 +156,6 @@ func (t *tester) InitialiseRunMockAssert(cfg *RunTestSetConfig) InitialiseRunTes
 		}
 	}
 
-	time.Sleep(time.Duration(cfg.Delay) * time.Second)
+	time.Sleep(time.Duration(sleepTime) * time.Second)
 	return returnVal
 }

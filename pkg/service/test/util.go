@@ -61,6 +61,7 @@ type TestConfig struct {
 	EnableTele         bool
 	MockAssert         bool
 	BaseUrl            string
+	ReplaySession      uint64
 }
 
 type RunTestSetConfig struct {

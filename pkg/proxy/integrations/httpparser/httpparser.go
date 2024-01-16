@@ -29,10 +29,11 @@ import (
 )
 
 type HttpParser struct {
-	logger     *zap.Logger
-	hooks      *hooks.Hook
-	baseUrl    string
-	MockAssert bool
+	logger        *zap.Logger
+	hooks         *hooks.Hook
+	baseUrl       string
+	MockAssert    bool
+	ReplaySession uint64
 }
 
 // ProcessOutgoing implements proxy.DepInterface.
@@ -46,19 +47,20 @@ func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net
 		}
 
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger, http.baseUrl, http.MockAssert)
+		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger, http.baseUrl, http.MockAssert, http.ReplaySession)
 	default:
 		http.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
 
-func NewHttpParser(logger *zap.Logger, h *hooks.Hook, baseUrl string, mockAssert bool) *HttpParser {
+func NewHttpParser(logger *zap.Logger, h *hooks.Hook, baseUrl string, mockAssert bool, replaySession uint64) *HttpParser {
 	return &HttpParser{
-		logger:     logger,
-		hooks:      h,
-		baseUrl:    baseUrl,
-		MockAssert: mockAssert,
+		logger:        logger,
+		hooks:         h,
+		baseUrl:       baseUrl,
+		MockAssert:    mockAssert,
+		ReplaySession: replaySession,
 	}
 }
 
@@ -354,7 +356,7 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, baseUrl string, mockAssert bool) {
+func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, baseUrl string, mockAssert bool, replaySession uint64) {
 	//Matching algorithmm
 	//Get the mocks
 	tcsMocks, err := h.GetTcsMocks()
@@ -465,15 +467,15 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				logger.Debug("No differences found")
 			}
 		}
-		var prevTime int64
-		prevTime = pkg.GetUnixMilliTime(stub.Spec.ReqTimestampMock)
+		var minTime int64
+		minTime = pkg.GetUnixMilliTime(stub.Spec.ReqTimestampMock)
 		//calculate chunk time
 
 		var chunkedResponses []string
 		var chunkedTime []int64
 		var watchCall bool
 		if stub.Spec.Metadata["chunkedLength"] != "" {
-			chunkedTime = getChunkTime(stub.Spec.Metadata["chunkedTime"])
+			chunkedTime = pkg.GetChunkTime(logger, stub.Spec.Metadata["chunkedTime"])
 
 			// Split the JSON input by newline
 			jsonObjects := strings.Split(stub.Spec.HttpResp.Body, "\n")
@@ -497,21 +499,21 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			}
 			watchCall = true
 		}
-		var totalSum float64
 
 		for _, chunktime := range chunkedTime {
-			// Add to total sum
-			totalSum += float64(chunktime - prevTime)
-			// Update prevTime for the next iteration
-			prevTime = chunktime
+			if chunktime < minTime {
+				minTime = chunktime
+			}
 		}
 
 		// Calculate average
 		var averageDuration time.Duration
-		if len(chunkedTime) > 0 {
-			averageDuration = time.Duration(totalSum / float64(len(chunkedTime)))
+		if replaySession > 0 && len(chunkedTime) > 0 {
+			averageDuration = time.Duration(replaySession / uint64(len(chunkedTime)))
+		} else if len(chunkedTime) > 0 {
+			averageDuration = time.Duration(minTime / int64(len(chunkedTime)))
 		} else {
-			averageDuration = 0 // or handle the case of no elements as you see fit
+			averageDuration = 0
 		}
 
 		// Fetching the response headers

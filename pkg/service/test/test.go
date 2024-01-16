@@ -142,7 +142,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		returnVal.LoadedHooks.Stop(true)
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
-		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword, BaseUrl: cfg.BaseUrl, MockAssert: cfg.MockAssert}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
+		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword, BaseUrl: cfg.BaseUrl, MockAssert: cfg.MockAssert, ReplaySession: cfg.ReplaySession}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
 	}
 
 	// proxy update its state in the ProxyPorts map
@@ -217,6 +217,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		CoverageReportPath: options.CoverageReportPath,
 		EnableTele:         enableTele,
 		MockAssert:         mockAssert,
+		ReplaySession:      options.ReplaySession,
 	}
 
 	initialisedValues, err := t.InitialiseTest(cfg)
