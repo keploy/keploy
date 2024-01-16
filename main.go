@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	_ "net/http/pprof"
-	"strings"
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
@@ -37,7 +36,6 @@ func main() {
 	}
 	utils.KeployVersion = version
 	fmt.Println(logo, " ")
-	// fmt.Printf("version: %v\n\n", version)  We will no longer print the version on startup.
 	releaseInfo, err2 := utils.GetLatestGitHubRelease()
 	if err2 != nil {
 		log.Debug("Failed to fetch latest release version", err2)
@@ -50,7 +48,7 @@ func main() {
 	   │ Run %v to update         │
 	   ╰─────────────────────────────────────╯
 	`
-	versionmsg := fmt.Sprintf(msg, strings.TrimSpace(version), strings.TrimSpace(releaseInfo.TagName), updatetext)
+	versionmsg := fmt.Sprintf(msg, version, releaseInfo.TagName, updatetext)
 	if releaseInfo.TagName != version {
 		fmt.Printf(versionmsg)
 	}
