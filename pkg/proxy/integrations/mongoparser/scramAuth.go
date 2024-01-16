@@ -19,7 +19,6 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
-			fmt.Println("reached here")
 			logger.Error("failed to extract the section of the recieved mongo request message", zap.Error(err), zap.Any("the section", v))
 			return false
 		}
