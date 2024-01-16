@@ -1,0 +1,5 @@
+🐰 Keploy: 2024-01-16T09:58:25Z 	[31mERROR[0m	failed to get the record config from config file due to error: %s	{"error": "yaml: unmarshal errors:\n  line 10: cannot unmarshal !!str `8080, 9000` into []uint"}
+🐰 Keploy: 2024-01-16T09:58:25Z 	[34mINFO[0m	You have probably edited the config file incorrectly. Please follow the guide below.
+🐰 Keploy: 2024-01-16T09:58:25Z 	[31mERROR[0m	missing required -c flag or appCmd in config file
+🐰 Keploy: 2024-01-16T09:58:25Z 	[34mINFO[0m	Example usage:sudo -E env PATH=$PATH keploy record -c "/path/to/user/app"
+🐰 Keploy: 2024-01-16T09:58:25Z 	[31mERROR[0m	failed to start the CLI.	{"error": "missing required -c flag or appCmd in config file"}
