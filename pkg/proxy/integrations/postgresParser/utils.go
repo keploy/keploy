@@ -593,7 +593,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 
 	if isMatched {
 		logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
-		if matchedInUnfilteredMocks {
+		if !matchedInUnfilteredMocks {
 			matchedMock.TestModeInfo["isFiltered"] = false
 			matchedMock.TestModeInfo["SortOrder"] = math.MaxInt64
 			h.UpdateConfigMock(matchedMock)
