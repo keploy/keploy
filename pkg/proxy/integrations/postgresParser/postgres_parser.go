@@ -284,6 +284,15 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						MsgType:             pg.BackendWrapper.MsgType,
 						AuthType:            pg.BackendWrapper.AuthType,
 					}
+					after_encoded, err := PostgresDecoderBackend(*pg_mock)
+					if err != nil {
+						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
+					}
+
+					if len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "p" {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
+						pg_mock.Payload = bufStr
+					}
 					pgRequests = append(pgRequests, *pg_mock)
 
 				}
@@ -494,11 +503,11 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		}
 
 		if !matched {
-			// _, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)
-			// if err != nil {
-			// 	logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
-			// 	return err
-			// }
+			_, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)
+			if err != nil {
+				logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
+				return err
+			}
 			continue
 		}
 		for _, pgResponse := range pgResponses {
