@@ -285,8 +285,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
 			}, enableTele) {
-				t.logger.Error("failed to run the test")
-				return errors.New("failed to run the test")
+				os.Exit(1)
 			}
 
 			return nil
