@@ -72,7 +72,6 @@ func handleScramAuth(actualRequestSections, expectedRequestSections []string, re
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
-			fmt.Println("reached there")
 			logger.Error("failed to extract the section of the recieved mongo request message", zap.Error(err))
 			return "", false, err
 		}
@@ -206,19 +205,19 @@ var decodeBase64Str func(s string) ([]byte, error) = base64.StdEncoding.DecodeSt
 func extractMsgFromSection(section string) (map[string]interface{}, error) {
 	var err error
 	var sectionStr string
+	var result map[string]interface{}
 
 	if strings.HasPrefix(section, "{ SectionSingle msg:") {
 		sectionStr, err = extractSectionSingle(section)
 		if err != nil {
 			return nil, err
 		}
+		err = json.Unmarshal([]byte(sectionStr), &result)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	var result map[string]interface{}
-	err = json.Unmarshal([]byte(sectionStr), &result)
-	if err != nil {
-		return nil, err
-	}
 	return result, nil
 }
 
