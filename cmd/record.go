@@ -151,6 +151,23 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("failed to read the disable telemetry flag")
 				return err
 			}
+			//add flag for mtls cert path
+			mtlsCertPath, err := cmd.Flags().GetString("mtls-cert-path")
+			if err != nil {
+				r.logger.Error("failed to read the mtls cert path")
+				return err
+			}
+			//add flag for mtls key path
+			mtlsKeyPath, err := cmd.Flags().GetString("mtls-key-path")
+			if err != nil {
+				r.logger.Error("failed to read the mtls key path")
+				return err
+			}
+			mtlsHostName, err := cmd.Flags().GetString("mtls-host-name")
+			if err != nil {
+				r.logger.Error("failed to read the mtls host name")
+				return err
+			}
 
 			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, configPath)
 			if err != nil {
@@ -210,7 +227,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, mtlsCertPath, mtlsKeyPath, mtlsHostName)
 			return nil
 		},
 	}
@@ -233,6 +250,12 @@ func (r *Record) GetCmd() *cobra.Command {
 
 	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
+	recordCmd.Flags().String("mtls-cert-path", "", "Path to the local directory where mtls cert file is stored")
+	
+	recordCmd.Flags().String("mtls-key-path", "", "Path to the local directory where mtls key file is stored")
+	
+	recordCmd.Flags().String("mtls-host-name", "", "Host name for mtls")
+	
 	recordCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 	recordCmd.Flags().MarkHidden("enableTele")
 

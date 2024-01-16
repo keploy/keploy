@@ -59,6 +59,9 @@ type TestConfig struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	EnableTele         bool
+	MockAssert         bool
+	BaseUrl            string
+	ReplaySession      uint64
 }
 
 type RunTestSetConfig struct {

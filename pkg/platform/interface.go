@@ -11,6 +11,7 @@ type TestCaseDB interface {
 	ReadTestcase(path string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
 	ReadTcsMocks(tc KindSpecifier, path string) ([]KindSpecifier, error)
 	ReadConfigMocks(path string) ([]KindSpecifier, error)
+	ReadResourceVersionMocks(path string) ([]KindSpecifier, error)
 }
 
 type TestReportDB interface {

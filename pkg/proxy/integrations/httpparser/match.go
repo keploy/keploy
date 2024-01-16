@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func match(req *http.Request, reqBody []byte, reqURL *url.URL, isReqBodyJSON bool, h *hooks.Hook, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer []byte, recover func(id int)) (bool, *models.Mock, error) {
+func match(req *http.Request, reqBody []byte, reqURL *url.URL, isReqBodyJSON bool, h *hooks.Hook, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer []byte, recover func(id int), mockAssert bool) (bool, *models.Mock, error) {
 	for {
 		tcsMocks, err := h.GetTcsMocks()
 		if err != nil {
@@ -71,7 +71,7 @@ func match(req *http.Request, reqBody []byte, reqURL *url.URL, isReqBodyJSON boo
 		}
 
 		isMatched, bestMatch := Fuzzymatch(eligibleMock, requestBuffer, h)
-		if isMatched {
+		if isMatched && !mockAssert {
 			isDeleted, err := h.DeleteTcsMock(bestMatch)
 			if err != nil {
 				return false, nil, fmt.Errorf("error while deleting tcs mocks: %v", err)

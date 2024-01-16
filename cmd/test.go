@@ -172,9 +172,36 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			replaySession, err := cmd.Flags().GetUint64("replaySession")
+			if err != nil {
+				t.logger.Error("failed to read the replaySession")
+				return err
+			}
+
 			enableTele, err := cmd.Flags().GetBool("enableTele")
 			if err != nil {
 				t.logger.Error("failed to read the disable telemetry flag")
+				return err
+			}
+
+			mockAssert, err := cmd.Flags().GetBool("mockAssert")
+			if err != nil {
+				t.logger.Error("failed to read the mock asserion flag")
+				return err
+			}
+			if mockAssert {
+				err := CreateFakekubeConfig(t.logger)
+				if err != nil {
+					t.logger.Error("failed to create fake kube config", zap.Error(err))
+					return err
+				} else {
+					appCmd += " -kubeconfig=kube-config"
+				}
+			}
+
+			baseUrl, err := cmd.Flags().GetString("baseUrl")
+			if err != nil {
+				t.logger.Error("failed to read the base url flag for mock asserion")
 				return err
 			}
 
@@ -275,6 +302,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				AppContainer:       appContainer,
 				AppNetwork:         networkName,
 				MongoPassword:      mongoPassword,
+				BaseUrl:            baseUrl, // for mock assertion
 				Delay:              delay,
 				BuildDelay:         buildDelay,
 				PassThroughPorts:   ports,
@@ -284,7 +312,8 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
-			}, enableTele)
+				ReplaySession:      replaySession,
+			}, enableTele, mockAssert)
 
 			return nil
 		},
@@ -303,11 +332,18 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 	testCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 
+	testCmd.Flags().Uint64("replaySession", 0, "Duration to repeat the recorded session")
+
 	testCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build")
 
 	testCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
 
 	testCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
+
+	testCmd.Flags().Bool("mockAssert", false, "Mock Assert")
+	testCmd.Flags().MarkHidden("mockAssert")
+
+	testCmd.Flags().String("baseUrl", "", "Base Url for mock assertion")
 
 	testCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
 
@@ -324,4 +360,63 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.SilenceErrors = true
 
 	return testCmd
+}
+
+func CreateFakekubeConfig(log *zap.Logger) error {
+	currentDir, err := os.Getwd()
+	if err != nil {
+		log.Error("Error getting current directory:", zap.Error(err))
+		return err
+	}
+
+	// Check if 'config' file already exists
+	configFilePath := filepath.Join(currentDir, "kube-config")
+	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+		// 'config' file doesn't exist, create it
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			log.Error("Error getting user home directory:", zap.Error(err))
+			return err
+		}
+
+		// Create the 'config.yaml' file with the specified content
+		configContent := fmt.Sprintf(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: %s/.minikube/ca.crt
+    extensions:
+    - extension:
+        last-update: Tue, 16 Jan 2024 08:56:35 UTC
+        provider: minikube.sigs.k8s.io
+        version: v1.32.0
+      name: cluster_info
+    server: https://192.168.49.2:8443
+  name: minikube
+contexts:
+- context:
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
+kind: Config
+preferences: {}
+users:
+- name: minikube
+  user:
+    client-certificate: %s/.minikube/profiles/minikube/client.crt
+    client-key: %s/.minikube/profiles/minikube/client.key
+`, homeDir, homeDir, homeDir)
+
+		err = os.WriteFile(configFilePath, []byte(configContent), 0644)
+		if err != nil {
+			log.Error("Error creating 'kube-config' file:", zap.Error(err))
+			return err
+		}
+
+		log.Debug("'config' file created successfully.")
+	} else {
+		log.Debug("'config' file already exists.")
+	}
+	return nil
 }
