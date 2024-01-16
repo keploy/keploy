@@ -3,6 +3,7 @@ package postgresparser
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"math"
 	"sort"
 
 	"errors"
@@ -442,7 +443,17 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 
 	tcsMocks, err := h.GetConfigMocks()
 	sort.Slice(tcsMocks, func(i, j int) bool {
-		return tcsMocks[i].SortOrder < tcsMocks[j].SortOrder
+		sortOrderI, okI := tcsMocks[i].TestModeInfo["SortOrder"]
+		sortOrderJ, okJ := tcsMocks[j].TestModeInfo["SortOrder"]
+		if !okI || !okJ {
+			return false
+		}
+		sortOrderInt64I, isInt64I := sortOrderI.(int64)
+		sortOrderInt64J, isInt64J := sortOrderJ.(int64)
+		if !isInt64I || !isInt64J {
+			return false
+		}
+		return sortOrderInt64I < sortOrderInt64J
 	})
 
 	if err != nil {
@@ -459,7 +470,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 		}
 
 		if sortFlag {
-			if mock.Name == "mock-0" {
+			if mock.TestModeInfo["isFiltered"] == false {
 				sortFlag = false
 			} else {
 				sortedTcsMocks = append(sortedTcsMocks, mock)
@@ -566,6 +577,8 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 		}
 	}
 
+	var matchedInUnfilteredMocks bool
+
 	if !isMatched {
 		isSorted = false
 		idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
@@ -573,10 +586,18 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			isMatched = true
 			matchedMock = tcsMocks[idx]
 		}
+		if isMatched {
+			matchedInUnfilteredMocks = true
+		}
 	}
 
 	if isMatched {
 		logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
+		if matchedInUnfilteredMocks {
+			matchedMock.TestModeInfo["isFiltered"] = false
+			matchedMock.TestModeInfo["SortOrder"] = math.MaxInt64
+			h.UpdateConfigMock(matchedMock)
+		}
 		return true, matchedMock.Spec.PostgresResponses, nil
 	}
 	return false, nil, nil

@@ -171,6 +171,14 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) error {
 	return nil
 }
 
+func (h *Hook) UpdateConfigMock(m *models.Mock) error {
+	err := h.localDb.insert(configMockTable, m)
+	if err != nil {
+		return fmt.Errorf("error while inserting config-mock into localDb: %v", err)
+	}
+	return nil
+}
+
 func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
 	it, err := h.localDb.getAll(mockTable, mockTableIndex)
 	if err != nil {

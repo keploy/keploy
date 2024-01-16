@@ -156,6 +156,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	}
 
 	sessions, err := yaml.ReadSessionIndices(cfg.Path, t.logger)
+	fmt.Println(sessions)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return returnVal, err
@@ -339,7 +340,15 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		return returnVal
 	}
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
-	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
+	fakeTestCase := models.TestCase{
+		Name:     "fake-tc",
+		HttpReq:  models.HttpReq{Timestamp: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
+		HttpResp: models.HttpResp{Timestamp: time.Now()},
+	}
+	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
+	fmt.Println("testing")
+	fmt.Println(sortedConfigMocks[0].TestModeInfo)
+	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
