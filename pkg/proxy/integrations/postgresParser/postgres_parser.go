@@ -356,7 +356,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 							row := pgproto3.DataRow{
 								RowValues: valuesCopy, // Use the copy of the values
 							}
-							// fmt.Println("row is ", row)
 							dataRows = append(dataRows, row)
 						}
 					}

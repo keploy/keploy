@@ -2,7 +2,6 @@ package mocktest
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -104,7 +103,7 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
+	<-stopper
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 

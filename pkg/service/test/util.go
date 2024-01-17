@@ -3,7 +3,6 @@ package test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"reflect"
@@ -168,7 +167,6 @@ func Flatten(j interface{}) map[string][]string {
 			}
 		}
 	default:
-		fmt.Println(Emoji, "found invalid value in json", j, x.Kind())
 	}
 	return o
 }

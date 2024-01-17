@@ -912,3 +912,7 @@ func platformPrefix(symbol string) string {
 
 	return fmt.Sprintf("__%s_%s", prefix, symbol)
 }
+
+func (h *Hook) GetLogger() *zap.Logger {
+	return h.logger
+}

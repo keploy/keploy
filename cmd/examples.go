@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -110,10 +108,10 @@ func (e *Example) GetCmd() *cobra.Command {
 				return err
 			}
 			if customSetup {
-				fmt.Println(examples)
+				e.logger.Info(examples)
 			} else {
-				fmt.Println(exampleOneClickInstall)
-				fmt.Println(withoutexampleOneClickInstall)
+				e.logger.Info(exampleOneClickInstall)
+				e.logger.Info(withoutexampleOneClickInstall)
 			}
 			return nil
 		},

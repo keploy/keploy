@@ -74,7 +74,6 @@ func Flatten(j interface{}) map[string][]string {
 			}
 		}
 	default:
-		fmt.Println(Emoji, "found invalid value in json", j, x.Kind())
 	}
 	return o
 }
@@ -264,7 +263,6 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 	}
 
 	for _, v := range files {
-		// fmt.Println("name for the file", v.Name())
 		fileName := filepath.Base(v.Name())
 		fileNamePackets := strings.Split(fileName, "-")
 		if len(fileNamePackets) == 3 {

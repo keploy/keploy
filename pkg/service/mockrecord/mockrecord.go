@@ -2,7 +2,6 @@ package mockrecord
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -51,7 +50,7 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 		s.logger.Error("error while creating hooks", zap.Error(err))
 		return
 	}
-	
+
 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}
@@ -68,7 +67,7 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
+	<-stopper
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 	//Call the telemetry events.
