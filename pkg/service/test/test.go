@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,7 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"net/url"
+
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/pkg"
@@ -222,7 +223,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	}
 	// Check if no testset found
 	if len(initialisedValues.Sessions) == 0 {
-		t.logger.Info("no testcases found. Use record mode to record testcases.")
+		t.logger.Info("no testcases found. Use record command to record testcases.")
 	}
 	for _, sessionIndex := range initialisedValues.Sessions {
 		// checking whether the provided testset match with a recorded testset.
