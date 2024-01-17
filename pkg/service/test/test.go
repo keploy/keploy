@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -346,9 +347,10 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		HttpResp: models.HttpResp{Timestamp: time.Now()},
 	}
 	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
-	fmt.Println("testing")
-	fmt.Println(sortedConfigMocks[0].TestModeInfo)
 	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
+	sort.SliceStable(readTcsMocks, func(i, j int) bool {
+		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+	})
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
@@ -613,6 +615,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			readTcsMocks = append(readTcsMocks, tcsmock)
 		}
 		readTcsMocks, _ = FilterMocks(tc, readTcsMocks, t.logger)
+		sort.SliceStable(readTcsMocks, func(i, j int) bool {
+			return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+		})
 		loadedHooks.SetTcsMocks(readTcsMocks)
 
 		// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top

@@ -384,7 +384,6 @@ func Contains(elems []string, v string) bool {
 // and are order by the request timestamp in ascending order
 // Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
 func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*models.Mock {
-	fmt.Println("reached here")
 	filteredMocks, unFilteredMocks := FilterMocks(tc, m, logger)
 	// Sort the filtered mocks based on the request timestamp
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
@@ -403,9 +402,8 @@ func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*mod
 	// Append the unfiltered mocks to the filtered mocks
 	sortedMocks := append(filteredMocks, unFilteredMocks...)
 	// logger.Info("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
-	for idx, v := range sortedMocks {
+	for _, v := range sortedMocks {
 		logger.Debug("sorted mocks", zap.Any("testcase", tc.Name), zap.Any("mocks", v))
-		sortedMocks[idx].TestModeInfo["SortOrder"] = int64(idx) + 1
 	}
 
 	return sortedMocks
@@ -429,24 +427,18 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
 			logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
-			testModeInfo := make(map[string]interface{})
-			testModeInfo["isFiltered"] = true
-			mock.TestModeInfo = testModeInfo
+			mock.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, mock)
 			continue
 		}
 
 		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
 		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
+			mock.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, mock)
-			testModeInfo := make(map[string]interface{})
-			testModeInfo["isFiltered"] = true
-			mock.TestModeInfo = testModeInfo
 			continue
 		}
-		testModeInfo := make(map[string]interface{})
-		testModeInfo["isFiltered"] = false
-		mock.TestModeInfo = testModeInfo
+		mock.TestModeInfo.IsFiltered = false
 		unFilteredMocks = append(unFilteredMocks, mock)
 	}
 	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", filteredMocks))
