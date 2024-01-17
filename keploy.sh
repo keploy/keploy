@@ -9,14 +9,13 @@ installKeploy() {
     COLIMA_INPUT=""
     LINUX_INPUT=""
 
-    for arg in "$@";
-    do
+    for arg in "$@"; do
         case $arg in
-            -isCI)
-                IS_CI=true
-                shift
+        -isCI)
+            IS_CI=true
+            shift
             ;;
-            *)
+        *)
             ;;
         esac
     done
@@ -26,10 +25,12 @@ installKeploy() {
         source "$CACHE_FILE"
     fi
 
+    # Function to prompt and store user input in cache
     prompt_and_store_input() {
         local input_var_name=$1
         local prompt_message=$2
 
+        # Check if the variable is already set in the cache
         if [ -z "${!input_var_name}" ]; then
             echo -n "$prompt_message"
             read user_input

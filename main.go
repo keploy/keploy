@@ -35,36 +35,38 @@ func main() {
 	if version == "" {
 		version = "2-dev"
 	}
-	utils.KeployVersion = version
-	fmt.Println(logo, " ")
-	fmt.Printf("version: %v\n\n", version)
-	releaseInfo, err2 := utils.GetLatestGitHubRelease()
-	if err2 != nil {
-		log.Debug("Failed to fetch latest release version", err2)
-	}
-	updatetext := models.HighlightStringGray("keploy update")
-	const msg string = `
-	   ╭─────────────────────────────────────╮
-	   │ New version available:              │		
-	   │ %v  ---->   %v       │
-	   │ Run %v to update         │
-	   ╰─────────────────────────────────────╯
-	`
-	versionmsg := fmt.Sprintf(msg, strings.TrimSpace(version), strings.TrimSpace(releaseInfo.TagName), updatetext)
-	if releaseInfo.TagName != version {
-		fmt.Printf(versionmsg)
-	}
 
-	//Initialise sentry.
+	// Initialize sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
 		TracesSampleRate: 1.0,
 	})
-	//Set the version
+	// Set the version
 	utils.KeployVersion = version
 	log.Level = 0
 	if err != nil {
-		log.Debug("Could not initialise sentry.", err)
+		log.Debug("Could not initialize sentry.", err)
+	} else {
+		// Check for the latest release version
+		releaseInfo, err := utils.GetLatestGitHubRelease()
+		if err != nil {
+			log.Debug("Failed to fetch the latest release version", err)
+			return
+		}
+
+		// Show update message only if it's not a dev version
+		if releaseInfo.TagName != version && !strings.HasSuffix(version, "-dev") {
+			updatetext := models.HighlightGrayString("keploy update")
+			const msg string = `
+           ╭─────────────────────────────────────╮
+           │ New version available:              │
+           │ %v  ---->   %v       │
+           │ Run %v to update         │
+           ╰─────────────────────────────────────╯
+        `
+			versionmsg := fmt.Sprintf(msg, version, releaseInfo.TagName, updatetext)
+			fmt.Printf(versionmsg)
+		}
 	}
 	defer utils.HandlePanic()
 	defer sentry.Flush(2 * time.Second)
