@@ -89,7 +89,6 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 			}
 		}
 	}
-
 	return nil
 }
 
