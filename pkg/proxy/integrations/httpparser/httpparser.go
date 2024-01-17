@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -801,37 +802,42 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		}
 	}
 	if !passthroughHost {
-		err = h.AppendMocks(&models.Mock{
-			Version: models.GetVersion(),
-			Name:    "mocks",
-			Kind:    models.HTTP,
-			Spec: models.MockSpec{
-				Metadata: meta,
-				HttpReq: &models.HttpReq{
-					Method:     models.Method(req.Method),
-					ProtoMajor: req.ProtoMajor,
-					ProtoMinor: req.ProtoMinor,
-					URL:        req.URL.String(),
-					Header:     pkg.ToYamlHttpHeader(req.Header),
-					Body:       string(reqBody),
-					URLParams:  pkg.UrlParams(req),
-					Host:       req.Host,
+		go func() {
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+			defer utils.HandlePanic()
+			err := h.AppendMocks(&models.Mock{
+				Version: models.GetVersion(),
+				Name:    "mocks",
+				Kind:    models.HTTP,
+				Spec: models.MockSpec{
+					Metadata: meta,
+					HttpReq: &models.HttpReq{
+						Method:     models.Method(req.Method),
+						ProtoMajor: req.ProtoMajor,
+						ProtoMinor: req.ProtoMinor,
+						URL:        req.URL.String(),
+						Header:     pkg.ToYamlHttpHeader(req.Header),
+						Body:       string(reqBody),
+						URLParams:  pkg.UrlParams(req),
+						Host:       req.Host,
+					},
+					HttpResp: &models.HttpResp{
+						StatusCode: respParsed.StatusCode,
+						Header:     pkg.ToYamlHttpHeader(respParsed.Header),
+						Body:       string(respBody),
+					},
+					Created:          time.Now().Unix(),
+					ReqTimestampMock: reqTimestampMock,
+					ResTimestampMock: resTimestampcMock,
 				},
-				HttpResp: &models.HttpResp{
-					StatusCode: respParsed.StatusCode,
-					Header:     pkg.ToYamlHttpHeader(respParsed.Header),
-					Body:       string(respBody),
-				},
-				Created:          time.Now().Unix(),
-				ReqTimestampMock: reqTimestampMock,
-				ResTimestampMock: resTimestampcMock,
-			},
-		}, ctx)
+			}, ctx)
 
-		if err != nil {
-			logger.Error("failed to store the http mock", zap.Error(err))
-			return err
-		}
+			if err != nil {
+				logger.Error("failed to store the http mock", zap.Error(err))
+			}
+		}()
+
 	}
 	return nil
 }
