@@ -396,6 +396,10 @@ func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*mod
 		return unFilteredMocks[i].Spec.ReqTimestampMock.Before(unFilteredMocks[j].Spec.ReqTimestampMock)
 	})
 
+	if len(unFilteredMocks) > 10 {
+		unFilteredMocks = unFilteredMocks[:10]
+	}
+
 	// Append the unfiltered mocks to the filtered mocks
 	sortedMocks := append(filteredMocks, unFilteredMocks...)
 	// logger.Info("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
