@@ -489,11 +489,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		if err != nil {
 			logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 		}
-
 		if !isMatched {
 			passthroughHost := false
-			for _, host := range models.PassThroughHosts {
-				if req.Host == host {
+			passthroughHosts := models.PassThroughHosts
+			passthroughHosts = append(passthroughHosts, h.GetProxyHost()...)
+			for _, host := range passthroughHosts {
+				if req.Host == host || req.URL.String() == host {
 					passthroughHost = true
 				}
 			}
@@ -796,8 +797,10 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		"operation": req.Method,
 	}
 	passthroughHost := false
-	for _, host := range models.PassThroughHosts {
-		if req.Host == host {
+	passthroughHosts := models.PassThroughHosts
+	passthroughHosts = append(passthroughHosts, h.GetProxyHost()...)
+	for _, host := range passthroughHosts {
+		if req.Host == host || req.URL.String() == host {
 			passthroughHost = true
 		}
 	}

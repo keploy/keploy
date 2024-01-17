@@ -42,7 +42,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = models.Filters{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, configPath string) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, PassThroughHosts *[]string, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -78,6 +78,9 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	}
 	if len(*passThroughPorts) == 0 {
 		*passThroughPorts = confRecord.PassThroughPorts
+	}
+	if len(*PassThroughHosts) == 0 {
+		*PassThroughHosts = confRecord.BypassEndpointsRegistry
 	}
 	return nil
 }
@@ -156,10 +159,12 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, configPath)
+			passThroughHosts := []string{}
+
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThroughHosts, configPath)
 			if err != nil {
 				if err == errFileNotFound {
-					r.logger.Info("continuing without configuration file because file not found")
+					r.logger.Info("Keploy config not found, using default config")
 				} else {
 					r.logger.Error("", zap.Error(err))
 				}
@@ -257,7 +262,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele)
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThroughHosts)
 			return nil
 		},
 	}

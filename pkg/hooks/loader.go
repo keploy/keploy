@@ -141,6 +141,14 @@ func (h *Hook) GetProxyPort() uint32 {
 	return h.proxyPort
 }
 
+func (h *Hook) GetProxyHost() []string {
+	return h.passThroughHosts
+}
+
+func (h *Hook) SetProxyHosts(passThroughHosts []string) {
+	h.passThroughHosts = passThroughHosts
+}
+
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
