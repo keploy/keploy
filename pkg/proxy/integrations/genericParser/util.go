@@ -4,24 +4,23 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	// "fmt"
 	"unicode"
 
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.uber.org/zap"
 )
 
-func PostgresDecoder(encoded string) ([]byte, error) {
+func PostgresDecoder(logger *zap.Logger, encoded string) []byte {
 	// decode the base 64 encoded string to buffer ..
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		// fmt.Println(hooks.Emoji+"failed to decode the data", err)
-		return nil, err
+		logger.Error(err.Error())
+		return nil
 	}
-	// println("Decoded data is :", string(data))
-	return data, nil
+	return data
 }
 
 func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
@@ -90,7 +89,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				// if !IsAsciiPrintable(bufStr) {
 				_ = base64.StdEncoding.EncodeToString(reqBuff)
 				// }
-				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				encoded := PostgresDecoder(h.GetLogger(), mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := util.CreateShingles(encoded, k)

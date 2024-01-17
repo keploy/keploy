@@ -159,7 +159,7 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 			}
 			pseudoHeaders, ordinaryHeaders, err := ExtractHeaders(headersFrame, decoder)
 			if err != nil {
-				return fmt.Errorf("could not extract headers from frame: %v", err)
+				return err
 			}
 
 			if isReqFromClient {

@@ -511,7 +511,6 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			logger.Debug("BINARY PACKET SENT HANDSHAKE", zap.ByteString("binaryPacketKey", binaryPacket))
 			prevRequest = "MYSQLHANDSHAKE"
 		} else {
-			// fmt.Println(time.Duration(delay) * time.Second)
 			timeoutDuration := 2 * time.Duration(delay) * time.Second // 2-second timeout
 			err := clientConn.SetReadDeadline(time.Now().Add(timeoutDuration))
 			if err != nil {

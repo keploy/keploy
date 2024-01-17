@@ -389,7 +389,6 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				// write the reply to mongo client
 				_, err = destConn.Write(requestBuffer1)
 				if err != nil {
-					// fmt.Println(logStr)
 					logger.Error("failed to write the reply message to mongo client", zap.Error(err))
 					return
 				}
@@ -504,7 +503,6 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				// write the reply to mongo client
 				_, err = clientConn.Write(responseBuffer)
 				if err != nil {
-					// fmt.Println(logStr)
 					logger.Error("failed to write the reply message to mongo client", zap.Error(err))
 					return
 				}

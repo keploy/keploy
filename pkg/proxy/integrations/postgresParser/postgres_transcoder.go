@@ -78,7 +78,6 @@ const ProtocolVersionNumber uint32 = 196608 // Replace with actual version numbe
 // PG Response Packet Transcoder
 func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.FrontendMessage, error) {
 
-	// fmt.Println("msgType", b.BackendWrapper.MsgType)
 	var msg pgproto3.FrontendMessage
 	switch b.BackendWrapper.MsgType {
 	case 'B':

@@ -73,9 +73,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	}
 
 	// Parse the rows
-	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
 	for len(b) > 5 {
-		// fmt.Println(b)
 		var row *Row
 		row, b, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, err = parseRow(b, columns)
 		if err != nil {
