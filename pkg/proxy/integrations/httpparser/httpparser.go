@@ -247,7 +247,6 @@ func chunkedResponse(chunkedTime *[]int64, chunkedLength *[]int, finalResp *[]by
 				}
 				logger.Debug("Count ", zap.Any("count", count))
 				*chunkedTime = append(*chunkedTime, t)
-				*chunkedLength = append(*chunkedLength, count)
 			}
 
 			//get the hexa decimal and then convert it to length
