@@ -35,6 +35,7 @@ record:
   delay: 5
   buildDelay: 30s
   passThroughPorts: []
+  bypassEndpointsRegistry: []
   filters:
     ReqHeader: []
     urlMethods: {}
@@ -57,9 +58,37 @@ test:
   apiTimeout: 5
   ignoreOrdering: false
   passThroughPorts: []
+  bypassEndpointsRegistry: []
   withCoverage: false
   coverageReportPath: ""
-  `
+  #
+  # Example on using globalNoise
+  # bypassEndpointsRegistry: ["api/users"]
+  # globalNoise: 
+  #    global:
+  #      body: {
+  #         # to ignore some values for a field, 
+  #         # pass regex patterns to the corresponding array value
+  #         "url": ["https?://\S+", "http://\S+"],
+  #      }
+  #      header: {
+  #         # to ignore the entire field, pass an empty array
+  #         "Date: [],
+  #       }
+  #     # to ignore fields or the corresponding values for a specific test-set,
+  #     # pass the test-set-name as a key to the "test-sets" object and
+  #     # populate the corresponding "body" and "header" objects 
+  #     test-sets:
+  #       test-set-1:
+  #         body: {
+  #           # ignore all the values for the "url" field
+  #           "url": []
+  #         }
+  #         header: { 
+  #           # we can also pass the exact value to ignore for a field
+  #           "User-Agent": ["PostmanRuntime/7.34.0"]
+  #         }
+`
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
 	var node yaml.Node

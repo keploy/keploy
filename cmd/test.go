@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -91,6 +91,9 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	*testSetNoise = confTest.GlobalNoise.Testsets
 	if !*ignoreOrdering {
 		*ignoreOrdering = confTest.IgnoreOrdering
+	}
+	if len(*passThroughHosts) == 0 {
+		*passThroughHosts = confTest.BypassEndpointsRegistry
 	}
 	return nil
 }
@@ -241,10 +244,12 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering)
+			passThroughHosts := []string{}
+
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
-					t.logger.Info("continuing without configuration file because file not found")
+					t.logger.Info("Keploy config not found, using default config")
 				} else {
 					t.logger.Error("", zap.Error(err))
 				}
@@ -389,6 +394,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					WithCoverage:       withCoverage,
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
+					PassthroughHosts:   passThroughHosts,
 				}, enableTele)
 			}
 
