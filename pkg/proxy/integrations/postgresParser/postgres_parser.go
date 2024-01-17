@@ -72,7 +72,6 @@ func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destC
 }
 
 // This is the encoding function for the streaming postgres wiremessage
-
 func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	logger.Debug("Inside the encodePostgresOutgoing function")
 	pgRequests := []models.Backend{}
@@ -160,6 +159,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		select {
 		case <-sigChan:
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
+				metadata := make(map[string]string)
+				metadata["type"] = "config"
 				h.AppendMocks(&models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
@@ -169,6 +170,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresResponses: pgResponses,
 						ReqTimestampMock:  reqTimestampMock,
 						ResTimestampMock:  resTimestampMock,
+						Metadata:          metadata,
 					},
 				}, ctx)
 				pgRequests = []models.Backend{}
@@ -189,6 +191,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 			logger.Debug("the iteration for the pg request ends with no of pgReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
+				metadata := make(map[string]string)
+				metadata["type"] = "config"
 				h.AppendMocks(&models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
@@ -198,6 +202,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						PostgresResponses: pgResponses,
 						ReqTimestampMock:  reqTimestampMock,
 						ResTimestampMock:  resTimestampMock,
+						Metadata:          metadata,
 					},
 				}, ctx)
 				pgRequests = []models.Backend{}
@@ -278,6 +283,15 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						Terminate:           pg.BackendWrapper.Terminate,
 						MsgType:             pg.BackendWrapper.MsgType,
 						AuthType:            pg.BackendWrapper.AuthType,
+					}
+					after_encoded, err := PostgresDecoderBackend(*pg_mock)
+					if err != nil {
+						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
+					}
+
+					if len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "p" {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
+						pg_mock.Payload = bufStr
 					}
 					pgRequests = append(pgRequests, *pg_mock)
 
