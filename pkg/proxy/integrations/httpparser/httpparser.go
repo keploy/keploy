@@ -241,11 +241,6 @@ func chunkedResponse(chunkedTime *[]int64, chunkedLength *[]int, finalResp *[]by
 				t := time.Now().UnixMilli()
 				//Get the length of the chunk <- check this
 
-				count, err := countHTTPChunks(resp)
-				if err != nil {
-					logger.Error("Error extracting length: %s", zap.Any("countHTTPChunks", err.Error()))
-				}
-				logger.Debug("Count ", zap.Any("count", count))
 				*chunkedTime = append(*chunkedTime, t)
 			}
 
