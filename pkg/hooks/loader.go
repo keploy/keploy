@@ -137,6 +137,18 @@ func (h *Hook) GetProxyPort() uint32 {
 	return h.proxyPort
 }
 
+func (h *Hook) SetUserCommand(appCmd *exec.Cmd) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.userAppCmd = appCmd
+}
+
+func (h *Hook) GetUserCommand() *exec.Cmd {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	return h.userAppCmd
+}
+
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -188,7 +200,13 @@ func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
 }
 
 func (h *Hook) IsUsrAppTerminateInitiated() bool {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 	return h.userAppShutdownInitiated
+}
+
+func (h *Hook) SetUsrAppTerminateInitiated(appTerminated bool) {
+	h.userAppShutdownInitiated = appTerminated
 }
 
 func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
@@ -355,14 +373,17 @@ func (h *Hook) SetKeployModeInKernel(mode uint32) {
 		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
+
 func (h *Hook) killProcessesAndTheirChildren(parentPID int) {
+	userAppCmd := h.GetUserCommand()
+	processState := userAppCmd.ProcessState
 
 	pids := []int{}
 
 	h.findAndCollectChildProcesses(fmt.Sprintf("%d", parentPID), &pids)
 
 	for _, childPID := range pids {
-		if h.userAppCmd.ProcessState == nil {
+		if processState == nil {
 			err := syscall.Kill(childPID, syscall.SIGTERM)
 			if err != nil {
 				h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
@@ -399,11 +420,23 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
-	h.logger.Info("keploy has initiated the shutdown of the user application.")
-	h.userAppShutdownInitiated = true
-	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
-		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
-		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
+	userAppCmd := h.GetUserCommand()
+	h.mutex.Lock()
+	h.SetUsrAppTerminateInitiated(true)
+	var process *os.Process
+	var processState *os.ProcessState
+	if userAppCmd != nil && userAppCmd.Process != nil {
+		process = userAppCmd.Process
+		processState = userAppCmd.ProcessState
+	}
+
+	h.mutex.Unlock()
+
+	if userAppCmd != nil && userAppCmd.Process != nil {
+		h.logger.Debug("the process state for the user process", zap.String("state", processState.String()), zap.Any("processState", processState))
+		pid := userAppCmd.Process.Pid
+
+		if processState != nil && processState.Exited() {
 			return
 		}
 
@@ -415,8 +448,12 @@ func (h *Hook) StopUserApplication() {
 				h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerID), zap.Error(err))
 			}
 		}
-
-		h.killProcessesAndTheirChildren(h.userAppCmd.Process.Pid)
+		if process != nil {
+			if processState != nil && processState.Exited() {
+				return
+			}
+			h.killProcessesAndTheirChildren(pid)
+		}
 	}
 }
 

@@ -470,60 +470,80 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 // It runs the application using the given command
 func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
-	// Create a new command with your appCmd
-	cmd := exec.Command("sh", "-c", appCmd)
+	// Create a new channel to communicate errors
+	errChan := make(chan error, 1)
 
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	// Start a goroutine to execute the command
+	go func() {
+		// Create a new command with your appCmd
+		cmd := exec.Command("sh", "-c", appCmd)
 
-	// Set the output of the command
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	h.userAppCmd = cmd
-
-	// Run the app as the user who invoked sudo
-	username := os.Getenv("SUDO_USER")
-	if username != "" {
-		uidCmd := exec.Command("id", "-u", username)
-		gidCmd := exec.Command("id", "-g", username)
-
-		var uidOut, gidOut bytes.Buffer
-		uidCmd.Stdout = &uidOut
-		gidCmd.Stdout = &gidOut
-
-		err := uidCmd.Run()
-		if err != nil {
-			return err
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
 		}
 
-		err = gidCmd.Run()
-		if err != nil {
-			return err
+		// Set the output of the command
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		// Run the app as the user who invoked sudo
+		username := os.Getenv("SUDO_USER")
+		if username != "" {
+			uidCmd := exec.Command("id", "-u", username)
+			gidCmd := exec.Command("id", "-g", username)
+
+			var uidOut, gidOut bytes.Buffer
+			uidCmd.Stdout = &uidOut
+			gidCmd.Stdout = &gidOut
+
+			err := uidCmd.Run()
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			err = gidCmd.Run()
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			uidStr := strings.TrimSpace(uidOut.String())
+			gidStr := strings.TrimSpace(gidOut.String())
+
+			uid, err := strconv.ParseUint(uidStr, 10, 32)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			gid, err := strconv.ParseUint(gidStr, 10, 32)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			// Switch the user
+			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
 		}
 
-		uidStr := strings.TrimSpace(uidOut.String())
-		gidStr := strings.TrimSpace(gidOut.String())
+		h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
 
-		uid, err := strconv.ParseUint(uidStr, 10, 32)
+		err := cmd.Run()
 		if err != nil {
-			return err
+			errChan <- err
+			return
 		}
 
-		gid, err := strconv.ParseUint(gidStr, 10, 32)
-		if err != nil {
-			return err
-		}
+		// Signal successful execution
+		errChan <- nil
+	}()
 
-		// Switch the user
-		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
-	}
+	// Wait for the goroutine to finish and report errors
+	err := <-errChan
 
-	h.logger.Debug("", zap.Any("executing cmd", cmd.String()))
-
-	err := cmd.Run()
 	if err != nil {
-		if h.userAppShutdownInitiated {
+		if h.IsUsrAppTerminateInitiated() {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
 					if status.Signaled() {
