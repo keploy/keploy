@@ -73,7 +73,7 @@ func (u *updater) UpdateBinary() {
 		return
 	}
 
-	u.logger.Info("Updated to version " + latestVersion)
+	u.logger.Info("Update successful ")
 
 	changelog = "\n" + string(changelog)
 	var renderer *glamour.TermRenderer
