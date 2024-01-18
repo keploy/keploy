@@ -31,7 +31,7 @@ const logo string = `
 
 func main() {
 	if version == "" {
-		version = "2.1.2 test"
+		version = "2-dev"
 	}
 	utils.KeployVersion = version
 	fmt.Println(logo, " ")
