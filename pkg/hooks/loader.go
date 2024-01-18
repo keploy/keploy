@@ -155,6 +155,7 @@ func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.tcsMocks.deleteAll()
 	for index, mock := range m {
 		mock.TestModeInfo.SortOrder = index
+		mock.TestModeInfo.Id = index
 		h.tcsMocks.insert(mock.TestModeInfo, mock)
 	}
 }
@@ -163,6 +164,7 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.configMocks.deleteAll()
 	for index, mock := range m {
 		mock.TestModeInfo.SortOrder = index
+		mock.TestModeInfo.Id = index
 		h.configMocks.insert(mock.TestModeInfo, mock)
 	}
 }
