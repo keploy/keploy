@@ -562,8 +562,6 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			}
 		}
 
-		var matchedInUnfilteredMocks bool
-
 		if !isMatched {
 			isSorted = false
 			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
@@ -571,14 +569,11 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 				isMatched = true
 				matchedMock = tcsMocks[idx]
 			}
-			if isMatched {
-				matchedInUnfilteredMocks = true
-			}
 		}
 
 		if isMatched {
 			logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
-			if !matchedInUnfilteredMocks {
+			if matchedMock.TestModeInfo.IsFiltered {
 				originalMatchedMock := *matchedMock
 				matchedMock.TestModeInfo.IsFiltered = false
 				matchedMock.TestModeInfo.SortOrder = math.MaxInt
