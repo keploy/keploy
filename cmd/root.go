@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
@@ -256,7 +258,7 @@ func (r *Root) execute() {
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	rootCmd.Flags().Bool("version", false, "Fetch the latest version")
+	rootCmd.PersistentFlags().Bool("version", false, "Fetch the latest version")
 
 	// Manually parse flags to determine debug mode and version flag early
 	debugMode = checkForDebugFlag(os.Args[1:])
@@ -264,7 +266,29 @@ func (r *Root) execute() {
 	if versionFlag {
 		// Fetch the version and print it
 		currentVersion := utils.KeployVersion
-		fmt.Println("Keploy: ", currentVersion)
+		fmt.Println("Current version:", currentVersion)
+
+		// Check for the latest release version
+		releaseInfo, err := utils.GetLatestGitHubRelease()
+		if err != nil {
+			r.logger.Debug("Failed to fetch the latest release version", zap.Error(err))
+			return
+		}
+
+		// Show update message only if it's not a dev version
+		if releaseInfo.TagName != currentVersion && !strings.HasSuffix(currentVersion, "-dev") {
+			updatetext := models.HighlightGrayString("keploy update")
+			const msg string = `
+               ╭─────────────────────────────────────╮
+               │ New version available:              │
+               │ %v  ---->   %v  │
+               │ Run %v to update         │
+               ╰─────────────────────────────────────╯
+			   `
+			versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
+			fmt.Printf(versionmsg)
+		}
+
 		return
 	}
 
