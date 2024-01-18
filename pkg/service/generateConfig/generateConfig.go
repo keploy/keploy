@@ -34,11 +34,17 @@ record:
   networkName: ""
   delay: 5
   buildDelay: 30s
-  passThroughPorts: []
-  bypassEndpointsRegistry: []
-  filters:
-    ReqHeader: []
-    urlMethods: {}
+  tests: 
+    filters:
+      - path: ""
+        urlMethods: []
+        headers: {}
+        host: ""
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        port: 0
 test:
   path: ""
   # mandatory
@@ -47,7 +53,7 @@ test:
   containerName: ""
   networkName: ""
   # example: "test-set-1": ["test-1", "test-2", "test-3"]
-  tests:
+  selectedTests: 
   # to use globalNoise, please follow the guide at the end of this file.
   globalNoise:
     global:
@@ -57,13 +63,40 @@ test:
   buildDelay: 30s
   apiTimeout: 5
   ignoreOrdering: false
-  passThroughPorts: []
-  bypassEndpointsRegistry: []
+  tests: 
+    filters:
+      - path: ""
+        urlMethods: []
+        headers: {}
+        host: ""
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        port: 0
   withCoverage: false
   coverageReportPath: ""
+  # Example on using tests
+  # tests: 
+  #   filters:
+  #    - path: "/user/app"
+  #      urlMethods: ["GET"]
+  #      headers: {
+  #        "^asdf*": "^test"
+  #      }
+  #      host: "dc.services.visualstudio.com"
+  # Example on using stubs
+  # stubs: 
+  #   filters:
+  #    - path: "/user/app"
+  #      port: 8080
+  #    - port: 8081
+  #    - host: "dc.services.visualstudio.com"
+  #    - port: 8081
+  #      host: "dc.services.visualstudio.com"
+  #      path: "/user/app"
   #
   # Example on using globalNoise
-  # bypassEndpointsRegistry: ["api/users"]
   # globalNoise: 
   #    global:
   #      body: {
@@ -73,7 +106,7 @@ test:
   #      }
   #      header: {
   #         # to ignore the entire field, pass an empty array
-  #         "Date: [],
+  #         "Date": [],
   #       }
   #     # to ignore fields or the corresponding values for a specific test-set,
   #     # pass the test-set-name as a key to the "test-sets" object and

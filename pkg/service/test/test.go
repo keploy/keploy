@@ -52,7 +52,7 @@ type TestOptions struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	IgnoreOrdering     bool
-	PassthroughHosts   []string
+	PassthroughHosts   []models.Filters
 }
 
 func NewTester(logger *zap.Logger) Tester {

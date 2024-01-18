@@ -775,6 +775,8 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
+	ps.hook.SetSourcePort(sourcePort)
+
 	ps.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
 	//TODO:  fix this bug, getting source port same as proxy port.
