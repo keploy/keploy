@@ -15,8 +15,7 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
-var ConfigGuide =
-`
+var ConfigGuide = `
   # Example on using globalNoise
   # globalNoise:
   #    global:

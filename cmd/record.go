@@ -175,48 +175,6 @@ func (r *Record) GetCmd() *cobra.Command {
 				return errors.New("missing required -c flag or appCmd in config file")
 			}
 
-<<<<<<< Updated upstream
-=======
-			if isDockerCmd && buildDelay <= 30*time.Second {
-				r.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", buildDelay))
-				r.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
-			}
-
-			var hasContainerName bool
-			if isDockerCmd {
-				if strings.Contains(appCmd, "--name") {
-					hasContainerName = true
-				}
-				if !hasContainerName && appContainer == "" {
-					r.logger.Error("Couldn't find containerName")
-					r.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag or containerName in config file")
-				}
-			}
-			//Check if app command starts with docker or sudo docker.
-			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
-			if !isDockerCmd && dockerRelatedCmd {
-				// r.logger.Error("Please run the command with sudo -E env PATH=$PATH keploy record -c \"your command\"")
-				isDockerCompose := false
-				if dockerCmd == "docker-compose" {
-					isDockerCompose = true
-				}
-				recordCfg := utils.RecordFlags{
-					Path:             path,
-					Command:          appCmd,
-					ContainerName:    appContainer,
-					Proxyport:        proxyPort,
-					NetworkName:      networkName,
-					Delay:            delay,
-					BuildDelay:       buildDelay,
-					PassThroughPorts: ports,
-					ConfigPath:       configPath,
-					EnableTele:       enableTele,
-				}
-				utils.UpdateKeployToDocker("record", isDockerCompose, recordCfg, r.logger)
-				return nil
-			}
-
 			if isDockerCmd && len(path) > 0 {
 				// Check if the path contains the moving up directory (..)
 				if strings.Contains(path, "..") {
@@ -252,11 +210,14 @@ func (r *Record) GetCmd() *cobra.Command {
 						return nil
 					}
 					// Set the relative path.
-					path = strings.TrimPrefix(path, currentDir)
+					path, err = filepath.Rel(currentDir, path)
+					if err != nil {
+						r.logger.Error("failed to get the relative path for the subdirectory", zap.Error(err))
+						return nil
+					}
 				}
 			}
 
->>>>>>> Stashed changes
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -274,14 +235,11 @@ func (r *Record) GetCmd() *cobra.Command {
 				// user provided the absolute path
 			}
 
-<<<<<<< Updated upstream
 			if isDockerCmd && buildDelay <= 30*time.Second {
 				r.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", buildDelay))
 				r.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
 			}
 
-=======
->>>>>>> Stashed changes
 			path += "/keploy"
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
