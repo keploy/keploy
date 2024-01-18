@@ -3,8 +3,8 @@ package updateBinary
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/utils"
@@ -59,31 +59,20 @@ func (u *updater) UpdateBinary() {
 	}
 
 	u.logger.Info("Updating to Version: " + latestVersion)
-	// Execute the curl command to download keploy.sh and run it with bash
-	curlCommand := `curl -s -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && bash keploy.sh`
 
-	// Execute the combined curl command to download and execute keploy.sh with bash
-	cmd := exec.Command("sh", "-c", curlCommand)
-
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			u.logger.Error(fmt.Sprintf("Failed to update binary file. Exit status: %v", exitErr.ExitCode()))
-			if status, ok := exitErr.Sys().(interface{ ExitStatus() int }); ok {
-				if exitStatus := status.ExitStatus(); exitStatus != 0 {
-					u.logger.Error(fmt.Sprintf("Command exited with status: %v", exitStatus))
-				}
-			}
-		} else {
-			u.logger.Error(fmt.Sprintf("Failed to update binary file: %v", err))
-		}
-
-		// If there was an error during the update, return here.
+	arch := runtime.GOARCH
+	downloadUrl := ""
+	if arch == "amd64" {
+		downloadUrl = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+	} else {
+		downloadUrl = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+	}
+	err = u.downloadAndUpdate(downloadUrl)
+	if err != nil {
+		u.logger.Error("update failed", zap.Error(err))
 		return
 	}
+
 	u.logger.Info("Updated to version " + latestVersion)
 
 	changelog = "\n" + string(changelog)
@@ -103,5 +92,33 @@ func (u *updater) UpdateBinary() {
 		return
 	}	
 	fmt.Println(changelog)
-
 }
+
+func (u *updater) downloadAndUpdate(downloadUrl string) error {
+	downloadCmd := exec.Command("curl", "--silent", "--location", downloadUrl)
+	untarCmd := exec.Command("tar", "xz", "-C", "/tmp")
+
+	// Pipe the output of the first command to the second command
+	untarCmd.Stdin, _ = downloadCmd.StdoutPipe()
+
+	if err := downloadCmd.Start(); err != nil {
+		return err
+	}
+	if err := untarCmd.Start(); err != nil {
+		return err
+	}
+
+	if err := downloadCmd.Wait(); err != nil {
+		return err
+	}
+	if err := untarCmd.Wait(); err != nil {
+		return err
+	}
+
+	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", "/usr/local/bin/keploybin")
+	if err := moveCmd.Run(); err != nil {
+		return err
+	}
+
+	return nil
+}	
