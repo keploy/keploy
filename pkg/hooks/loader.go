@@ -93,7 +93,9 @@ type Hook struct {
 	writev        link.Link
 	writevRet     link.Link
 
-	idc clients.InternalDockerClient
+	idc              clients.InternalDockerClient
+	passThroughHosts models.Stubs
+	sourcePort       int
 }
 
 func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Hook, error) {
@@ -141,12 +143,22 @@ func (h *Hook) GetProxyPort() uint32 {
 	return h.proxyPort
 }
 
-func (h *Hook) GetProxyHost() []string {
+func (h *Hook) GetProxyHost() models.Stubs {
 	return h.passThroughHosts
 }
 
-func (h *Hook) SetProxyHosts(passThroughHosts []string) {
-	h.passThroughHosts = passThroughHosts
+func (h *Hook) SetProxyHosts(passThroughHosts []models.Filters) {
+	h.passThroughHosts = models.Stubs{
+		Filters: passThroughHosts,
+	}
+}
+
+func (h *Hook) GetSourcePort() int {
+	return h.sourcePort
+}
+
+func (h *Hook) SetSourcePort(sourcePort int) {
+	h.sourcePort = sourcePort
 }
 
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
@@ -517,7 +529,7 @@ func (h *Hook) Stop(forceStop bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context, filters *models.Filters) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context, filters *models.TestFilter) error {
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err

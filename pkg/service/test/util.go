@@ -59,7 +59,7 @@ type TestConfig struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	EnableTele         bool
-	PassThroughHosts   []string
+	PassThroughHosts   []models.Filters
 }
 
 type RunTestSetConfig struct {

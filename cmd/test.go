@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]string) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -60,7 +60,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *appCmd == "" {
 		*appCmd = confTest.Command
 	}
-	for testset, testcases := range confTest.Tests {
+	for testset, testcases := range confTest.SelectedTests {
 		if _, ok := (*tests)[testset]; !ok {
 			(*tests)[testset] = testcases
 		}
@@ -77,9 +77,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *buildDelay == 30*time.Second && confTest.BuildDelay != 0 {
 		*buildDelay = confTest.BuildDelay
 	}
-	if len(*passThorughPorts) == 0 {
-		*passThorughPorts = confTest.PassThroughPorts
-	}
+
 	if len(*coverageReportPath) == 0 {
 		*coverageReportPath = confTest.CoverageReportPath
 	}
@@ -92,9 +90,17 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if !*ignoreOrdering {
 		*ignoreOrdering = confTest.IgnoreOrdering
 	}
-	if len(*passThroughHosts) == 0 {
-		*passThroughHosts = confTest.BypassEndpointsRegistry
+	*passThroughHosts = append(*passThroughHosts, confTest.Stubs.Filters...)
+	if len(*passThroughPorts) == 0 {
+		for _, filter := range confTest.Stubs.Filters {
+			if filter.Port != 0 && filter.Host == "" && filter.Path == "" {
+				*passThroughPorts = append(*passThroughPorts, filter.Port)
+			} else {
+				*passThroughHosts = append(*passThroughHosts, filter)
+			}
+		}
 	}
+
 	return nil
 }
 
@@ -244,7 +250,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-			passThroughHosts := []string{}
+			passThroughHosts := []models.Filters{}
 
 			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -491,10 +492,35 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		}
 		if !isMatched {
 			passthroughHost := false
-			passthroughHosts := models.PassThroughHosts
-			passthroughHosts = append(passthroughHosts, h.GetProxyHost()...)
-			for _, host := range passthroughHosts {
-				if req.Host == host || req.URL.String() == host {
+			passThrough := models.PassThroughHosts
+			portPassThrough := []models.Filters{}
+			for _, filters := range h.GetProxyHost().Filters {
+				if filters.Port == 0 {
+					passThrough = append(passThrough, filters.Host, filters.Path)
+				} else {
+					portPassThrough = append(portPassThrough, filters)
+				}
+			}
+			// Define the regular expression pattern
+
+			for _, host := range passThrough {
+				regex, err := regexp.Compile(host)
+				if err != nil {
+					continue
+				}
+				submatches := regex.FindStringSubmatch(req.URL.String())
+				if len(submatches) > 0 && host != "" || req.Host == host {
+					passthroughHost = true
+				}
+
+			}
+			for _, filter := range portPassThrough {
+				regex, err := regexp.Compile(filter.Path)
+				if err != nil {
+					continue
+				}
+				submatches := regex.FindStringSubmatch(req.URL.String())
+				if h.GetSourcePort() == int(filter.Port) && (len(submatches) > 0 && filter.Path != "") {
 					passthroughHost = true
 				}
 			}
@@ -797,10 +823,32 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		"operation": req.Method,
 	}
 	passthroughHost := false
-	passthroughHosts := models.PassThroughHosts
-	passthroughHosts = append(passthroughHosts, h.GetProxyHost()...)
-	for _, host := range passthroughHosts {
-		if req.Host == host || req.URL.String() == host {
+	passThrough := models.PassThroughHosts
+	portPassThrough := []models.Filters{}
+	for _, filters := range h.GetProxyHost().Filters {
+		if filters.Port == 0 {
+			passThrough = append(passThrough, filters.Host, filters.Path)
+		} else {
+			portPassThrough = append(portPassThrough, filters)
+		}
+	}
+	for _, host := range passThrough {
+		regex, err := regexp.Compile(host)
+		if err != nil {
+			continue
+		}
+		submatches := regex.FindStringSubmatch(req.URL.String())
+		if len(submatches) > 0 && host != "" || req.Host == host {
+			passthroughHost = true
+		}
+	}
+	for _, filter := range portPassThrough {
+		regex, err := regexp.Compile(filter.Path)
+		if err != nil {
+			continue
+		}
+		submatches := regex.FindStringSubmatch(req.URL.String())
+		if h.GetSourcePort() == int(filter.Port) && (len(submatches) > 0 && filter.Path != "") {
 			passthroughHost = true
 		}
 	}
