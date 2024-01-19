@@ -508,8 +508,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				if err != nil {
 					continue
 				}
-				submatches := regex.FindStringSubmatch(req.URL.String())
-				if len(submatches) > 0 && host != "" || req.Host == host {
+				subMatches := regex.FindStringSubmatch(req.URL.String())
+				if len(subMatches) > 0 && host != "" || req.Host == host {
 					passthroughHost = true
 				}
 
@@ -519,8 +519,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				if err != nil {
 					continue
 				}
-				submatches := regex.FindStringSubmatch(req.URL.String())
-				if h.GetSourcePort() == int(filter.Port) && (len(submatches) > 0 && filter.Path != "") {
+				subMatches := regex.FindStringSubmatch(req.URL.String())
+				if h.GetSourcePort() == int(filter.Port) && (len(subMatches) > 0 && filter.Path != "") {
 					passthroughHost = true
 				}
 			}
@@ -837,8 +837,8 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		if err != nil {
 			continue
 		}
-		submatches := regex.FindStringSubmatch(req.URL.String())
-		if len(submatches) > 0 && host != "" || req.Host == host {
+		subMatches := regex.FindStringSubmatch(req.URL.String())
+		if len(subMatches) > 0 && host != "" || req.Host == host {
 			passthroughHost = true
 		}
 	}
@@ -847,8 +847,8 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		if err != nil {
 			continue
 		}
-		submatches := regex.FindStringSubmatch(req.URL.String())
-		if h.GetSourcePort() == int(filter.Port) && (len(submatches) > 0 && filter.Path != "") {
+		subMatches := regex.FindStringSubmatch(req.URL.String())
+		if h.GetSourcePort() == int(filter.Port) && (len(subMatches) > 0 && filter.Path != "") {
 			passthroughHost = true
 		}
 	}
