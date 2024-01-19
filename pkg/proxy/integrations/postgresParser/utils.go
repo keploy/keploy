@@ -3,7 +3,7 @@ package postgresparser
 import (
 	"encoding/base64"
 	"encoding/binary"
-	"sort"
+	"math"
 
 	"errors"
 	"fmt"
@@ -439,145 +439,153 @@ func IfBeginOnlyQuery(reqBuff []byte, logger *zap.Logger, expectedPgReq *models.
 }
 
 func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) (bool, []models.Frontend, error) {
-
-	tcsMocks, err := h.GetConfigMocks()
-	sort.Slice(tcsMocks, func(i, j int) bool {
-		return tcsMocks[i].SortOrder < tcsMocks[j].SortOrder
-	})
-
-	if err != nil {
-		return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
-	}
-
-	var isMatched, sortFlag bool = false, true
-	var sortedTcsMocks []*models.Mock
-	var matchedMock *models.Mock
-
-	for _, mock := range tcsMocks {
-		if mock == nil {
-			continue
+	for {
+		tcsMocks, err := h.GetConfigMocks()
+		if err != nil {
+			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 		}
 
-		if sortFlag {
-			if mock.Name == "mock-0" {
-				sortFlag = false
-			} else {
-				sortedTcsMocks = append(sortedTcsMocks, mock)
+		var isMatched, sortFlag bool = false, true
+		var sortedTcsMocks []*models.Mock
+		var matchedMock *models.Mock
+
+		for _, mock := range tcsMocks {
+			if mock == nil {
+				continue
 			}
-		}
 
-		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
-			for requestIndex, reqBuff := range requestBuffers {
-				bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-				encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
-				if err != nil {
-					logger.Debug("Error while decoding postgres request", zap.Error(err))
-				}
-				if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
-					logger.Debug("CHANGING TO MD5 for Response")
-					mock.Spec.PostgresResponses[requestIndex].AuthType = 5
-					continue
+			if sortFlag {
+				if mock.TestModeInfo.IsFiltered == false {
+					sortFlag = false
 				} else {
-					if len(encoded) > 0 && encoded[0] == 'p' {
-						logger.Debug("CHANGING TO MD5 for Request and Response")
-						mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
-
-						mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
-						mock.Spec.PostgresResponses[requestIndex].AuthType = 0
-						mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
-							ProcessID: 2613,
-							SecretKey: 824670820,
-						}
-						mock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
-						mock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
-							{
-								Name:  "application_name",
-								Value: "",
-							},
-							{
-								Name:  "client_encoding",
-								Value: "UTF8",
-							},
-							{
-								Name:  "DateStyle",
-								Value: "ISO, MDY",
-							},
-							{
-								Name:  "integer_datetimes",
-								Value: "on",
-							},
-							{
-								Name:  "IntervalStyle",
-								Value: "postgres",
-							},
-							{
-								Name:  "is_superuser",
-								Value: "UTF8",
-							},
-							{
-								Name:  "server_version",
-								Value: "13.12 (Debian 13.12-1.pgdg120+1)",
-							},
-							{
-								Name:  "session_authorization",
-								Value: "keploy-user",
-							},
-							{
-								Name:  "standard_conforming_strings",
-								Value: "on",
-							},
-							{
-								Name:  "TimeZone",
-								Value: "Etc/UTC",
-							},
-							{
-								Name:  "TimeZone",
-								Value: "Etc/UTC",
-							},
-						}
-
-					}
+					sortedTcsMocks = append(sortedTcsMocks, mock)
 				}
+			}
 
-				if bufStr == "AAAACATSFi8=" {
-					ssl := models.Frontend{
-						Payload: "Tg==",
+			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+				for requestIndex, reqBuff := range requestBuffers {
+					bufStr := base64.StdEncoding.EncodeToString(reqBuff)
+					encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+					if err != nil {
+						logger.Debug("Error while decoding postgres request", zap.Error(err))
 					}
-					return true, []models.Frontend{ssl}, nil
+					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
+						logger.Debug("CHANGING TO MD5 for Response")
+						mock.Spec.PostgresResponses[requestIndex].AuthType = 5
+						continue
+					} else {
+						if len(encoded) > 0 && encoded[0] == 'p' {
+							logger.Debug("CHANGING TO MD5 for Request and Response")
+							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
+
+							mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
+							mock.Spec.PostgresResponses[requestIndex].AuthType = 0
+							mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
+								ProcessID: 2613,
+								SecretKey: 824670820,
+							}
+							mock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
+							mock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
+								{
+									Name:  "application_name",
+									Value: "",
+								},
+								{
+									Name:  "client_encoding",
+									Value: "UTF8",
+								},
+								{
+									Name:  "DateStyle",
+									Value: "ISO, MDY",
+								},
+								{
+									Name:  "integer_datetimes",
+									Value: "on",
+								},
+								{
+									Name:  "IntervalStyle",
+									Value: "postgres",
+								},
+								{
+									Name:  "is_superuser",
+									Value: "UTF8",
+								},
+								{
+									Name:  "server_version",
+									Value: "13.12 (Debian 13.12-1.pgdg120+1)",
+								},
+								{
+									Name:  "session_authorization",
+									Value: "keploy-user",
+								},
+								{
+									Name:  "standard_conforming_strings",
+									Value: "on",
+								},
+								{
+									Name:  "TimeZone",
+									Value: "Etc/UTC",
+								},
+								{
+									Name:  "TimeZone",
+									Value: "Etc/UTC",
+								},
+							}
+
+						}
+					}
+
+					if bufStr == "AAAACATSFi8=" {
+						ssl := models.Frontend{
+							Payload: "Tg==",
+						}
+						return true, []models.Frontend{ssl}, nil
+					}
 				}
 			}
 		}
-	}
 
-	logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+		logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
-	isSorted := false
-	var idx int
-	if !isMatched {
-		//use findBinaryMatch twice one for sorted and another for unsorted
-		// give more priority to sorted like if you find more than 0.5 in sorted then return that
-		if len(sortedTcsMocks) > 0 {
-			isSorted = true
-			idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted)
+		isSorted := false
+		var idx int
+		if !isMatched {
+			//use findBinaryMatch twice one for sorted and another for unsorted
+			// give more priority to sorted like if you find more than 0.5 in sorted then return that
+			if len(sortedTcsMocks) > 0 {
+				isSorted = true
+				idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted)
+				if idx != -1 {
+					isMatched = true
+					matchedMock = tcsMocks[idx]
+				}
+			}
+		}
+
+		if !isMatched {
+			isSorted = false
+			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
 			if idx != -1 {
 				isMatched = true
 				matchedMock = tcsMocks[idx]
 			}
 		}
-	}
 
-	if !isMatched {
-		isSorted = false
-		idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
-		if idx != -1 {
-			isMatched = true
-			matchedMock = tcsMocks[idx]
+		if isMatched {
+			logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
+			if matchedMock.TestModeInfo.IsFiltered {
+				originalMatchedMock := *matchedMock
+				matchedMock.TestModeInfo.IsFiltered = false
+				matchedMock.TestModeInfo.SortOrder = math.MaxInt
+				isUpdated := h.UpdateConfigMock(&originalMatchedMock, matchedMock)
+				if !isUpdated {
+					continue
+				}
+			}
+			return true, matchedMock.Spec.PostgresResponses, nil
 		}
-	}
 
-	if isMatched {
-		logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
-		return true, matchedMock.Spec.PostgresResponses, nil
+		break
 	}
 	return false, nil, nil
 }
