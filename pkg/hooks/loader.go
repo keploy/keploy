@@ -373,21 +373,16 @@ func (h *Hook) SetKeployModeInKernel(mode uint32) {
 		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
 	}
 }
-
 func (h *Hook) killProcessesAndTheirChildren(parentPID int) {
-	userAppCmd := h.GetUserCommand()
-	processState := userAppCmd.ProcessState
 
 	pids := []int{}
 
 	h.findAndCollectChildProcesses(fmt.Sprintf("%d", parentPID), &pids)
 
 	for _, childPID := range pids {
-		if processState == nil {
-			err := syscall.Kill(childPID, syscall.SIGTERM)
-			if err != nil {
-				h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
-			}
+		err := syscall.Kill(childPID, syscall.SIGTERM)
+		if err != nil {
+			h.logger.Error("failed to set kill child pid", zap.Any("error killing child process", err.Error()))
 		}
 	}
 }
@@ -424,21 +419,13 @@ func (h *Hook) StopUserApplication() {
 	h.mutex.Lock()
 	h.SetUsrAppTerminateInitiated(true)
 	var process *os.Process
-	var processState *os.ProcessState
 	if userAppCmd != nil && userAppCmd.Process != nil {
 		process = userAppCmd.Process
-		processState = userAppCmd.ProcessState
 	}
 
 	h.mutex.Unlock()
 
 	if userAppCmd != nil && userAppCmd.Process != nil {
-		h.logger.Debug("the process state for the user process", zap.String("state", processState.String()), zap.Any("processState", processState))
-		pid := userAppCmd.Process.Pid
-
-		if processState != nil && processState.Exited() {
-			return
-		}
 
 		// Stop Docker Container and Remove it if Keploy ran using docker.
 		containerID := h.idc.GetContainerID()
@@ -449,9 +436,8 @@ func (h *Hook) StopUserApplication() {
 			}
 		}
 		if process != nil {
-			if processState != nil && processState.Exited() {
-				return
-			}
+			pid := userAppCmd.Process.Pid
+
 			h.killProcessesAndTheirChildren(pid)
 		}
 	}

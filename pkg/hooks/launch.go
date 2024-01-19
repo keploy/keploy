@@ -486,6 +486,7 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
+		h.SetUserCommand(cmd)
 		// Run the app as the user who invoked sudo
 		username := os.Getenv("SUDO_USER")
 		if username != "" {
