@@ -572,7 +572,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 		}
 
 		if isMatched {
-			logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
+			logger.Info("Matched mock", zap.String("mock", matchedMock.Name))
 			if matchedMock.TestModeInfo.IsFiltered {
 				originalMatchedMock := *matchedMock
 				matchedMock.TestModeInfo.IsFiltered = false
