@@ -2,11 +2,13 @@ package connection
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	structs2 "go.keploy.io/server/pkg/hooks/structs"
+	"go.keploy.io/server/pkg/models"
 	"go.uber.org/zap"
 	// "log"
 )
@@ -48,7 +50,7 @@ type Tracker struct {
 	logger *zap.Logger
 
 	reqTimestampTest []time.Time
-	resTimestampTest time.Time
+	resTimestampTest []time.Time
 	isNewRequest     bool
 }
 
@@ -138,8 +140,6 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 
 			if conn.verifyResponseData(expectedSentBytes, actualSentBytes) {
 				validRes = true
-				// Capturing the response timestamp as response is verified
-				conn.resTimestampTest = time.Now()
 			} else {
 				conn.logger.Debug("Malformed response", zap.Any("ExpectedSentBytes", expectedSentBytes), zap.Any("ActualSentBytes", actualSentBytes))
 				recordTraffic = false
@@ -193,8 +193,6 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 				conn.currentRecvBufQ = conn.currentRecvBufQ[1:]
 
 				responseBuf = conn.SentBuf
-
-				conn.resTimestampTest = time.Now()
 			} else {
 				conn.logger.Debug("no data buffer for request", zap.Any("Length of RecvBufQueue", len(conn.currentRecvBufQ)))
 				recordTraffic = false
@@ -213,19 +211,44 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 	}
 
 	var reqTimestampTest time.Time
-	// Checking if record traffic is recorded and reqeust timestamp is captured or not.
-	if recordTraffic && len(conn.reqTimestampTest) > 0 {
-		// Get the timestamp of current request
-		reqTimestampTest = conn.reqTimestampTest[0]
-		// Pop the timestamp of current request
-		conn.reqTimestampTest = conn.reqTimestampTest[1:]
+	var resTimestampTest time.Time
+	// Checking if record traffic is recorded and request & response timestamp is captured or not.
+	if recordTraffic {
+		if len(conn.reqTimestampTest) > 0 {
+			// Get the timestamp of current request
+			reqTimestampTest = conn.reqTimestampTest[0]
+			// Pop the timestamp of current request
+			conn.reqTimestampTest = conn.reqTimestampTest[1:]
+		} else {
+			conn.logger.Debug("no request timestamp found")
+			if len(requestBuf) > 0 {
+				reqLine := strings.Split(string(requestBuf), "\n")
+				if models.GetMode() == models.MODE_RECORD && len(reqLine) > 0 && reqLine[0] != "" {
+					conn.logger.Warn(fmt.Sprintf("failed to capture request timestamp for a request. Please record it again if important:%v", reqLine[0]))
+				}
+			}
+			recordTraffic = false
+		}
+
+		if len(conn.resTimestampTest) > 0 {
+			// Get the timestamp of current request
+			resTimestampTest = conn.resTimestampTest[0]
+			// Pop the timestamp of current request
+			conn.resTimestampTest = conn.resTimestampTest[1:]
+		} else {
+			conn.logger.Debug("no response timestamp found")
+			if len(requestBuf) > 0 {
+				reqLine := strings.Split(string(requestBuf), "\n")
+				if models.GetMode() == models.MODE_RECORD && len(reqLine) > 0 && reqLine[0] != "" {
+					conn.logger.Warn(fmt.Sprintf("failed to capture response timestamp for a request. Please record it again if important:%v", reqLine[0]))
+				}
+			}
+			recordTraffic = false
+		}
+		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestampTest, resTimestampTest))
 	}
 
-	return recordTraffic, requestBuf, responseBuf, reqTimestampTest, conn.resTimestampTest
-	// // Check if other conditions for completeness are met.
-	// return conn.closeTimestamp != 0 &&
-	// 	conn.totalReadBytes == conn.recvBytes &&
-	// 	conn.totalWrittenBytes == conn.sentBytes
+	return recordTraffic, requestBuf, responseBuf, reqTimestampTest, resTimestampTest
 }
 
 func (conn *Tracker) resetConnection() {
@@ -275,6 +298,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 	switch event.Direction {
 	case structs2.EgressTraffic:
 		if !conn.isNewRequest {
+			conn.resTimestampTest = append(conn.resTimestampTest, time.Now())
 			conn.isNewRequest = true
 		}
 
