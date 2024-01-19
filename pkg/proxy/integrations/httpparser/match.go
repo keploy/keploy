@@ -72,10 +72,7 @@ func match(req *http.Request, reqBody []byte, reqURL *url.URL, isReqBodyJSON boo
 
 		isMatched, bestMatch := Fuzzymatch(eligibleMock, requestBuffer, h)
 		if isMatched {
-			isDeleted, err := h.DeleteTcsMock(bestMatch)
-			if err != nil {
-				return false, nil, fmt.Errorf("error while deleting tcs mocks: %v", err)
-			}
+			isDeleted := h.DeleteTcsMock(bestMatch)
 			if !isDeleted {
 				continue
 			}

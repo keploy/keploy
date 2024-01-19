@@ -153,7 +153,7 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		}
 	}
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetTag("Keploy Version", utils.KeployVersion)
+		scope.SetTag("Keploy Version", utils.Version)
 		scope.SetTag("Linux Kernel Version", kernelVersion)
 		scope.SetTag("Architecture", arch)
 		scope.SetTag("Installation ID", installationID)

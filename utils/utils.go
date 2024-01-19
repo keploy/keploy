@@ -25,6 +25,33 @@ type GitHubRelease struct {
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
+var ConfigGuide = `
+  # Example on using globalNoise
+  # globalNoise:
+  #    global:
+  #      body: {
+  #         # to ignore some values for a field,
+  #         # pass regex patterns to the corresponding array value
+  #         "url": ["https?://\S+", "http://\S+"],
+  #      }
+  #      header: {
+  #         # to ignore the entire field, pass an empty array
+  #         "Date": [],
+  #       }
+  #     # to ignore fields or the corresponding values for a specific test-set,
+  #     # pass the test-set-name as a key to the "test-sets" object and
+  #     # populate the corresponding "body" and "header" objects
+  #     test-sets:
+  #       test-set-1:
+  #         body: {
+  #           # ignore all the values for the "url" field
+  #           "url": []
+  #         }
+  #         header: {
+  #           # we can also pass the exact value to ignore for a field
+  #           "User-Agent": ["PostmanRuntime/7.34.0"]
+  #         }
+`
 
 // askForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
@@ -58,7 +85,7 @@ func CheckFileExists(path string) bool {
 	return true
 }
 
-var KeployVersion string
+var Version string
 
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)

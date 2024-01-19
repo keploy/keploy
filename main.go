@@ -33,15 +33,13 @@ func main() {
 	if version == "" {
 		version = "2-dev"
 	}
-	utils.KeployVersion = version
+	utils.Version = version
 	fmt.Println(logo, " ")
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
 		TracesSampleRate: 1.0,
 	})
-	//Set the version
-	utils.KeployVersion = version
 	log.Level = 0
 	if err != nil {
 		log.Debug("Could not initialise sentry.", err)
