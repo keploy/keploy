@@ -196,6 +196,8 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				copy(genericResponseCopy, genericResponses)
 				copy(genericRequestsCopy, genericRequests)
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+					metadata := make(map[string]string)
+					metadata["type"] = "config"
 					h.AppendMocks(&models.Mock{
 						Version: models.GetVersion(),
 						Name:    "mocks",
@@ -205,6 +207,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 							GenericResponses: resps,
 							ReqTimestampMock: reqTimestampMock,
 							ResTimestampMock: resTimestampMock,
+							Metadata:         metadata,
 						},
 					}, ctx)
 				}(genericRequestsCopy, genericResponseCopy)
@@ -227,6 +230,8 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				copy(genericResponseCopy, genericResponses)
 				copy(genericRequestsCopy, genericRequests)
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+					metadata := make(map[string]string)
+					metadata["type"] = "config"
 					h.AppendMocks(&models.Mock{
 						Version: models.GetVersion(),
 						Name:    "mocks",
@@ -236,6 +241,7 @@ func encodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 							GenericResponses: resps,
 							ReqTimestampMock: reqTimestampMock,
 							ResTimestampMock: resTimestampMock,
+							Metadata:         metadata,
 						},
 					}, ctx)
 				}(genericRequestsCopy, genericResponseCopy)
