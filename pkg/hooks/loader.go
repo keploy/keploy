@@ -425,7 +425,7 @@ func (h *Hook) StopUserApplication() {
 
 	h.mutex.Unlock()
 
-	if userAppCmd != nil && userAppCmd.Process != nil {
+	if userAppCmd != nil && process != nil {
 
 		// Stop Docker Container and Remove it if Keploy ran using docker.
 		containerID := h.idc.GetContainerID()
@@ -436,7 +436,7 @@ func (h *Hook) StopUserApplication() {
 			}
 		}
 		if process != nil {
-			pid := userAppCmd.Process.Pid
+			pid := process.Pid
 
 			h.killProcessesAndTheirChildren(pid)
 		}
