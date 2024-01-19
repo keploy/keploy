@@ -16,8 +16,7 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
-var ConfigGuide =
-`
+var ConfigGuide = `
   # Example on using globalNoise
   # globalNoise:
   #    global:
@@ -77,7 +76,7 @@ func CheckFileExists(path string) bool {
 	return true
 }
 
-var KeployVersion string
+var Version string
 
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
