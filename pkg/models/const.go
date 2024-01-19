@@ -16,7 +16,7 @@ const (
 )
 
 var (
-	PassThroughHosts = []string{"dc\\.services\\.visualstudio\\.com"}
+	PassThroughHosts = []string{"^dc\\.services\\.visualstudio\\.com$"}
 )
 
 var orangeColorSGR = []color.Attribute{38, 5, 208}
