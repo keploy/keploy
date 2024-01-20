@@ -5,9 +5,9 @@ import (
 	"os/exec"
 	"sync"
 
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
-  "go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -36,7 +36,7 @@ record:
   buildDelay: 30s
   passThroughPorts: []
   filters:
-    ReqHeader: []
+    reqHeaders: []
     urlMethods: {}
 test:
   path: ""
@@ -47,7 +47,6 @@ test:
   networkName: ""
   # example: "test-set-1": ["test-1", "test-2", "test-3"]
   tests:
-  # to use globalNoise, please follow the guide at the end of this file.
   globalNoise:
     global:
       body: {}
@@ -71,14 +70,14 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
 	}
 
-  finalOutput := append(results, []byte(utils.ConfigGuide)...)
+	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 
 	err = os.WriteFile(filePath, finalOutput, os.ModePerm)
 	if err != nil {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
 
-	cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
+	cmd := exec.Command("sudo", "chmod", "-R", "644", filePath)
 	err = cmd.Run()
 	if err != nil {
 		g.logger.Error("failed to set the permission of config file", zap.Error(err))
