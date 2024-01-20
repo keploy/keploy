@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/service/updateBinary" // Import the updateBinary package
+	"go.keploy.io/server/pkg/service/update" // Import the updateBinary package
 	"go.uber.org/zap"
 )
 

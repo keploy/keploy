@@ -265,7 +265,7 @@ func (r *Root) execute() {
 	versionFlag := checkForVersionFlag(os.Args[1:])
 	if versionFlag {
 		// Fetch the version and print it
-		currentVersion := utils.KeployVersion
+		currentVersion := utils.Version
 		fmt.Println("Current version:", currentVersion)
 
 		// Check for the latest release version

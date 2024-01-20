@@ -38,7 +38,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 // UpdateBinary initiates the update process for the Keploy binary file.
 func (u *updater) UpdateBinary() {
-	currentVersion := utils.KeployVersion
+	currentVersion := utils.Version
 
 	releaseInfo, err := utils.GetLatestGitHubRelease()
 	latestVersion := releaseInfo.TagName
@@ -90,7 +90,7 @@ func (u *updater) UpdateBinary() {
 	if err != nil {
 		u.logger.Error("Failed to render release notes", zap.Error(err))
 		return
-	}	
+	}
 	fmt.Println(changelog)
 }
 
@@ -121,4 +121,4 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	}
 
 	return nil
-}	
+}
