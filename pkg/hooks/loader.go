@@ -551,7 +551,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 		defer utils.HandlePanic()
 		for {
 			connectionFactory.ProcessActiveTrackers(h.TestCaseDB, ctx, filters)
-			time.Sleep(1 * time.Second)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 
