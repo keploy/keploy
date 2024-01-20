@@ -105,7 +105,6 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 			continue
 		}
 
-		fmt.Println("please delete me from socketDataEventCallback")
 
 		data := record.RawSample
 		if len(data) < eventAttributesSize {
