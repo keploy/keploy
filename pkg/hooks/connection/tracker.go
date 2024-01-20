@@ -188,7 +188,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 
 		// // decrease the recTestCounter
 		conn.decRecordTestCount()
-		conn.logger.Info("verified recording", zap.Any("recordTraffic", recordTraffic))
+		conn.logger.Debug("verified recording", zap.Any("recordTraffic", recordTraffic))
 	} else if conn.lastChunkWasResp && elapsedTime >= uint64(time.Second*2) { // Check if 2 seconds has passed since the last activity.
 		conn.logger.Debug("might be last request on the connection")
 
@@ -233,7 +233,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 		// this can be to avoid potential corruption in the connection
 		conn.reset()
 
-		conn.logger.Info("unverified recording", zap.Any("recordTraffic", recordTraffic))
+		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))
 	}
 
 	var reqTimestamps time.Time
@@ -337,7 +337,6 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 
 		//Handling multiple request on same connection to support connection:keep-alive
 		if conn.firstRequest || conn.lastChunkWasReq {
-			fmt.Println("req size before getting response is:", conn.reqSize, event.ValidateReadBytes)
 			conn.userReqSizes = append(conn.userReqSizes, conn.reqSize)
 			conn.reqSize = 0
 
