@@ -543,6 +543,9 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 		if isUnitTestIntegration {
 			return ErrFailedUnitTest
 		}
+		h.logger.Error("Failed to execute userApplication: Invalid runApp command",
+			zap.String("appCmd", appCmd),
+		)
 		h.logger.Error("userApplication failed to run with the following error. Please check application logs", zap.Error(err))
 		return ErrCommandError
 	} else {
