@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/service/serve"
 	"go.uber.org/zap"
 )
@@ -56,6 +57,13 @@ func (s *Serve) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
+			subDirPrefix := "test-report-"
+
+			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, subDirPrefix)
+			if err != nil {
+				s.logger.Error("failed to get the next test report directory", zap.Error(err))
+				return
+			}
 
 			s.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
