@@ -74,9 +74,9 @@ done
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --apiTimeout 30 --delay 7
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-report-0/report-1.yaml"
+report_file="./keploy/testReports/test-run-0/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-report-0/report-2.yaml"
+report_file2="./keploy/testReports/test-run-0/report-2.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.

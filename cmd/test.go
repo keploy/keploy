@@ -250,7 +250,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
-			subDirPrefix := "test-report-"
+			subDirPrefix := "test-run-"
 			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, subDirPrefix)
 			if err != nil {
 				t.logger.Error("failed to get the next test report directory", zap.Error(err))
