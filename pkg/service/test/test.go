@@ -106,8 +106,8 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 		os.Setenv("GOCOVERDIR", cfg.CoverageReportPath)
 	}
 
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+	returnVal.Stopper = make(chan os.Signal, 1)
+	signal.Notify(returnVal.Stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	models.SetMode(models.MODE_TEST)
 
@@ -126,7 +126,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	}
 
 	select {
-	case <-stopper:
+	case <-returnVal.Stopper:
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// load the ebpf hooks into the kernel
@@ -136,7 +136,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	}
 
 	select {
-	case <-stopper:
+	case <-returnVal.Stopper:
 		returnVal.LoadedHooks.Stop(true)
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
@@ -167,29 +167,6 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	returnVal.AbortStopHooksInterrupt = make(chan bool) // channel to stop closing of keploy via interrupt
 	returnVal.AbortStopHooksForcefully = false          // boolen to stop closing of keploy via user app error
 	returnVal.ExitCmd = make(chan bool)                 // channel to exit this command
-	resultForTele := []int{0, 0}
-	returnVal.Ctx = context.WithValue(context.Background(), "resultForTele", &resultForTele)
-
-	go func() {
-		select {
-		case <-stopper:
-			returnVal.AbortStopHooksForcefully = true
-			returnVal.LoadedHooks.Stop(false)
-			//Call the telemetry events.
-			if resultForTele[0] != 0 || resultForTele[1] != 0 {
-				tele.Testrun(resultForTele[0], resultForTele[1])
-			}
-			returnVal.ProxySet.StopProxyServer()
-			returnVal.ExitCmd <- true
-		case <-returnVal.AbortStopHooksInterrupt:
-			//Call the telemetry events.
-			if resultForTele[0] != 0 || resultForTele[1] != 0 {
-				tele.Testrun(resultForTele[0], resultForTele[1])
-			}
-			return
-		}
-	}()
-
 	return returnVal, nil
 }
 
@@ -215,7 +192,31 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		CoverageReportPath: options.CoverageReportPath,
 		EnableTele:         enableTele,
 	}
+
 	initialisedValues, err := t.InitialiseTest(cfg)
+	resultForTele := []int{0, 0}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
+	go func() {
+		select {
+		case <-initialisedValues.Stopper:
+			cancel()
+			initialisedValues.AbortStopHooksForcefully = true
+			initialisedValues.LoadedHooks.Stop(false)
+			//Call the telemetry events.
+			if resultForTele[0] != 0 || resultForTele[1] != 0 {
+				initialisedValues.YamlStore.GetTele().Testrun(resultForTele[0], resultForTele[1])
+			}
+			initialisedValues.ProxySet.StopProxyServer()
+			initialisedValues.ExitCmd <- true
+		case <-initialisedValues.AbortStopHooksInterrupt:
+			//Call the telemetry events.
+			if resultForTele[0] != 0 || resultForTele[1] != 0 {
+				initialisedValues.YamlStore.GetTele().Testrun(resultForTele[0], resultForTele[1])
+			}
+			return
+		}
+	}()
 	// Recover from panic and gracefully shutdown
 	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
 	if err != nil {
@@ -223,35 +224,41 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		return false
 	}
 	for _, sessionIndex := range initialisedValues.Sessions {
-		// checking whether the provided testset match with a recorded testset.
-		testcases := ArrayToMap(options.Tests[sessionIndex])
-		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
-			continue
-		}
-		noiseConfig := options.GlobalNoise
-		if tsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
-			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
-		}
-
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
-
-		switch testRunStatus {
-		case models.TestRunStatusAppHalted:
-			testRes = false
-			exitLoop = true
-		case models.TestRunStatusFaultUserApp:
-			testRes = false
-			exitLoop = true
-		case models.TestRunStatusUserAbort:
-			return false
-		case models.TestRunStatusFailed:
-			testRes = false
-		case models.TestRunStatusPassed:
-			testRes = true
-		}
-		result = result && testRes
-		if exitLoop {
+		select {
+		case <-ctx.Done():
 			break
+		default:
+			// checking whether the provided testset match with a recorded testset.
+			testcases := ArrayToMap(options.Tests[sessionIndex])
+			if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
+				continue
+			}
+			noiseConfig := options.GlobalNoise
+			if tsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
+				noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
+			}
+
+			testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, ctx, testcases, noiseConfig, false)
+
+			switch testRunStatus {
+			case models.TestRunStatusAppHalted:
+				testRes = false
+				exitLoop = true
+			case models.TestRunStatusFaultUserApp:
+				testRes = false
+				exitLoop = true
+			case models.TestRunStatusUserAbort:
+				return false
+			case models.TestRunStatusFailed:
+				testRes = false
+			case models.TestRunStatusPassed:
+				testRes = true
+			}
+			result = result && testRes
+			if exitLoop {
+				break
+			}
+
 		}
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
@@ -296,11 +303,16 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	var readTcs []*models.TestCase
 	tcsMocks, err := cfg.YamlStore.ReadTestcase(filepath.Join(cfg.Path, cfg.TestSet, "tests"), nil, nil)
 	for _, mock := range tcsMocks {
-		tcs, ok := mock.(*models.TestCase)
-		if !ok {
-			continue
+		select {
+		case <-cfg.Ctx.Done():
+			return returnVal
+		default:
+			tcs, ok := mock.(*models.TestCase)
+			if !ok {
+				continue
+			}
+			readTcs = append(readTcs, tcs)
 		}
-		readTcs = append(readTcs, tcs)
 	}
 	if err != nil {
 		t.logger.Error("Error in reading the testcase", zap.Error(err))
@@ -318,11 +330,18 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	var readConfigMocks []*models.Mock
 	configMocks, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
 	for _, mock := range configMocks {
-		configMock, ok := mock.(*models.Mock)
-		if !ok {
-			continue
+		select {
+		case <-cfg.Ctx.Done():
+			return returnVal
+		default:
+			configMock, ok := mock.(*models.Mock)
+			if !ok {
+				continue
+			}
+			readConfigMocks = append(readConfigMocks, configMock)
+
 		}
-		readConfigMocks = append(readConfigMocks, configMock)
+
 	}
 	var readTcsMocks []*models.Mock
 	readTcsMockss, err := cfg.YamlStore.ReadTcsMocks(nil, filepath.Join(cfg.Path, cfg.TestSet))
@@ -347,22 +366,29 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	if len(cfg.AppCmd) == 0 && cfg.Pid != 0 {
 		t.logger.Debug("running keploy tests along with other unit tests")
 	} else {
-		t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(cfg.TestSet)))
 		// start user application
 		if !cfg.ServeTest {
 			go func() {
-				if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay, cfg.BuildDelay, false); err != nil {
-					switch err {
-					case hooks.ErrInterrupted:
-						t.logger.Info("keploy terminated user application")
-					case hooks.ErrCommandError:
-					case hooks.ErrUnExpected:
-						t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
-					default:
-						t.logger.Error("unknown error recieved from application", zap.Error(err))
+				select {
+				case <-cfg.Ctx.Done():
+					return
+				default:
+					t.logger.Info("running user application for", zap.Any("test-set", models.HighlightString(cfg.TestSet)))
+					if err := cfg.LoadedHooks.LaunchUserApplication(cfg.AppCmd, cfg.AppContainer, cfg.AppNetwork, cfg.Delay, cfg.BuildDelay, false); err != nil {
+						switch err {
+						case hooks.ErrInterrupted:
+							t.logger.Info("keploy terminated user application")
+						case hooks.ErrCommandError:
+						case hooks.ErrUnExpected:
+							t.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is expected")
+						default:
+							t.logger.Error("unknown error recieved from application", zap.Error(err))
+						}
+						returnVal.ErrChan <- err
 					}
-					returnVal.ErrChan <- err
+
 				}
+
 			}()
 		}
 	}
@@ -588,90 +614,107 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 
 	var entTcs, nonKeployTcs []string
 	for _, tc := range initialisedValues.Tcs {
-		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
-			continue
-		}
-		// Filter the TCS Mocks based on the test case's request and response
-		// timestamp such that mock's timestamps lies between the test's timestamp
-		// and then, set the TCS Mocks.
-		filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
-		readTcsMocks := []*models.Mock{}
-		for _, mock := range filteredTcsMocks {
-			tcsmock, ok := mock.(*models.Mock)
-			if !ok {
-				continue
-			}
-			readTcsMocks = append(readTcsMocks, tcsmock)
-		}
-		readTcsMocks, _ = FilterMocks(tc, readTcsMocks, t.logger)
-		loadedHooks.SetTcsMocks(readTcsMocks)
-
-		// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
-		// and are order by the request timestamp in ascending order
-		// Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
-		rec, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
-		if err != nil {
-			t.logger.Error("failed to read the config mocks", zap.Error(err))
-			return models.TestRunStatusFailed
-		}
-		configMocks := []*models.Mock{}
-		for _, mock := range rec {
-			configMock, ok := mock.(*models.Mock)
-			if !ok {
-				continue
-			}
-			configMocks = append(configMocks, configMock)
-		}
-		sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
-		loadedHooks.SetConfigMocks(sortedConfigMocks)
-		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
-			entTcs = append(entTcs, tc.Name)
-		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
-			nonKeployTcs = append(nonKeployTcs, tc.Name)
-		}
 		select {
-		case err := <-initialisedValues.ErrChan:
-			isApplicationStopped = true
-			switch err {
-			case hooks.ErrInterrupted:
-				exitLoop = true
-				status = models.TestRunStatusUserAbort
-			case hooks.ErrCommandError:
-				exitLoop = true
-				status = models.TestRunStatusFaultUserApp
-			case hooks.ErrUnExpected:
-				exitLoop = true
-				status = models.TestRunStatusAppHalted
-				t.logger.Warn("stopping testrun for the test set:", zap.Any("test-set", testSet))
-			default:
-				exitLoop = true
-				status = models.TestRunStatusAppHalted
-				t.logger.Error("stopping testrun for the test set:", zap.Any("test-set", testSet))
-			}
+		case <-ctx.Done():
+			return models.TestRunStatusFailed
 		default:
-		}
+			if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
+				continue
+			}
+			// Filter the TCS Mocks based on the test case's request and response
+			// timestamp such that mock's timestamps lies between the test's timestamp
+			// and then, set the TCS Mocks.
+			filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
+			readTcsMocks := []*models.Mock{}
+			for _, mock := range filteredTcsMocks {
+				select {
+				case <-ctx.Done():
+					return models.TestRunStatusFailed
+				default:
+					tcsmock, ok := mock.(*models.Mock)
+					if !ok {
+						continue
+					}
+					readTcsMocks = append(readTcsMocks, tcsmock)
 
-		if exitLoop {
-			break
-		}
+				}
+			}
+			readTcsMocks, _ = FilterMocks(tc, readTcsMocks, t.logger)
+			loadedHooks.SetTcsMocks(readTcsMocks)
 
-		cfg := &SimulateRequestConfig{
-			Tc:           tc,
-			LoadedHooks:  loadedHooks,
-			AppCmd:       appCmd,
-			UserIP:       userIp,
-			TestSet:      testSet,
-			ApiTimeout:   apiTimeout,
-			Success:      &success,
-			Failure:      &failure,
-			Status:       &status,
-			TestReportFS: testReportFS,
-			TestReport:   initialisedValues.TestReport,
-			Path:         path,
-			DockerID:     initialisedValues.DockerID,
-			NoiseConfig:  noiseConfig,
+			// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
+			// and are order by the request timestamp in ascending order
+			// Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
+			rec, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+			if err != nil {
+				t.logger.Error("failed to read the config mocks", zap.Error(err))
+				return models.TestRunStatusFailed
+			}
+			configMocks := []*models.Mock{}
+			for _, mock := range rec {
+				select {
+				case <-ctx.Done():
+					return models.TestRunStatusFailed
+				default:
+					configMock, ok := mock.(*models.Mock)
+					if !ok {
+						continue
+					}
+					configMocks = append(configMocks, configMock)
+				}
+			}
+			sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
+			loadedHooks.SetConfigMocks(sortedConfigMocks)
+			if tc.Version == "api.keploy-enterprise.io/v1beta1" {
+				entTcs = append(entTcs, tc.Name)
+			} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
+				nonKeployTcs = append(nonKeployTcs, tc.Name)
+			}
+			select {
+			case err := <-initialisedValues.ErrChan:
+				isApplicationStopped = true
+				switch err {
+				case hooks.ErrInterrupted:
+					exitLoop = true
+					status = models.TestRunStatusUserAbort
+				case hooks.ErrCommandError:
+					exitLoop = true
+					status = models.TestRunStatusFaultUserApp
+				case hooks.ErrUnExpected:
+					exitLoop = true
+					status = models.TestRunStatusAppHalted
+					t.logger.Warn("stopping testrun for the test set:", zap.Any("test-set", testSet))
+				default:
+					exitLoop = true
+					status = models.TestRunStatusAppHalted
+					t.logger.Error("stopping testrun for the test set:", zap.Any("test-set", testSet))
+				}
+			default:
+			}
+
+			if exitLoop {
+				break
+			}
+
+			cfg := &SimulateRequestConfig{
+				Tc:           tc,
+				LoadedHooks:  loadedHooks,
+				AppCmd:       appCmd,
+				UserIP:       userIp,
+				TestSet:      testSet,
+				ApiTimeout:   apiTimeout,
+				Success:      &success,
+				Failure:      &failure,
+				Status:       &status,
+				TestReportFS: testReportFS,
+				TestReport:   initialisedValues.TestReport,
+				Path:         path,
+				DockerID:     initialisedValues.DockerID,
+				NoiseConfig:  noiseConfig,
+			}
+			t.SimulateRequest(cfg)
+
 		}
-		t.SimulateRequest(cfg)
 	}
 	if len(entTcs) > 0 {
 		t.logger.Warn("These testcases have been recorded with Keploy Enterprise, may not work properly with the open-source version", zap.Strings("enterprise mocks:", entTcs))
@@ -731,6 +774,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	}
 
 	for field, regexArr := range noise {
+		//TODO: add context cancel here.
 		a := strings.Split(field, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
@@ -798,6 +842,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		)
 
 		for _, j := range res.HeadersResult {
+			//TODO: add context cancel here.
 			if !j.Normal {
 				unmatched = false
 				actualHeader[j.Actual.Key] = j.Actual.Value
@@ -807,6 +852,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 
 		if !unmatched {
 			for i, j := range expectedHeader {
+				// TODO: add context cancel here.
 				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
 			}
 		}
@@ -819,6 +865,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					t.logger.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
+					//TODO: add context cancel here.
 					keyStr := op.Path
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]

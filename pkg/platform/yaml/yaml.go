@@ -32,7 +32,7 @@ type Yaml struct {
 	MockName    string
 	TcsName     string
 	Logger      *zap.Logger
-	tele        *telemetry.Telemetry
+	Tele        *telemetry.Telemetry
 	nameCounter int
 	mutex       sync.RWMutex
 }
@@ -44,7 +44,7 @@ func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName stri
 		MockName:    mockName,
 		TcsName:     tcsName,
 		Logger:      Logger,
-		tele:        tele,
+		Tele:        tele,
 		nameCounter: 0,
 		mutex:       sync.RWMutex{},
 	}
@@ -86,6 +86,10 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 	lastIndex += 1
 
 	return lastIndex, nil
+}
+
+func (ys *Yaml) GetTele() *telemetry.Telemetry  {
+	return ys.Tele
 }
 
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
@@ -181,7 +185,7 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 	}
 
 	if !bypassTestCase {
-		ys.tele.RecordedTestAndMocks()
+		ys.Tele.RecordedTestAndMocks()
 		ys.mutex.Lock()
 		testsTotal, ok := ctx.Value("testsTotal").(*int)
 		if !ok {
@@ -316,7 +320,7 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	}
 	(*mocksTotal)[string(mock.Kind)]++
 	if ctx.Value("cmd") == "mockrecord" {
-		ys.tele.RecordedMock(string(mock.Kind))
+		ys.Tele.RecordedMock(string(mock.Kind))
 	}
 	if ys.MockName != "" {
 		mock.Name = ys.MockName

@@ -35,13 +35,13 @@ type InitialiseRunTestSetReturn struct {
 type InitialiseTestReturn struct {
 	Sessions                 []string
 	TestReportFS             *yaml.TestReport
-	Ctx                      context.Context
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
 	YamlStore                platform.TestCaseDB
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
+	Stopper                  chan os.Signal
 }
 
 type TestConfig struct {
