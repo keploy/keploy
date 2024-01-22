@@ -17,23 +17,34 @@ import (
 const MAX_LINE_LENGTH = 50
 
 type DiffsPrinter struct {
-	testCase  string
-	statusExp string
-	statusAct string
-	headerExp map[string]string
-	headerAct map[string]string
-	bodyExp   string
-	bodyAct   string
-	bodyNoise map[string][]string
-	headNoise map[string][]string
+	testCase                   string
+	statusExp                  string
+	statusAct                  string
+	headerExp                  map[string]string
+	headerAct                  map[string]string
+	bodyExp                    string
+	bodyAct                    string
+	bodyNoise                  map[string][]string
+	headNoise                  map[string][]string
+	hasSameDifferentOrderMocks bool
+	expectedOrder              []string
+	actualOrder                []string
+	text                       string
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, []string{}, []string{}, ""}
 }
 
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 	d.statusExp, d.statusAct = exp, act
+}
+
+func (d *DiffsPrinter) PushFooterDiff(exp, act, key string) {
+	d.hasSameDifferentOrderMocks = true
+	d.expectedOrder = append(d.expectedOrder, exp)
+	d.actualOrder = append(d.actualOrder, act)
+	d.text = key
 }
 
 func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]string) {
@@ -73,8 +84,17 @@ func (d *DiffsPrinter) Render() error {
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
 	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
+
 	for _, e := range diffs {
 		table.Append([]string{e})
+	}
+	if d.hasSameDifferentOrderMocks {
+		table.SetHeader([]string{d.text})
+		table.SetAlignment(tablewriter.ALIGN_CENTER)
+		paint := color.New(color.FgHiRed).SprintFunc()
+		postPaint := paint(d.text)
+		table.Append([]string{postPaint})
+
 	}
 	table.Render()
 	return nil

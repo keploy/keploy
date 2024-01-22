@@ -759,8 +759,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
+	isSame := false
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
+		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
 		if err != nil {
 			return false, res
 		}
@@ -834,7 +835,12 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
+					if isSame {
+						logDiffs.hasSameDifferentOrderMocks = true
+						logDiffs.PushFooterDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), "Same value in different order")
+					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+
 				}
 			} else {
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
