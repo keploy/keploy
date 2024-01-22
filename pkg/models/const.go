@@ -12,6 +12,7 @@ const (
 	HttpClient     string = "HTTP_CLIENT"
 	TestSetPattern string = "test-set-"
 	String         string = "string"
+	SubDirPrefix   string = "test-run-"
 )
 
 var (
