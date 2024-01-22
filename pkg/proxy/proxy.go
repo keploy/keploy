@@ -49,7 +49,7 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 type DependencyHandler interface {
 	OutgoingType(buffer []byte) bool
-	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context)
+	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context, sourcePort int)
 }
 
 var ParsersMap = make(map[string]DependencyHandler)
@@ -775,8 +775,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 	remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-	ps.hook.SetSourcePort(sourcePort)
-
 	ps.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
 	//TODO:  fix this bug, getting source port same as proxy port.
@@ -817,7 +815,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				// }
 			}
 		}
-		ParsersMap["mysql"].ProcessOutgoing([]byte{}, conn, dst, ctx)
+		ParsersMap["mysql"].ProcessOutgoing([]byte{}, conn, dst, ctx, sourcePort)
 
 	} else {
 		clientConnId := util.GetNextID()
@@ -914,7 +912,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		//Checking for all the parsers.
 		for _, parser := range ParsersMap {
 			if parser.OutgoingType(buffer) {
-				parser.ProcessOutgoing(buffer, conn, dst, ctx)
+				parser.ProcessOutgoing(buffer, conn, dst, ctx, sourcePort)
 				genericCheck = false
 			}
 		}

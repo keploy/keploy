@@ -32,7 +32,7 @@ func (sql *MySqlParser) OutgoingType(buffer []byte) bool {
 	//Returning false here because sql parser is using the ports to check if the packet is mysql or not.
 	return false
 }
-func (sql *MySqlParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
+func (sql *MySqlParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context, sourcePort int) {
 	delay := sql.delay
 	switch models.GetMode() {
 	case models.MODE_RECORD:

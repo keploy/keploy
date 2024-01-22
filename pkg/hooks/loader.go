@@ -95,7 +95,6 @@ type Hook struct {
 
 	idc              clients.InternalDockerClient
 	passThroughHosts models.Stubs
-	sourcePort       int
 }
 
 func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Hook, error) {
@@ -151,14 +150,6 @@ func (h *Hook) SetProxyHosts(passThroughHosts []models.Filters) {
 	h.passThroughHosts = models.Stubs{
 		Filters: passThroughHosts,
 	}
-}
-
-func (h *Hook) GetSourcePort() int {
-	return h.sourcePort
-}
-
-func (h *Hook) SetSourcePort(sourcePort int) {
-	h.sourcePort = sourcePort
 }
 
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {

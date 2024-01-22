@@ -49,7 +49,7 @@ func (m *MongoParser) OutgoingType(buffer []byte) bool {
 	return int(messageLength) == len(buffer)
 }
 
-func (m *MongoParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
+func (m *MongoParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context, sourcePort int) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		m.logger.Debug("the outgoing mongo in record mode")
