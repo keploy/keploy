@@ -3,6 +3,7 @@ package genericparser
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 
 	// "fmt"
 	"unicode"
@@ -26,12 +27,24 @@ func PostgresDecoder(encoded string) ([]byte, error) {
 
 func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
 	for {
-		tcsMocks, err := h.GetTcsMocks()
+		tcsMocks, err := h.GetConfigMocks()
 		if err != nil {
 			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 		}
+
+		var filteredMocks []*models.Mock
+		var unfilteredMocks []*models.Mock
+
+		for _, mock := range tcsMocks {
+			if mock.TestModeInfo.IsFiltered {
+				filteredMocks = append(filteredMocks, mock)
+			} else {
+				unfilteredMocks = append(unfilteredMocks, mock)
+			}
+		}
+
 		index := -1
-		for idx, mock := range tcsMocks {
+		for idx, mock := range filteredMocks {
 			if len(mock.Spec.GenericRequests) == len(requestBuffers) {
 				matched := true // Flag to track if all requests match
 
@@ -55,25 +68,47 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 			}
 		}
 
-		if index == -1 {
-			index = findBinaryMatch(tcsMocks, requestBuffers, h)
-		}
-
 		if index != -1 {
-			responseMock := make([]models.GenericPayload, len(tcsMocks[index].Spec.GenericResponses))
-			copy(responseMock, tcsMocks[index].Spec.GenericResponses)
-			isDeleted, err := h.DeleteTcsMock(tcsMocks[index])
-			if err != nil {
-				return false, nil, fmt.Errorf("error while deleting tcsMock %v", err)
-			}
-			if !isDeleted {
+			responseMock := make([]models.GenericPayload, len(filteredMocks[index].Spec.GenericResponses))
+			copy(responseMock, filteredMocks[index].Spec.GenericResponses)
+			originalFilteredMock := *filteredMocks[index]
+			filteredMocks[index].TestModeInfo.IsFiltered = false
+			filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
+			isUpdated := h.UpdateConfigMock(&originalFilteredMock, filteredMocks[index])
+			if !isUpdated {
 				continue
 			}
 			return true, responseMock, nil
 		}
+
+		if index == -1 {
+			index = findBinaryMatch(filteredMocks, requestBuffers, h)
+		}
+
+		if index != -1 {
+			responseMock := make([]models.GenericPayload, len(filteredMocks[index].Spec.GenericResponses))
+			copy(responseMock, filteredMocks[index].Spec.GenericResponses)
+			originalFilteredMock := *filteredMocks[index]
+			filteredMocks[index].TestModeInfo.IsFiltered = false
+			filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
+			isUpdated := h.UpdateConfigMock(&originalFilteredMock, filteredMocks[index])
+			if isUpdated {
+				continue
+			}
+			return true, responseMock, nil
+		}
+
+		if index == -1 {
+			index = findBinaryMatch(unfilteredMocks, requestBuffers, h)
+		}
+
+		if index != -1 {
+			responseMock := make([]models.GenericPayload, len(unfilteredMocks[index].Spec.GenericResponses))
+			copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
+			return true, responseMock, nil
+		}
 		break
 	}
-
 	return false, nil, nil
 }
 

@@ -60,39 +60,6 @@ func isRegularPacket(packet []byte) bool {
 	return messageType == 'Q' || messageType == 'P' || messageType == 'D' || messageType == 'C' || messageType == 'E'
 }
 
-func printStartupPacketDetails(packet []byte) {
-
-	// Print key-value pairs (for simplicity, only one key-value pair is shown)
-	keyStart := 8
-	for keyStart < len(packet) && packet[keyStart] != 0 {
-		keyEnd := keyStart
-		for keyEnd < len(packet) && packet[keyEnd] != 0 {
-			keyEnd++
-		}
-		key := string(packet[keyStart:keyEnd])
-
-		valueStart := keyEnd + 1
-		valueEnd := valueStart
-		for valueEnd < len(packet) && packet[valueEnd] != 0 {
-			valueEnd++
-		}
-		value := string(packet[valueStart:valueEnd])
-
-		fmt.Printf("Key: %s, Value: %s\n", key, value)
-
-		keyStart = valueEnd + 1
-	}
-}
-
-func printRegularPacketDetails(packet []byte) {
-	messageType := packet[0]
-	fmt.Printf("Message Type: %c\n", messageType)
-
-	// Print the message payload (for simplicity, the payload is printed as a string)
-	payload := string(packet[5:])
-	fmt.Printf("Payload: %s\n", payload)
-}
-
 const (
 	AuthTypeOk                = 0
 	AuthTypeCleartextPassword = 3
@@ -159,24 +126,16 @@ func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.Fr
 	default:
 		return nil, fmt.Errorf("unknown message type: %c", b.BackendWrapper.MsgType)
 	}
-	// fmt.Println("msg--", msgBody)
 	err := msg.Decode(msgBody[5:])
 	if b.BackendWrapper.MsgType == 'P' {
 		*msg.(*pgproto3.Parse) = b.BackendWrapper.Parse
 	}
-
-	// bits := msg.Encode([]byte{})
-	// // println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
-	// if len(bits) != len(msgBody) {
-	// 	fmt.Println("Encoded Data doesn't match the original data ..")
-	// }
 
 	return msg, err
 }
 
 func (f *FrontendWrapper) TranslateToReadableResponse(msgBody []byte, logger *zap.Logger) (pgproto3.BackendMessage, error) {
 	f.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(msgBody[1:])) - 4
-	// println("bodylen", f.FrontendWrapper.BodyLen, "of msgtype", msgBody[0])
 	f.FrontendWrapper.MsgType = msgBody[0]
 	var msg pgproto3.BackendMessage
 	switch f.FrontendWrapper.MsgType {

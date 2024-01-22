@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -296,17 +295,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	}
 
 	for _, v := range files {
-		// Define the regular expression pattern
-		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
-
-		// Compile the regular expression
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			return indices, err
-		}
-
-		// Check if the string matches the pattern
-		if regex.MatchString(v.Name()) {
+		if v.Name() != "testReports" {
 			indices = append(indices, v.Name())
 		}
 	}

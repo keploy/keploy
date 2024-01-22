@@ -46,7 +46,10 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
+		t.logger.Error("failed to get the test config from config file due to error: %s", zap.Error(err))
+		t.logger.Info("You have probably edited the config file incorrectly. Please follow the guide below.")
+		fmt.Println(utils.ConfigGuide)
+		return nil
 	}
 	if len(*path) == 0 {
 		*path = confTest.Path
