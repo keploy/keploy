@@ -76,51 +76,6 @@ test:
         port: 0
   withCoverage: false
   coverageReportPath: ""
-  # Example on using tests
-  # tests: 
-  #   filters:
-  #    - path: "/user/app"
-  #      urlMethods: ["GET"]
-  #      headers: {
-  #        "^asdf*": "^test"
-  #      }
-  #      host: "dc.services.visualstudio.com"
-  # Example on using stubs
-  # stubs: 
-  #   filters:
-  #    - path: "/user/app"
-  #      port: 8080
-  #    - port: 8081
-  #    - host: "dc.services.visualstudio.com"
-  #    - port: 8081
-  #      host: "dc.services.visualstudio.com"
-  #      path: "/user/app"
-  #
-  # Example on using globalNoise
-  # globalNoise: 
-  #    global:
-  #      body: {
-  #         # to ignore some values for a field, 
-  #         # pass regex patterns to the corresponding array value
-  #         "url": ["https?://\S+", "http://\S+"],
-  #      }
-  #      header: {
-  #         # to ignore the entire field, pass an empty array
-  #         "Date": [],
-  #       }
-  #     # to ignore fields or the corresponding values for a specific test-set,
-  #     # pass the test-set-name as a key to the "test-sets" object and
-  #     # populate the corresponding "body" and "header" objects 
-  #     test-sets:
-  #       test-set-1:
-  #         body: {
-  #           # ignore all the values for the "url" field
-  #           "url": []
-  #         }
-  #         header: { 
-  #           # we can also pass the exact value to ignore for a field
-  #           "User-Agent": ["PostmanRuntime/7.34.0"]
-  #         }
 `
 
 func (g *generatorConfig) GenerateConfig(filePath string) {

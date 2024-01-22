@@ -32,17 +32,17 @@ type HttpParser struct {
 }
 
 // ProcessOutgoing implements proxy.DepInterface.
-func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
+func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context, sourcePort int) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx)
+		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx, sourcePort)
 		if err != nil {
 			http.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
 
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger)
+		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger, sourcePort)
 	default:
 		http.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -97,14 +97,14 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h, ctx)
+		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h, ctx, 0)
 		if err != nil {
 			logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
 
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
+		decodeOutgoingHttp(request, clientConn, destConn, h, logger, 0)
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -431,7 +431,7 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, sourcePort int) {
 	//Matching algorithmm
 	//Get the mocks
 	for {
@@ -508,8 +508,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				if err != nil {
 					continue
 				}
-				subMatches := regex.FindStringSubmatch(req.URL.String())
-				if len(subMatches) > 0 && host != "" || req.Host == host {
+				matches := regex.MatchString(req.URL.String())
+				if matches && host != "" || req.Host == host {
 					passthroughHost = true
 				}
 
@@ -519,8 +519,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				if err != nil {
 					continue
 				}
-				subMatches := regex.FindStringSubmatch(req.URL.String())
-				if h.GetSourcePort() == int(filter.Port) && (len(subMatches) > 0 && filter.Path != "") {
+				matches := regex.MatchString(req.URL.String())
+				if sourcePort == int(filter.Port) && (matches && filter.Path != "") {
 					passthroughHost = true
 				}
 			}
@@ -596,7 +596,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook, ctx context.Context) error {
+func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook, ctx context.Context, sourcePort int) error {
 	var resp []byte
 	var finalResp []byte
 	var finalReq []byte
@@ -690,7 +690,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					}
 
 					// saving last request/response on this connection.
-					err := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
+					err := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
 					if err != nil {
 						logger.Error("failed to parse the final http request and response", zap.Error(err))
 						return err
@@ -721,7 +721,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			if err == io.EOF {
 				logger.Debug("connection closed by the server", zap.Error(err))
 				//check if before EOF complete response came, and try to parse it.
-				parseErr := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
+				parseErr := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
 				if parseErr != nil {
 					logger.Error("failed to parse the final http request and response", zap.Error(parseErr))
 					return parseErr
@@ -735,7 +735,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 
 		logger.Debug("This is the final response: " + string(finalResp))
 
-		err = ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
+		err = ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
 		if err != nil {
 			logger.Error("failed to parse the final http request and response", zap.Error(err))
 			return err
@@ -764,7 +764,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 }
 
 // ParseFinalHttp is used to parse the final http request and response and save it in a yaml file
-func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTimestampcMock time.Time, ctx context.Context, logger *zap.Logger, h *hooks.Hook) error {
+func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTimestampcMock time.Time, ctx context.Context, logger *zap.Logger, h *hooks.Hook, sourcePort int) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
@@ -837,8 +837,8 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		if err != nil {
 			continue
 		}
-		subMatches := regex.FindStringSubmatch(req.URL.String())
-		if len(subMatches) > 0 && host != "" || req.Host == host {
+		matches := regex.MatchString(req.URL.String())
+		if matches && host != "" || req.Host == host {
 			passthroughHost = true
 		}
 	}
@@ -847,8 +847,8 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		if err != nil {
 			continue
 		}
-		subMatches := regex.FindStringSubmatch(req.URL.String())
-		if h.GetSourcePort() == int(filter.Port) && (len(subMatches) > 0 && filter.Path != "") {
+		matches := regex.MatchString(req.URL.String())
+		if sourcePort == int(filter.Port) && (matches && filter.Path != "") {
 			passthroughHost = true
 		}
 	}

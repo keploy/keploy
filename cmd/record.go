@@ -78,15 +78,13 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if *buildDelay == 30*time.Second && confRecord.BuildDelay != 0 {
 		*buildDelay = confRecord.BuildDelay
 	}
-	*passThrough = append(*passThrough, confRecord.Stubs.Filters...)
+	passThroughPortProvided := len(*passThroughPorts) == 0
 
-	if len(*passThroughPorts) == 0 {
-		for _, filter := range confRecord.Stubs.Filters {
-			if filter.Port != 0 && filter.Host == "" && filter.Path == "" {
-				*passThroughPorts = append(*passThroughPorts, filter.Port)
-			} else {
-				*passThrough = append(*passThrough, filter)
-			}
+	for _, filter := range confRecord.Stubs.Filters {
+		if filter.Port != 0 && filter.Host == "" && filter.Path == "" && passThroughPortProvided {
+			*passThroughPorts = append(*passThroughPorts, filter.Port)
+		} else {
+			*passThrough = append(*passThrough, filter)
 		}
 	}
 
