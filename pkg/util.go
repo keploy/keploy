@@ -185,7 +185,7 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 }
 
 func GetNextTestReportDir(testReportPath, subDirPrefix string) (string, error) {
-	latestReportNumber := 0
+	latestReportNumber := 1
 
 	if _, err := os.Stat(testReportPath); !os.IsNotExist(err) {
 		file, err := os.Open(testReportPath)
