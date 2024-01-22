@@ -6,13 +6,13 @@ import (
 )
 
 const (
-	NoSqlDB        string = "NO_SQL_DB"
-	SqlDB          string = "SQL_DB"
-	GRPC           string = "GRPC"
-	HttpClient     string = "HTTP_CLIENT"
-	TestSetPattern string = "test-set-"
-	String         string = "string"
-	SubDirPrefix   string = "test-run-"
+	NoSqlDB             string = "NO_SQL_DB"
+	SqlDB               string = "SQL_DB"
+	GRPC                string = "GRPC"
+	HttpClient          string = "HTTP_CLIENT"
+	TestSetPattern      string = "test-set-"
+	String              string = "string"
+	TestRunTemplateName string = "test-run-"
 )
 
 var (
