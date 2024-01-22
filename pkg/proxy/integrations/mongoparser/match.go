@@ -52,10 +52,7 @@ func match(h *hooks.Hook, mongoRequests []models.MongoRequest, logger *zap.Logge
 			return false, nil, nil
 		}
 		mock := tcsMocks[bestMatchIndex]
-		isDeleted, err := h.DeleteTcsMock(mock)
-		if err != nil {
-			return false, nil, fmt.Errorf("error while deleting tcs mock: %v", err)
-		}
+		isDeleted := h.DeleteTcsMock(mock)
 		if !isDeleted {
 			continue
 		}
