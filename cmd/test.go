@@ -90,10 +90,10 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if !*ignoreOrdering {
 		*ignoreOrdering = confTest.IgnoreOrdering
 	}
-	*passThroughHosts = append(*passThroughHosts, confTest.Stubs.Filters...)
+	passThroughPortProvided := len(*passThroughPorts) == 0
 	if len(*passThroughPorts) == 0 {
 		for _, filter := range confTest.Stubs.Filters {
-			if filter.Port != 0 && filter.Host == "" && filter.Path == "" {
+			if filter.Port != 0 && filter.Host == "" && filter.Path == "" && passThroughPortProvided {
 				*passThroughPorts = append(*passThroughPorts, filter.Port)
 			} else {
 				*passThroughHosts = append(*passThroughHosts, filter)
