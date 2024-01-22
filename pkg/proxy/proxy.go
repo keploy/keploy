@@ -316,25 +316,30 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	}
 
 	for _, path := range caPaths {
-		caPath := filepath.Join(path, "ca.crt")
-
-		fs, err := os.Create(caPath)
-		if err != nil {
-			logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
+		select {
+		case <-ctx.Done():
 			return nil
+		default:
+			caPath := filepath.Join(path, "ca.crt")
+
+			fs, err := os.Create(caPath)
+			if err != nil {
+				logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
+				return nil
+			}
+
+			_, err = fs.Write(caCrt)
+			if err != nil {
+				logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", path))
+				return nil
+			}
+
+			//check if serve command is used by java application
+			isJavaServe := containsJava(lang)
+
+			// install CA in the java keystore if java is installed
+			InstallJavaCA(logger, caPath, pid, isJavaServe)
 		}
-
-		_, err = fs.Write(caCrt)
-		if err != nil {
-			logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", path))
-			return nil
-		}
-
-		//check if serve command is used by java application
-		isJavaServe := containsJava(lang)
-
-		// install CA in the java keystore if java is installed
-		InstallJavaCA(logger, caPath, pid, isJavaServe)
 
 	}
 
@@ -369,12 +374,17 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 
 	if !isPortAvailable(opt.Port) {
 		for i := 1024; i <= 65535 && attemptsDone < maxAttempts; i++ {
-			if isPortAvailable(uint32(i)) {
-				opt.Port = uint32(i)
-				logger.Info("Found an available port to start proxy server", zap.Uint32("port", opt.Port))
-				break
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				if isPortAvailable(uint32(i)) {
+					opt.Port = uint32(i)
+					logger.Info("Found an available port to start proxy server", zap.Uint32("port", opt.Port))
+					break
+				}
+				attemptsDone++
 			}
-			attemptsDone++
 		}
 	}
 
@@ -559,23 +569,28 @@ func (ps *ProxySet) startProxy(ctx context.Context) {
 
 	// retry := 0
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if strings.Contains(err.Error(), "use of closed network connection") {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			conn, err := listener.Accept()
+			if err != nil {
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					break
+				}
+
+				ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
 				break
 			}
-
-			ps.logger.Error("failed to accept connection to the proxy", zap.Error(err))
-			break
+			ps.connMutex.Lock()
+			ps.clientConnections = append(ps.clientConnections, conn)
+			ps.connMutex.Unlock()
+			go func() {
+				defer ps.hook.Recover(pkg.GenerateRandomID())
+				defer utils.HandlePanic()
+				ps.handleConnection(conn, port, ctx)
+			}()
 		}
-		ps.connMutex.Lock()
-		ps.clientConnections = append(ps.clientConnections, conn)
-		ps.connMutex.Unlock()
-		go func() {
-			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer utils.HandlePanic()
-			ps.handleConnection(conn, port, ctx)
-		}()
 	}
 }
 
@@ -900,20 +915,31 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		}
 
 		for _, port := range ps.PassThroughPorts {
-			if port == uint(destInfo.DestPort) {
-				err = ps.callNext(buffer, conn, dst, logger)
-				if err != nil {
-					logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
-					return
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if port == uint(destInfo.DestPort) {
+					err = ps.callNext(buffer, conn, dst, logger, ctx)
+					if err != nil {
+						logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
+						return
+					}
 				}
+
 			}
 		}
 		genericCheck := true
 		//Checking for all the parsers.
 		for _, parser := range ParsersMap {
-			if parser.OutgoingType(buffer) {
-				parser.ProcessOutgoing(buffer, conn, dst, ctx)
-				genericCheck = false
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if parser.OutgoingType(buffer) {
+					parser.ProcessOutgoing(buffer, conn, dst, ctx)
+					genericCheck = false
+				}
 			}
 		}
 		if genericCheck {
@@ -928,7 +954,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 	ps.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 }
 
-func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
+func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger, ctx context.Context) error {
 
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 
@@ -948,31 +974,42 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 
 	for {
 		// go routine to read from client
-		go func() {
+		go func(ctx context.Context) {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 			defer utils.HandlePanic()
-			buffer, err := util.ReadBytes(clientConn)
-			if err != nil {
-				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
+			select {
+			case <-ctx.Done():
 				return
+			default:
+				buffer, err := util.ReadBytes(clientConn)
+				if err != nil {
+					logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
+					return
+				}
+				destinationWriteChannel <- buffer
 			}
-			destinationWriteChannel <- buffer
-		}()
+		}(ctx)
 
 		// go routine to read from destination
-		go func() {
+		go func(ctx context.Context) {
 			defer ps.hook.Recover(pkg.GenerateRandomID())
 			defer utils.HandlePanic()
-			buffer, err := util.ReadBytes(destConn)
-			if err != nil {
-				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+			select {
+			case <-ctx.Done():
 				return
+			default:
+				buffer, err := util.ReadBytes(destConn)
+				if err != nil {
+					logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+					return
+				}
+				clientWriteChannel <- buffer
 			}
-
-			clientWriteChannel <- buffer
-		}()
+		}(ctx)
 
 		select {
+		case <-ctx.Done():
+			return nil
 		case requestBuffer := <-destinationWriteChannel:
 			// Write the request message to the actual destination server
 			_, err := destConn.Write(requestBuffer)

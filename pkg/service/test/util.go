@@ -94,6 +94,7 @@ type SimulateRequestConfig struct {
 	TestReport   *models.TestReport
 	Path         string
 	DockerID     bool
+	Ctx          context.Context
 	NoiseConfig  models.GlobalNoise
 }
 

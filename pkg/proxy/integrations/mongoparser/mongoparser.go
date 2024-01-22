@@ -322,7 +322,6 @@ func GetPacketLength(src []byte) (length int32) {
 func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	rand.Seed(time.Now().UnixNano())
 	for {
-
 		var err error
 		var readRequestDelay time.Duration
 		// var logStr string = fmt.Sprintln("the connection id: ", clientConnId, " the destination conn id: ", destConnId)

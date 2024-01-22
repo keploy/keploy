@@ -468,7 +468,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig)
+		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.Ctx)
 
 		if !testPass {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
@@ -656,11 +656,16 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		}
 		configMocks := []*models.Mock{}
 		for _, mock := range rec {
-			configMock, ok := mock.(*models.Mock)
-			if !ok {
-				continue
+			select {
+			case <-ctx.Done():
+				return models.TestRunStatusFailed
+			default:
+				configMock, ok := mock.(*models.Mock)
+				if !ok {
+					continue
+				}
+				configMocks = append(configMocks, configMock)
 			}
-			configMocks = append(configMocks, configMock)
 		}
 		sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
 		loadedHooks.SetConfigMocks(sortedConfigMocks)
@@ -766,6 +771,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 				Path:         path,
 				DockerID:     initialisedValues.DockerID,
 				NoiseConfig:  noiseConfig,
+				Ctx:          ctx,
 			}
 			t.SimulateRequest(cfg)
 
@@ -792,7 +798,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ctx context.Context) (bool, *models.Result) {
 
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
@@ -829,13 +835,17 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	}
 
 	for field, regexArr := range noise {
-		//TODO: add context cancel here.
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[x] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = regexArr
+		select {
+		case <-ctx.Done():
+			return false, res
+		default:
+			a := strings.Split(field, ".")
+			if len(a) > 1 && a[0] == "body" {
+				x := strings.Join(a[1:], ".")
+				bodyNoise[x] = regexArr
+			} else if a[0] == "header" {
+				headerNoise[a[len(a)-1]] = regexArr
+			}
 		}
 	}
 
@@ -897,18 +907,26 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		)
 
 		for _, j := range res.HeadersResult {
-			//TODO: add context cancel here.
-			if !j.Normal {
-				unmatched = false
-				actualHeader[j.Actual.Key] = j.Actual.Value
-				expectedHeader[j.Expected.Key] = j.Expected.Value
+			select {
+			case <-ctx.Done():
+				return false, res
+			default:
+				if !j.Normal {
+					unmatched = false
+					actualHeader[j.Actual.Key] = j.Actual.Value
+					expectedHeader[j.Expected.Key] = j.Expected.Value
+				}
 			}
 		}
 
 		if !unmatched {
 			for i, j := range expectedHeader {
-				// TODO: add context cancel here.
-				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
+				select {
+				case <-ctx.Done():
+					return false, res
+				default:
+					logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
+				}
 			}
 		}
 
@@ -920,13 +938,16 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					t.logger.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
-					//TODO: add context cancel here.
-					keyStr := op.Path
-					if len(keyStr) > 1 && keyStr[0] == '/' {
-						keyStr = keyStr[1:]
+					select {
+					case <-ctx.Done():
+						return false, res
+					default:
+						keyStr := op.Path
+						if len(keyStr) > 1 && keyStr[0] == '/' {
+							keyStr = keyStr[1:]
+						}
+						logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 					}
-					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
-
 				}
 			} else {
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)

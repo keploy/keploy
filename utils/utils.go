@@ -64,6 +64,8 @@ func AskForConfirmation(s string) (bool, error) {
 			return true, nil
 		} else if response == "n" || response == "no" {
 			return false, nil
+		}else{
+			fmt.Println("Please type yes or no and then press enter:")
 		}
 	}
 }

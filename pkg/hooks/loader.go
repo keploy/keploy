@@ -546,12 +546,23 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 
 	connectionFactory := connection.NewFactory(time.Minute, h.logger)
 	go func() {
-		// Recover from panic and gracefully shutdown
-		defer h.Recover(pkg.GenerateRandomID())
-		defer utils.HandlePanic()
-		for {
-			connectionFactory.ProcessActiveTrackers(h.TestCaseDB, ctx, filters)
-			time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+			defer utils.HandlePanic()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					connectionFactory.ProcessActiveTrackers(h.TestCaseDB, ctx, filters)
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+
 		}
 	}()
 

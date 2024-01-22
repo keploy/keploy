@@ -43,39 +43,45 @@ func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx contex
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
 	for connID, tracker := range factory.connections {
-		ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
-		if ok {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
+			if ok {
 
-			if len(requestBuf) == 0 || len(responseBuf) == 0 {
-				factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
-				continue
+				if len(requestBuf) == 0 || len(responseBuf) == 0 {
+					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+					continue
+				}
+
+				parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
+				if err != nil {
+					factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
+					continue
+				}
+				parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
+				if err != nil {
+					factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
+					continue
+				}
+
+				switch models.GetMode() {
+				case models.MODE_RECORD:
+					// capture the ingress call for record cmd
+					factory.logger.Debug("capturing ingress call from tracker in record mode")
+					capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest, filters)
+				case models.MODE_TEST:
+					factory.logger.Debug("skipping tracker in test mode")
+				default:
+					factory.logger.Warn("Keploy mode is not set to record or test. Tracker is being skipped.",
+						zap.Any("current mode", models.GetMode()))
+				}
+
+			} else if tracker.IsInactive(factory.inactivityThreshold) {
+				trackersToDelete = append(trackersToDelete, connID)
 			}
 
-			parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
-			if err != nil {
-				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
-				continue
-			}
-			parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
-			if err != nil {
-				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
-				continue
-			}
-
-			switch models.GetMode() {
-			case models.MODE_RECORD:
-				// capture the ingress call for record cmd
-				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest, filters)
-			case models.MODE_TEST:
-				factory.logger.Debug("skipping tracker in test mode")
-			default:
-				factory.logger.Warn("Keploy mode is not set to record or test. Tracker is being skipped.",
-					zap.Any("current mode", models.GetMode()))
-			}
-
-		} else if tracker.IsInactive(factory.inactivityThreshold) {
-			trackersToDelete = append(trackersToDelete, connID)
 		}
 	}
 

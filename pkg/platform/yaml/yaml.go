@@ -397,14 +397,8 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 		ys.Logger.Warn("response timestamp is missing for " + tc.Name)
 		return tcsMocks, nil
 	}
-	var entMocks, nonKeployMocks []string
 	for _, readMock := range tcsMocks {
 		mock := readMock.(*models.Mock)
-		if mock.Version == "api.keploy-enterprise.io/v1beta1" {
-			entMocks = append(entMocks, mock.Name)
-		} else if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
-			nonKeployMocks = append(nonKeployMocks, mock.Name)
-		}
 		if (mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{})) && mock.Kind != "SQL" {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
 			ys.Logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
@@ -416,12 +410,6 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
 			filteredMocks = append(filteredMocks, mock)
 		}
-	}
-	if len(entMocks) > 0 {
-		ys.Logger.Warn("These mocks have been recorded with Keploy Enterprise, may not work properly with the open-source version", zap.Strings("enterprise mocks:", entMocks))
-	}
-	if len(nonKeployMocks) > 0 {
-		ys.Logger.Warn("These mocks have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployMocks))
 	}
 
 	return filteredMocks, nil
