@@ -17,7 +17,7 @@ func PostgresDecoder(logger *zap.Logger, encoded string) []byte {
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		logger.Error(err.Error())
+		logger.Error("failed to decode string", zap.Any("error", err.Error()))
 		return nil
 	}
 	return data

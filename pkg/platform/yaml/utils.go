@@ -30,9 +30,9 @@ func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error
 // Flatten takes a map and returns a new one where nested maps are replaced
 // by dot-delimited keys.
 // examples of valid jsons - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse#examples
-func Flatten(j interface{}) map[string][]string {
+func Flatten(j interface{}) (map[string][]string, error) {
 	if j == nil {
-		return map[string][]string{"": {""}}
+		return map[string][]string{"": {""}}, nil
 	}
 	o := make(map[string][]string)
 	x := reflect.ValueOf(j)
@@ -40,10 +40,13 @@ func Flatten(j interface{}) map[string][]string {
 	case reflect.Map:
 		m, ok := j.(map[string]interface{})
 		if !ok {
-			return map[string][]string{}
+			return map[string][]string{}, fmt.Errorf("failed to convert the interface")
 		}
 		for k, v := range m {
-			nm := Flatten(v)
+			nm, err := Flatten(v)
+			if err != nil {
+				return map[string][]string{}, err
+			}
 			for nk, nv := range nm {
 				fk := k
 				if nk != "" {
@@ -61,10 +64,13 @@ func Flatten(j interface{}) map[string][]string {
 	case reflect.Slice:
 		child, ok := j.([]interface{})
 		if !ok {
-			return map[string][]string{}
+			return map[string][]string{}, fmt.Errorf("failed to convert the interface")
 		}
 		for _, av := range child {
-			nm := Flatten(av)
+			nm, err := Flatten(av)
+			if err != nil {
+				return map[string][]string{}, err
+			}
 			for nk, nv := range nm {
 				if ov, exists := o[nk]; exists {
 					o[nk] = append(ov, nv...)
@@ -74,8 +80,9 @@ func Flatten(j interface{}) map[string][]string {
 			}
 		}
 	default:
+		return map[string][]string{}, fmt.Errorf("unknown type %v", x.Kind())
 	}
-	return o
+	return o, nil
 }
 
 func AddHttpBodyToMap(body string, m map[string][]string) error {
@@ -87,7 +94,10 @@ func AddHttpBodyToMap(body string, m map[string][]string) error {
 		if err != nil {
 			return err
 		}
-		j := Flatten(result)
+		j, err := Flatten(result)
+		if err != nil {
+			return err
+		}
 		for k, v := range j {
 			nk := "body"
 			if k != "" {
