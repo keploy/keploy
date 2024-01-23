@@ -233,7 +233,7 @@ func (srv *transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) err
 
 	pseudoHeaders, ordinaryHeaders, err := ExtractHeaders(headersFrame, srv.decoder)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not extract headers from frame: %s", err.Error())
 	}
 
 	srv.sic.AddHeadersForRequest(id, pseudoHeaders, true)
