@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -28,14 +29,14 @@ var withoutexampleOneClickInstall = `
 Note: If installed keploy without One Click Install, use "keploy example --customSetup true"
 `
 var examples = `
-Golang Application
+Golang
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
 	
 	Test:
 	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
 
-Node Application
+Node
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
 	
@@ -63,14 +64,14 @@ Docker
 `
 
 var exampleOneClickInstall = `
-Golang Application
+Golang
 	Record:
 	keploy record -c "/path/to/user/app/binary"
 	
 	Test:
 	keploy test -c "/path/to/user/app/binary" --delay 2
 
-Node Application
+Node
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
 	
@@ -107,11 +108,16 @@ func (e *Example) GetCmd() *cobra.Command {
 				e.logger.Error("failed to read the customSetup flag")
 				return err
 			}
+			modifiedLogger, err := utils.HideInfo()
+			if err != nil {
+				e.logger.Error("failed to initialize logger")
+				return err
+			}
 			if customSetup {
-				e.logger.Info(examples)
+				modifiedLogger.Info(examples)
 			} else {
-				e.logger.Info(exampleOneClickInstall)
-				e.logger.Info(withoutexampleOneClickInstall)
+				modifiedLogger.Info(exampleOneClickInstall)
+				modifiedLogger.Info(withoutexampleOneClickInstall)
 			}
 			return nil
 		},

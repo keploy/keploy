@@ -93,7 +93,7 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 		for _, genericResponse := range genericResponses {
 			encoded := []byte(genericResponse.Message[0].Data)
 			if genericResponse.Message[0].Type != models.String {
-				encoded = PostgresDecoder(logger, genericResponse.Message[0].Data)
+				encoded, _ = PostgresDecoder(logger, genericResponse.Message[0].Data)
 			}
 			_, err := clientConn.Write([]byte(encoded))
 			if err != nil {

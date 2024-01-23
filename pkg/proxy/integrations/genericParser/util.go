@@ -12,15 +12,15 @@ import (
 	"go.uber.org/zap"
 )
 
-func PostgresDecoder(logger *zap.Logger, encoded string) []byte {
+func PostgresDecoder(logger *zap.Logger, encoded string) ([]byte, error) {
 	// decode the base 64 encoded string to buffer ..
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		logger.Error("failed to decode string", zap.Any("error", err.Error()))
-		return nil
+		return nil, err
 	}
-	return data
+	return data, nil
 }
 
 func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
@@ -89,7 +89,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 				// if !IsAsciiPrintable(bufStr) {
 				_ = base64.StdEncoding.EncodeToString(reqBuff)
 				// }
-				encoded := PostgresDecoder(h.GetLogger(), mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				encoded, _ := PostgresDecoder(h.GetLogger(), mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := util.CreateShingles(encoded, k)
