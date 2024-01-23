@@ -20,4 +20,4 @@ jobs:
     - name: Run the express-mongoose app
       run: |
         cd samples-typescript/express-mongoose
-        source ./../../.github/workflows/node-linux.sh
+        source ./../../.github/workflows/test-workflow-scripts/node-linux.sh
