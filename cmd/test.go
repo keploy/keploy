@@ -48,7 +48,12 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if err != nil {
 		t.logger.Error("failed to get the test config from config file due to error: %s", zap.Error(err))
 		t.logger.Info("You have probably edited the config file incorrectly. Please follow the guide below.")
-		fmt.Println(utils.ConfigGuide)
+		modifiedLogger, loggerError := utils.HideInfo()
+		if loggerError != nil {
+			t.logger.Error("failed to initialize logger", zap.Error(loggerError))
+			return loggerError
+		}
+		modifiedLogger.Info(utils.ConfigGuide)
 		return nil
 	}
 	if len(*path) == 0 {

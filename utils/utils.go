@@ -12,11 +12,12 @@ import (
 
 	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
-var ConfigGuide =
-`
+var ConfigGuide = `
   # Example on using globalNoise
   # globalNoise:
   #    global:
@@ -104,4 +105,14 @@ func HandlePanic() {
 		log.Error(Emoji+"Recovered from:", r, "\nstack trace:\n", string(stackTrace))
 		sentry.Flush(time.Second * 2)
 	}
+}
+
+func HideInfo() (*zap.Logger, error) {
+	logCfg := zap.NewDevelopmentConfig()
+	logCfg.DisableStacktrace = true
+	logCfg.EncoderConfig.EncodeCaller = nil
+	logCfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("")
+	logCfg.EncoderConfig.EncodeLevel = func(zapcore.Level, zapcore.PrimitiveArrayEncoder) {}
+	modifiedLogger, err := logCfg.Build()
+	return modifiedLogger, err
 }
