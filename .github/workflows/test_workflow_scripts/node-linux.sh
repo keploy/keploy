@@ -76,7 +76,10 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testset
 config_file="./keploy-config.yaml"
 sed -i '/tests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
 
+
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
+ls .keploy/testReports
+ls .keploy/testReports/test-run-1
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/test-run-1/report-1.yaml"
