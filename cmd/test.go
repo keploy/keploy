@@ -318,25 +318,22 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			if coverage {
-				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
-			} else {
-				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-					Tests:              tests,
-					AppContainer:       appContainer,
-					AppNetwork:         networkName,
-					MongoPassword:      mongoPassword,
-					Delay:              delay,
-					BuildDelay:         buildDelay,
-					PassThroughPorts:   ports,
-					ApiTimeout:         apiTimeout,
-					ProxyPort:          proxyPort,
-					GlobalNoise:        globalNoise,
-					TestsetNoise:       testsetNoise,
-					WithCoverage:       withCoverage,
-					CoverageReportPath: coverageReportPath,
-				}, enableTele)
+			if !t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+				Tests:              tests,
+				AppContainer:       appContainer,
+				AppNetwork:         networkName,
+				MongoPassword:      mongoPassword,
+				Delay:              delay,
+				BuildDelay:         buildDelay,
+				PassThroughPorts:   ports,
+				ApiTimeout:         apiTimeout,
+				ProxyPort:          proxyPort,
+				GlobalNoise:        globalNoise,
+				TestsetNoise:       testsetNoise,
+				WithCoverage:       withCoverage,
+				CoverageReportPath: coverageReportPath,
+			}, enableTele) {
+				os.Exit(1)
 			}
 
 			return nil
