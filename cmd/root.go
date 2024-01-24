@@ -236,14 +236,6 @@ func deleteLogs(logger *zap.Logger) {
 		return
 	}
 }
-func checkForVersionFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "--version" {
-			return true
-		}
-	}
-	return false
-}
 
 func (r *Root) execute() {
 	// Root command
@@ -251,7 +243,9 @@ func (r *Root) execute() {
 		Use:     "keploy",
 		Short:   "Keploy CLI",
 		Example: rootExamples,
+		Version: utils.Version,
 	}
+
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
@@ -262,20 +256,16 @@ func (r *Root) execute() {
 
 	// Manually parse flags to determine debug mode and version flag early
 	debugMode = checkForDebugFlag(os.Args[1:])
-	versionFlag := checkForVersionFlag(os.Args[1:])
-	if versionFlag {
-		// Fetch the version and print it
-		currentVersion := utils.KeployVersion
-		fmt.Println("Current version:", currentVersion)
 
-		// Check for the latest release version
-		releaseInfo, err := utils.GetLatestGitHubRelease()
-		if err != nil {
-			r.logger.Debug("Failed to fetch the latest release version", zap.Error(err))
-			return
-		}
-
-		// Show update message only if it's not a dev version
+	rootCmd.SetVersionTemplate(`
+	{{with .Version}}{{printf "Keploy %s" .}}{{end}}
+	`)
+	// Check for updates and set flags in the versionInfo
+	releaseInfo, err := utils.GetLatestGitHubRelease()
+	if err != nil {
+		r.logger.Debug("Failed to fetch the latest release version", zap.Error(err))
+	} else {
+		currentVersion := utils.Version
 		if releaseInfo.TagName != currentVersion && !strings.HasSuffix(currentVersion, "-dev") {
 			updatetext := models.HighlightGrayString("keploy update")
 			const msg string = `
@@ -288,8 +278,6 @@ func (r *Root) execute() {
 			versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
 			fmt.Printf(versionmsg)
 		}
-
-		return
 	}
 
 	// Now that flags are parsed, set up the logger
