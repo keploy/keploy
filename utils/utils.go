@@ -13,6 +13,7 @@ import (
 
 	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
+	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -139,72 +140,94 @@ type TestFlags struct {
 	WithCoverage       bool
 }
 
-func UpdateKeployToDocker(cmdName string, isDockerCompose bool, recordFlags RecordFlags, testFlags TestFlags) {
+func getAlias(keployAlias *string, logger *zap.Logger) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	if osName == "Windows" {
-		log.Error("Windows is not supported yet. Use WSL2 instead.")
+		logger.Error("Windows is not supported. Use WSL2 instead.")
 		return
 	}
-	var keployAlias string
 	if osName == "darwin" {
-		fmt.Println("Do you want to use keploy with Docker or Colima? (docker/colima):")
-		reader := bufio.NewReader(os.Stdin)
-		choice, _ := reader.ReadString('\n')
-		choice = strings.ToLower(strings.TrimSpace(choice))
 		//Get the current docker context.
 		cmd := exec.Command("docker", "context", "ls", "--format", "{{.Name}}")
 		out, err := cmd.Output()
 		if err != nil {
-			log.Error("Failed to get the current docker context", err.Error())
+			logger.Error("Failed to get the current docker context", zap.Error(err))
 			return
 		}
 		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if choice == "colima" {
 			if dockerContext == "default" {
-				log.Error("Error: Docker is using the default context, set to colima using 'docker context use colima'")
+				logger.Error("Error: Docker is using the default context, set to colima using 'docker context use colima'")
 				return
 			}
-			keployAlias = "sudo docker run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm keploylocal " + cmdName + " -c "
-		} else {
+			*keployAlias = "sudo docker run --pull always  --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+		} else if choice == "docker" {
 			if dockerContext == "colima" {
-				log.Error("Error: Docker is using the colima context, set to default using 'docker context use default'")
+				logger.Error("Error: Docker is using the colima context, set to default using 'docker context use default'")
 				return
 			}
-			keployAlias = "sudo docker run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm keploylocal " + cmdName + " -c "
-			fmt.Println("This is the alias", keployAlias)
+			*keployAlias = "sudo docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+		} else {
+			logger.Error("Please enter one of the two options provided.")
+			return
 		}
+	} else if osName == "linux" {
+		*keployAlias = "sudo docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
 	}
-	if osName == "linux" {
-		keployAlias = "sudo docker run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm keploylocal " + cmdName + " -c "
+}
+
+func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{}, logger *zap.Logger) {
+	var recordFlags RecordFlags
+	var testFlags TestFlags
+	//Check the type of flags.
+	switch flags.(type) {
+	case RecordFlags:
+		recordFlags = flags.(RecordFlags)
+	case TestFlags:
+		testFlags = flags.(TestFlags)
+	default:
+		logger.Error("Unknown flags provided")
+		return
 	}
+	var keployAlias string
+	getAlias(&keployAlias, logger)
+	keployAlias = keployAlias + cmdName + " -c "
 	var cmd *exec.Cmd
 	if cmdName == "record" {
 		keployAlias = keployAlias + "\"" + recordFlags.Command + "\" "
 		if len(recordFlags.PassThroughPorts) > 0 {
-			keployAlias = keployAlias + " --passThroughPorts " + fmt.Sprintf("%v", recordFlags.PassThroughPorts)
+			portSlice := make([]string, len(recordFlags.PassThroughPorts))
+			for i, port := range recordFlags.PassThroughPorts {
+				portSlice[i] = fmt.Sprintf("%d", port)
+			}
+			joinedPorts := strings.Join(portSlice, ",")
+			keployAlias = keployAlias + " --passThroughPorts " + fmt.Sprintf("%v ", joinedPorts)
 		}
 		if recordFlags.ConfigPath != "." {
 			keployAlias = keployAlias + " --configPath " + recordFlags.ConfigPath
 		}
-		if len(testFlags.Path) > 0 {
+		if len(recordFlags.Path) > 0 {
 			keployAlias = keployAlias + " --path " + recordFlags.Path
 		}
+		addtionalFlags := " --containerName " + recordFlags.ContainerName + " --buildDelay " + recordFlags.BuildDelay.String() + " --delay " + fmt.Sprintf("%d", recordFlags.Delay) + " --proxyport " + fmt.Sprintf("%d", recordFlags.Proxyport) + " --networkName " + recordFlags.NetworkName + " --enableTele=" + fmt.Sprintf("%v", recordFlags.EnableTele)
 		if isDockerCompose {
-			addtionalFlags := "--containerName " + recordFlags.ContainerName + " --buildDelay " + recordFlags.BuildDelay.String() + " --delay " + fmt.Sprintf("%d", recordFlags.Delay) + " --proxyport " + fmt.Sprintf("%d", recordFlags.Proxyport) + " --networkName " + recordFlags.NetworkName + " --enableTele=" + fmt.Sprintf("%v", recordFlags.EnableTele)
 			keployAlias = keployAlias + addtionalFlags
 			cmd = exec.Command("sh", "-c", keployAlias)
-			fmt.Println("This is the alias", keployAlias)
 		} else {
-			addtionalFlags := "--delay " + fmt.Sprintf("%d", recordFlags.Delay) + " --proxyport " + fmt.Sprintf("%d", recordFlags.Proxyport) + " --networkName " + recordFlags.NetworkName + " --enableTele=" + fmt.Sprintf("%v", recordFlags.EnableTele)
 			keployAlias = keployAlias + addtionalFlags
 			cmd = exec.Command("sh", "-c", keployAlias)
 		}
 	} else {
 		keployAlias = keployAlias + "\"" + testFlags.Command + "\" "
 		if len(testFlags.PassThroughPorts) > 0 {
-			keployAlias = keployAlias + " --passThroughPorts " + fmt.Sprintf("%v", testFlags.PassThroughPorts)
+			portSlice := make([]string, len(recordFlags.PassThroughPorts))
+			for i, port := range recordFlags.PassThroughPorts {
+				portSlice[i] = fmt.Sprintf("%d", port)
+			}
+			joinedPorts := strings.Join(portSlice, ",")
+			keployAlias = keployAlias + " --passThroughPorts " + fmt.Sprintf("%v ", joinedPorts)
 		}
 		if testFlags.ConfigPath != "." {
 			keployAlias = keployAlias + " --configPath " + testFlags.ConfigPath
@@ -215,13 +238,12 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, recordFlags Reco
 		if len(testFlags.Path) > 0 {
 			keployAlias = keployAlias + " --path " + testFlags.Path
 		}
+		addtionalFlags := " --containerName " + testFlags.ContainerName + " --buildDelay " + testFlags.BuildDelay.String() + " --delay " + fmt.Sprintf("%d", testFlags.Delay) + " --networkName " + testFlags.NetworkName + " --enableTele=" + fmt.Sprintf("%v", testFlags.EnableTele) + " --apiTimeout " + fmt.Sprintf("%d", testFlags.ApiTimeout) + " --mongoPassword " + testFlags.MongoPassword + " --coverageReportPath " + testFlags.CoverageReportPath + " --withCoverage " + fmt.Sprintf("%v", testFlags.WithCoverage) + " --proxyport " + fmt.Sprintf("%d", testFlags.Proxyport)
 		if isDockerCompose {
-			addtionalFlags := cmdName + " -c \"" + testFlags.Command + "\" --containerName " + testFlags.ContainerName + " --buildDelay " + testFlags.BuildDelay.String() + " --delay " + fmt.Sprintf("%d", testFlags.Delay) + " --networkName " + testFlags.NetworkName + " --enableTele=" + fmt.Sprintf("%v", testFlags.EnableTele) + " --apiTimeout " + fmt.Sprintf("%d", testFlags.ApiTimeout) + " --mongoPassword " + testFlags.MongoPassword + " --coverageReportPath " + testFlags.CoverageReportPath + " --withCoverage " + fmt.Sprintf("%v", testFlags.WithCoverage)
 			keployAlias = keployAlias + addtionalFlags
 			cmd = exec.Command("sh", "-c", keployAlias)
 		} else {
-			additionalFlags := "--delay " + fmt.Sprintf("%d", testFlags.Delay) + " --networkName " + testFlags.NetworkName + " --enableTele=" + fmt.Sprintf("%v", testFlags.EnableTele) + " --apiTimeout " + fmt.Sprintf("%d", testFlags.ApiTimeout) + " --mongoPassword " + testFlags.MongoPassword + " --coverageReportPath " + testFlags.CoverageReportPath + " --withCoverage " + fmt.Sprintf("%v", testFlags.WithCoverage)
-			keployAlias = keployAlias + additionalFlags
+			keployAlias = keployAlias + addtionalFlags
 			cmd = exec.Command("sh", "-c", keployAlias)
 		}
 	}
@@ -232,7 +254,7 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, recordFlags Reco
 
 	err := cmd.Run()
 	if err != nil {
-		log.Error("Failed to start keploy in docker", err.Error())
+		logger.Error("Failed to start keploy in docker", zap.Error(err))
 		return
 	}
 

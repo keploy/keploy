@@ -207,7 +207,7 @@ func (r *Record) GetCmd() *cobra.Command {
 					ConfigPath:       configPath,
 					EnableTele:       enableTele,
 				}
-				utils.UpdateKeployToDocker("record", isDockerCompose, recordCfg, utils.TestFlags{})
+				utils.UpdateKeployToDocker("record", isDockerCompose, recordCfg, r.logger)
 				return nil
 			}
 

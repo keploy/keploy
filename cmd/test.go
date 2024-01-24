@@ -268,7 +268,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					CoverageReportPath: coverageReportPath,
 					EnableTele:         enableTele,
 				}
-				utils.UpdateKeployToDocker("test", isDockerCompose, utils.RecordFlags{}, testCfg)
+				utils.UpdateKeployToDocker("test", isDockerCompose, testCfg, t.logger)
 				return nil
 			}
 			//if user provides relative path

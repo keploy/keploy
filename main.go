@@ -37,8 +37,10 @@ func main() {
 	utils.KeployVersion = version
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER");binaryToDocker != "true" {
 		fmt.Println(logo, " ")
+		fmt.Printf("version: %v\n\n", version)
+	}else{
+		fmt.Println("Starting keploy in docker environment.")
 	}
-	fmt.Printf("version: %v\n\n", version)
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
