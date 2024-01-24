@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/pkg/models"
@@ -26,24 +27,26 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type Yaml struct {
-	TcsPath  string
-	MockPath string
-	MockName string
-	TcsName  string
-	Logger   *zap.Logger
-	tele     *telemetry.Telemetry
-	mutex    sync.RWMutex
+	TcsPath     string
+	MockPath    string
+	MockName    string
+	TcsName     string
+	Logger      *zap.Logger
+	tele        *telemetry.Telemetry
+	nameCounter int
+	mutex       sync.RWMutex
 }
 
 func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) *Yaml {
 	return &Yaml{
-		TcsPath:  tcsPath,
-		MockPath: mockPath,
-		MockName: mockName,
-		TcsName:  tcsName,
-		Logger:   Logger,
-		tele:     tele,
-		mutex:    sync.RWMutex{},
+		TcsPath:     tcsPath,
+		MockPath:    mockPath,
+		MockName:    mockName,
+		TcsName:     tcsName,
+		Logger:      Logger,
+		tele:        tele,
+		nameCounter: 0,
+		mutex:       sync.RWMutex{},
 	}
 }
 
@@ -319,16 +322,17 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 		mock.Name = ys.MockName
 	}
 
+	mock.Name = fmt.Sprint("mock-", getNextID())
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
 
-	if mock.Name == "" {
-		mock.Name = "mocks"
-	}
+	// if mock.Name == "" {
+	// 	mock.Name = "mocks"
+	// }
 
-	err = ys.Write(ys.MockPath, mock.Name, mockYaml)
+	err = ys.Write(ys.MockPath, "mocks", mockYaml)
 	if err != nil {
 		return err
 	}
@@ -370,9 +374,10 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" {
+			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" {
 				tcsMocks = append(tcsMocks, mock)
 			}
+			//if postgres type confgi
 		}
 	}
 	filteredMocks := make([]platform.KindSpecifier, 0)
@@ -393,7 +398,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 		mock := readMock.(*models.Mock)
 		if mock.Version == "api.keploy-enterprise.io/v1beta1" {
 			entMocks = append(entMocks, mock.Name)
-		} else if mock.Version != "api.keploy.io/v1beta1" {
+		} else if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
 			nonKeployMocks = append(nonKeployMocks, mock.Name)
 		}
 		if (mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{})) && mock.Kind != "SQL" {
@@ -452,7 +457,7 @@ func (ys *Yaml) ReadConfigMocks(path string) ([]platform.KindSpecifier, error) {
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] == "config" {
+			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" || mock.Kind == "Generic" {
 				configMocks = append(configMocks, mock)
 			}
 		}
@@ -467,4 +472,10 @@ func (ys *Yaml) UpdateTest(mock *models.Mock, ctx context.Context) error {
 
 func (ys *Yaml) DeleteTest(mock *models.Mock, ctx context.Context) error {
 	return nil
+}
+
+var idCounter int64 = -1
+
+func getNextID() int64 {
+	return atomic.AddInt64(&idCounter, 1)
 }

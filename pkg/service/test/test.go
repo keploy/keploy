@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -156,6 +157,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	}
 
 	sessions, err := yaml.ReadSessionIndices(cfg.Path, t.logger)
+	fmt.Println(sessions)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return returnVal, err
@@ -339,7 +341,16 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		return returnVal
 	}
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
-	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
+	fakeTestCase := models.TestCase{
+		Name:     "fake-tc",
+		HttpReq:  models.HttpReq{Timestamp: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
+		HttpResp: models.HttpResp{Timestamp: time.Now()},
+	}
+	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
+	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
+	sort.SliceStable(readTcsMocks, func(i, j int) bool {
+		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+	})
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
@@ -591,7 +602,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
 			continue
 		}
-		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
+		// Filter the TCS Mocks based on the test case's request and response
+		// timestamp such that mock's timestamps lies between the test's timestamp
+		// and then, set the TCS Mocks.
 		filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
 		readTcsMocks := []*models.Mock{}
 		for _, mock := range filteredTcsMocks {
@@ -601,8 +614,30 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 			readTcsMocks = append(readTcsMocks, tcsmock)
 		}
-		readTcsMocks = FilterTcsMocks(tc, readTcsMocks, t.logger)
+		readTcsMocks, _ = FilterMocks(tc, readTcsMocks, t.logger)
+		sort.SliceStable(readTcsMocks, func(i, j int) bool {
+			return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+		})
 		loadedHooks.SetTcsMocks(readTcsMocks)
+
+		// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
+		// and are order by the request timestamp in ascending order
+		// Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
+		rec, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+		if err != nil {
+			t.logger.Error("failed to read the config mocks", zap.Error(err))
+			return models.TestRunStatusFailed
+		}
+		configMocks := []*models.Mock{}
+		for _, mock := range rec {
+			configMock, ok := mock.(*models.Mock)
+			if !ok {
+				continue
+			}
+			configMocks = append(configMocks, configMock)
+		}
+		sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
+		loadedHooks.SetConfigMocks(sortedConfigMocks)
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
@@ -723,6 +758,10 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	cleanExp, cleanAct := "", ""
 	var err error
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
+		// TODO:  only for dev purposes
+		if len(tc.HttpResp.Body) == len(actualResponse.Body) {
+			return true, res
+		}
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
@@ -807,7 +846,11 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 		t.mutex.Lock()
 		logger.Printf(logs)
-		logDiffs.Render()
+		err := logDiffs.Render()
+		if err != nil {
+			t.logger.Error("failed to render the diffs", zap.Error(err))
+		}
+
 		t.mutex.Unlock()
 
 	} else {

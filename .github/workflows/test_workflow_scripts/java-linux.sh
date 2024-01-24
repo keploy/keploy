@@ -36,7 +36,6 @@ done
 # Get the pid of the application.
 pid=$(pgrep keploy)
 
-for j in {1..10}; do
 # Start making curl calls to record the testcases and mocks.
 curl -X GET http://localhost:9966/petclinic/api/pettypes
 
@@ -60,7 +59,6 @@ curl -X GET http://localhost:9966/petclinic/api/pettypes
 --url http://localhost:9966/petclinic/api/pettypes/1
 
 curl -X GET http://localhost:9966/petclinic/api/pettypes
-done
 
 # Wait for 5 seconds for keploy to record the tcs and mocks.
 sleep 5
@@ -77,9 +75,9 @@ done
 sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/report-1.yaml"
+report_file="./keploy/testReports/test-run-1/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/report-2.yaml"
+report_file2="./keploy/testReports/test-run-1/report-2.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.

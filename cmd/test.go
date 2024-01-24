@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
@@ -46,7 +47,10 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
+		t.logger.Error("failed to get the test config from config file due to error: %s", zap.Error(err))
+		t.logger.Info("You have probably edited the config file incorrectly. Please follow the guide below.")
+		fmt.Println(utils.ConfigGuide)
+		return nil
 	}
 	if len(*path) == 0 {
 		*path = confTest.Path
@@ -246,6 +250,12 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
+			
+			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
+			if err != nil {
+				t.logger.Error("failed to get the next test report directory", zap.Error(err))
+				return err
+			}
 
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
@@ -270,7 +280,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+			if !t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
 				Tests:              tests,
 				AppContainer:       appContainer,
 				AppNetwork:         networkName,
@@ -284,7 +294,9 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
-			}, enableTele)
+			}, enableTele) {
+				os.Exit(1)
+			}
 
 			return nil
 		},
