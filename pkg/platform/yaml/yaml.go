@@ -374,7 +374,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" {
+			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" {
 				tcsMocks = append(tcsMocks, mock)
 			}
 			//if postgres type confgi
@@ -457,7 +457,7 @@ func (ys *Yaml) ReadConfigMocks(path string) ([]platform.KindSpecifier, error) {
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" {
+			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" || mock.Kind == "Generic" {
 				configMocks = append(configMocks, mock)
 			}
 		}
