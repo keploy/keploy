@@ -24,14 +24,16 @@ type Telemetry struct {
 	client         *http.Client
 }
 
-func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, KeployVersion string, GlobalMap map[string]interface{}) *Telemetry {
-
+func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, version string, GlobalMap map[string]interface{}) *Telemetry {
+	if version == "" {
+		version = utils.Version
+	}
 	tele := Telemetry{
 		Enabled:       enabled,
 		OffMode:       offMode,
 		logger:        logger,
 		store:         store,
-		KeployVersion: KeployVersion,
+		KeployVersion: version,
 		GlobalMap:     GlobalMap,
 		client:        &http.Client{Timeout: 10 * time.Second},
 	}
@@ -144,7 +146,6 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 			}
 			event.InstallationID = tel.InstallationID
 			event.OS = runtime.GOOS
-			tel.KeployVersion = utils.KeployVersion
 			event.KeployVersion = tel.KeployVersion
 			event.Arch = runtime.GOARCH
 			bin, err := marshalEvent(event, tel.logger)
