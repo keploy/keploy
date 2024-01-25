@@ -1,5 +1,7 @@
 #!/bin/bash
 
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+
 # Checkout a different branch
 git fetch origin
 git checkout native-linux
@@ -20,7 +22,7 @@ config_file="./keploy-config.yaml"
 sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
-sudo rm -rf keploy/
+rm -rf keploy/
 
 # Build the binary.
 go build -o ginApp
