@@ -10,7 +10,7 @@ git checkout native-linux
 docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
 
 # Update the java version
-source ./../../../.github/workflows/test_workflows_scripts/update-java.sh
+source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
 
 # Remove any existing test and mocks by keploy.
 
