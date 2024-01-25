@@ -27,6 +27,7 @@ import (
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
+	// "github.com/docker/docker/daemon/logger"
 
 	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/signer"
@@ -604,22 +605,26 @@ func (ps *ProxySet) startDnsServer() {
 	}
 }
 
-func (ps *ProxySet) changeListenerToDNS() {
-
+func (ps *ProxySet) changeListenerToDNS() error {
 	handler := ps
+	dnsServerAddr := fmt.Sprintf(":%v", ps.Port)
 	server := &dns.Server{
-		Addr:     "53",
+		Addr:     dnsServerAddr,
+		Net:      "tcp",
 		Listener: ps.Listener,
 		Handler:  handler,
 	}
 
+	ps.logger.Info("TCP listener started")
 	ps.DnsServer = server
 
 	ps.logger.Info(fmt.Sprintf("starting DNS-TCP server at addr %v", server.Addr))
-	err := server.ActivateAndServe()
+	err := server.ListenAndServe()
 	if err != nil {
 		ps.logger.Error("failed to start dns tcp server", zap.Any("addr", server.Addr), zap.Error(err))
+		return err
 	}
+	return nil
 }
 
 // For DNS caching
@@ -955,13 +960,16 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 			hostIP, port, err := net.SplitHostPort(actualAddress)
 			if err != nil {
 				ps.logger.Error("Not able to get the host IP .... Exiting gracefully")
-				os.Exit(1)
+				return
 			}
 			ps.logger.Info("hostIp: " + hostIP + "port: " + port)
 			// answers := resolveDNSQuery(hostIP, ps.logger, ps.DnsServerTimeout)
 
-			ps.changeListenerToDNS()
-			// }
+			tcpErr := ps.changeListenerToDNS()
+			if tcpErr != nil {
+				ps.logger.Error("fauled to parse the DNS Query with error", zap.Error(tcpErr))
+				return
+			}
 		}
 
 		//Checking for all the parsers.
