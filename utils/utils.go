@@ -159,21 +159,10 @@ func getAlias(keployAlias *string, logger *zap.Logger) {
 		}
 		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 		dockerContext = strings.Split(dockerContext, "\n")[0]
-		if choice == "colima" {
-			if dockerContext == "default" {
-				logger.Error("Error: Docker is using the default context, set to colima using 'docker context use colima'")
-				return
-			}
-			*keployAlias = "sudo docker run --pull always  --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
-		} else if choice == "docker" {
-			if dockerContext == "colima" {
-				logger.Error("Error: Docker is using the colima context, set to default using 'docker context use default'")
-				return
-			}
-			*keployAlias = "sudo docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
-		} else {
-			logger.Error("Please enter one of the two options provided.")
-			return
+		if dockerContext == "colima" {
+			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
+		}else{
+			logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		}
 	} else if osName == "linux" {
 		*keployAlias = "sudo docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
