@@ -19,7 +19,7 @@ docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
 
 for i in {1..2}; do
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/*.jar' &
+sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' &
 
 
 # Wait for the application to start.
@@ -70,7 +70,7 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/*.jar' --delay 20
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/test-run-1/report-1.yaml"
