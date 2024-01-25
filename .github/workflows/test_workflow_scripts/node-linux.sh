@@ -76,21 +76,20 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testset
 config_file="./keploy-config.yaml"
 sed -i '/tests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
 
-
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-run-1/report-1.yaml"
+report_file="./keploy/testReports/test-report-0/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-run-1/report-2.yaml"
+report_file2="./keploy/testReports/test-report-0/report-2.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
-report_file3="./keploy/testReports/test-run-2/report-1.yaml"
+report_file3="./keploy/testReports/test-report-0/report-3.yaml"
 test_status3=$(grep 'status:' "$report_file3" | head -n 1 | awk '{print $2}')
-report_file4="./keploy/testReports/test-run-2/report-2.yaml"
+report_file4="./keploy/testReports/test-report-0/report-4.yaml"
 test_status4=$(grep 'status:' "$report_file4" | head -n 1 | awk '{print $2}')
-report_file5="./keploy/testReports/test-run-3/report-1.yaml"
+report_file5="./keploy/testReports/test-report-0/report-5.yaml"
 test_status5=$(grep 'status:' "$report_file5" | head -n 1 | awk '{print $2}')
-report_file6="./keploy/testReports/test-run-4/report-1.yaml"
+report_file6="./keploy/testReports/test-report-0/report-6.yaml"
 test_status6=$(grep 'status:' "$report_file6" | head -n 1 | awk '{print $2}')
 test_total6=$(grep 'total:' "$report_file6" | head -n 1 | awk '{print $2}')
 test_failure=$(grep 'failure:' "$report_file6" | head -n 1 | awk '{print $2}')
