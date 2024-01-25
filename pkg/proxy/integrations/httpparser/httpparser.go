@@ -470,14 +470,14 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 		reqBody, err := ioutil.ReadAll(req.Body)
 		if err != nil {
-			logger.Error("failed to read from request body", zap.Error(err))
+			logger.Error("failed to read from request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			return
 		}
 
 		//parse request url
 		reqURL, err := url.Parse(req.URL.String())
 		if err != nil {
-			logger.Error("failed to parse request url", zap.Error(err))
+			logger.Error("failed to parse request url", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			return
 		}
 
@@ -487,7 +487,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		isMatched, stub, err := match(req, reqBody, reqURL, isReqBodyJSON, h, logger, clientConn, destConn, requestBuffer, h.Recover)
 
 		if err != nil {
-			logger.Error("error while matching http mocks", zap.Error(err))
+			logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 		}
 
 		if !isMatched {
@@ -498,11 +498,11 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 				}
 			}
 			if !passthroughHost {
-				logger.Error("Didn't match any prexisting http mock")
+				logger.Error("Didn't match any prexisting http mock", zap.Any("metadata", getReqMeta(req)))
 			}
 			_, err := util.Passthrough(clientConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
 			if err != nil {
-				logger.Error("failed to passthrough http request", zap.Error(err))
+				logger.Error("failed to passthrough http request", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			}
 			return
 		}
@@ -522,12 +522,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			gw := gzip.NewWriter(&compressedBuffer)
 			_, err := gw.Write([]byte(body))
 			if err != nil {
-				logger.Error("failed to compress the response body", zap.Error(err))
+				logger.Error("failed to compress the response body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 				return
 			}
 			err = gw.Close()
 			if err != nil {
-				logger.Error("failed to close the gzip writer", zap.Error(err))
+				logger.Error("failed to close the gzip writer", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 				return
 			}
 			logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
@@ -553,7 +553,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 		_, err = clientConn.Write([]byte(responseString))
 		if err != nil {
-			logger.Error("failed to write the mock output to the user application", zap.Error(err))
+			logger.Error("failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			return
 		}
 
@@ -751,14 +751,14 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			logger.Error("failed to read the http request body", zap.Error(err))
+			logger.Error("failed to read the http request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			return err
 		}
 	}
 	// converts the response message buffer to http response
 	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResp)), req)
 	if err != nil {
-		logger.Error("failed to parse the http response message", zap.Error(err))
+		logger.Error("failed to parse the http response message", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 		return err
 	}
 	//Add the content length to the headers.
@@ -774,7 +774,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 			if ok {
 				gzipReader, err := gzip.NewReader(reader)
 				if err != nil {
-					logger.Error("failed to create a gzip reader", zap.Error(err))
+					logger.Error("failed to create a gzip reader", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 					return err
 				}
 				respParsed.Body = gzipReader
@@ -782,7 +782,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			logger.Error("failed to read the the http response body", zap.Error(err))
+			logger.Error("failed to read the the http response body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			return err
 		}
 		logger.Debug("This is the response body: " + string(respBody))
@@ -834,7 +834,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 			}, ctx)
 
 			if err != nil {
-				logger.Error("failed to store the http mock", zap.Error(err))
+				logger.Error("failed to store the http mock", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			}
 		}()
 
@@ -849,4 +849,18 @@ func hasCompleteHeaders(httpChunk []byte) bool {
 
 	// Check if the byte slice contains the header end sequence
 	return bytes.Contains(httpChunk, headerEndSequence)
+}
+
+// extract the request metadata from the request
+func getReqMeta(req *http.Request) map[string]string {
+	reqMeta := map[string]string{}
+	if req != nil {
+		// get request metadata
+		reqMeta = map[string]string{
+			"method": req.Method,
+			"url":    req.URL.String(),
+			"host":   req.Host,
+		}
+	}
+	return reqMeta
 }
