@@ -1,102 +1,102 @@
 #! /bin/bash
 
-# Checkout a different branch
-git fetch origin
-git checkout native-linux
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Start the postgres database.
-docker-compose up -d
+# Start the docker container.
+docker run --name mongoDb --rm -p 27017:27017 -d mongo
 
-# Install the dependencies.
-pip3 install -r requirements.txt
+# Install the required node dependencies.
+npm install
 
-# Set the environment variable for the app to run correctly.
-export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
+# Edit the connection.js file to connect to local mongodb.
+file_path="src/db/connection.js"
+sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
 
-# Make the required migrations.
-python3 manage.py makemigrations
-python3 manage.py migrate
-
-# Generate the keploy-config file.
-./../../../keployv2 generate-config
-
-#Clean any keploy folders.
-sudo rm -rf keploy/
-
-# Update the global noise to ignore the Allow header.
-config_file="./keploy-config.yaml"
-sed -i 's/header: {}/header: {"Allow":[]}/' "$config_file"
-
-# Wait for 5 seconds for it to complete
-sleep 5
+# Remove any preexisting keploy tests.
+rm -rf keploy/
 
 for i in {1..2}; do
-# Start the django-postgres app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" &
+# Start keploy in record mode.
+sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' &
 
 # Wait for the application to start.
 app_started=false
 while [ "$app_started" = false ]; do
-    if curl --location 'http://127.0.0.1:8000/'; then
+    if curl -X GET http://localhost:8000/students; then
         app_started=true
     fi
     sleep 3 # wait for 3 seconds before checking again.
 done
 
-# Get the pid of keploy.
+# Get the pid of the application.
 pid=$(pgrep keploy)
 
 # Start making curl calls to record the testcases and mocks.
-curl --location 'http://127.0.0.1:8000/user/' \
---header 'Content-Type: application/json' \
---data-raw '    {
-        "name": "Jane Smith",
-        "email": "jane.smith@example.com",
-        "password": "smith567",
-        "website": "www.janesmith.com"
+curl --request POST \
+--url http://localhost:8000/students \
+   --header 'content-type: application/json' \
+   --data '{
+    "name":"John Do",
+    "email":"john@xyiz.com",
+    "phone":"0123456799"
     }'
 
-curl --location 'http://127.0.0.1:8000/user/' \
---header 'Content-Type: application/json' \
---data-raw '    {
-        "name": "John Doe",
-        "email": "john.doe@example.com",
-        "password": "john567",
-        "website": "www.johndoe.com"
+curl --request POST \
+--url http://localhost:8000/students \
+   --header 'content-type: application/json' \
+   --data '{
+    "name":"Alice Green",
+    "email":"green@alice.com",
+    "phone":"3939201584"
     }'
 
-curl --location 'http://127.0.0.1:8000/user/'
-
-curl --location 'http://127.0.0.1:8000/user/' \
---header 'Content-Type: application/json' \
---data-raw '    {
-        "name": "John Doe",
-        "email": "john.doe@example.com",
-        "password": "john567",
-        "website": "www.johndoe.com"
-    }'
+curl -X GET http://localhost:8000/students
 
 # Wait for 5 seconds for keploy to record the tcs and mocks.
 sleep 5
 
-# Stop the gin-mongo app.
+# Stop keploy.
 sudo kill $pid
 
 # Wait for 5 seconds for keploy to stop.
 sleep 5
 done
 
-# Start the app in test mode.
-sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10
+# Start keploy in test mode.
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10
+
+sudo -E env PATH=$PATH ./../../keployv2 serve -c "npm test" --delay 5
+
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
+
+# Generate the keploy-config file.
+./../../keployv2 generate-config
+
+# Update the global noise to ts.
+config_file="./keploy-config.yaml"
+sed -i '/tests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
+
+
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/test-run-1/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 report_file2="./keploy/testReports/test-run-1/report-2.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
+report_file3="./keploy/testReports/test-run-2/report-1.yaml"
+test_status3=$(grep 'status:' "$report_file3" | head -n 1 | awk '{print $2}')
+report_file4="./keploy/testReports/test-run-2/report-2.yaml"
+test_status4=$(grep 'status:' "$report_file4" | head -n 1 | awk '{print $2}')
+report_file5="./keploy/testReports/test-run-3/report-1.yaml"
+test_status5=$(grep 'status:' "$report_file5" | head -n 1 | awk '{print $2}')
+report_file6="./keploy/testReports/test-run-4/report-1.yaml"
+test_status6=$(grep 'status:' "$report_file6" | head -n 1 | awk '{print $2}')
+test_total6=$(grep 'total:' "$report_file6" | head -n 1 | awk '{print $2}')
+test_failure=$(grep 'failure:' "$report_file6" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
     exit 0
 else
     exit 1
