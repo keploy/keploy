@@ -250,8 +250,8 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
-			
-			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
+			subDirPrefix := "test-report-"
+			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, subDirPrefix)
 			if err != nil {
 				t.logger.Error("failed to get the next test report directory", zap.Error(err))
 				return err
@@ -280,7 +280,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			if !t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
 				Tests:              tests,
 				AppContainer:       appContainer,
 				AppNetwork:         networkName,
@@ -294,9 +294,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				TestsetNoise:       testsetNoise,
 				WithCoverage:       withCoverage,
 				CoverageReportPath: coverageReportPath,
-			}, enableTele) {
-				os.Exit(1)
-			}
+			}, enableTele)
 
 			return nil
 		},
