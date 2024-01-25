@@ -1,13 +1,7 @@
 #! /bin/bash
 
-source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
-
-# Checkout a different branch
-git fetch origin
-git checkout native-linux
-
 # Start postgres instance.
-docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
+docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
 
 # Update the java version
 source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
@@ -15,13 +9,8 @@ source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
 
-# Update the postgres database.
-docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
-docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
-
 for i in {1..2}; do
 # Start keploy in record mode.
-mvn clean install -Dmaven.test.skip=true
 sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' &
 
 # Wait for the application to start.
