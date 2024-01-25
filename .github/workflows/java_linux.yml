@@ -25,7 +25,7 @@ jobs:
     - name: Compile the project
       run: |
        cd samples-java/spring-petclinic/spring-petclinic-rest
-        source ./../../../.github/workflows/update-java.sh
+        source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
         ./mvnw compile
 
     - name: Run the spring-petclinic-rest app
