@@ -101,3 +101,4 @@ if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
 else
     exit 1
 fi
+
