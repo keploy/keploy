@@ -53,13 +53,13 @@ done
 docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40s --apiTimeout 60 --delay 20
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-report-0/report-1.yaml"
+report_file="./keploy/testReports/test-run-1/report-1.yaml"
 test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-report-0/report-1.yaml"
+report_file="./keploy/testReports/test-run-1/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-report-0/report-2.yaml"
+report_file2="./keploy/testReports/test-run-1/report-2.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
@@ -68,4 +68,3 @@ if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
 else
     exit 1
 fi
-
