@@ -586,7 +586,7 @@ func (ps *ProxySet) startDnsServer() {
 	ps.DnsServerTimeout = 1 * time.Second
 
 	handler := ps
-	udpServer := &dns.Server{
+	server := &dns.Server{
 		Addr:      dnsServerAddr,
 		Net:       "udp",
 		Handler:   handler,
@@ -595,31 +595,30 @@ func (ps *ProxySet) startDnsServer() {
 		// DisableBackground: true,
 	}
 
-	ps.DnsServer = udpServer
+	ps.DnsServer = server
 
-	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", udpServer.Addr))
-	udpErr := udpServer.ListenAndServe()
-	if udpErr != nil {
-		ps.logger.Error("failed to start dns server", zap.Any("addr", udpServer.Addr), zap.Error(udpErr))
+	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", server.Addr))
+	err := server.ListenAndServe()
+	if err != nil {
+		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
+	}
+}
+
+func (ps *ProxySet) changeListenerToDNS() {
+
+	handler := ps
+	server := &dns.Server{
+		Addr:     "53",
+		Listener: ps.Listener,
+		Handler:  handler,
 	}
 
-	// DNS server to handle tcp requests
+	ps.DnsServer = server
 
-	tcpServer := &dns.Server{
-		Addr:      dnsServerAddr,
-		Net:       "tcp",
-		Handler:   handler,
-		UDPSize:   65535,
-		ReusePort: true,
-		// DisableBackground: true,
-	}
-
-	ps.DnsServer = tcpServer
-
-	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", tcpServer.Addr))
-	tcpErr := tcpServer.ListenAndServe()
-	if tcpErr != nil {
-		ps.logger.Error("failed to start dns server", zap.Any("addr", tcpServer.Addr), zap.Error(tcpErr))
+	ps.logger.Info(fmt.Sprintf("starting DNS-TCP server at addr %v", server.Addr))
+	err := server.ActivateAndServe()
+	if err != nil {
+		ps.logger.Error("failed to start dns tcp server", zap.Any("addr", server.Addr), zap.Error(err))
 	}
 }
 
@@ -634,7 +633,7 @@ func generateCacheKey(name string, qtype uint16) string {
 }
 
 func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-
+	ps.logger.Info("Entered ServeDNS function")
 	ps.logger.Debug("", zap.Any("Source socket info", w.RemoteAddr().String()))
 	msg := new(dns.Msg)
 	msg.SetReply(r)
@@ -699,20 +698,26 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) []dns.RR {
-	// Remove the last dot from the domain name if it exists
+	// Remove the (last dot from the domain name if it exists
+	logger.Debug("Resolving DNS Query")
 	domain = strings.TrimSuffix(domain, ".")
-
+	logger.Debug("Domain " + domain)
 	// Create a context with a timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	// Use the default system resolver
 	resolver := net.DefaultResolver
-
 	// Perform the lookup with the context
 	ips, err := resolver.LookupIPAddr(ctx, domain)
 	if err != nil {
 		logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
+		return nil
+	}
+
+	if ips == nil {
+		// Handling the case where ips is nil (no DNS records found)
+		logger.Info("Resolved IP addresses are nil")
 		return nil
 	}
 
@@ -928,6 +933,37 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 			}
 		}
 		genericCheck := true
+
+		//Handling cases for PORT 53 for TCP calls
+		if destInfo.DestPort == 53 {
+
+			var actualAddress = ""
+			if destInfo.IpVersion == 4 {
+				actualAddress = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.DestIp4), destInfo.DestPort)
+			} else if destInfo.IpVersion == 6 {
+				actualAddress = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.DestIp6), destInfo.DestPort)
+			}
+			if models.GetMode() != models.MODE_TEST {
+				dst, err = net.Dial("tcp", actualAddress)
+				if err != nil {
+					ps.logger.Error(Emoji+"failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
+					conn.Close()
+					return
+				}
+			}
+			ps.logger.Info(actualAddress)
+			hostIP, port, err := net.SplitHostPort(actualAddress)
+			if err != nil {
+				ps.logger.Error("Not able to get the host IP .... Exiting gracefully")
+				os.Exit(1)
+			}
+			ps.logger.Info("hostIp: " + hostIP + "port: " + port)
+			// answers := resolveDNSQuery(hostIP, ps.logger, ps.DnsServerTimeout)
+
+			ps.changeListenerToDNS()
+			// }
+		}
+
 		//Checking for all the parsers.
 		for _, parser := range ParsersMap {
 			if parser.OutgoingType(buffer) {
@@ -935,6 +971,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				genericCheck = false
 			}
 		}
+
 		if genericCheck {
 			logger.Debug("The external dependency is not supported. Hence using generic parser")
 			genericparser.ProcessGeneric(buffer, conn, dst, ps.hook, logger, ctx)
