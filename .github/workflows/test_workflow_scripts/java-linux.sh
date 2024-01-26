@@ -7,7 +7,7 @@ git fetch origin
 git checkout native-linux
 
 # Start postgres instance.
-docker run -d -e --name mypostgres POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
+docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2 --name mypostgres
 
 # Update the java version
 source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
