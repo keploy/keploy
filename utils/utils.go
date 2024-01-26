@@ -75,7 +75,7 @@ func CheckFileExists(path string) bool {
 	return true
 }
 
-var KeployVersion string
+var Version string
 
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
