@@ -7,7 +7,7 @@ git fetch origin
 git checkout native-linux
 
 # Start postgres instance.
-docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
+docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
 
 # Update the java version
 source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
@@ -22,7 +22,7 @@ docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
 for i in {1..2}; do
 # Start keploy in record mode.
 mvn clean install -Dmaven.test.skip=true
-sudo -E env PATH=$PATH ./../../../keployv2 record -c './mvnw spring-boot:run' &
+sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' &
 
 # Wait for the application to start.
 app_started=false
@@ -72,7 +72,7 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 record -c './mvnw spring-boot:run' &
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/test-run-1/report-1.yaml"
