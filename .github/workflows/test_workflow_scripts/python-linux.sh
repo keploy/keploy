@@ -1,5 +1,7 @@
 #! /bin/bash
 
+source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
+
 # Checkout a different branch
 git fetch origin
 git checkout native-linux
