@@ -26,8 +26,7 @@ func NewCmdTest(logger *zap.Logger) *Test {
 	}
 }
 
-
-func readTestConfig(configPath string) (*models.Test, error) {
+func ReadTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
@@ -47,7 +46,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
 	}
-	confTest, err := readTestConfig(configFilePath)
+	confTest, err := ReadTestConfig(configFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
