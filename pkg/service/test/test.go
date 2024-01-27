@@ -748,10 +748,6 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	cleanExp, cleanAct := "", ""
 	var err error
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		// TODO:  only for dev purposes
-		if len(tc.HttpResp.Body) == len(actualResponse.Body) {
-			return true, res
-		}
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res

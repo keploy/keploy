@@ -12,17 +12,29 @@ type MySQLRequest struct {
 	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty,flow" bson:"read_delay,omitempty"`
 }
 
+// func (mr *MySQLRequest) UnmarshalBSON(data []byte) error
+// func (mr *MySQLRequest) UnmarshalJSON(data []byte) error
+// func (mr *MySQLRequest) MarshalJSON() ([]byte, error)
+
 type RowColumnDefinition struct {
 	Type  FieldType   `json:"type,omitempty" yaml:"type,omitempty,flow" bson:"type,omitempty"`
 	Name  string      `json:"name,omitempty" yaml:"name,omitempty,flow" bson:"name,omitempty"`
 	Value interface{} `json:"value,omitempty" yaml:"value,omitempty,flow" bson:"value,omitempty"`
 }
 
+// func (r *RowColumnDefinition) UnmarshalBSON(data []byte) error
+// func (mr *RowColumnDefinition) UnmarshalJSON(data []byte) error
+// func (mr *RowColumnDefinition) MarshalJSON() ([]byte, error)
+
 type MySQLResponse struct {
 	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header,omitempty,flow" bson:"header,omitempty"`
 	Message   interface{}        `json:"message,omitempty" yaml:"message,omitempty,flow" bson:"message,omitempty"`
 	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty,flow" bson:"read_delay,omitempty"`
 }
+
+// func (mr *MySQLResponse) UnmarshalBSON(data []byte) error
+// func (mr *MySQLResponse) UnmarshalJSON(data []byte) error
+// func (mr *MySQLResponse) MarshalJSON() ([]byte, error)
 
 type MySQLHandshakeV10Packet struct {
 	ProtocolVersion uint8  `json:"protocol_version,omitempty" yaml:"protocol_version,omitempty,flow" bson:"protocol_version,omitempty"`
@@ -89,13 +101,13 @@ type MySQLStmtPrepareOk struct {
 type MySQLResultSet struct {
 	Columns             []*ColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow" bson:"columns,omitempty"`
 	Rows                []*Row              `json:"rows,omitempty" yaml:"rows,omitempty,flow" bson:"rows,omitempty"`
-	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow" bson:"eof_present,omitempty"`
-	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow" bson:"padding_present,omitempty"`
-	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow" bson:"eof_present_final,omitempty"`
-	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow" bson:"padding_present_final,omitempty"`
-	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow" bson:"optional_padding,omitempty"`
-	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optional_eof_bytes,omitempty"`
-	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eof_after_columns,omitempty"`
+	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow" bson:"eofPresent,omitempty"`
+	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow" bson:"paddingPresent,omitempty"`
+	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow" bson:"eofPresentFinal,omitempty"`
+	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow" bson:"paddingPresentFinal,omitempty"`
+	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow" bson:"optionalPadding,omitempty"`
+	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optionalEOFBytes,omitempty"`
+	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eofAfterColumns,omitempty"`
 }
 
 type PacketHeader struct {

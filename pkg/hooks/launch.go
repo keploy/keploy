@@ -77,7 +77,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				dockerComposeFile := findDockerComposeFile()
 
 				if dockerComposeFile == "" {
-					return fmt.Errorf("Can't find the docker compose file of user. Are you in the right directory?")
+					return fmt.Errorf("can't find the docker compose file of user. Are you in the right directory? ")
 				}
 
 				// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
@@ -123,7 +123,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 						err := h.idc.MakeNetworkExternal(dockerComposeFile, newComposeFile)
 						if err != nil {
 							h.logger.Error("couldn't make your docker network external")
-							return fmt.Errorf("Error while updating network to external: %v\n", err)
+							return fmt.Errorf("error while updating network to external: %v", err)
 						}
 
 						h.logger.Info("successfully made your docker network external")
@@ -657,7 +657,6 @@ func getInodeNumber(pid int) uint64 {
 
 	f, err := os.Stat(filepath)
 	if err != nil {
-		fmt.Errorf("%v failed to get the inode number or namespace Id:", Emoji, err)
 		return 0
 	}
 	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
