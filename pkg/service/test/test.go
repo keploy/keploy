@@ -259,6 +259,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
+	//pass the generateTestReport flag
 	defer deleteTestReport(t.logger, options.GenerateTestReport)
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {
