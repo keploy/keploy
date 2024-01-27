@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/utils"
@@ -95,7 +96,20 @@ func (u *updater) UpdateBinary() {
 }
 
 func (u *updater) downloadAndUpdate(downloadUrl string) error {
-	downloadCmd := exec.Command("curl", "--silent", "--location", downloadUrl)
+	curlPath, err := exec.LookPath("curl")
+	if err != nil {
+		return errors.New("curl command not found on the system")
+	}
+
+	// Determine the path based on the alias "keploy"
+	aliasPath := "/usr/local/bin/keploy" // Default path
+	aliasCmd := exec.Command("which", "keploy")
+	aliasOutput, err := aliasCmd.Output()
+	if err == nil && len(aliasOutput) > 0 {
+		aliasPath = strings.TrimSpace(string(aliasOutput))
+	}
+
+	downloadCmd := exec.Command(curlPath, "--silent", "--location", downloadUrl)
 	untarCmd := exec.Command("tar", "xz", "-C", "/tmp")
 
 	// Pipe the output of the first command to the second command
@@ -115,7 +129,7 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 		return err
 	}
 
-	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", "/usr/local/bin/keploybin")
+	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", aliasPath)
 	if err := moveCmd.Run(); err != nil {
 		return err
 	}
