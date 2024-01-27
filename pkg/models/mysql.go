@@ -136,6 +136,9 @@ type MySQLResultSet struct {
 	Columns             []*ColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow" bson:"columns,omitempty"`
 	Rows                []*Row              `json:"rows,omitempty" yaml:"rows,omitempty,flow" bson:"rows,omitempty"`
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 0fb22b3 (fix: adds json marshaller/unmarshaller for mongo models)
 	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow" bson:"eofPresent,omitempty"`
 	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow" bson:"paddingPresent,omitempty"`
 	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow" bson:"eofPresentFinal,omitempty"`
@@ -143,6 +146,7 @@ type MySQLResultSet struct {
 	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow" bson:"optionalPadding,omitempty"`
 	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optionalEOFBytes,omitempty"`
 	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eofAfterColumns,omitempty"`
+<<<<<<< HEAD
 =======
 	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow" bson:"eof_present,omitempty"`
 	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow" bson:"padding_present,omitempty"`
@@ -152,6 +156,8 @@ type MySQLResultSet struct {
 	OptionalEOFBytes    []byte              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optional_eof_bytes,omitempty"`
 	EOFAfterColumns     []byte              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eof_after_columns,omitempty"`
 >>>>>>> 70bcbc0 (merge: resolves merge conflicts)
+=======
+>>>>>>> 0fb22b3 (fix: adds json marshaller/unmarshaller for mongo models)
 }
 
 type PacketHeader struct {
