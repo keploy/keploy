@@ -458,3 +458,23 @@ func makeDirectory(path string) error {
 	syscall.Umask(oldUmask)
 	return nil
 }
+
+func deleteTestReport(logger *zap.Logger, generateTestReport bool) {
+	logger.Info("generateTestReport is ", zap.Bool("generateTestReport", generateTestReport))
+	fmt.Println("generateTestReport is ", generateTestReport)
+	if generateTestReport {
+		return
+	}
+
+	//Remove testReports folder if it exists and generateTestReport flag is not set
+	_, err := os.Stat("keploy/testReports")
+	if os.IsNotExist(err) {
+		return
+	}
+	err = os.RemoveAll("keploy/testReports")
+	if err != nil {
+		logger.Error("Error removing testReports folder: %v\n", zap.String("error", err.Error()))
+		return
+	}
+
+}

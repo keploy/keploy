@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,8 +15,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"net/url"
 
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
@@ -27,6 +26,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+
 	"go.uber.org/zap"
 )
 
@@ -50,6 +50,7 @@ type TestOptions struct {
 	TestsetNoise       models.TestsetNoise
 	WithCoverage       bool
 	CoverageReportPath string
+	GenerateTestReport bool
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -257,6 +258,8 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		}
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
+
+	defer deleteTestReport(t.logger, options.GenerateTestReport)
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {
 		t.logger.Info("there is a opportunity to get the coverage here")
