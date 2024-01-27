@@ -9,12 +9,9 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-<<<<<<< HEAD
 	"path/filepath"
 	"strconv"
-=======
 	"regexp"
->>>>>>> bb7025b (refactor:removing duplicate code)
 	"strings"
 	"time"
 
