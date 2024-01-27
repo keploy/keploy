@@ -3,20 +3,17 @@ package cmd
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
@@ -252,33 +249,11 @@ func (r *Root) execute() {
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	rootCmd.PersistentFlags().Bool("version", false, "Fetch the latest version")
-
 	// Manually parse flags to determine debug mode and version flag early
 	debugMode = checkForDebugFlag(os.Args[1:])
 
-	rootCmd.SetVersionTemplate(`
-	{{with .Version}}{{printf "Keploy %s" .}}{{end}}
-	`)
-	// Check for updates and set flags in the versionInfo
-	releaseInfo, err := utils.GetLatestGitHubRelease()
-	if err != nil {
-		r.logger.Debug("Failed to fetch the latest release version", zap.Error(err))
-	} else {
-		currentVersion := utils.Version
-		if releaseInfo.TagName != currentVersion && !strings.HasSuffix(currentVersion, "-dev") {
-			updatetext := models.HighlightGrayString("keploy update")
-			const msg string = `
-               ╭─────────────────────────────────────╮
-               │ New version available:              │
-               │ %v  ---->   %v  │
-               │ Run %v to update         │
-               ╰─────────────────────────────────────╯
-			   `
-			versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
-			fmt.Printf(versionmsg)
-		}
-	}
+	//Set the version template for version command
+	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
 
 	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
