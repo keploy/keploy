@@ -212,6 +212,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			generateTestReport, err := cmd.Flags().GetBool("generateTestReport")
+			if err != nil {
+				t.logger.Error("failed to read the generate test teport flag")
+				return err
+			}
+
 			enableTele, err := cmd.Flags().GetBool("enableTele")
 			if err != nil {
 				t.logger.Error("failed to read the disable telemetry flag")
@@ -284,18 +290,20 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			path += "/keploy"
+			t.logger.Info("", zap.Any("keploy test and mock path", path))
 
-			testReportPath := path + "/testReports"
-			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
-			if err != nil {
-				t.logger.Error("failed to get the next test report directory", zap.Error(err))
-				return err
+			testReportPath := ""
+
+			if generateTestReport {
+				testReportPath = path + "/testReports"
+				testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
+				t.logger.Info("", zap.Any("keploy testReport path", testReportPath))
+				if err != nil {
+					t.logger.Error("failed to get the next test report directory", zap.Error(err))
+					return err
+				}
 			}
-
-
-
-			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
-
+			
 			var hasContainerName bool
 			if isDockerCmd {
 				if strings.Contains(appCmd, "--name") {
@@ -320,12 +328,12 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
-            
+
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+				g.Serve(path, proxyPort, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
-				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+				t.tester.Test(path, testReportPath, generateTestReport, appCmd, test.TestOptions{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,
@@ -376,6 +384,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().StringP("language", "l", "", "application programming language")
 
 	testCmd.Flags().Uint32("pid", 0, "Process id of your application.")
+	
+	testCmd.Flags().BoolP("generateTestReport", "g", false, "Generate the test report")
 
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 
