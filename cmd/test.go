@@ -97,7 +97,28 @@ type Test struct {
 	logger *zap.Logger
 }
 
+var generateTestReport bool
+
+func deleteTestReport(logger *zap.Logger) {
+	if generateTestReport {
+		return
+	}
+
+	//Remove testReports folder if it exists and generateTestReport flag is not set
+	_, err := os.Stat("keploy/testReports")
+	if os.IsNotExist(err) {
+		return
+	}
+	err = os.RemoveAll("keploy/testReports")
+	if err != nil {
+		logger.Error("Error removing testReports folder: %v\n", zap.String("error", err.Error()))
+		return
+	}
+
+}
+
 func (t *Test) GetCmd() *cobra.Command {
+
 	var testCmd = &cobra.Command{
 		Use:     "test",
 		Short:   "run the recorded testcases and execute assertions",
@@ -325,6 +346,10 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
+
+	testCmd.Flags().BoolVar(&generateTestReport, "generateTestReport", false, "Generate test reports")
+
+	defer deleteTestReport(t.logger)
 
 	return testCmd
 }

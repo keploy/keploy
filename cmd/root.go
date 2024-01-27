@@ -32,7 +32,6 @@ type Root struct {
 }
 
 var debugMode bool
-var generateTestReport bool
 
 type colorConsoleEncoder struct {
 	*zapcore.EncoderConfig
@@ -235,24 +234,6 @@ func deleteLogs(logger *zap.Logger) {
 	}
 }
 
-func deleteTestReport(logger *zap.Logger) {
-	if generateTestReport {
-		return
-	}
-
-	//Remove testReports folder if it exists and generateTestReport flag is not set
-	_, err := os.Stat("keploy/testReports")
-	if os.IsNotExist(err) {
-		return
-	}
-	err = os.RemoveAll("keploy/testReports")
-	if err != nil {
-		logger.Error("Error removing testReports folder: %v\n", zap.String("error", err.Error()))
-		return
-	}
-
-}
-
 func (r *Root) execute() {
 	// Root command
 	var rootCmd = &cobra.Command{
@@ -264,7 +245,6 @@ func (r *Root) execute() {
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
-	rootCmd.PersistentFlags().BoolVar(&generateTestReport, "generateTestReport", false, "Generate test reports")
 
 	// Manually parse flags to determine debug mode early
 	debugMode = checkForDebugFlag(os.Args[1:])
@@ -278,8 +258,6 @@ func (r *Root) execute() {
 	for _, sc := range r.subCommands {
 		rootCmd.AddCommand(sc.GetCmd())
 	}
-
-	defer deleteTestReport(r.logger)
 
 	if err := rootCmd.Execute(); err != nil {
 		r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
