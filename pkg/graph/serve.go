@@ -1,4 +1,4 @@
-package serve
+package graph
 
 import (
 	"context"
@@ -20,21 +20,18 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-	"go.keploy.io/server/pkg/service/serve/graph"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
-var Emoji = "\U0001F430" + " Keploy:"
-
-type server struct {
+type graph struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
 
-func NewServer(logger *zap.Logger) Server {
-	return &server{
+func NewGraph(logger *zap.Logger) graphInterface {
+	return &graph{
 		logger: logger,
 		mutex:  sync.Mutex{},
 	}
@@ -43,7 +40,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
+func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
 	var ps *proxy.ProxySet
 
 	if port == 0 {
@@ -55,17 +52,17 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	models.SetMode(models.MODE_TEST)
-	tester := test.NewTester(s.logger)
-	testReportFS := yaml.NewTestReportFS(s.logger)
-	teleFS := fs.NewTeleFS(s.logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, s.logger, "", nil)
+	tester := test.NewTester(g.logger)
+	testReportFS := yaml.NewTestReportFS(g.logger)
+	teleFS := fs.NewTeleFS(g.logger)
+	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
 	tele.Ping(false)
-	ys := yaml.NewYamlStore(path, path, "", "", s.logger, tele)
+	ys := yaml.NewYamlStore(path, path, "", "", g.logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
-	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
+	loadedHooks, err := hooks.NewHook(ys, routineId, g.logger)
 	if err != nil {
-		s.logger.Error("error while creating hooks", zap.Error(err))
+		g.logger.Error("error while creating hooks", zap.Error(err))
 		return
 	}
 
@@ -96,7 +93,7 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
+		ps = proxy.BootProxy(g.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
 
 	}
 
@@ -106,20 +103,20 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		return
 	}
 
-	s.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
+	g.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
 	passThroughPorts = append(passThroughPorts, 36320)
 	// filter the required destination ports
 	if err := loadedHooks.SendPassThroughPorts(passThroughPorts); err != nil {
 		return
 	}
 
-	srv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{
-		Resolvers: &graph.Resolver{
+	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
+		Resolvers: &Resolver{
 			Tester:         tester,
 			TestReportFS:   testReportFS,
 			Storage:        ys,
 			LoadedHooks:    loadedHooks,
-			Logger:         s.logger,
+			Logger:         g.logger,
 			Path:           path,
 			TestReportPath: testReportPath,
 			Delay:          Delay,
@@ -149,10 +146,10 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf(Emoji+"listen: %s\n", err)
 		}
-		s.logger.Debug("graphql server stopped")
+		g.logger.Debug("graphql server stopped")
 	}()
 
-	defer s.stopGraphqlServer(httpSrv)
+	defer g.stopGraphqlServer(httpSrv)
 
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
 	exitCmd := make(chan bool)                 // channel to exit this command
@@ -169,14 +166,14 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, 30*time.Second, true); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
-					s.logger.Info("keploy terminated user application")
+					g.logger.Info("keploy terminated user application")
 					return
 				case hooks.ErrFailedUnitTest:
-					s.logger.Debug("unit tests failed hence stopping keploy")
+					g.logger.Debug("unit tests failed hence stopping keploy")
 				case hooks.ErrUnExpected:
-					s.logger.Debug("unit tests ran successfully hence stopping keploy")
+					g.logger.Debug("unit tests ran successfully hence stopping keploy")
 				default:
-					s.logger.Error("unknown error recieved from application", zap.Error(err))
+					g.logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 			}
 			if !abortStopHooksForcefully {
@@ -205,12 +202,12 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 }
 
 // Gracefully shut down the HTTP server with a timeout
-func (s *server) stopGraphqlServer(httpSrv *http.Server) {
+func (g *graph)stopGraphqlServer(httpSrv *http.Server) {
 	shutdown := make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(ctx); err != nil {
-		s.logger.Error("Graphql server shutdown failed", zap.Error(err))
+		g.logger.Error("Graphql server shutdown failed", zap.Error(err))
 	}
 	// If you have other goroutines that should listen for this, you can use this channel to notify them.
 	close(shutdown)

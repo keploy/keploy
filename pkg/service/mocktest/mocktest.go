@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 
@@ -78,6 +79,11 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		}
 		readTcsMocks = append(readTcsMocks, tcsmock)
 	}
+
+	sort.SliceStable(readTcsMocks, func(i, j int) bool {
+		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+	})
+
 	configMocks, err := ys.ReadConfigMocks("")
 
 	if err != nil {
