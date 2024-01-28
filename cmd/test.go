@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,7 +26,6 @@ func NewCmdTest(logger *zap.Logger) *Test {
 		logger: logger,
 	}
 }
-
 
 func readTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
@@ -95,7 +95,6 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 type Test struct {
 	tester test.Tester
 	logger *zap.Logger
-
 }
 
 func (t *Test) GetCmd() *cobra.Command {
@@ -266,51 +265,49 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Info(`Example usage:keploy test -c "docker-compose up --build" --buildDelay 35s`)
 			}
 
-			var hasContainerName bool
-			if isDockerCmd {
-				if strings.Contains(appCmd, "--name") {
-					hasContainerName = true
-				}
-				if !hasContainerName && appContainer == "" {
-					t.logger.Error("Couldn't find containerName")
-					t.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag or containerName in config file")
+			if isDockerCmd && len(path) > 0 {
+				// Check if the path contains the moving up directory (..)
+				if strings.Contains(path, "..") {
+					path, err = filepath.Abs(filepath.Clean(path))
+					if err != nil {
+						t.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					relativePath, err := filepath.Rel("/files", path)
+					if err != nil {
+						t.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
+					// Check if the path is a subdirectory of current directory
+					// Get the current directory path in docker.
+					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					cmd := exec.Command("sh", "-c", getDir)
+					out, err := cmd.Output()
+					if err != nil {
+						t.logger.Error("failed to get the current directory path in docker", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					currentDir := strings.TrimSpace(string(out))
+					t.logger.Debug("This is the path after trimming", zap.String("currentDir:", currentDir))
+					// Check if the path is a subdirectory of current directory
+					if !strings.HasPrefix(path, currentDir) {
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+					// Set the relative path.
+					path, err = filepath.Rel(currentDir, path)
+					if err != nil {
+						t.logger.Error("failed to get the relative path for the subdirectory", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
 				}
 			}
 
-			t.logger.Debug("the ports are", zap.Any("ports", ports))
-
-			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
-			if err != nil {
-				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-			//Check if app command starts with docker or  docker-compose.
-			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
-			if !isDockerCmd && dockerRelatedCmd {
-				isDockerCompose := false
-				if dockerCmd == "docker-compose" {
-					isDockerCompose = true
-				}
-				testCfg := utils.TestFlags{
-					Path:               path,
-					Proxyport:          proxyPort,
-					Command:            appCmd,
-					Testsets:           testsets,
-					ContainerName:      appContainer,
-					NetworkName:        networkName,
-					Delay:              delay,
-					BuildDelay:         buildDelay,
-					ApiTimeout:         apiTimeout,
-					PassThroughPorts:   ports,
-					ConfigPath:         configPath,
-					MongoPassword:      mongoPassword,
-					CoverageReportPath: coverageReportPath,
-					EnableTele:         enableTele,
-				}
-				utils.UpdateKeployToDocker("test", isDockerCompose, testCfg, t.logger)
-				return nil
-			}
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -331,6 +328,15 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
+<<<<<<< HEAD
+=======
+			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
+			if err != nil {
+				t.logger.Error("failed to get the next test report directory", zap.Error(err))
+				return err
+			}
+
+>>>>>>> c17dd8c (fix: unknown path problem in docker (#1396))
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			var hasContainerName bool
