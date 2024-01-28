@@ -912,6 +912,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		//Checking for all the parsers.
 		for _, parser := range ParsersMap {
 			if parser.OutgoingType(buffer) {
+				ctx := context.WithValue(ctx, "connectionId", fmt.Sprint(clientConnId))
 				parser.ProcessOutgoing(buffer, conn, dst, ctx)
 				genericCheck = false
 			}

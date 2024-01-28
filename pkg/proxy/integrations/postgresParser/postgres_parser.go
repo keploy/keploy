@@ -68,7 +68,6 @@ func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destC
 	default:
 		p.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
-
 }
 
 // This is the encoding function for the streaming postgres wiremessage
@@ -172,6 +171,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionId: ctx.Value("connectionId").(string),
 				}, ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
@@ -204,6 +204,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionId: ctx.Value("connectionId").(string),
 				}, ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
@@ -463,6 +464,8 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 // This is the decoding function for the postgres wiremessage
 func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	pgRequests := [][]byte{requestBuffer}
+	connectionId := "x"
+	statementMap := make(map[string]string)
 
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
@@ -497,10 +500,13 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 		}
 
-		matched, pgResponses, err := matchingReadablePG(pgRequests, logger, h)
+		matched, pgResponses, newConnectionId, newStatementMap, err := matchingReadablePG(pgRequests, logger, h, connectionId, statementMap)
 		if err != nil {
 			return fmt.Errorf("error while matching tcs mocks %v", err)
 		}
+
+		statementMap = newStatementMap
+		connectionId = newConnectionId
 
 		if !matched {
 			_, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)

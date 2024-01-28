@@ -762,6 +762,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		if len(tc.HttpResp.Body) == len(actualResponse.Body) {
 			return true, res
 		}
+
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res

@@ -314,7 +314,12 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	if !ok {
 		ys.Logger.Debug("failed to get mocksTotal from context")
 	}
-	(*mocksTotal)[string(mock.Kind)]++
+
+	if _, ok := (*mocksTotal)[string(mock.Kind)]; ok {
+		(*mocksTotal)[string(mock.Kind)]++
+	} else {
+		(*mocksTotal)[string(mock.Kind)] = 1
+	}
 	if ctx.Value("cmd") == "mockrecord" {
 		ys.tele.RecordedMock(string(mock.Kind))
 	}

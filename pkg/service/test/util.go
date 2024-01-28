@@ -396,8 +396,12 @@ func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*mod
 	})
 
 	// select first 10 mocks from the unfiltered mocks
-	if len(unFilteredMocks) > 10 {
-		unFilteredMocks = unFilteredMocks[:10]
+	// if len(unFilteredMocks) > 10 {
+	// 	unFilteredMocks = unFilteredMocks[:10]
+	// }
+
+	for _, v := range filteredMocks {
+		fmt.Println(v.Name)
 	}
 
 	// Append the unfiltered mocks to the filtered mocks
