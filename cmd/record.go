@@ -203,7 +203,7 @@ func (r *Record) GetCmd() *cobra.Command {
 						return nil
 					}
 					currentDir := strings.TrimSpace(string(out))
-					t.logger.Debug("This is the path after trimming the spaces", zap.String("currentDir:", currentDir))
+					r.logger.Debug("This is the path after trimming the spaces", zap.String("currentDir:", currentDir))
 					// Check if the path is a subdirectory of current directory
 					if !strings.HasPrefix(path, currentDir) {
 						r.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
