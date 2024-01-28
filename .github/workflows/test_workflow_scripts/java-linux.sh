@@ -1,16 +1,16 @@
 #! /bin/bash
 
-source ./../../../.github/workflows/workflow_scripts/fake-iid.sh
+source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout a different branch
 git fetch origin
 git checkout native-linux
 
 # Start postgres instance.
-docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
+docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 --name mypostgres postgres:15.2
 
 # Update the java version
-source ./../../../.github/workflows/workflow_scripts/update-java.sh
+source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
 
 # Remove any existing test and mocks by keploy.
 sudo rm -rf keploy/
