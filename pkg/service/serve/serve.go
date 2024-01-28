@@ -43,7 +43,7 @@ func NewServer(logger *zap.Logger) Server {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
+func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool, generateTestReport bool) {
 	var ps *proxy.ProxySet
 
 	if port == 0 {
@@ -58,6 +58,10 @@ func (s *server) Serve(path string, proxyPort uint32, testReportPath string, Del
 	tester := test.NewTester(s.logger)
 	testReportFS := yaml.NewTestReportFS(s.logger)
 	teleFS := fs.NewTeleFS(s.logger)
+
+	// Delete the generated test report if flag is not set
+	defer utils.DeleteTestReport(s.logger, generateTestReport)
+
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, s.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore("", "", "", "", s.logger, tele)

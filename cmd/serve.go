@@ -57,6 +57,13 @@ func (s *Serve) GetCmd() *cobra.Command {
 
 			testReportPath := path + "/testReports"
 
+			generateTestReport, err := cmd.Flags().GetBool("generateTestReport")
+
+			if err != nil {
+				s.logger.Error("Failed to get the generateTestReport flag", zap.Error((err)))
+				return
+			}
+
 			s.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			delay, err := cmd.Flags().GetUint64("delay")
@@ -113,7 +120,7 @@ func (s *Serve) GetCmd() *cobra.Command {
 			}
 			s.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			s.server.Serve(path, proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout, appCmd, enableTele)
+			s.server.Serve(path, proxyPort, testReportPath, delay, pid, port, language, ports, apiTimeout, appCmd, enableTele, generateTestReport)
 		},
 	}
 
@@ -129,6 +136,8 @@ func (s *Serve) GetCmd() *cobra.Command {
 	serveCmd.MarkFlagRequired("delay")
 
 	serveCmd.Flags().Uint64("apiTimeout", 5, "User provided timeout for calling its application")
+
+	serveCmd.Flags().Bool("generateTestReport", false, "Generate test report")
 
 	serveCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 	serveCmd.Flags().Bool("enableTele", true, "Switch for telemetry")

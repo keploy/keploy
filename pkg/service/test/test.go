@@ -26,7 +26,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -260,7 +260,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
 	//pass the generateTestReport flag
-	defer deleteTestReport(t.logger, options.GenerateTestReport)
+	defer utils.DeleteTestReport(t.logger, options.GenerateTestReport)
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {
 		t.logger.Info("there is a opportunity to get the coverage here")
