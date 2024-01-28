@@ -63,11 +63,11 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateTestReport
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage
+sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage --generateTestReport
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 --generateTestReport
 
 # Generate the keploy-config file.
 ./../../keployv2 generate-config
