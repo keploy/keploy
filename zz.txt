@@ -1,0 +1,53 @@
+local build: 
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+docker build -t keploy-v2 .
+
+go build -o keploy && sudo mv keploy /usr/local/bin
+
+////////
+// local test
+alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+
+
+docs guide:
+https://keploy.io/docs/keploy-explained/contribution-guide/
+
+docker build -t keploy-v2 .
+
+alias keployV2='sudo docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v "$(pwd)":/files -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm keploy-v2'
+
+record 
+keployV2 record -c "docker compose up" --containerName "url_shortener" --buildDelay 100s
+
+test
+keployV2 test -c "docker compose up" --containerName "url_shortener" --delay 10
+//////
+
+
+
+
+
+
+ques
+    cmd/root
+        func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder)
+            isme return colorConsoleEncoder struct hona chahiye
+
+/cmd
+package deals with cli.
+- they have type struct like given with a `GetCmd` func
+    type zz struct {
+        zx zx.zx
+        logger          *zap.Logger
+    }
+- test also have `GetTestConfig` and record has `GetRecordConfig`
+
+
+/pkg/service
+deals with service and mocks the test/record, generate config, test or record
+- they have struct like given it is furthur passed to cmd/root zz struct. they all have a service func (along with some util methods like in test)
+    type zx struct {
+        logger *zap.Logger
+        mutex  sync.Mutex
+    }
+
