@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg"
@@ -26,7 +26,6 @@ func NewCmdTest(logger *zap.Logger) *Test {
 		logger: logger,
 	}
 }
-
 
 func readTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
@@ -96,7 +95,6 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 type Test struct {
 	tester test.Tester
 	logger *zap.Logger
-
 }
 
 func (t *Test) GetCmd() *cobra.Command {
@@ -272,16 +270,16 @@ func (t *Test) GetCmd() *cobra.Command {
 				if strings.Contains(path, "..") {
 					path, err = filepath.Abs(filepath.Clean(path))
 					if err != nil {
-						t.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
+						t.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
 					relativePath, err := filepath.Rel("/files", path)
 					if err != nil {
-						t.logger.Error("failed to get the relative path from absolute path", zap.Error(err))
+						t.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
 					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
-						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories")
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
 						return nil
 					}
 				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
@@ -291,20 +289,20 @@ func (t *Test) GetCmd() *cobra.Command {
 					cmd := exec.Command("sh", "-c", getDir)
 					out, err := cmd.Output()
 					if err != nil {
-						t.logger.Error("failed to get the current directory path in docker", zap.Error(err))
+						t.logger.Error("failed to get the current directory path in docker", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
 					currentDir := strings.TrimSpace(string(out))
-					fmt.Println("THis is the path", path)
+					t.logger.Debug("This is the path after trimming", zap.String("currentDir:", currentDir))
 					// Check if the path is a subdirectory of current directory
 					if !strings.HasPrefix(path, currentDir) {
-						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories")
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
 						return nil
 					}
 					// Set the relative path.
 					path, err = filepath.Rel(currentDir, path)
 					if err != nil {
-						t.logger.Error("failed to get the relative path for the subdirectory", zap.Error(err))
+						t.logger.Error("failed to get the relative path for the subdirectory", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
 				}
@@ -336,8 +334,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
-
-
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			var hasContainerName bool
@@ -364,7 +360,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
-            
+
 			if coverage {
 				g := graph.NewGraph(t.logger)
 				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
