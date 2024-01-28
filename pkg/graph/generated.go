@@ -16,7 +16,7 @@ import (
 	"github.com/99designs/gqlgen/graphql/introspection"
 	gqlparser "github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
-	"go.keploy.io/server/pkg/service/serve/graph/model"
+	"go.keploy.io/server/pkg/graph/model"
 )
 
 // region    ************************** generated!.gotpl **************************
