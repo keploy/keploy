@@ -40,6 +40,7 @@ type Test struct {
 	BuildDelay         time.Duration       `json:"buildDelay" yaml:"buildDelay"`
 	ApiTimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts   []uint              `json:"passThroughPorts" yaml:"passThroughPorts"`
+	GenerateTestReport bool                `json:"generateTestReport" yaml:"generateTestReport"`
 	WithCoverage       bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
 	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 }

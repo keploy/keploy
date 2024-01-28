@@ -56,6 +56,7 @@ test:
   buildDelay: 30s
   apiTimeout: 5
   passThroughPorts: []
+  generateTestReport: false
   withCoverage: false
   coverageReportPath: ""
   `
