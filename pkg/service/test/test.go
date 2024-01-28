@@ -536,8 +536,6 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	(*resultForTele)[1] += *cfg.Failure
 
 	if cfg.GenerateTestReport {
-		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
-		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
 
 		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
 
