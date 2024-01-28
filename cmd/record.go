@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -172,6 +173,49 @@ func (r *Record) GetCmd() *cobra.Command {
 					r.logger.Info(fmt.Sprintf("Example usage:%s", cmd.Example))
 				}
 				return errors.New("missing required -c flag or appCmd in config file")
+			}
+
+			if isDockerCmd && len(path) > 0 {
+				// Check if the path contains the moving up directory (..)
+				if strings.Contains(path, "..") {
+					path, err = filepath.Abs(filepath.Clean(path))
+					if err != nil {
+						r.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					relativePath, err := filepath.Rel("/files", path)
+					if err != nil {
+						r.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
+						r.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
+					// Check if the path is a subdirectory of current directory
+					// Get the current directory path in docker.
+					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					cmd := exec.Command("sh", "-c", getDir)
+					out, err := cmd.Output()
+					if err != nil {
+						r.logger.Error("failed to get the current directory path in docker", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					currentDir := strings.TrimSpace(string(out))
+					r.logger.Debug("This is the path after trimming the spaces", zap.String("currentDir:", currentDir))
+					// Check if the path is a subdirectory of current directory
+					if !strings.HasPrefix(path, currentDir) {
+						r.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+					// Set the relative path.
+					path, err = filepath.Rel(currentDir, path)
+					if err != nil {
+						r.logger.Error("failed to get the relative path for the subdirectory", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+				}
 			}
 
 			//if user provides relative path
