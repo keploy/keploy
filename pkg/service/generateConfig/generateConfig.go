@@ -5,9 +5,9 @@ import (
 	"os/exec"
 	"sync"
 
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
-  "go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -58,6 +58,7 @@ test:
   passThroughPorts: []
   withCoverage: false
   coverageReportPath: ""
+  generateTestReport: false
   `
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
@@ -71,7 +72,7 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
 	}
 
-  finalOutput := append(results, []byte(utils.ConfigGuide)...)
+	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 
 	err = os.WriteFile(filePath, finalOutput, os.ModePerm)
 	if err != nil {

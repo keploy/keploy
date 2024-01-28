@@ -42,6 +42,7 @@ type Test struct {
 	PassThroughPorts   []uint              `json:"passThroughPorts" yaml:"passThroughPorts"`
 	WithCoverage       bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
 	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
+	GenerateTestReport bool                `json:"generateTestReport" yaml:"generateTestReport"` // boolean to generate test report
 }
 
 type Globalnoise struct {
