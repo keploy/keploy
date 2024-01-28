@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"time"
 
+	"go.keploy.io/server/pkg/graph/model"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/service/serve/graph/model"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"

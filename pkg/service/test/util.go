@@ -392,12 +392,21 @@ func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*mod
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
 	})
 
+	// Sort the unfiltered mocks based on some criteria (modify as needed)
+	sort.SliceStable(unFilteredMocks, func(i, j int) bool {
+		return unFilteredMocks[i].Spec.ReqTimestampMock.Before(unFilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	// select first 10 mocks from the unfiltered mocks
+	if len(unFilteredMocks) > 10 {
+		unFilteredMocks = unFilteredMocks[:10]
+	}
+
 	// Append the unfiltered mocks to the filtered mocks
 	sortedMocks := append(filteredMocks, unFilteredMocks...)
 	// logger.Info("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
-	for idx, v := range sortedMocks {
+	for _, v := range sortedMocks {
 		logger.Debug("sorted mocks", zap.Any("testcase", tc.Name), zap.Any("mocks", v))
-		sortedMocks[idx].SortOrder = int64(idx) + 1
 	}
 
 	return sortedMocks
@@ -421,15 +430,18 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
 			logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
+			mock.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, mock)
 			continue
 		}
 
 		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
 		if mock.Spec.ReqTimestampMock.After(tc.HttpReq.Timestamp) && mock.Spec.ResTimestampMock.Before(tc.HttpResp.Timestamp) {
+			mock.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, mock)
 			continue
 		}
+		mock.TestModeInfo.IsFiltered = false
 		unFilteredMocks = append(unFilteredMocks, mock)
 	}
 	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", filteredMocks))

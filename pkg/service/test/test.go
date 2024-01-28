@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -316,7 +317,41 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
-
+	var readConfigMocks []*models.Mock
+	configMocks, err := cfg.Storage.ReadConfigMocks(cfg.TestSet)
+	for _, mock := range configMocks {
+		configMock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readConfigMocks = append(readConfigMocks, configMock)
+	}
+	var readTcsMocks []*models.Mock
+	readTcsMockss, err := cfg.Storage.ReadTcsMocks(nil, cfg.TestSet)
+	for _, mock := range readTcsMockss {
+		configMock, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		readTcsMocks = append(readTcsMocks, configMock)
+	}
+	if err != nil {
+		t.logger.Error(err.Error())
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
+	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
+	fakeTestCase := models.TestCase{
+		Name:     "fake-tc",
+		HttpReq:  models.HttpReq{Timestamp: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
+		HttpResp: models.HttpResp{Timestamp: time.Now()},
+	}
+	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
+	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
+	sort.SliceStable(readTcsMocks, func(i, j int) bool {
+		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+	})
+	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
 
@@ -608,6 +643,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			readTcsMocks = append(readTcsMocks, tcsmock)
 		}
 		readTcsMocks, _ = FilterMocks(tc, readTcsMocks, t.logger)
+		sort.SliceStable(readTcsMocks, func(i, j int) bool {
+			return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+		})
 		initialisedValues.LoadedHooks.SetTcsMocks(readTcsMocks)
 
 		// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
@@ -748,10 +786,6 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	cleanExp, cleanAct := "", ""
 	var err error
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		// TODO:  only for dev purposes
-		if len(tc.HttpResp.Body) == len(actualResponse.Body) {
-			return true, res
-		}
 		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
 		if err != nil {
 			return false, res
@@ -836,7 +870,11 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 		t.mutex.Lock()
 		logger.Printf(logs)
-		logDiffs.Render()
+		err := logDiffs.Render()
+		if err != nil {
+			t.logger.Error("failed to render the diffs", zap.Error(err))
+		}
+
 		t.mutex.Unlock()
 
 	} else {

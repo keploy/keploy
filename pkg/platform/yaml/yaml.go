@@ -154,7 +154,7 @@ func ContainsMatchingUrl(urlMethods map[string][]string, urlStr string, requestM
 }
 
 func HasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
-	for headerName, _ := range object {
+	for headerName := range object {
 		for _, bannedHeader := range bannedHeaders {
 			if headerName == bannedHeader {
 				return true
@@ -367,9 +367,10 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, testSet string) ([]p
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" {
+			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" {
 				tcsMocks = append(tcsMocks, mock)
 			}
+			//if postgres type confgi
 		}
 	}
 	filteredMocks := make([]platform.KindSpecifier, 0)
@@ -390,7 +391,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, testSet string) ([]p
 		mock := readMock.(*models.Mock)
 		if mock.Version == "api.keploy-enterprise.io/v1beta1" {
 			entMocks = append(entMocks, mock.Name)
-		} else if mock.Version != "api.keploy.io/v1beta1" {
+		} else if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
 			nonKeployMocks = append(nonKeployMocks, mock.Name)
 		}
 		if (mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{})) && mock.Kind != "SQL" {
@@ -445,7 +446,7 @@ func (ys *Yaml) ReadConfigMocks(testSet string) ([]platform.KindSpecifier, error
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] == "config" {
+			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" || mock.Kind == "Generic" {
 				configMocks = append(configMocks, mock)
 			}
 		}
