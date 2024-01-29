@@ -83,20 +83,21 @@ type RunTestSetConfig struct {
 }
 
 type SimulateRequestConfig struct {
-	Tc           *models.TestCase
-	LoadedHooks  *hooks.Hook
-	AppCmd       string
-	UserIP       string
-	TestSet      string
-	ApiTimeout   uint64
-	Success      *int
-	Failure      *int
-	Status       *models.TestRunStatus
-	TestReportFS platform.TestReportDB
-	TestReport   *models.TestReport
-	Path         string
-	DockerID     bool
-	NoiseConfig  models.GlobalNoise
+	Tc             *models.TestCase
+	LoadedHooks    *hooks.Hook
+	AppCmd         string
+	UserIP         string
+	TestSet        string
+	ApiTimeout     uint64
+	Success        *int
+	Failure        *int
+	Status         *models.TestRunStatus
+	TestReportFS   platform.TestReportDB
+	TestReport     *models.TestReport
+	Path           string
+	DockerID       bool
+	NoiseConfig    models.GlobalNoise
+	IgnoreOrdering bool
 }
 
 type FetchTestResultsConfig struct {
