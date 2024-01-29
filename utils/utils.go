@@ -2,12 +2,9 @@ package utils
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"net"
-	"net/http"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -16,13 +13,6 @@ import (
 	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
 )
-
-type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
-}
-
-var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
@@ -113,37 +103,4 @@ func HandlePanic() {
 		log.Error(Emoji+"Recovered from:", r, "\nstack trace:\n", string(stackTrace))
 		sentry.Flush(time.Second * 2)
 	}
-}
-
-// getLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
-func GetLatestGitHubRelease() (GitHubRelease, error) {
-	// GitHub repository details
-	repoOwner := "keploy"
-	repoName := "keploy"
-
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
-
-	client := http.Client{
-		Timeout: 4 * time.Second,
-	}
-
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return GitHubRelease{}, err
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return GitHubRelease{}, ErrGitHubAPIUnresponsive
-		}
-		return GitHubRelease{}, err
-	}
-	defer resp.Body.Close()
-
-	var release GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return GitHubRelease{}, err
-	}
-	return release, nil
 }

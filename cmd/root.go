@@ -249,7 +249,7 @@ func (r *Root) execute() {
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	// Manually parse flags to determine debug mode and version flag early
+	// Manually parse flags to determine debug mode
 	debugMode = checkForDebugFlag(os.Args[1:])
 
 	//Set the version template for version command
