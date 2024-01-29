@@ -158,7 +158,6 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	}
 
 	sessions, err := yaml.ReadSessionIndices(cfg.Path, t.logger)
-	fmt.Println(sessions)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return returnVal, err
