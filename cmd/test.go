@@ -89,7 +89,9 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	*globalNoise = confTest.GlobalNoise.Global
 	*testSetNoise = confTest.GlobalNoise.Testsets
-	*ignoreOrdering = confTest.IgnoreOrdering
+	if !*ignoreOrdering {
+		*ignoreOrdering = confTest.IgnoreOrdering
+	}
 	return nil
 }
 
