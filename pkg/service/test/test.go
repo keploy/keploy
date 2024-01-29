@@ -27,6 +27,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -50,6 +51,7 @@ type TestOptions struct {
 	TestsetNoise       models.TestsetNoise
 	WithCoverage       bool
 	CoverageReportPath string
+	IgnoreOrdering     bool
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -234,7 +236,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, options.IgnoreOrdering)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -441,7 +443,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig)
+		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering)
 
 		if !testPass {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
@@ -547,7 +549,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, ignoreOrdering bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -669,20 +671,21 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		}
 
 		cfg := &SimulateRequestConfig{
-			Tc:           tc,
-			LoadedHooks:  loadedHooks,
-			AppCmd:       appCmd,
-			UserIP:       userIp,
-			TestSet:      testSet,
-			ApiTimeout:   apiTimeout,
-			Success:      &success,
-			Failure:      &failure,
-			Status:       &status,
-			TestReportFS: testReportFS,
-			TestReport:   initialisedValues.TestReport,
-			Path:         path,
-			DockerID:     initialisedValues.DockerID,
-			NoiseConfig:  noiseConfig,
+			Tc:             tc,
+			LoadedHooks:    loadedHooks,
+			AppCmd:         appCmd,
+			UserIP:         userIp,
+			TestSet:        testSet,
+			ApiTimeout:     apiTimeout,
+			Success:        &success,
+			Failure:        &failure,
+			Status:         &status,
+			TestReportFS:   testReportFS,
+			TestReport:     initialisedValues.TestReport,
+			Path:           path,
+			DockerID:       initialisedValues.DockerID,
+			NoiseConfig:    noiseConfig,
+			IgnoreOrdering: ignoreOrdering,
 		}
 		t.SimulateRequest(cfg)
 	}
@@ -707,7 +710,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool) (bool, *models.Result) {
 
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
@@ -756,12 +759,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
+	isSame := false
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		// TODO:  only for dev purposes
-		if len(tc.HttpResp.Body) == len(actualResponse.Body) {
-			return true, res
-		}
-		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
+		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
 		if err != nil {
 			return false, res
 		}
@@ -825,9 +825,8 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 
 		if !res.BodyResult[0].Normal {
-
 			if json.Valid([]byte(actualResponse.Body)) {
-				patch, err := jsondiff.Compare(cleanExp, cleanAct)
+				patch, err := jsondiff.Compare(tc.HttpResp.Body, actualResponse.Body)
 				if err != nil {
 					t.logger.Warn("failed to compute json diff", zap.Error(err))
 				}
@@ -835,6 +834,10 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					keyStr := op.Path
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
+					}
+					if isSame {
+						logDiffs.hasarrayIndexMismatch = true
+						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 
