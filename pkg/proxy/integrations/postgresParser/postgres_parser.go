@@ -464,8 +464,9 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 // This is the decoding function for the postgres wiremessage
 func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	pgRequests := [][]byte{requestBuffer}
-	connectionId := "x"
-	statementMap := make(map[string]string)
+	preferedConnectionIdFromMocks := "x"
+	// stores the mapping between the prepared statements in the request buffer and the corresponding prepared statements in the mock.
+	preparedstatementMap := make(map[string]string)
 
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
@@ -500,13 +501,13 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 		}
 
-		matched, pgResponses, newConnectionId, newStatementMap, err := matchingReadablePG(pgRequests, logger, h, connectionId, statementMap)
+		matched, pgResponses, newPreferedConnectionIdFromMocks, newPreparedstatementMap, err := matchingReadablePG(pgRequests, logger, h, preferedConnectionIdFromMocks, preparedstatementMap)
 		if err != nil {
 			return fmt.Errorf("error while matching tcs mocks %v", err)
 		}
 
-		statementMap = newStatementMap
-		connectionId = newConnectionId
+		preparedstatementMap = newPreparedstatementMap
+		preferedConnectionIdFromMocks = newPreferedConnectionIdFromMocks
 
 		if !matched {
 			_, err = util.Passthrough(clientConn, destConn, pgRequests, h.Recover, logger)

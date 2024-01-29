@@ -335,10 +335,10 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 				}
 				var similarity1, similarity2 float64
 				if len(encoded) > 0 {
-					similarity1 = FuzzyCheck(encoded, reqBuff)
+					similarity1 = CosineSimilarity(encoded, reqBuff)
 				}
 				if len(encoded64) > 0 {
-					similarity2 = FuzzyCheck(encoded64, reqBuff)
+					similarity2 = CosineSimilarity(encoded64, reqBuff)
 				}
 
 				isNotSameStatement, isMisMatched, NewstatementMap := CheckForStatementName(mock.Spec.PostgresRequests[requestIndex], reqBuff, statementMap, logger)
@@ -753,4 +753,37 @@ func max(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func CosineSimilarity(slice1, slice2 []byte) float64 {
+	// Create frequency maps for both slices
+	freqMap1 := make(map[byte]int)
+	freqMap2 := make(map[byte]int)
+	for _, b := range slice1 {
+		freqMap1[b]++
+	}
+	for _, b := range slice2 {
+		freqMap2[b]++
+	}
+
+	// Calculate the dot product
+	var dotProduct int
+	for k, v := range freqMap1 {
+		dotProduct += v * freqMap2[k]
+	}
+
+	// Calculate the magnitude of the vectors
+	var magnitude1, magnitude2 int
+	for _, v := range freqMap1 {
+		magnitude1 += v * v
+	}
+	for _, v := range freqMap2 {
+		magnitude2 += v * v
+	}
+
+	if magnitude1 == 0 || magnitude2 == 0 {
+		return 0
+	}
+
+	return float64(dotProduct) / (math.Sqrt(float64(magnitude1)) * math.Sqrt(float64(magnitude2)))
 }
