@@ -63,12 +63,6 @@ test:
   buildDelay: 30s
   apiTimeout: 5
   ignoreOrdering: false
-  tests: 
-    filters:
-      - path: ""
-        urlMethods: []
-        headers: {}
-        host: ""
   stubs:
     filters:
       - path: ""
