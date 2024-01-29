@@ -838,7 +838,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					}
 					if isSame {
 						logDiffs.hasSameDifferentOrderMocks = true
-						logDiffs.PushFooterDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), utils.WarningSign+" Expected and actual array of key are in different order but have the same objects")
+						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 

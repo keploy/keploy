@@ -222,7 +222,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			ignoreOrdering, err := cmd.Flags().GetBool("ignoreOrdering")
 			if err != nil {
-				t.logger.Error("failed to read the disable telemetry flag")
+				t.logger.Error("failed to read the ignore ordering flag")
 				return err
 			}
 

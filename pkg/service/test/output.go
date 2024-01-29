@@ -27,23 +27,19 @@ type DiffsPrinter struct {
 	bodyNoise                  map[string][]string
 	headNoise                  map[string][]string
 	hasSameDifferentOrderMocks bool
-	expectedOrder              []string
-	actualOrder                []string
 	text                       string
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, []string{}, []string{}, ""}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, ""}
 }
 
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 	d.statusExp, d.statusAct = exp, act
 }
 
-func (d *DiffsPrinter) PushFooterDiff(exp, act, key string) {
+func (d *DiffsPrinter) PushFooterDiff(key string) {
 	d.hasSameDifferentOrderMocks = true
-	d.expectedOrder = append(d.expectedOrder, exp)
-	d.actualOrder = append(d.actualOrder, act)
 	d.text = key
 }
 
