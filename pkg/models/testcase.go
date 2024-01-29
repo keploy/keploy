@@ -48,6 +48,7 @@ type TestCase struct {
 	Noise    map[string][]string `json:"noise"`
 	Mocks    []*Mock             `json:"mocks"`
 	Type     string              `json:"type"`
+	Curl     string              `json:"curl"`
 }
 
 func (tc *TestCase) GetKind() string {
