@@ -27,6 +27,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -837,7 +838,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					}
 					if isSame {
 						logDiffs.hasSameDifferentOrderMocks = true
-						logDiffs.PushFooterDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), "Same value in different order")
+						logDiffs.PushFooterDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), utils.WarningSign+" Expected and actual array of key are in different order but have the same objects")
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 

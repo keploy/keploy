@@ -91,7 +91,7 @@ func (d *DiffsPrinter) Render() error {
 	if d.hasSameDifferentOrderMocks {
 		table.SetHeader([]string{d.text})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
-		paint := color.New(color.FgHiRed).SprintFunc()
+		paint := color.New(color.FgYellow).SprintFunc()
 		postPaint := paint(d.text)
 		table.Append([]string{postPaint})
 

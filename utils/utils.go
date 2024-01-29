@@ -104,3 +104,5 @@ func HandlePanic() {
 		sentry.Flush(time.Second * 2)
 	}
 }
+
+var WarningSign = "\U000026A0"
