@@ -308,11 +308,13 @@ func PostgresEncoder(buffer []byte) string {
 	return encoded
 }
 
-func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, isSorted bool) int {
+func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, isSorted bool, connectionId string, statementMap map[string]string) (int, map[string]string) {
 
 	mxSim := -1.0
 	mxIdx := -1
-
+	matchedMockConnectionId := "y"
+	var newPrepareStatementMapAfterMatching map[string]string
+	var isPrepareStatementMapMatched bool
 	for idx, mock := range tcsMocks {
 
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
@@ -328,23 +330,30 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 					encoded64, err = PostgresDecoder(mock.Spec.PostgresRequests[requestIndex].Payload)
 					if err != nil {
 						logger.Debug("Error while decoding postgres request", zap.Error(err))
-						return -1
+						return -1, statementMap
 					}
 				}
 				var similarity1, similarity2 float64
 				if len(encoded) > 0 {
-					similarity1 = FuzzyCheck(encoded, reqBuff)
+					similarity1 = CosineSimilarity(encoded, reqBuff)
 				}
 				if len(encoded64) > 0 {
-					similarity2 = FuzzyCheck(encoded64, reqBuff)
+					similarity2 = CosineSimilarity(encoded64, reqBuff)
 				}
+
+				isPreparedStatementChanged, isMisMatched, NewstatementMap := CheckForStatementName(mock.Spec.PostgresRequests[requestIndex], reqBuff, statementMap, logger)
 
 				// calculate the jaccard similarity between the two buffers one with base64 encoding and another via that ..
 				similarity := max(similarity1, similarity2)
-				if mxSim < similarity {
+				if !isMisMatched && (mxSim < similarity || (matchedMockConnectionId != mock.ConnectionId && mxSim == similarity && connectionId == mock.ConnectionId) || (mxSim == similarity && !isPrepareStatementMapMatched && !isPreparedStatementChanged)) {
 					mxSim = similarity
 					mxIdx = idx
-					continue
+					matchedMockConnectionId = mock.ConnectionId
+					isPrepareStatementMapMatched = !isPreparedStatementChanged
+					newPrepareStatementMapAfterMatching = make(map[string]string)
+					for key, value := range NewstatementMap {
+						newPrepareStatementMapAfterMatching[key] = value
+					}
 				}
 			}
 		}
@@ -361,7 +370,68 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 			logger.Debug("Matched with Unsorted Stream", zap.Float64("similarity", mxSim))
 		}
 	}
-	return mxIdx
+	return mxIdx, newPrepareStatementMapAfterMatching
+}
+
+func CheckForStatementName(expectedPgReq models.Backend, reqBuff []byte, statementMap map[string]string, logger *zap.Logger) (bool, bool, map[string]string) {
+
+	ReadableReqBuff := decodePgRequest(reqBuff, logger)
+	var NewstatementMap map[string]string = make(map[string]string)
+	for key, value := range statementMap {
+		NewstatementMap[key] = value
+	}
+
+	if ReadableReqBuff == nil {
+		return false, false, statementMap
+	}
+
+	if expectedPgReq.Binds == nil && ReadableReqBuff.Binds == nil {
+		return false, false, statementMap
+	}
+
+	if expectedPgReq.Binds == nil && ReadableReqBuff.Binds != nil {
+		return true, false, statementMap
+	}
+
+	if expectedPgReq.Binds != nil && ReadableReqBuff.Binds == nil {
+		return true, false, statementMap
+	}
+
+	var preparedStatementsFromMock []string
+	for _, bind := range expectedPgReq.Binds {
+		if bind.PreparedStatement != "" {
+			preparedStatementsFromMock = append(preparedStatementsFromMock, bind.PreparedStatement)
+		}
+	}
+
+	var preparedStatementsFromReqBuff []string
+
+	for _, bind := range ReadableReqBuff.Binds {
+		if bind.PreparedStatement != "" {
+			preparedStatementsFromReqBuff = append(preparedStatementsFromReqBuff, bind.PreparedStatement)
+		}
+	}
+
+	if len(preparedStatementsFromMock) != len(preparedStatementsFromReqBuff) {
+		return true, false, statementMap
+	}
+
+	isNewStatementCreated := false
+
+	for index, mockStmt := range preparedStatementsFromMock {
+		reqStmt, exists := statementMap[mockStmt]
+		if exists {
+			if preparedStatementsFromReqBuff[index] != reqStmt {
+				return true, true, statementMap
+			}
+		} else {
+			NewstatementMap[mockStmt] = preparedStatementsFromReqBuff[index]
+			if !isNewStatementCreated {
+				isNewStatementCreated = true
+			}
+		}
+	}
+	return isNewStatementCreated, false, NewstatementMap
 }
 
 func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
@@ -411,7 +481,7 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 }
 
 func IfBeginOnlyQuery(reqBuff []byte, logger *zap.Logger, expectedPgReq *models.Backend, h *hooks.Hook) (*models.Backend, bool) {
-	actualreq := decodePgRequest(reqBuff, logger, h)
+	actualreq := decodePgRequest(reqBuff, logger)
 	if actualreq == nil {
 		return nil, false
 	}
@@ -438,11 +508,11 @@ func IfBeginOnlyQuery(reqBuff []byte, logger *zap.Logger, expectedPgReq *models.
 	return nil, false
 }
 
-func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) (bool, []models.Frontend, error) {
+func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, preparedConnectionIdFromMocks string, prepareStatementMap map[string]string) (bool, []models.Frontend, string, map[string]string, error) {
 	for {
 		tcsMocks, err := h.GetConfigMocks()
 		if err != nil {
-			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
+			return false, nil, preparedConnectionIdFromMocks, prepareStatementMap, fmt.Errorf("error while getting tcs mocks %v", err)
 		}
 
 		var isMatched, sortFlag bool = false, true
@@ -455,7 +525,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			}
 
 			if sortFlag {
-				if mock.TestModeInfo.IsFiltered == false {
+				if !mock.TestModeInfo.IsFiltered {
 					sortFlag = false
 				} else {
 					sortedTcsMocks = append(sortedTcsMocks, mock)
@@ -539,7 +609,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 						ssl := models.Frontend{
 							Payload: "Tg==",
 						}
-						return true, []models.Frontend{ssl}, nil
+						return true, []models.Frontend{ssl}, preparedConnectionIdFromMocks, prepareStatementMap, nil
 					}
 				}
 			}
@@ -554,7 +624,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			// give more priority to sorted like if you find more than 0.5 in sorted then return that
 			if len(sortedTcsMocks) > 0 {
 				isSorted = true
-				idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted)
+				idx, prepareStatementMap = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted, preparedConnectionIdFromMocks, prepareStatementMap)
 				if idx != -1 {
 					isMatched = true
 					matchedMock = tcsMocks[idx]
@@ -564,7 +634,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 
 		if !isMatched {
 			isSorted = false
-			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
+			idx, prepareStatementMap = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted, preparedConnectionIdFromMocks, prepareStatementMap)
 			if idx != -1 {
 				isMatched = true
 				matchedMock = tcsMocks[idx]
@@ -582,15 +652,16 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 					continue
 				}
 			}
-			return true, matchedMock.Spec.PostgresResponses, nil
+
+			return true, matchedMock.Spec.PostgresResponses, matchedMock.ConnectionId, prepareStatementMap, nil
 		}
 
 		break
 	}
-	return false, nil, nil
+	return false, nil, preparedConnectionIdFromMocks, prepareStatementMap, nil
 }
 
-func decodePgRequest(buffer []byte, logger *zap.Logger, h *hooks.Hook) *models.Backend {
+func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
 
 	pg := NewBackend()
 
@@ -682,4 +753,37 @@ func max(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func CosineSimilarity(slice1, slice2 []byte) float64 {
+	// Create frequency maps for both slices
+	freqMap1 := make(map[byte]int)
+	freqMap2 := make(map[byte]int)
+	for _, b := range slice1 {
+		freqMap1[b]++
+	}
+	for _, b := range slice2 {
+		freqMap2[b]++
+	}
+
+	// Calculate the dot product
+	var dotProduct int
+	for k, v := range freqMap1 {
+		dotProduct += v * freqMap2[k]
+	}
+
+	// Calculate the magnitude of the vectors
+	var magnitude1, magnitude2 int
+	for _, v := range freqMap1 {
+		magnitude1 += v * v
+	}
+	for _, v := range freqMap2 {
+		magnitude2 += v * v
+	}
+
+	if magnitude1 == 0 || magnitude2 == 0 {
+		return 0
+	}
+
+	return float64(dotProduct) / (math.Sqrt(float64(magnitude1)) * math.Sqrt(float64(magnitude2)))
 }
