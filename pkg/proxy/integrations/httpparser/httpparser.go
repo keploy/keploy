@@ -32,17 +32,17 @@ type HttpParser struct {
 }
 
 // ProcessOutgoing implements proxy.DepInterface.
-func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context, sourcePort int) {
+func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx, sourcePort)
+		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx)
 		if err != nil {
 			http.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
 
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger, sourcePort)
+		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger)
 	default:
 		http.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -97,14 +97,14 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h, ctx, 0)
+		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h, ctx)
 		if err != nil {
 			logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
 
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, h, logger, 0)
+		decodeOutgoingHttp(request, clientConn, destConn, h, logger)
 	default:
 		logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -431,11 +431,12 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, sourcePort int) {
+func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	//Matching algorithmm
 	//Get the mocks
 	for {
-
+		remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+		sourcePort := remoteAddr.Port
 		//Check if the expected header is present
 		if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
 			//Send the 100 continue response
@@ -494,7 +495,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			passthroughHost := false
 			passThrough := models.PassThroughHosts
 			portPassThrough := []models.Filters{}
-			for _, filters := range h.GetProxyHost().Filters {
+			for _, filters := range h.GetPassThroughHosts().Filters {
 				if filters.Port == 0 {
 					passThrough = append(passThrough, filters.Host, filters.Path)
 				} else {
@@ -596,12 +597,14 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 }
 
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook, ctx context.Context, sourcePort int) error {
+func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *zap.Logger, h *hooks.Hook, ctx context.Context) error {
 	var resp []byte
 	var finalResp []byte
 	var finalReq []byte
 	var err error
 
+	remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+	sourcePort := remoteAddr.Port
 	//closing the destination connection
 	defer destConn.Close()
 
@@ -825,7 +828,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 	passthroughHost := false
 	passThrough := models.PassThroughHosts
 	portPassThrough := []models.Filters{}
-	for _, filters := range h.GetProxyHost().Filters {
+	for _, filters := range h.GetPassThroughHosts().Filters {
 		if filters.Port == 0 {
 			passThrough = append(passThrough, filters.Host, filters.Path)
 		} else {

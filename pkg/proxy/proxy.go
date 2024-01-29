@@ -49,7 +49,7 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 type DependencyHandler interface {
 	OutgoingType(buffer []byte) bool
-	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context, sourcePort int)
+	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context)
 }
 
 var ParsersMap = make(map[string]DependencyHandler)
@@ -815,7 +815,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				// }
 			}
 		}
-		ParsersMap["mysql"].ProcessOutgoing([]byte{}, conn, dst, ctx, sourcePort)
+		ParsersMap["mysql"].ProcessOutgoing([]byte{}, conn, dst, ctx)
 
 	} else {
 		clientConnId := util.GetNextID()
@@ -912,7 +912,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		//Checking for all the parsers.
 		for _, parser := range ParsersMap {
 			if parser.OutgoingType(buffer) {
-				parser.ProcessOutgoing(buffer, conn, dst, ctx, sourcePort)
+				parser.ProcessOutgoing(buffer, conn, dst, ctx)
 				genericCheck = false
 			}
 		}

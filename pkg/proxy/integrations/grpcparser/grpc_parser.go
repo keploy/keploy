@@ -36,7 +36,7 @@ func (g *GrpcParser) OutgoingType(buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("PRI * HTTP/2"))
 }
 
-func (g *GrpcParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context, sourcePort int) {
+func (g *GrpcParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		encodeOutgoingGRPC(requestBuffer, clientConn, destConn, g.hooks, g.logger, ctx)

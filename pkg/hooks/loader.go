@@ -142,11 +142,11 @@ func (h *Hook) GetProxyPort() uint32 {
 	return h.proxyPort
 }
 
-func (h *Hook) GetProxyHost() models.Stubs {
+func (h *Hook) GetPassThroughHosts() models.Stubs {
 	return h.passThroughHosts
 }
 
-func (h *Hook) SetProxyHosts(passThroughHosts []models.Filters) {
+func (h *Hook) SetPassThroughHosts(passThroughHosts []models.Filters) {
 	h.passThroughHosts = models.Stubs{
 		Filters: passThroughHosts,
 	}
