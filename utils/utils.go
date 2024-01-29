@@ -226,7 +226,7 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 			for i, port := range recordFlags.PassThroughPorts {
 				portSlice[i] = fmt.Sprintf("%d", port)
 			}
-			joinedPorts := strings.Join(portSlice, ",")
+			joinedPorts := strings.Join(portSlice, " ")
 			keployAlias = keployAlias + " --passThroughPorts " + fmt.Sprintf("%v ", joinedPorts)
 		}
 		if recordFlags.ConfigPath != "." {
@@ -257,7 +257,7 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 			for i, testSet := range testFlags.Testsets {
 				testSetSlice[i] = fmt.Sprintf("%v", testSet)
 			}
-			joinedTestSets := strings.Join(testSetSlice, ",")
+			joinedTestSets := strings.Join(testSetSlice, " ")
 			keployAlias = keployAlias + " --testsets " + fmt.Sprintf("%v", joinedTestSets)
 		}
 		if len(testFlags.Path) > 0 {
