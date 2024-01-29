@@ -36,7 +36,7 @@ record:
   buildDelay: 30s
   passThroughPorts: []
   filters:
-    ReqHeader: []
+    reqHeaders: []
     urlMethods: {}
 test:
   path: ""
@@ -47,7 +47,6 @@ test:
   networkName: ""
   # example: "test-set-1": ["test-1", "test-2", "test-3"]
   tests:
-  # to use globalNoise, please follow the guide at the end of this file.
   globalNoise:
     global:
       body: {}
@@ -79,7 +78,7 @@ func (g *generatorConfig) GenerateConfig(filePath string) {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
 
-	cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
+	cmd := exec.Command("sudo", "chmod", "-R", "644", filePath)
 	err = cmd.Run()
 	if err != nil {
 		g.logger.Error("failed to set the permission of config file", zap.Error(err))

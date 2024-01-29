@@ -41,6 +41,13 @@ var ConfigGuide = `
   #           # we can also pass the exact value to ignore for a field
   #           "User-Agent": ["PostmanRuntime/7.34.0"]
   #         }
+  # Example on using filters
+  # filters:
+  #    reqHeaders: ["Content-Type", "Authorization"]
+  #    urlMethods: {
+  #          "/placeholder/endpoint/": ["GET", "POST"],
+  #      }
+  #
 `
 
 // askForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
