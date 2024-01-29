@@ -72,7 +72,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Kin
 func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindSpecifier) error {
 	readDock, ok := doc.(*models.TestReport)
 	if !ok {
-		return fmt.Errorf("%s failed to read test report in yaml file.", Emoji)
+		return fmt.Errorf("%s failed to read test report in yaml file", Emoji)
 	}
 	if readDock.Name == "" {
 		lastIndex, err := findLastIndex(path, fe.Logger)

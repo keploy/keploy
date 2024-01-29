@@ -27,11 +27,16 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
-	"go.keploy.io/server/utils"
+	// "go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+type contextKey string
+
+const (
+	resultContextKey contextKey = "resultForTele"
+)
 
 type tester struct {
 	logger *zap.Logger
@@ -88,7 +93,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 				return returnVal, err
 			} else if err == nil && !dirInfo.IsDir() {
 				t.logger.Error("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries.")
-				return returnVal, fmt.Errorf("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries.")
+				return returnVal, fmt.Errorf("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries")
 			} else if err != nil && os.IsNotExist(err) {
 				err := makeDirectory(cfg.CoverageReportPath)
 				if err != nil {
@@ -110,7 +115,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	}
 
 	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
 	models.SetMode(models.MODE_TEST)
 
@@ -130,7 +135,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 
 	select {
 	case <-stopper:
-		return returnVal, errors.New("Keploy was interupted by stopper")
+		return returnVal, errors.New("keploy was interupted by stopper")
 	default:
 		// load the ebpf hooks into the kernel
 		if err := returnVal.LoadedHooks.LoadHooks(cfg.AppCmd, cfg.AppContainer, 0, context.Background(), nil); err != nil {
@@ -141,7 +146,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	select {
 	case <-stopper:
 		returnVal.LoadedHooks.Stop(true)
-		return returnVal, errors.New("Keploy was interupted by stopper")
+		return returnVal, errors.New("keploy was interupted by stopper")
 	default:
 		// start the proxy
 		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
@@ -171,7 +176,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	returnVal.AbortStopHooksForcefully = false          // boolen to stop closing of keploy via user app error
 	returnVal.ExitCmd = make(chan bool)                 // channel to exit this command
 	resultForTele := []int{0, 0}
-	returnVal.Ctx = context.WithValue(context.Background(), "resultForTele", &resultForTele)
+	returnVal.Ctx = context.WithValue(context.Background(), resultContextKey, &resultForTele)
 
 	go func() {
 		select {
@@ -320,6 +325,11 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
 	var readConfigMocks []*models.Mock
 	configMocks, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+	if err != nil {
+		t.logger.Error("Failed to read config mocks", zap.Error(err))
+		returnVal.InitialStatus = models.TestRunStatusFailed
+		return returnVal
+	}
 	for _, mock := range configMocks {
 		configMock, ok := mock.(*models.Mock)
 		if !ok {
@@ -594,8 +604,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		status  = models.TestRunStatusPassed
 	)
 
-	var userIp string
-	userIp = initialisedValues.UserIP
+	var userIp = initialisedValues.UserIP
 	t.logger.Debug("the userip of the user docker container", zap.Any("", userIp))
 
 	var entTcs, nonKeployTcs []string
@@ -759,9 +768,8 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
-	isSame := false
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
+		cleanExp, cleanAct, pass, _, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
 		if err != nil {
 			return false, res
 		}
@@ -831,14 +839,10 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					t.logger.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
-					keyStr := op.Path
-					if len(keyStr) > 1 && keyStr[0] == '/' {
-						keyStr = keyStr[1:]
-					}
-					if isSame {
-						logDiffs.hasarrayIndexMismatch = true
-						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
-					}
+					// keyStr := op.Path
+					// if len(keyStr) > 1 && keyStr[0] == '/' {
+					// 	keyStr = keyStr[1:]
+					// }
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 
 				}

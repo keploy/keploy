@@ -18,6 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
+type contextKey string
+
+const (
+	resultContextKey contextKey = "resultForTele"
+)
+
 // RunTestSet is the resolver for the runTestSet field.
 func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*model.RunTestSetResponse, error) {
 	if r.Resolver == nil {
@@ -58,7 +64,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	}
 
 	resultForTele := make([]int, 2)
-	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
+	ctx = context.WithValue(ctx, resultContextKey, &resultForTele)
 
 	go func() {
 		defer utils.HandlePanic()

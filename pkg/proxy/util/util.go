@@ -28,7 +28,7 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
-var sendLogs = true
+// var sendLogs = true
 
 // idCounter is used to generate random ID for each request
 var idCounter int64 = -1
@@ -38,7 +38,6 @@ func GetNextID() int64 {
 }
 
 func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger) error {
-	for {
 		if conn == nil {
 			logger.Debug("the connection is nil")
 		}
@@ -49,9 +48,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 			return err
 		}
 		bufferChannel <- buffer
-		break
-	}
-	return nil
+		return nil
 }
 
 func ValidatePath(path string) (string, error) {
@@ -184,7 +181,7 @@ func ToIPv6AddressStr(ip [4]uint32) string {
 func PeekBytes(reader *bufio.Reader) ([]byte, error) {
 	var buffer []byte
 
-	buf := make([]byte, 1024)
+	// buf := make([]byte, 1024)
 
 	// Read bytes from the Reader
 	reader.Peek(1)
@@ -294,7 +291,7 @@ func GetLocalIPv4() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("No valid IP address found")
+	return nil, fmt.Errorf("no valid IP address found")
 }
 
 func ConvertToIPV4(ip net.IP) (uint32, bool) {
@@ -326,7 +323,7 @@ func GetLocalIPv6() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("No valid IPv6 address found")
+	return nil, fmt.Errorf("no valid IPv6 address found")
 }
 
 func ConvertIPv6ToUint32Array(ip net.IP) ([4]uint32, error) {

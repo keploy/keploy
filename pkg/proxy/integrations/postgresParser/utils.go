@@ -455,7 +455,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			}
 
 			if sortFlag {
-				if mock.TestModeInfo.IsFiltered == false {
+				if !mock.TestModeInfo.IsFiltered {
 					sortFlag = false
 				} else {
 					sortedTcsMocks = append(sortedTcsMocks, mock)

@@ -13,7 +13,7 @@ type ComStmtFetchPacket struct {
 
 func decodeComStmtFetch(data []byte) (ComStmtFetchPacket, error) {
 	if len(data) < 9 {
-		return ComStmtFetchPacket{}, errors.New("Data too short for COM_STMT_FETCH")
+		return ComStmtFetchPacket{}, errors.New("data too short for COM_STMT_FETCH")
 	}
 
 	statementID := binary.LittleEndian.Uint32(data[1:5])

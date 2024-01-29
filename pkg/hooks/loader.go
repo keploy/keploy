@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -516,7 +515,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 	}
 
 	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -866,40 +865,40 @@ func detectCgroupPath() (string, error) {
 	return "", errors.New("cgroup2 not mounted")
 }
 
-func platformPrefix(symbol string) string {
-	// per https://github.com/golang/go/blob/master/src/go/build/syslist.go
-	// and https://github.com/libbpf/libbpf/blob/master/src/libbpf.c#L10047
-	var prefix string
-	switch runtime.GOARCH {
-	case "386":
-		prefix = "ia32"
-	case "amd64", "amd64p32":
-		prefix = "x64"
+// func platformPrefix(symbol string) string {
+// 	// per https://github.com/golang/go/blob/master/src/go/build/syslist.go
+// 	// and https://github.com/libbpf/libbpf/blob/master/src/libbpf.c#L10047
+// 	var prefix string
+// 	switch runtime.GOARCH {
+// 	case "386":
+// 		prefix = "ia32"
+// 	case "amd64", "amd64p32":
+// 		prefix = "x64"
 
-	case "arm", "armbe":
-		prefix = "arm"
-	case "arm64", "arm64be":
-		prefix = "arm64"
+// 	case "arm", "armbe":
+// 		prefix = "arm"
+// 	case "arm64", "arm64be":
+// 		prefix = "arm64"
 
-	case "mips", "mipsle", "mips64", "mips64le", "mips64p32", "mips64p32le":
-		prefix = "mips"
+// 	case "mips", "mipsle", "mips64", "mips64le", "mips64p32", "mips64p32le":
+// 		prefix = "mips"
 
-	case "s390":
-		prefix = "s390"
-	case "s390x":
-		prefix = "s390x"
+// 	case "s390":
+// 		prefix = "s390"
+// 	case "s390x":
+// 		prefix = "s390x"
 
-	case "riscv", "riscv64":
-		prefix = "riscv"
+// 	case "riscv", "riscv64":
+// 		prefix = "riscv"
 
-	case "ppc":
-		prefix = "powerpc"
-	case "ppc64", "ppc64le":
-		prefix = "powerpc64"
+// 	case "ppc":
+// 		prefix = "powerpc"
+// 	case "ppc64", "ppc64le":
+// 		prefix = "powerpc64"
 
-	default:
-		return symbol
-	}
+// 	default:
+// 		return symbol
+// 	}
 
-	return fmt.Sprintf("__%s_%s", prefix, symbol)
-}
+// 	return fmt.Sprintf("__%s_%s", prefix, symbol)
+// }

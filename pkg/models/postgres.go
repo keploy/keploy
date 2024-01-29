@@ -99,10 +99,10 @@ type RegularPacket struct {
 	Payload    []byte
 }
 
-const (
-	minStartupPacketLen = 4     // minStartupPacketLen is a single 32-bit int version or code.
-	maxStartupPacketLen = 10000 // maxStartupPacketLen is MAX_STARTUP_PACKET_LENGTH from PG source.
-	sslRequestNumber    = 80877103
-	cancelRequestCode   = 80877102
-	gssEncReqNumber     = 80877104
-)
+// const (
+// 	minStartupPacketLen = 4     // minStartupPacketLen is a single 32-bit int version or code.
+// 	maxStartupPacketLen = 10000 // maxStartupPacketLen is MAX_STARTUP_PACKET_LENGTH from PG source.
+// 	sslRequestNumber    = 80877103
+// 	cancelRequestCode   = 80877102
+// 	gssEncReqNumber     = 80877104
+// )

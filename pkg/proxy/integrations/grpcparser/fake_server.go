@@ -233,7 +233,7 @@ func (srv *transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) err
 
 	pseudoHeaders, ordinaryHeaders, err := ExtractHeaders(headersFrame, srv.decoder)
 	if err != nil {
-		fmt.Errorf("could not extract headers from frame: %v", err)
+		return fmt.Errorf("could not extract headers from frame: %v", err)
 	}
 
 	srv.sic.AddHeadersForRequest(id, pseudoHeaders, true)
@@ -259,27 +259,27 @@ func (srv *transcoder) ProcessContinuationFrame(ContinuationFrame *http2.Continu
 func (srv *transcoder) ProcessGenericFrame(frame http2.Frame) error {
 	//PrintFrame(frame)
 	var err error
-	switch frame.(type) {
+	switch f := frame.(type) {
 	case *http2.PingFrame:
-		err = srv.ProcessPingFrame(frame.(*http2.PingFrame))
+		err = srv.ProcessPingFrame(f)
 	case *http2.DataFrame:
-		err = srv.ProcessDataFrame(frame.(*http2.DataFrame))
+		err = srv.ProcessDataFrame(f)
 	case *http2.WindowUpdateFrame:
-		err = srv.ProcessWindowUpdateFrame(frame.(*http2.WindowUpdateFrame))
+		err = srv.ProcessWindowUpdateFrame(f)
 	case *http2.RSTStreamFrame:
-		err = srv.ProcessResetStreamFrame(frame.(*http2.RSTStreamFrame))
+		err = srv.ProcessResetStreamFrame(f)
 	case *http2.SettingsFrame:
-		err = srv.ProcessSettingsFrame(frame.(*http2.SettingsFrame))
+		err = srv.ProcessSettingsFrame(f)
 	case *http2.GoAwayFrame:
-		err = srv.ProcessGoAwayFrame(frame.(*http2.GoAwayFrame))
+		err = srv.ProcessGoAwayFrame(f)
 	case *http2.PriorityFrame:
-		err = srv.ProcessPriorityFrame(frame.(*http2.PriorityFrame))
+		err = srv.ProcessPriorityFrame(f)
 	case *http2.HeadersFrame:
-		err = srv.ProcessHeadersFrame(frame.(*http2.HeadersFrame))
+		err = srv.ProcessHeadersFrame(f)
 	case *http2.PushPromiseFrame:
-		err = srv.ProcessPushPromise(frame.(*http2.PushPromiseFrame))
+		err = srv.ProcessPushPromise(f)
 	case *http2.ContinuationFrame:
-		err = srv.ProcessContinuationFrame(frame.(*http2.ContinuationFrame))
+		err = srv.ProcessContinuationFrame(f)
 	default:
 		err = fmt.Errorf("unknown frame received from the client")
 	}

@@ -13,9 +13,9 @@ import (
 	// "log"
 )
 
-const (
-	maxBufferSize = 16 * 1024 * 1024 // 16MB
-)
+// const (
+// 	maxBufferSize = 16 * 1024 * 1024 // 16MB
+// )
 
 // Tracker is a routine-safe container that holds a connection with unique ID, and able to create new connection.
 type Tracker struct {

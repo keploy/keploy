@@ -16,12 +16,12 @@ type ComChangeUserPacket struct {
 
 func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {
 	if len(data) < 2 {
-		return ComChangeUserPacket{}, errors.New("Data too short for COM_CHANGE_USER")
+		return ComChangeUserPacket{}, errors.New("data too short for COM_CHANGE_USER")
 	}
 
 	nullTerminatedStrings := strings.Split(string(data[1:]), "\x00")
 	if len(nullTerminatedStrings) < 5 {
-		return ComChangeUserPacket{}, errors.New("Data malformed for COM_CHANGE_USER")
+		return ComChangeUserPacket{}, errors.New("data malformed for COM_CHANGE_USER")
 	}
 
 	user := nullTerminatedStrings[0]

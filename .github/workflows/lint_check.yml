@@ -1,0 +1,26 @@
+name: Staticcheck Lint
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  staticcheck:
+    name: Run Staticcheck
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - name: Set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: "1.21"
+
+    - name: Install Staticcheck
+      run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+    - name: Run Staticcheck
+      run: staticcheck ./...

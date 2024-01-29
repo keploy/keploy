@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
+	// "math"
 	"time"
 
 	"go.keploy.io/server/pkg/models"
@@ -260,8 +260,8 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 		for _, column := range resultSet.Columns {
 			sequenceID++
 			buf.WriteByte(byte(column.PacketHeader.PacketLength))
-			buf.WriteByte(byte(column.PacketHeader.PacketLength >> 8))
-			buf.WriteByte(byte(column.PacketHeader.PacketLength >> 16))
+			// buf.WriteByte(byte(column.PacketHeader.PacketLength >> 8))
+			// buf.WriteByte(byte(column.PacketHeader.PacketLength >> 16))
 			buf.WriteByte(sequenceID)
 
 			writeLengthEncodedString(buf, column.Catalog)
@@ -388,20 +388,20 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 	return buf.Bytes(), nil
 }
 
-func encodeInt32(val int32) []byte {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, uint32(val))
-	return buf
-}
+// func encodeInt32(val int32) []byte {
+// 	buf := make([]byte, 4)
+// 	binary.LittleEndian.PutUint32(buf, uint32(val))
+// 	return buf
+// }
 
-func encodeFloat32(val float32) []byte {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, math.Float32bits(val))
-	return buf
-}
+// func encodeFloat32(val float32) []byte {
+// 	buf := make([]byte, 4)
+// 	binary.LittleEndian.PutUint32(buf, math.Float32bits(val))
+// 	return buf
+// }
 
-func encodeFloat64(val float64) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, math.Float64bits(val))
-	return buf
-}
+// func encodeFloat64(val float64) []byte {
+// 	buf := make([]byte, 8)
+// 	binary.LittleEndian.PutUint64(buf, math.Float64bits(val))
+// 	return buf
+// }

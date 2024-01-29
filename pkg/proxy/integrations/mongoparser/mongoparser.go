@@ -320,7 +320,8 @@ func GetPacketLength(src []byte) (length int32) {
 }
 
 func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
-	rand.Seed(time.Now().UnixNano())
+	seed := time.Now().UnixNano()
+	rand.New(rand.NewSource(seed))
 	for {
 
 		var err error
@@ -608,10 +609,10 @@ func hasSecondSetBit(num int) bool {
 	return (num>>1)&1 == 1
 }
 
-func hasSixteenthBit(num int) bool {
-	// Shift the number right by 1 bit and check if the least significant bit is set
-	return (num>>16)&1 == 1
-}
+// func hasSixteenthBit(num int) bool {
+// 	// Shift the number right by 1 bit and check if the least significant bit is set
+// 	return (num>>16)&1 == 1
+// }
 
 // Skip heartbeat from capturing in the global set of mocks. Since, the heartbeat packet always contain the "hello" boolean.
 // See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
