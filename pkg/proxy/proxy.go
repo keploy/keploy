@@ -607,10 +607,9 @@ func (ps *ProxySet) startDnsServer() {
 
 func (ps *ProxySet) changeListenerToDNS() error {
 	handler := ps
-	dnsServerAddr := fmt.Sprintf(":%v", ps.Port)
+	// dnsServerAddr := fmt.Sprintf(":%v", ps.Port)
 	server := &dns.Server{
-		Addr:     dnsServerAddr,
-		Net:      "tcp",
+		// PacketConn: ps.DnsServer.PacketConn,
 		Listener: ps.Listener,
 		Handler:  handler,
 	}
@@ -619,7 +618,7 @@ func (ps *ProxySet) changeListenerToDNS() error {
 	ps.DnsServer = server
 
 	ps.logger.Info(fmt.Sprintf("starting DNS-TCP server at addr %v", server.Addr))
-	err := server.ListenAndServe()
+	err := server.ActivateAndServe()
 	if err != nil {
 		ps.logger.Error("failed to start dns tcp server", zap.Any("addr", server.Addr), zap.Error(err))
 		return err
