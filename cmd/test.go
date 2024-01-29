@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg"
+	"go.keploy.io/server/pkg/graph"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
@@ -46,10 +49,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	confTest, err := readTestConfig(configFilePath)
 	if err != nil {
-		t.logger.Error("failed to get the test config from config file due to error: %s", zap.Error(err))
-		t.logger.Info("You have probably edited the config file incorrectly. Please follow the guide below.")
-		fmt.Println(utils.ConfigGuide)
-		return nil
+		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
 	if len(*path) == 0 {
 		*path = confTest.Path
@@ -145,6 +145,36 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			coverage, err := cmd.Flags().GetBool("coverage")
+			if err != nil {
+				t.logger.Error("Failed to get the coverage flag", zap.Error((err)))
+				return err
+			}
+			var lang string
+			var pid uint32
+			var port uint32
+			if !coverage {
+
+				lang, err = cmd.Flags().GetString("language")
+				if err != nil {
+					t.logger.Error("failed to read the programming language")
+					return err
+				}
+
+				pid, err = cmd.Flags().GetUint32("pid")
+				if err != nil {
+					t.logger.Error("Failed to get the pid of the application", zap.Error((err)))
+					return err
+				}
+
+				port, err = cmd.Flags().GetUint32("port")
+				if err != nil {
+					t.logger.Error("Failed to get the port of keploy server", zap.Error((err)))
+					return err
+				}
+
+			}
+
 			buildDelay, err := cmd.Flags().GetDuration("buildDelay")
 			if err != nil {
 				t.logger.Error("Failed to get the build-delay flag", zap.Error((err)))
@@ -162,6 +192,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
+
+			// port, err := cmd.Flags().GetUint32("port")
+			// if err != nil {
+			// 	t.logger.Error("failed to read the port of keploy server")
+			// 	return err
+			// }
 
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
@@ -229,6 +265,49 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Info(`Example usage:keploy test -c "docker-compose up --build" --buildDelay 35s`)
 			}
 
+			if isDockerCmd && len(path) > 0 {
+				// Check if the path contains the moving up directory (..)
+				if strings.Contains(path, "..") {
+					path, err = filepath.Abs(filepath.Clean(path))
+					if err != nil {
+						t.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					relativePath, err := filepath.Rel("/files", path)
+					if err != nil {
+						t.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
+					// Check if the path is a subdirectory of current directory
+					// Get the current directory path in docker.
+					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					cmd := exec.Command("sh", "-c", getDir)
+					out, err := cmd.Output()
+					if err != nil {
+						t.logger.Error("failed to get the current directory path in docker", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					currentDir := strings.TrimSpace(string(out))
+					t.logger.Debug("This is the path after trimming", zap.String("currentDir:", currentDir))
+					// Check if the path is a subdirectory of current directory
+					if !strings.HasPrefix(path, currentDir) {
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+					// Set the relative path.
+					path, err = filepath.Rel(currentDir, path)
+					if err != nil {
+						t.logger.Error("failed to get the relative path for the subdirectory", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+				}
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -249,6 +328,11 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
+			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
+			if err != nil {
+				t.logger.Error("failed to get the next test report directory", zap.Error(err))
+				return err
+			}
 
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
@@ -264,6 +348,9 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 			}
 
+			//flags like lang, pid, port cannot be used unless called the serve method
+			// Check if the coverage flag is set
+
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
 			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
@@ -271,29 +358,37 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
 				return err
 			}
+
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
-			t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
-				Tests:              tests,
-				AppContainer:       appContainer,
-				AppNetwork:         networkName,
-				MongoPassword:      mongoPassword,
-				Delay:              delay,
-				BuildDelay:         buildDelay,
-				PassThroughPorts:   ports,
-				ApiTimeout:         apiTimeout,
-				ProxyPort:          proxyPort,
-				GlobalNoise:        globalNoise,
-				TestsetNoise:       testsetNoise,
-				WithCoverage:       withCoverage,
-				CoverageReportPath: coverageReportPath,
-			}, enableTele)
+			if coverage {
+				g := graph.NewGraph(t.logger)
+				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+			} else {
+				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+					Tests:              tests,
+					AppContainer:       appContainer,
+					AppNetwork:         networkName,
+					MongoPassword:      mongoPassword,
+					Delay:              delay,
+					BuildDelay:         buildDelay,
+					PassThroughPorts:   ports,
+					ApiTimeout:         apiTimeout,
+					ProxyPort:          proxyPort,
+					GlobalNoise:        globalNoise,
+					TestsetNoise:       testsetNoise,
+					WithCoverage:       withCoverage,
+					CoverageReportPath: coverageReportPath,
+				}, enableTele)
+			}
 
 			return nil
 		},
 	}
 
 	testCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+
+	testCmd.Flags().Uint32("port", 6789, "Port at which you want to run graphql Server")
 
 	testCmd.Flags().Uint32("proxyport", 0, "Choose a port to run Keploy Proxy.")
 
@@ -318,11 +413,19 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().String("coverageReportPath", "", "Write a go coverage profile to the file in the given directory.")
 
+	testCmd.Flags().StringP("language", "l", "", "application programming language")
+
+	testCmd.Flags().Uint32("pid", 0, "Process id of your application.")
+
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+
 	testCmd.Flags().MarkHidden("enableTele")
 
 	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"
+
+	testCmd.Flags().Bool("coverage", false, "Capture the code coverage of the go binary in the command flag.")
+	testCmd.Flags().Lookup("coverage").NoOptDefVal = "true"
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
 
