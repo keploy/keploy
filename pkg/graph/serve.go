@@ -202,7 +202,7 @@ func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Dela
 }
 
 // Gracefully shut down the HTTP server with a timeout
-func (g *graph)stopGraphqlServer(httpSrv *http.Server) {
+func (g *graph) stopGraphqlServer(httpSrv *http.Server) {
 	shutdown := make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
