@@ -77,9 +77,9 @@ func decodeGenericOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, 
 				logger.Debug("the genericRequests are:", zap.Any("h", string(vgen)))
 			}
 			requestBuffer, err = util.Passthrough(clientConn, destConn, genericRequests, h.Recover, logger)
-			// if err != nil {
-			// 	return err
-			// }
+			if err != nil {
+				return err
+			}
 			genericRequests = [][]byte{}
 			logger.Debug("the request buffer after pass through in generic", zap.Any("buffer", string(requestBuffer)))
 			if len(requestBuffer) > 0 {

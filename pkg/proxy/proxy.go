@@ -5,12 +5,11 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"embed"
 	"crypto/tls"
 	"crypto/x509"
-	"embed"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -143,6 +142,7 @@ var caCrt []byte
 var caPKey []byte
 
 //go:embed asset
+//lint:ignore U1000 this is important for the folder structure of ca certificates
 var caFolder embed.FS
 
 // isJavaInstalled checks if java is installed on the system
@@ -153,7 +153,7 @@ func isJavaInstalled() bool {
 
 // to extract ca certificate to temp
 func ExtractCertToTemp() (string, error) {
-	tempFile, err := ioutil.TempFile("", "ca.crt")
+	tempFile, err := os.CreateTemp("", "ca.crt")
 	if err != nil {
 		return "", err
 	}
@@ -473,10 +473,10 @@ var caStoreUpdateCmd = []string{
 	"certctl rehash",
 }
 
-type certKeyPair struct {
-	cert tls.Certificate
-	host string
-}
+// type certKeyPair struct {
+// 	cert tls.Certificate
+// 	host string
+// }
 
 var (
 	caPrivKey      interface{}
@@ -635,7 +635,7 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			// If not found in cache, resolve the DNS query
 			// answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
 
-			if answers == nil || len(answers) == 0 {
+			if len(answers) == 0 {
 				// If the resolution failed, return a default A record with Proxy IP
 				if question.Qtype == dns.TypeA {
 					answers = []dns.RR{&dns.A{
@@ -679,46 +679,46 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
-func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) []dns.RR {
-	// Remove the last dot from the domain name if it exists
-	domain = strings.TrimSuffix(domain, ".")
+// func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) []dns.RR {
+// 	// Remove the last dot from the domain name if it exists
+// 	domain = strings.TrimSuffix(domain, ".")
 
-	// Create a context with a timeout
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+// 	// Create a context with a timeout
+// 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+// 	defer cancel()
 
-	// Use the default system resolver
-	resolver := net.DefaultResolver
+// 	// Use the default system resolver
+// 	resolver := net.DefaultResolver
 
-	// Perform the lookup with the context
-	ips, err := resolver.LookupIPAddr(ctx, domain)
-	if err != nil {
-		logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
-		return nil
-	}
+// 	// Perform the lookup with the context
+// 	ips, err := resolver.LookupIPAddr(ctx, domain)
+// 	if err != nil {
+// 		logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
+// 		return nil
+// 	}
 
-	// Convert the resolved IPs to dns.RR
-	var answers []dns.RR
-	for _, ip := range ips {
-		if ipv4 := ip.IP.To4(); ipv4 != nil {
-			answers = append(answers, &dns.A{
-				Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-				A:   ipv4,
-			})
-		} else {
-			answers = append(answers, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-				AAAA: ip.IP,
-			})
-		}
-	}
+// 	// Convert the resolved IPs to dns.RR
+// 	var answers []dns.RR
+// 	for _, ip := range ips {
+// 		if ipv4 := ip.IP.To4(); ipv4 != nil {
+// 			answers = append(answers, &dns.A{
+// 				Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+// 				A:   ipv4,
+// 			})
+// 		} else {
+// 			answers = append(answers, &dns.AAAA{
+// 				Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+// 				AAAA: ip.IP,
+// 			})
+// 		}
+// 	}
 
-	if len(answers) > 0 {
-		logger.Debug("net.LookupIP resolved the ip address...")
-	}
+// 	if len(answers) > 0 {
+// 		logger.Debug("net.LookupIP resolved the ip address...")
+// 	}
 
-	return answers
-}
+// 	return answers
+// }
 
 func isTLSHandshake(data []byte) bool {
 	if len(data) < 5 {

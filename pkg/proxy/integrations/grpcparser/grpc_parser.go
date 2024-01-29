@@ -121,9 +121,9 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 		}
 		//PrintFrame(frame)
 
-		switch frame.(type) {
+		switch f := frame.(type) {
 		case *http2.SettingsFrame:
-			settingsFrame := frame.(*http2.SettingsFrame)
+			settingsFrame := f
 			if settingsFrame.IsAck() {
 				// Transfer Ack.
 				if err := framer.WriteSettingsAck(); err != nil {
@@ -144,7 +144,7 @@ func TransferFrame(lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, isReqF
 				}
 			}
 		case *http2.HeadersFrame:
-			headersFrame := frame.(*http2.HeadersFrame)
+			headersFrame := f
 			streamID := headersFrame.StreamID
 			err := framer.WriteHeaders(http2.HeadersFrameParam{
 				StreamID:      streamID,

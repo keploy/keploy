@@ -279,8 +279,6 @@ func (t *Test) GetCmd() *cobra.Command {
 					t.logger.Error("failed to get the path of current directory", zap.Error(err))
 				}
 				path = cdirPath
-			} else {
-				// user provided the absolute path
 			}
 
 			path += "/keploy"
@@ -320,7 +318,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
-            
+
 			if coverage {
 				g := graph.NewGraph(t.logger)
 				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)

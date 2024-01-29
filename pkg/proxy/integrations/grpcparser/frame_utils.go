@@ -56,17 +56,17 @@ func PrintFrame(frame http2.Frame) {
 	fmt.Printf("fh length: %d\n", frame.Header().Length)
 	fmt.Printf("fh streamid: %d\n", frame.Header().StreamID)
 
-	switch frame.(type) {
+	switch f := frame.(type) {
 	case *http2.DataFrame:
-		PrintDataFrame(frame.(*http2.DataFrame))
+		PrintDataFrame(f)
 	case *http2.HeadersFrame:
-		PrintHeadersFrame(frame.(*http2.HeadersFrame))
+		PrintHeadersFrame(f)
 	case *http2.SettingsFrame:
-		PrintSettingsFrame(frame.(*http2.SettingsFrame))
+		PrintSettingsFrame(f)
 	case *http2.WindowUpdateFrame:
-		PrintWindowUpdateFrame(frame.(*http2.WindowUpdateFrame))
+		PrintWindowUpdateFrame(f)
 	case *http2.PingFrame:
-		PrintPingFrame(frame.(*http2.PingFrame))
+		PrintPingFrame(f)
 	}
 }
 

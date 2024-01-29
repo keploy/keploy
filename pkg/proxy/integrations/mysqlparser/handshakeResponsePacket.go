@@ -132,7 +132,7 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 				return nil, errors.New("handshake response packet too short for ZSTD compression level")
 			}
 			packet.ZstdCompressionLevel = data[0]
-			data = data[1:]
+			// data = data[1:]
 		}
 	}
 	packet.AuthData = base64.StdEncoding.EncodeToString(authDataByte)

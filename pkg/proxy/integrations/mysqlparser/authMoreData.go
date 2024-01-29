@@ -18,9 +18,9 @@ func decodeAuthMoreData(data []byte) (*NextAuthPacket, error) {
 }
 
 // Encode function for Next Authentication method Packet
-func encodeAuthMoreData(packet *NextAuthPacket) ([]byte, error) {
-	if packet.PluginData != 0x02 {
-		return nil, errors.New("invalid PluginData value for NextAuthPacket")
-	}
-	return []byte{packet.PluginData}, nil
-}
+// func encodeAuthMoreData(packet *NextAuthPacket) ([]byte, error) {
+// 	if packet.PluginData != 0x02 {
+// 		return nil, errors.New("invalid PluginData value for NextAuthPacket")
+// 	}
+// 	return []byte{packet.PluginData}, nil
+// }

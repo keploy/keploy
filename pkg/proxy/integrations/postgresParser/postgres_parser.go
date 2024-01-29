@@ -173,8 +173,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						Metadata:          metadata,
 					},
 				}, ctx)
-				pgRequests = []models.Backend{}
-				pgResponses = []models.Frontend{}
+				// pgRequests = []models.Backend{}
+				// pgResponses = []models.Frontend{}
 
 				clientConn.Close()
 				destConn.Close()

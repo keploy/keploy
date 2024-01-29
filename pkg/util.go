@@ -165,7 +165,8 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 
 // Generate unique random id
 func GenerateRandomID() int {
-	rand.Seed(time.Now().UnixNano())
+	seed := time.Now().UnixNano()
+	rand.New(rand.NewSource(seed))
 	id := rand.Intn(1000000000) // Adjust the range as needed
 	return id
 }

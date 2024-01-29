@@ -153,7 +153,7 @@ func containsMatchingUrl(urlMethods map[string][]string, urlStr string, requestM
 }
 
 func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
-	for headerName, _ := range object {
+	for headerName := range object {
 		for _, bannedHeader := range bannedHeaders {
 			if headerName == bannedHeader {
 				return true

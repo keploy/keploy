@@ -43,9 +43,9 @@ func (sql *MySqlParser) ProcessOutgoing(requestBuffer []byte, clientConn, destCo
 	}
 }
 
-var (
-	isConfigRecorded = false
-)
+// var (
+// 	isConfigRecorded = false
+// )
 var (
 	isPluginData = false
 )
@@ -445,12 +445,11 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			handleClientQueries(h, nil, clientConn, destConn, logger, ctx)
 		}
 	}
-	return
 }
 
-var (
-	mockResponseRead = 0
-)
+// var (
+// 	mockResponseRead = 0
+// )
 
 var (
 	expectingHandshakeResponseTest = false
@@ -651,9 +650,9 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		configMocks[matchedIndex].Spec.MySqlRequests = append(configMocks[matchedIndex].Spec.MySqlRequests[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlRequests[matchedReqIndex+1:]...)
 		configMocks[matchedIndex].Spec.MySqlResponses = append(configMocks[matchedIndex].Spec.MySqlResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
 
-		if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
-			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
-		}
+		// if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
+		// 	configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
+		// }
 		//h.SetConfigMocks(configMocks)
 	} else {
 		realIndex := matchedIndex - len(configMocks)
@@ -663,9 +662,9 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		tcsMocks[realIndex].Spec.MySqlRequests = append(tcsMocks[realIndex].Spec.MySqlRequests[:matchedReqIndex], tcsMocks[realIndex].Spec.MySqlRequests[matchedReqIndex+1:]...)
 		tcsMocks[realIndex].Spec.MySqlResponses = append(tcsMocks[realIndex].Spec.MySqlResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
 
-		if len(tcsMocks[realIndex].Spec.MySqlResponses) == 0 {
-			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
-		}
+		// if len(tcsMocks[realIndex].Spec.MySqlResponses) == 0 {
+		// 	tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
+		// }
 		//h.SetTcsMocks(tcsMocks)
 	}
 
@@ -748,6 +747,10 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 			break
 		}
 		operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(queryBuffer), logger, destConn)
+		if err != nil{
+			logger.Error("failed to decode the MySQL packet from the client", zap.Error(err))
+			continue
+		}
 		mysqlRequests = append([]models.MySQLRequest{}, models.MySQLRequest{
 			Header: &models.MySQLPacketHeader{
 				PacketLength: requestHeader.PayloadLength,

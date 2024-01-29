@@ -18,6 +18,12 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+type contextKey string
+
+const (
+	mocksContextKey contextKey = "mocksTotal"
+	testsContextKey contextKey = "testsTotal"
+)
 
 type recorder struct {
 	Logger *zap.Logger
@@ -33,7 +39,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
 	models.SetMode(models.MODE_RECORD)
 	teleFS := fs.NewTeleFS(r.Logger)
@@ -60,8 +66,9 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	mocksTotal := make(map[string]int)
 	testsTotal := 0
-	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
-	ctx = context.WithValue(ctx, "testsTotal", &testsTotal)
+
+	ctx := context.WithValue(context.Background(), mocksContextKey, &mocksTotal)
+	ctx = context.WithValue(ctx, testsContextKey, &testsTotal)
 
 	select {
 	case <-stopper:

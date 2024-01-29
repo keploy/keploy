@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"strings"
+	// "strings"
 
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/models"
@@ -28,26 +28,26 @@ func NewFrontend() *FrontendWrapper {
 	return &FrontendWrapper{}
 }
 
-func checkScram(encoded []byte, log *zap.Logger) bool {
-	// encoded, err := PostgresDecoder(packet)
+// func checkScram(encoded []byte, log *zap.Logger) bool {
+// 	// encoded, err := PostgresDecoder(packet)
 
-	// check if payload contains SCRAM-SHA-256
-	messageType := encoded[0]
-	log.Debug("Message Type: %c\n", zap.String("messageType", string(messageType)))
-	if messageType == 'N' {
-		return false
-	}
-	// Print the message payload (for simplicity, the payload is printed as a string)
-	payload := string(encoded[5:])
-	if messageType == 'R' {
-		if strings.Contains(payload, "SCRAM-SHA") {
-			log.Debug("scram packet")
-			return true
-		}
-	}
+// 	// check if payload contains SCRAM-SHA-256
+// 	messageType := encoded[0]
+// 	log.Debug("Message Type: %c\n", zap.String("messageType", string(messageType)))
+// 	if messageType == 'N' {
+// 		return false
+// 	}
+// 	// Print the message payload (for simplicity, the payload is printed as a string)
+// 	payload := string(encoded[5:])
+// 	if messageType == 'R' {
+// 		if strings.Contains(payload, "SCRAM-SHA") {
+// 			log.Debug("scram packet")
+// 			return true
+// 		}
+// 	}
 
-	return false
-}
+// 	return false
+// }
 
 func isStartupPacket(packet []byte) bool {
 	protocolVersion := binary.BigEndian.Uint32(packet[4:8])
@@ -55,10 +55,10 @@ func isStartupPacket(packet []byte) bool {
 	return protocolVersion == 196608 // 3.0 in PostgreSQL
 }
 
-func isRegularPacket(packet []byte) bool {
-	messageType := packet[0]
-	return messageType == 'Q' || messageType == 'P' || messageType == 'D' || messageType == 'C' || messageType == 'E'
-}
+// func isRegularPacket(packet []byte) bool {
+// 	messageType := packet[0]
+// 	return messageType == 'Q' || messageType == 'P' || messageType == 'D' || messageType == 'C' || messageType == 'E'
+// }
 
 const (
 	AuthTypeOk                = 0

@@ -20,6 +20,12 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
+type contextKey string
+
+const (
+	mocksContextKey contextKey = "mocksTotal"
+)
+
 type mockRecorder struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
@@ -42,16 +48,14 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 	routineId := pkg.GenerateRandomID()
 
 	mocksTotal := make(map[string]int)
-	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
-	//Add the name of the cmd to context.
-	ctx = context.WithValue(ctx, "cmd", "mockrecord")
+	ctx := context.WithValue(context.Background(), mocksContextKey, &mocksTotal)
 	// Initiate the hooks
 	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
 	if err != nil {
 		s.logger.Error("error while creating hooks", zap.Error(err))
 		return
 	}
-	
+
 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}

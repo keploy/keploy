@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"io"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -80,12 +80,12 @@ var Version string
 func attachLogFileToSentry(logFilePath string) {
 	file, err := os.Open(logFilePath)
 	if err != nil {
-		errors.New(fmt.Sprintf("Error opening log file: %s", err.Error()))
+		log.Error(fmt.Sprintf("Error opening log file: %s", err.Error()))
 		return
 	}
 	defer file.Close()
 
-	content, _ := ioutil.ReadAll(file)
+	content, _ := io.ReadAll(file)
 
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetExtra("logfile", string(content))

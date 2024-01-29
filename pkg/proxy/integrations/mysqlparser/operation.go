@@ -139,7 +139,7 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 	var err error
 
 	if len(data) < 1 {
-		return "", MySQLPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
+		return "", MySQLPacketHeader{}, nil, fmt.Errorf("invalid packet: Payload is empty")
 	}
 
 	switch {
@@ -362,36 +362,36 @@ func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) {
 	}
 }
 
-func writeLengthEncodedIntegers(buf *bytes.Buffer, value *uint64) {
-	if value == nil {
-		// Write 0xFB to represent NULL
-		buf.WriteByte(0xFB)
-		return
-	}
+// func writeLengthEncodedIntegers(buf *bytes.Buffer, value *uint64) {
+// 	if value == nil {
+// 		// Write 0xFB to represent NULL
+// 		buf.WriteByte(0xFB)
+// 		return
+// 	}
 
-	if *value <= 250 {
-		buf.WriteByte(byte(*value))
-	} else if *value <= 0xffff {
-		buf.WriteByte(0xfc)
-		buf.WriteByte(byte(*value))
-		buf.WriteByte(byte(*value >> 8))
-	} else if *value <= 0xffffff {
-		buf.WriteByte(0xfd)
-		buf.WriteByte(byte(*value))
-		buf.WriteByte(byte(*value >> 8))
-		buf.WriteByte(byte(*value >> 16))
-	} else {
-		buf.WriteByte(0xfe)
-		binary.Write(buf, binary.LittleEndian, *value)
-	}
-}
+// 	if *value <= 250 {
+// 		buf.WriteByte(byte(*value))
+// 	} else if *value <= 0xffff {
+// 		buf.WriteByte(0xfc)
+// 		buf.WriteByte(byte(*value))
+// 		buf.WriteByte(byte(*value >> 8))
+// 	} else if *value <= 0xffffff {
+// 		buf.WriteByte(0xfd)
+// 		buf.WriteByte(byte(*value))
+// 		buf.WriteByte(byte(*value >> 8))
+// 		buf.WriteByte(byte(*value >> 16))
+// 	} else {
+// 		buf.WriteByte(0xfe)
+// 		binary.Write(buf, binary.LittleEndian, *value)
+// 	}
+// }
 
-func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
-	data := []byte(value)
-	length := uint64(len(data))
-	writeLengthEncodedIntegers(buf, &length)
-	buf.Write(data)
-}
+// func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
+// 	data := []byte(value)
+// 	length := uint64(len(data))
+// 	writeLengthEncodedIntegers(buf, &length)
+// 	buf.Write(data)
+// }
 
 func readLengthEncodedString(data []byte, offset *int) (string, error) {
 	if *offset >= len(data) {
@@ -442,13 +442,13 @@ func ReadLengthEncodedIntegers(data []byte, offset int) (uint64, int) {
 	}
 }
 
-func nullTerminatedString(data []byte) (string, int, error) {
-	pos := bytes.IndexByte(data, 0)
-	if pos == -1 {
-		return "", 0, errors.New("null-terminated string not found")
-	}
-	return string(data[:pos]), pos, nil
-}
+// func nullTerminatedString(data []byte) (string, int, error) {
+// 	pos := bytes.IndexByte(data, 0)
+// 	if pos == -1 {
+// 		return "", 0, errors.New("null-terminated string not found")
+// 	}
+// 	return string(data[:pos]), pos, nil
+// }
 
 func readLengthEncodedInteger(b []byte) (uint64, bool, int) {
 	if len(b) == 0 {
@@ -471,30 +471,30 @@ func readLengthEncodedInteger(b []byte) (uint64, bool, int) {
 	}
 }
 
-func readLengthEncodedStringUpdated(data []byte) (string, []byte, error) {
-	// First, determine the length of the string
-	strLength, isNull, bytesRead := readLengthEncodedInteger(data)
-	if isNull {
-		return "", nil, errors.New("NULL value encountered")
-	}
+// func readLengthEncodedStringUpdated(data []byte) (string, []byte, error) {
+// 	// First, determine the length of the string
+// 	strLength, isNull, bytesRead := readLengthEncodedInteger(data)
+// 	if isNull {
+// 		return "", nil, errors.New("NULL value encountered")
+// 	}
 
-	// Adjust data to point to the next bytes after the integer
-	data = data[bytesRead:]
+// 	// Adjust data to point to the next bytes after the integer
+// 	data = data[bytesRead:]
 
-	// Check if we have enough data left to read the string
-	if len(data) < int(strLength) {
-		return "", nil, errors.New("not enough data to read string")
-	}
+// 	// Check if we have enough data left to read the string
+// 	if len(data) < int(strLength) {
+// 		return "", nil, errors.New("not enough data to read string")
+// 	}
 
-	// Read the string
-	strData := data[:strLength]
-	remainingData := data[strLength:]
+// 	// Read the string
+// 	strData := data[:strLength]
+// 	remainingData := data[strLength:]
 
-	// Convert the byte array to a string
-	str := string(strData)
+// 	// Convert the byte array to a string
+// 	str := string(strData)
 
-	return str, remainingData, nil
-}
+// 	return str, remainingData, nil
+// }
 
 func readUint24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
@@ -575,39 +575,39 @@ func readLengthEncodedIntegerOff(data []byte, offset *int) (uint64, error) {
 	return result, nil
 }
 
-func readLengthEncodedStringOff(data []byte, offset *int) (string, error) {
-	if *offset >= len(data) {
-		return "", errors.New("data length is not enough")
-	}
-	var length int
-	firstByte := data[*offset]
-	switch {
-	case firstByte < 0xfb:
-		length = int(firstByte)
-		*offset++
-	case firstByte == 0xfb:
-		*offset++
-		return "", nil
-	case firstByte == 0xfc:
-		if *offset+3 > len(data) {
-			return "", errors.New("data length is not enough 1")
-		}
-		length = int(binary.LittleEndian.Uint16(data[*offset+1 : *offset+3]))
-		*offset += 3
-	case firstByte == 0xfd:
-		if *offset+4 > len(data) {
-			return "", errors.New("data length is not enough 2")
-		}
-		length = int(data[*offset+1]) | int(data[*offset+2])<<8 | int(data[*offset+3])<<16
-		*offset += 4
-	case firstByte == 0xfe:
-		if *offset+9 > len(data) {
-			return "", errors.New("data length is not enough 3")
-		}
-		length = int(binary.LittleEndian.Uint64(data[*offset+1 : *offset+9]))
-		*offset += 9
-	}
-	result := string(data[*offset : *offset+length])
-	*offset += length
-	return result, nil
-}
+// func readLengthEncodedStringOff(data []byte, offset *int) (string, error) {
+// 	if *offset >= len(data) {
+// 		return "", errors.New("data length is not enough")
+// 	}
+// 	var length int
+// 	firstByte := data[*offset]
+// 	switch {
+// 	case firstByte < 0xfb:
+// 		length = int(firstByte)
+// 		*offset++
+// 	case firstByte == 0xfb:
+// 		*offset++
+// 		return "", nil
+// 	case firstByte == 0xfc:
+// 		if *offset+3 > len(data) {
+// 			return "", errors.New("data length is not enough 1")
+// 		}
+// 		length = int(binary.LittleEndian.Uint16(data[*offset+1 : *offset+3]))
+// 		*offset += 3
+// 	case firstByte == 0xfd:
+// 		if *offset+4 > len(data) {
+// 			return "", errors.New("data length is not enough 2")
+// 		}
+// 		length = int(data[*offset+1]) | int(data[*offset+2])<<8 | int(data[*offset+3])<<16
+// 		*offset += 4
+// 	case firstByte == 0xfe:
+// 		if *offset+9 > len(data) {
+// 			return "", errors.New("data length is not enough 3")
+// 		}
+// 		length = int(binary.LittleEndian.Uint64(data[*offset+1 : *offset+9]))
+// 		*offset += 9
+// 	}
+// 	result := string(data[*offset : *offset+length])
+// 	*offset += length
+// 	return result, nil
+// }
