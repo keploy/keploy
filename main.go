@@ -35,6 +35,7 @@ func main() {
 	}
 	utils.Version = version
 	fmt.Println(logo, " ")
+	fmt.Printf("version: %v\n\n", version)
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
