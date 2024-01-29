@@ -466,7 +466,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	pgRequests := [][]byte{requestBuffer}
 	preferedConnectionIdFromMocks := "x"
 	// stores the mapping between the prepared statements in the request buffer and the corresponding prepared statements in the mock.
-	preparedstatementMap := make(map[string]string)
+	prepareStatementMap := make(map[string]string)
 
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
@@ -501,12 +501,12 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 		}
 
-		matched, pgResponses, newPreferedConnectionIdFromMocks, newPreparedstatementMap, err := matchingReadablePG(pgRequests, logger, h, preferedConnectionIdFromMocks, preparedstatementMap)
+		matched, pgResponses, newPreferedConnectionIdFromMocks, newPreparedstatementMap, err := matchingReadablePG(pgRequests, logger, h, preferedConnectionIdFromMocks, prepareStatementMap)
 		if err != nil {
 			return fmt.Errorf("error while matching tcs mocks %v", err)
 		}
 
-		preparedstatementMap = newPreparedstatementMap
+		prepareStatementMap = newPreparedstatementMap
 		preferedConnectionIdFromMocks = newPreferedConnectionIdFromMocks
 
 		if !matched {

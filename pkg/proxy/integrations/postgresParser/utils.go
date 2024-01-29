@@ -312,9 +312,9 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 
 	mxSim := -1.0
 	mxIdx := -1
-	previousConnectionId := "y"
-	var MatchedStatementMap map[string]string
-	var isPreviousStatementMatched bool
+	matchedMockConnectionId := "y"
+	var newPrepareStatementMapAfterMatching map[string]string
+	var isPrepareStatementMapMatched bool
 	for idx, mock := range tcsMocks {
 
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
@@ -341,18 +341,18 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 					similarity2 = CosineSimilarity(encoded64, reqBuff)
 				}
 
-				isNotSameStatement, isMisMatched, NewstatementMap := CheckForStatementName(mock.Spec.PostgresRequests[requestIndex], reqBuff, statementMap, logger)
+				isPreparedStatementChanged, isMisMatched, NewstatementMap := CheckForStatementName(mock.Spec.PostgresRequests[requestIndex], reqBuff, statementMap, logger)
 
 				// calculate the jaccard similarity between the two buffers one with base64 encoding and another via that ..
 				similarity := max(similarity1, similarity2)
-				if !isMisMatched && (mxSim < similarity || (previousConnectionId != mock.ConnectionId && mxSim == similarity && connectionId == mock.ConnectionId) || (mxSim == similarity && !isPreviousStatementMatched && !isNotSameStatement)) {
+				if !isMisMatched && (mxSim < similarity || (matchedMockConnectionId != mock.ConnectionId && mxSim == similarity && connectionId == mock.ConnectionId) || (mxSim == similarity && !isPrepareStatementMapMatched && !isPreparedStatementChanged)) {
 					mxSim = similarity
 					mxIdx = idx
-					previousConnectionId = mock.ConnectionId
-					isPreviousStatementMatched = !isNotSameStatement
-					MatchedStatementMap = make(map[string]string)
+					matchedMockConnectionId = mock.ConnectionId
+					isPrepareStatementMapMatched = !isPreparedStatementChanged
+					newPrepareStatementMapAfterMatching = make(map[string]string)
 					for key, value := range NewstatementMap {
-						MatchedStatementMap[key] = value
+						newPrepareStatementMapAfterMatching[key] = value
 					}
 				}
 			}
@@ -370,7 +370,7 @@ func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, log
 			logger.Debug("Matched with Unsorted Stream", zap.Float64("similarity", mxSim))
 		}
 	}
-	return mxIdx, MatchedStatementMap
+	return mxIdx, newPrepareStatementMapAfterMatching
 }
 
 func CheckForStatementName(expectedPgReq models.Backend, reqBuff []byte, statementMap map[string]string, logger *zap.Logger) (bool, bool, map[string]string) {
@@ -508,11 +508,11 @@ func IfBeginOnlyQuery(reqBuff []byte, logger *zap.Logger, expectedPgReq *models.
 	return nil, false
 }
 
-func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, connectionId string, statementMap map[string]string) (bool, []models.Frontend, string, map[string]string, error) {
+func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, preparedConnectionIdFromMocks string, prepareStatementMap map[string]string) (bool, []models.Frontend, string, map[string]string, error) {
 	for {
 		tcsMocks, err := h.GetConfigMocks()
 		if err != nil {
-			return false, nil, connectionId, statementMap, fmt.Errorf("error while getting tcs mocks %v", err)
+			return false, nil, preparedConnectionIdFromMocks, prepareStatementMap, fmt.Errorf("error while getting tcs mocks %v", err)
 		}
 
 		var isMatched, sortFlag bool = false, true
@@ -609,7 +609,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 						ssl := models.Frontend{
 							Payload: "Tg==",
 						}
-						return true, []models.Frontend{ssl}, connectionId, statementMap, nil
+						return true, []models.Frontend{ssl}, preparedConnectionIdFromMocks, prepareStatementMap, nil
 					}
 				}
 			}
@@ -624,7 +624,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			// give more priority to sorted like if you find more than 0.5 in sorted then return that
 			if len(sortedTcsMocks) > 0 {
 				isSorted = true
-				idx, statementMap = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted, connectionId, statementMap)
+				idx, prepareStatementMap = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted, preparedConnectionIdFromMocks, prepareStatementMap)
 				if idx != -1 {
 					isMatched = true
 					matchedMock = tcsMocks[idx]
@@ -634,7 +634,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 
 		if !isMatched {
 			isSorted = false
-			idx, statementMap = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted, connectionId, statementMap)
+			idx, prepareStatementMap = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted, preparedConnectionIdFromMocks, prepareStatementMap)
 			if idx != -1 {
 				isMatched = true
 				matchedMock = tcsMocks[idx]
@@ -653,12 +653,12 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 				}
 			}
 
-			return true, matchedMock.Spec.PostgresResponses, matchedMock.ConnectionId, statementMap, nil
+			return true, matchedMock.Spec.PostgresResponses, matchedMock.ConnectionId, prepareStatementMap, nil
 		}
 
 		break
 	}
-	return false, nil, connectionId, statementMap, nil
+	return false, nil, preparedConnectionIdFromMocks, prepareStatementMap, nil
 }
 
 func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
