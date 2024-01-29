@@ -17,17 +17,17 @@ import (
 const MAX_LINE_LENGTH = 50
 
 type DiffsPrinter struct {
-	testCase                   string
-	statusExp                  string
-	statusAct                  string
-	headerExp                  map[string]string
-	headerAct                  map[string]string
-	bodyExp                    string
-	bodyAct                    string
-	bodyNoise                  map[string][]string
-	headNoise                  map[string][]string
-	hasSameDifferentOrderMocks bool
-	text                       string
+	testCase              string
+	statusExp             string
+	statusAct             string
+	headerExp             map[string]string
+	headerAct             map[string]string
+	bodyExp               string
+	bodyAct               string
+	bodyNoise             map[string][]string
+	headNoise             map[string][]string
+	hasarrayIndexMismatch bool
+	text                  string
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
@@ -39,7 +39,7 @@ func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 }
 
 func (d *DiffsPrinter) PushFooterDiff(key string) {
-	d.hasSameDifferentOrderMocks = true
+	d.hasarrayIndexMismatch = true
 	d.text = key
 }
 
@@ -84,7 +84,7 @@ func (d *DiffsPrinter) Render() error {
 	for _, e := range diffs {
 		table.Append([]string{e})
 	}
-	if d.hasSameDifferentOrderMocks {
+	if d.hasarrayIndexMismatch {
 		table.SetHeader([]string{d.text})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
 		paint := color.New(color.FgYellow).SprintFunc()
