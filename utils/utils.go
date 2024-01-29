@@ -253,14 +253,19 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 			keployAlias = keployAlias + " --configPath " + testFlags.ConfigPath
 		}
 		if len(testFlags.Testsets) > 0 {
-			keployAlias = keployAlias + " --testsets " + fmt.Sprintf("%v", testFlags.Testsets)
+			testSetSlice := make([]string, len(testFlags.Testsets))
+			for i, testSet := range testFlags.Testsets {
+				testSetSlice[i] = fmt.Sprintf("%v", testSet)
+			}
+			joinedTestSets := strings.Join(testSetSlice, ",")
+			keployAlias = keployAlias + " --testsets " + fmt.Sprintf("%v", joinedTestSets)
 		}
 		if len(testFlags.Path) > 0 {
 			keployAlias = keployAlias + " --path " + testFlags.Path
 		}
 		addtionalFlags := " --containerName " + testFlags.ContainerName + " --buildDelay " + testFlags.BuildDelay.String() + " --delay " + fmt.Sprintf("%d", testFlags.Delay) + " --networkName " + testFlags.NetworkName + " --enableTele=" + fmt.Sprintf("%v", testFlags.EnableTele) + " --apiTimeout " + fmt.Sprintf("%d", testFlags.ApiTimeout) + " --mongoPassword " + testFlags.MongoPassword + " --coverageReportPath " + testFlags.CoverageReportPath + " --withCoverage " + fmt.Sprintf("%v", testFlags.WithCoverage) + " --proxyport " + fmt.Sprintf("%d", testFlags.Proxyport)
 		keployAlias = keployAlias + addtionalFlags
-		cmd = exec.Command("sh", "-c", keployAlias)
+				cmd = exec.Command("sh", "-c", keployAlias)
 	}
 
 	cmd.Stdout = os.Stdout
