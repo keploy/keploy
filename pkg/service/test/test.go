@@ -638,6 +638,8 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		}
 		sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
 		loadedHooks.SetConfigMocks(sortedConfigMocks)
+		fmt.Println(tc.Name)
+		fmt.Println((*&readTcsMocks[0].Name))
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
