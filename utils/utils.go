@@ -147,4 +147,5 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 	}
 	return release, nil
 }
+
 var WarningSign = "\U000026A0"

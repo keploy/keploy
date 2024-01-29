@@ -3,6 +3,7 @@ package updateBinary
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -40,6 +41,12 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 // UpdateBinary initiates the update process for the Keploy binary file.
 func (u *updater) UpdateBinary() {
 	currentVersion := utils.Version
+
+	isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
+	if isDockerCmd {
+		u.logger.Info("Please Pull the latest Docker image of Keploy")
+		return
+	}
 
 	releaseInfo, err := utils.GetLatestGitHubRelease()
 	latestVersion := releaseInfo.TagName
