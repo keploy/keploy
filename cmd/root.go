@@ -265,15 +265,22 @@ func (r *Root) execute() {
 		Use:     "keploy",
 		Short:   "Keploy CLI",
 		Example: rootExamples,
+		Version: utils.Version,
 	}
+
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
+
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	// Manually parse flags to determine debug mode early
+	// Manually parse flags to determine debug mode
 	debugMode = checkForDebugFlag(os.Args[1:])
-	// Now that flags are parsed, set up the l722ogger
+
+	//Set the version template for version command
+	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
+
+	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
 	defer deleteLogs(r.logger)
