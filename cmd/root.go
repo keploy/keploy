@@ -251,7 +251,9 @@ func (r *Root) execute() {
 		Use:     "keploy",
 		Short:   "Keploy CLI",
 		Example: rootExamples,
+		Version: utils.Version,
 	}
+
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
@@ -260,7 +262,7 @@ func (r *Root) execute() {
 
 	rootCmd.PersistentFlags().Bool("version", false, "Fetch the latest version")
 
-	// Manually parse flags to determine debug mode and version flag early
+	// Manually parse flags to determine debug mode and version flag
 	debugMode = checkForDebugFlag(os.Args[1:])
 	versionFlag := checkForVersionFlag(os.Args[1:])
 	if versionFlag {
@@ -291,6 +293,11 @@ func (r *Root) execute() {
 
 		return
 	}
+
+	// Now that flags are parsed, set up the logger
+
+	//Set the version template for version command
+	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
 
 	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
