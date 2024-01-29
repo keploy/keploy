@@ -157,7 +157,6 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	}
 
 	sessions, err := yaml.ReadSessionIndices(cfg.Path, t.logger)
-	fmt.Println(sessions)
 	if err != nil {
 		t.logger.Debug("failed to read the recorded sessions", zap.Error(err))
 		return returnVal, err
@@ -638,8 +637,6 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		}
 		sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
 		loadedHooks.SetConfigMocks(sortedConfigMocks)
-		fmt.Println(tc.Name)
-		fmt.Println((*&readTcsMocks[0].Name))
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
