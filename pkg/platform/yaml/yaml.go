@@ -181,15 +181,18 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 	}
 
 	if !bypassTestCase {
-		ys.tele.RecordedTestAndMocks()
-		ys.mutex.Lock()
-		testsTotal, ok := ctx.Value("testsTotal").(*int)
-		if !ok {
-			ys.Logger.Debug("failed to get testsTotal from context")
-		} else {
-			*testsTotal++
+		if ys.tele != nil {
+			ys.tele.RecordedTestAndMocks()
+			ys.mutex.Lock()
+			testsTotal, ok := ctx.Value("testsTotal").(*int)
+			if !ok {
+				ys.Logger.Debug("failed to get testsTotal from context")
+			} else {
+				*testsTotal++
+			}
+			ys.mutex.Unlock()
 		}
-		ys.mutex.Unlock()
+
 		var tcsName string
 		if ys.TcsName == "" {
 			if tc.Name == "" {
@@ -316,7 +319,9 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	}
 	(*mocksTotal)[string(mock.Kind)]++
 	if ctx.Value("cmd") == "mockrecord" {
-		ys.tele.RecordedMock(string(mock.Kind))
+		if ys.tele != nil {
+			ys.tele.RecordedMock(string(mock.Kind))
+		}
 	}
 	if ys.MockName != "" {
 		mock.Name = ys.MockName
@@ -466,7 +471,58 @@ func (ys *Yaml) ReadConfigMocks(path string) ([]platform.KindSpecifier, error) {
 	return configMocks, nil
 
 }
-func (ys *Yaml) UpdateTest(mock *models.Mock, ctx context.Context) error {
+
+func (ys *Yaml) update(path, fileName string, docRead platform.KindSpecifier) error {
+	doc, _ := docRead.(*NetworkTrafficDoc)
+
+	yamlPath, err := util.ValidatePath(filepath.Join(path, fileName+".yaml"))
+	if err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(yamlPath, os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		ys.Logger.Error("failed to open the yaml file", zap.Error(err), zap.Any("yaml file name", fileName))
+		return err
+	}
+
+	d, err := yamlLib.Marshal(&doc)
+	if err != nil {
+		ys.Logger.Error("failed to marshal the updated calls into yaml", zap.Error(err), zap.Any("yaml file name", fileName))
+		return err
+	}
+
+	_, err = file.Write(d)
+	if err != nil {
+		ys.Logger.Error("failed to update the yaml document", zap.Error(err), zap.Any("yaml file name", fileName))
+		return err
+	}
+	defer file.Close()
+
+	return nil
+}
+
+func (ys *Yaml) UpdateTestCase(tcRead platform.KindSpecifier, path, tcsName string, ctx context.Context) error {
+	tc, ok := tcRead.(*models.TestCase)
+	if !ok {
+		return fmt.Errorf("%s failed to read testcase in UpdateTest", Emoji)
+	}
+
+	// encode the testcase into yaml docs
+	yamlTc, err := EncodeTestcase(*tc, ys.Logger)
+	if err != nil {
+		return fmt.Errorf("%s failed to encode the testcase into yamldocs in UpdateTest:%v", Emoji, err)
+	}
+
+	yamlTc.Name = tcsName
+
+	// update testcase yaml
+	err = ys.update(path, tcsName, yamlTc)
+	if err != nil {
+		ys.Logger.Error("failed to update testcase yaml file", zap.Error(err))
+		return err
+	}
+	ys.Logger.Info("🔄 Keploy has updated the test case for the user's application.", zap.String("path", path), zap.String("testcase name", tcsName))
 	return nil
 }
 

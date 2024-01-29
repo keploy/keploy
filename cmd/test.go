@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,8 +27,7 @@ func NewCmdTest(logger *zap.Logger) *Test {
 	}
 }
 
-
-func readTestConfig(configPath string) (*models.Test, error) {
+func ReadTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
@@ -42,12 +42,12 @@ func readTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
 	}
-	confTest, err := readTestConfig(configFilePath)
+	confTest, err := ReadTestConfig(configFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
@@ -89,13 +89,15 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	}
 	*globalNoise = confTest.GlobalNoise.Global
 	*testSetNoise = confTest.GlobalNoise.Testsets
+	if !*ignoreOrdering {
+		*ignoreOrdering = confTest.IgnoreOrdering
+	}
 	return nil
 }
 
 type Test struct {
 	tester test.Tester
 	logger *zap.Logger
-
 }
 
 func (t *Test) GetCmd() *cobra.Command {
@@ -218,6 +220,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			ignoreOrdering, err := cmd.Flags().GetBool("ignoreOrdering")
+			if err != nil {
+				t.logger.Error("failed to read the ignore ordering flag")
+				return err
+			}
+
 			tests := map[string][]string{}
 
 			testsets, err := cmd.Flags().GetStringSlice("testsets")
@@ -233,7 +241,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("continuing without configuration file because file not found")
@@ -266,6 +274,49 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Info(`Example usage:keploy test -c "docker-compose up --build" --buildDelay 35s`)
 			}
 
+			if isDockerCmd && len(path) > 0 {
+				// Check if the path contains the moving up directory (..)
+				if strings.Contains(path, "..") {
+					path, err = filepath.Abs(filepath.Clean(path))
+					if err != nil {
+						t.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					relativePath, err := filepath.Rel("/files", path)
+					if err != nil {
+						t.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
+					// Check if the path is a subdirectory of current directory
+					// Get the current directory path in docker.
+					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					cmd := exec.Command("sh", "-c", getDir)
+					out, err := cmd.Output()
+					if err != nil {
+						t.logger.Error("failed to get the current directory path in docker", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+					currentDir := strings.TrimSpace(string(out))
+					t.logger.Debug("This is the path after trimming", zap.String("currentDir:", currentDir))
+					// Check if the path is a subdirectory of current directory
+					if !strings.HasPrefix(path, currentDir) {
+						t.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", path))
+						return nil
+					}
+					// Set the relative path.
+					path, err = filepath.Rel(currentDir, path)
+					if err != nil {
+						t.logger.Error("failed to get the relative path for the subdirectory", zap.Error(err), zap.String("path:", path))
+						return nil
+					}
+				}
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -289,8 +340,6 @@ func (t *Test) GetCmd() *cobra.Command {
 				t.logger.Error("failed to get the next test report directory", zap.Error(err))
 				return err
 			}
-
-
 
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
@@ -337,6 +386,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					TestsetNoise:       testsetNoise,
 					WithCoverage:       withCoverage,
 					CoverageReportPath: coverageReportPath,
+					IgnoreOrdering:     ignoreOrdering,
 				}, enableTele)
 			}
 
@@ -377,9 +427,12 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 
+	testCmd.Flags().Bool("ignoreOrdering", false, "Ignore ordering of array in response")
+
 	testCmd.Flags().MarkHidden("enableTele")
 
 	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
+
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"
 
 	testCmd.Flags().Bool("coverage", false, "Capture the code coverage of the go binary in the command flag.")
