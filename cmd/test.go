@@ -328,15 +328,6 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
-<<<<<<< HEAD
-=======
-			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
-			if err != nil {
-				t.logger.Error("failed to get the next test report directory", zap.Error(err))
-				return err
-			}
-
->>>>>>> c17dd8c (fix: unknown path problem in docker (#1396))
 			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
 
 			var hasContainerName bool

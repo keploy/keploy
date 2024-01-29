@@ -234,9 +234,27 @@ func (r *Record) GetCmd() *cobra.Command {
 			} else {
 				// user provided the absolute path
 			}
+
+			if isDockerCmd && buildDelay <= 30*time.Second {
+				r.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", buildDelay))
+				r.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
+			}
+
 			path += "/keploy"
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
+
+			var hasContainerName bool
+			if isDockerCmd {
+				if strings.Contains(appCmd, "--name") {
+					hasContainerName = true
+				}
+				if !hasContainerName && appContainer == "" {
+					r.logger.Error("Couldn't find containerName")
+					r.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					return errors.New("missing required --containerName flag or containerName in config file")
+				}
+			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
 			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele)
