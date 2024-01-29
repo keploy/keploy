@@ -149,7 +149,7 @@ func containsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, 
 		urlMatched = true
 	}
 
-	if len(urlMethods) != 0 {
+	if len(urlMethods) != 0 && urlMatched {
 		urlMatched = false
 		for _, method := range urlMethods {
 			if string(method) == string(requestMethod) {
