@@ -58,7 +58,7 @@ func (p *PostgresParser) OutgoingType(buffer []byte) bool {
 	return version == ProtocolVersion
 }
 
-func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context, sourcePort int) {
+func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		encodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger, ctx)

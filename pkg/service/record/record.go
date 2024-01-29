@@ -50,7 +50,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
-	loadedHooks.SetProxyHosts(passThroughHosts)
+	loadedHooks.SetPassThroughHosts(passThroughHosts)
 	if err != nil {
 		r.Logger.Error("error while creating hooks", zap.Error(err))
 		return

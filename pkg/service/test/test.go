@@ -125,7 +125,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
-	returnVal.LoadedHooks.SetProxyHosts(cfg.PassThroughHosts)
+	returnVal.LoadedHooks.SetPassThroughHosts(cfg.PassThroughHosts)
 	if err != nil {
 		return returnVal, fmt.Errorf("error while creating hooks %v", err)
 	}
