@@ -44,7 +44,7 @@ record:
     filters:
       - path: ""
         host: ""
-        port: 0
+        ports: 0
 test:
   path: ""
   # mandatory
@@ -67,7 +67,7 @@ test:
     filters:
       - path: ""
         host: ""
-        port: 0
+        ports: 0
   withCoverage: false
   coverageReportPath: ""
 `
