@@ -849,8 +849,8 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 			}
 		}
 
-		portSatisfied := filters.Port != 0 && sourcePort == int(filters.Port)
-		if (portSatisfied && passthroughHost) || (filters.Port == 0 && passthroughHost) {
+		portMatched := filters.Port != 0 && sourcePort == int(filters.Port)
+		if (portMatched && passthroughHost) || (filters.Port == 0 && passthroughHost) {
 			break
 		} else if filters.Port != 0 {
 			passthroughHost = false
