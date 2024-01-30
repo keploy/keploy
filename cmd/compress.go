@@ -5,21 +5,25 @@ import (
 	"fmt"
 	"github.com/cloudflare/cfssl/log"
 	"github.com/spf13/cobra"
-	// "go.uber.org/zap"
+	"go.uber.org/zap"
 	"io"
 	"os"
 	"regexp"
 )
 
 const (
-	maxSizeBytes = 5 * 1024 * 1024 // 5MB
+	maxSizeBytes = 5 * 1024 * 1024 // Max file size defined is 5MB. Can be changed according to convenience
 )
 
-// func NewCmdCompress(logger *zap.Logger) *Example {
-// 	return &Example{
-// 		logger: logger,
-// 	}
-// }
+type Compress struct {
+	logger *zap.Logger
+}
+
+func NewCmdCompress(logger *zap.Logger) *Compress {
+	return &Compress{
+		logger: logger,
+	}
+}
 
 func compressLogFile(logFilePath string) error {
 	logFile, err := os.Open(logFilePath)
@@ -75,23 +79,24 @@ func checkAndCompress(logFilePath string) {
 }
 
 func compress(cmd *cobra.Command, args []string) error {
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: go run compress.go <test-set-number>")
-		os.Exit(1)
-	}
-
-	logFilePath := os.Args[1]
-	log.Info("log file path : ", logFilePath)
-
 	path, err := cmd.Flags().GetString("path")
 	if err != nil {
 		log.Error("failed to read the testcase path input")
 		return err
 	}
 
-	pattern := `test-set-\d+`
+	if len(os.Args) < 2 {
+		log.Info("Args", len(os.Args))
+		fmt.Println("Usage: go run compress.go <test-set-number>")
+		os.Exit(1)
+	}
+
+	logFilePath := os.Args[2]
+	log.Info("log file path : ", logFilePath)
+
+	pattern := `test-set-\d+` // Regex to identify the test-set folder correctly (test-set-<number>)
 	re := regexp.MustCompile(pattern)
-	if !re.MatchString(path) {
+	if re.MatchString(path) == false {
 		log.Error("Invalid path. PLease provide the path to the test-set folder")
 		return nil
 	}
@@ -102,24 +107,24 @@ func compress(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	testSetPath := currentDir + "/keploy" + "/" + path
+	testSetPath := currentDir + "/keploy" + "/" + path + "/mocks.yaml"
 	log.Debug("test-set path : ", testSetPath)
 
 	checkAndCompress(testSetPath)
 	return nil
 }
 
-func GetCmd() *cobra.Command {
-	// TODO: Have to make this owrk like a command "keploy compress <test-set-i>"
+func (c *Compress) GetCmd() *cobra.Command {
+	// Currently it can zip in gzip format but after unzipping it is not in yaml format. You need to mannually change the name to mocks.yaml
 
 	var compressCmd = &cobra.Command{
-		Use:     "compress mocks.yaml in deesired test-set folder",
-		Short:   "Compress dseired mocks.yaml file",
-		Example: `keploy compress <test-set-number>`,
-		Args:    cobra.ExactArgs(1),
+		Use:     "compress mocks.yaml in desired test-set folder",
+		Short:   "Compress desired mocks.yaml file",
+		Example: `keploy compress --path <test-set-number>`,
 		RunE:    compress,
 	}
 
-	compressCmd.Flags().StringP("path", "p", "", "Path to the mocks folder")
+	compressCmd.Flags().StringP("path", "p", "", "Path to the test-set folder")
+
 	return compressCmd
 }
