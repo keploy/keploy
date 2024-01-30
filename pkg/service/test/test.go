@@ -52,6 +52,7 @@ type TestOptions struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	IgnoreOrdering     bool
+	PassthroughHosts   []models.Filters
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -124,6 +125,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
+	returnVal.LoadedHooks.SetPassThroughHosts(cfg.PassThroughHosts)
 	if err != nil {
 		return returnVal, fmt.Errorf("error while creating hooks %v", err)
 	}
@@ -217,6 +219,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
 		EnableTele:         enableTele,
+		PassThroughHosts:   options.PassthroughHosts,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracefully shutdown
