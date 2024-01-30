@@ -493,39 +493,35 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		}
 		if !isMatched {
 			passthroughHost := false
-			passThrough := models.PassThroughHosts
-			portPassThrough := []models.Filters{}
 			for _, filters := range h.GetPassThroughHosts().Filters {
-				if filters.Port == 0 {
-					passThrough = append(passThrough, filters.Host, filters.Path)
-				} else {
-					portPassThrough = append(portPassThrough, filters)
+				if filters.Host != "" {
+					regex, err := regexp.Compile(filters.Host)
+					if err != nil {
+						logger.Error("failed to compile the host regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+						continue
+					}
+					passthroughHost = regex.MatchString(req.Host)
+					if !passthroughHost {
+						continue
+					}
 				}
-			}
+				if filters.Path != "" {
+					regex, err := regexp.Compile(filters.Path)
+					if err != nil {
+						logger.Error("failed to compile the path regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+						continue
+					}
+					passthroughHost = regex.MatchString(req.URL.String())
+					if !passthroughHost {
+						continue
+					}
+				}
 
-			for _, host := range passThrough {
-				regex, err := regexp.Compile(host)
-				if err != nil {
-					logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-					continue
-				}
-				matches := regex.MatchString(req.URL.String())
-				if matches && host != "" || req.Host == host {
-					passthroughHost = true
+				portSatisfied := filters.Port != 0 && sourcePort == int(filters.Port)
+				if (portSatisfied && passthroughHost) || (filters.Port == 0 && passthroughHost) {
 					break
-				}
-
-			}
-			for _, filter := range portPassThrough {
-				regex, err := regexp.Compile(filter.Path)
-				if err != nil {
-					logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-					continue
-				}
-				matches := regex.MatchString(req.URL.String())
-				if sourcePort == int(filter.Port) && (matches && filter.Path != "") {
-					passthroughHost = true
-					break
+				} else if filters.Port != 0 {
+					passthroughHost = false
 				}
 			}
 			if !passthroughHost {
@@ -829,37 +825,35 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		"operation": req.Method,
 	}
 	passthroughHost := false
-	passThrough := models.PassThroughHosts
-	portPassThrough := []models.Filters{}
 	for _, filters := range h.GetPassThroughHosts().Filters {
-		if filters.Port == 0 {
-			passThrough = append(passThrough, filters.Host, filters.Path)
-		} else {
-			portPassThrough = append(portPassThrough, filters)
+		if filters.Host != "" {
+			regex, err := regexp.Compile(filters.Host)
+			if err != nil {
+				logger.Error("failed to compile the host regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				continue
+			}
+			passthroughHost = regex.MatchString(req.Host)
+			if !passthroughHost {
+				continue
+			}
 		}
-	}
-	for _, host := range passThrough {
-		regex, err := regexp.Compile(host)
-		if err != nil {
-			logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-			continue
+		if filters.Path != "" {
+			regex, err := regexp.Compile(filters.Path)
+			if err != nil {
+				logger.Error("failed to compile the path regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				continue
+			}
+			passthroughHost = regex.MatchString(req.URL.String())
+			if !passthroughHost {
+				continue
+			}
 		}
-		matches := regex.MatchString(req.URL.String())
-		if matches && host != "" || req.Host == host {
-			passthroughHost = true
+
+		portSatisfied := filters.Port != 0 && sourcePort == int(filters.Port)
+		if (portSatisfied && passthroughHost) || (filters.Port == 0 && passthroughHost) {
 			break
-		}
-	}
-	for _, filter := range portPassThrough {
-		regex, err := regexp.Compile(filter.Path)
-		if err != nil {
-			logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-			continue
-		}
-		matches := regex.MatchString(req.URL.String())
-		if sourcePort == int(filter.Port) && (matches && filter.Path != "") {
-			passthroughHost = true
-			break
+		} else if filters.Port != 0 {
+			passthroughHost = false
 		}
 	}
 	if !passthroughHost {
