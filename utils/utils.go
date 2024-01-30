@@ -12,6 +12,7 @@ import (
 
 	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
+	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -123,6 +124,24 @@ func HandlePanic() {
 		log.Error(Emoji+"Recovered from:", r, "\nstack trace:\n", string(stackTrace))
 		sentry.Flush(time.Second * 2)
 	}
+}
+
+func DeleteTestReport(logger *zap.Logger, generateTestReport bool) {
+	if generateTestReport {
+		return
+	}
+
+	//Remove testReports folder if it exists and generateTestReport flag is not set
+	_, err := os.Stat("keploy/testReports")
+	if os.IsNotExist(err) {
+		return
+	}
+	err = os.RemoveAll("keploy/testReports")
+	if err != nil {
+		logger.Error("Error removing testReports folder: %v\n", zap.String("error", err.Error()))
+		return
+	}
+
 }
 
 var WarningSign = "\U000026A0"

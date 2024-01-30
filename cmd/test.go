@@ -107,6 +107,8 @@ type Test struct {
 	logger *zap.Logger
 }
 
+var generateTestReport bool
+
 func (t *Test) GetCmd() *cobra.Command {
 	var testCmd = &cobra.Command{
 		Use:     "test",
@@ -381,7 +383,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele, generateTestReport)
 			} else {
 				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
 					Tests:              tests,
@@ -399,6 +401,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
 					PassthroughHosts:   passThroughHosts,
+					GenerateTestReport: generateTestReport,
 				}, enableTele)
 			}
 
@@ -449,6 +452,9 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Bool("coverage", false, "Capture the code coverage of the go binary in the command flag.")
 	testCmd.Flags().Lookup("coverage").NoOptDefVal = "true"
+
+	testCmd.Flags().BoolVar(&generateTestReport, "generateTestReport", false, "Generate test reports")
+
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
 

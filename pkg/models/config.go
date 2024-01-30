@@ -55,6 +55,7 @@ type Test struct {
 	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
 	Stubs                   Stubs               `json:"stubs" yaml:"stubs"`
+	GenTestReport           bool                `json:"generateTestReport" yaml:"generateTestReport"`
 }
 
 type Globalnoise struct {

@@ -70,6 +70,7 @@ test:
         ports: 0
   withCoverage: false
   coverageReportPath: ""
+  generateTestReport: false
 `
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
