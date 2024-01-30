@@ -44,7 +44,7 @@ record:
     filters:
       - path: ""
         host: ""
-        ports: 0
+        port: 0
 test:
   path: ""
   # mandatory
@@ -71,7 +71,7 @@ test:
   generateTestReport: false
   withCoverage: false
   coverageReportPath: ""
-`
+  `
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
 	var node yaml.Node
