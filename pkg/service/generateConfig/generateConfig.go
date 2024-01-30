@@ -71,7 +71,7 @@ test:
   generateTestReport: false
   withCoverage: false
   coverageReportPath: ""
-  `
+`
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
 	var node yaml.Node
