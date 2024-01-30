@@ -44,7 +44,7 @@ type Test struct {
 	ProxyPort               uint32              `json:"proxyport" yaml:"proxyport"`
 	ContainerName           string              `json:"containerName" yaml:"containerName"`
 	NetworkName             string              `json:"networkName" yaml:"networkName"`
-	Tests                   map[string][]string `json:"tests" yaml:"tests"`
+	SelectedTests           map[string][]string `json:"tests" yaml:"tests"`
 	GlobalNoise             Globalnoise         `json:"globalNoise" yaml:"globalNoise"`
 	Delay                   uint64              `json:"delay" yaml:"delay"`
 	BuildDelay              time.Duration       `json:"buildDelay" yaml:"buildDelay"`
@@ -54,6 +54,7 @@ type Test struct {
 	WithCoverage            bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
 	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
+	Stubs                   Stubs               `json:"stubs" yaml:"stubs"`
 }
 
 type Globalnoise struct {
