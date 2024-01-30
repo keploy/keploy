@@ -253,7 +253,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
-					t.logger.Info("Keploy config not found, using default config")
+					t.logger.Info("Keploy config not found, continuing without configuration")
 				} else {
 					t.logger.Error("", zap.Error(err))
 				}
