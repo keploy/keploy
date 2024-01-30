@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,38 +130,57 @@ func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) err
 	return nil
 }
 
-func containsMatchingUrl(urlMethods map[string][]string, urlStr string, requestMethod models.Method) bool {
-	parsedURL, err := url.Parse(urlStr)
+func containsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, requestMethod models.Method) (error, bool) {
+	urlMatched := false
+	parsedURL, err := url.Parse(requestUrl)
 	if err != nil {
-		return false
+		return err, false
 	}
 
 	// Check for URL path and method
-	path := parsedURL.Path
-	if methods, exists := urlMethods[path]; exists {
-		// Loop through the methods for this path
-		for _, method := range methods {
-			// If the request method matches one of the allowed methods, return true
-			if string(method) == string(requestMethod) {
-				return true
-			}
-		}
-		// If the request method is not in the allowed methods, return false
-		return false
+	regex, err := regexp.Compile(urlStr)
+	if err != nil {
+		return err, false
 	}
 
-	return false
+	urlMatch := regex.MatchString(parsedURL.Path)
+
+	if urlMatch && len(urlStr) != 0 {
+		urlMatched = true
+	}
+
+	if len(urlMethods) != 0 && urlMatched {
+		urlMatched = false
+		for _, method := range urlMethods {
+			if string(method) == string(requestMethod) {
+				urlMatched = true
+			}
+		}
+	}
+
+	return nil, urlMatched
 }
 
-func hasBannedHeaders(object map[string]string, bannedHeaders []string) bool {
-	for headerName, _ := range object {
-		for _, bannedHeader := range bannedHeaders {
-			if headerName == bannedHeader {
-				return true
+func hasBannedHeaders(object map[string]string, bannedHeaders map[string]string) (error, bool) {
+	for headerName, headerNameValue := range object {
+		for bannedHeaderName, bannedHeaderValue := range bannedHeaders {
+			regex, err := regexp.Compile(headerName)
+			if err != nil {
+				return err, false
+			}
+			headerNameMatch := regex.MatchString(bannedHeaderName)
+
+			regex, err = regexp.Compile(bannedHeaderValue)
+			if err != nil {
+				return err, false
+			}
+			headerValueMatch := regex.MatchString(headerNameValue)
+			if headerNameMatch && headerValueMatch {
+				return nil, true
 			}
 		}
 	}
-	return false
+	return nil, false
 }
 
 func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context, filtersRead platform.KindSpecifier) error {
@@ -168,18 +188,23 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 	if !ok {
 		return fmt.Errorf("%s failed to read testcase in WriteTestcase", Emoji)
 	}
-	filters, ok := filtersRead.(*models.Filters)
+	testFilters, ok := filtersRead.(*models.TestFilter)
 
 	var bypassTestCase = false
 
 	if ok {
-		if containsMatchingUrl(filters.URLMethods, tc.HttpReq.URL, tc.HttpReq.Method) {
-			bypassTestCase = true
-		} else if hasBannedHeaders(tc.HttpReq.Header, filters.ReqHeader) {
-			bypassTestCase = true
+		for _, testFilter := range testFilters.Filters {
+			if err, containsMatch := containsMatchingUrl(testFilter.UrlMethods, testFilter.Path, tc.HttpReq.URL, tc.HttpReq.Method); err == nil && containsMatch {
+				bypassTestCase = true
+			} else if err != nil {
+				return fmt.Errorf("%s failed to check matching url, error %s", Emoji, err.Error())
+			} else if bannerHeaderCheck, hasHeader := hasBannedHeaders(tc.HttpReq.Header, testFilter.Headers); bannerHeaderCheck == nil && hasHeader {
+				bypassTestCase = true
+			} else if bannerHeaderCheck != nil {
+				return fmt.Errorf("%s failed to check banned header, error %s", Emoji, err.Error())
+			}
 		}
 	}
-
 	if !bypassTestCase {
 		if ys.tele != nil {
 			ys.tele.RecordedTestAndMocks()

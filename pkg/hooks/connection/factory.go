@@ -38,7 +38,7 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // ProcessActiveTrackers iterates over all connection the trackers and checks if they are complete. If so, it captures the ingress call and
 // deletes the tracker. If the tracker is inactive for a long time, it deletes it.
-func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.Filters) {
+func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.TestFilter) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
@@ -98,7 +98,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.Filters) {
+func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.TestFilter) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
