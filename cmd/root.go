@@ -236,14 +236,6 @@ func deleteLogs(logger *zap.Logger) {
 		return
 	}
 }
-func checkForVersionFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "--version" {
-			return true
-		}
-	}
-	return false
-}
 
 func (r *Root) execute() {
 	// Root command
