@@ -36,6 +36,8 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
+const libsslPath = "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+
 type Hook struct {
 	proxyInfoMap     *ebpf.Map
 	inodeMap         *ebpf.Map
@@ -45,6 +47,7 @@ type Hook struct {
 	appPidMap        *ebpf.Map
 	keployServerPort *ebpf.Map
 	passthroughPorts *ebpf.Map
+	MastersecretMap  *ebpf.Map
 
 	platform.TestCaseDB
 
@@ -74,24 +77,26 @@ type Hook struct {
 	tcpv6    link.Link
 	tcpv6Ret link.Link
 
-	accept        link.Link
-	acceptRet     link.Link
-	accept4       link.Link
-	accept4Ret    link.Link
-	read          link.Link
-	readRet       link.Link
-	write         link.Link
-	writeRet      link.Link
-	close         link.Link
-	closeRet      link.Link
-	sendto        link.Link
-	sendtoRet     link.Link
-	recvfrom      link.Link
-	recvfromRet   link.Link
-	objects       bpfObjects
-	userIpAddress chan string
-	writev        link.Link
-	writevRet     link.Link
+	accept            link.Link
+	acceptRet         link.Link
+	accept4           link.Link
+	accept4Ret        link.Link
+	read              link.Link
+	readRet           link.Link
+	write             link.Link
+	writeRet          link.Link
+	close             link.Link
+	closeRet          link.Link
+	sendto            link.Link
+	sendtoRet         link.Link
+	recvfrom          link.Link
+	recvfromRet       link.Link
+	objects           bpfObjects
+	userIpAddress     chan string
+	writev            link.Link
+	writevRet         link.Link
+	sslDoHandshake    link.Link
+	sslDoHandshakeRet link.Link
 
 	idc              clients.InternalDockerClient
 	passThroughHosts models.Stubs
@@ -510,6 +515,8 @@ func (h *Hook) Stop(forceStop bool) {
 	h.objects.Close()
 	h.writev.Close()
 	h.writevRet.Close()
+	h.sslDoHandshake.Close()
+	h.sslDoHandshakeRet.Close()
 	h.logger.Info("eBPF resources released successfully...")
 }
 
@@ -551,6 +558,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 	h.appPidMap = objs.AppNsPidMap
 	h.keployServerPort = objs.KeployServerPort
 	h.passthroughPorts = objs.PassThroughPorts
+	h.MastersecretMap = objs.MastersecretMap
 
 	h.stopper = stopper
 	h.objects = objs
@@ -822,6 +830,22 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 		return err
 	}
 	h.closeRet = cl_
+
+	// Open a uprobe and a uretprobe at the entry of the SSL_do_handshake symbol from OpenSSL
+	ex, err := link.OpenExecutable(libsslPath)
+	if err != nil {
+		h.logger.Error("failed to open the libssl shared object", zap.Error(err))
+	}
+	ssldh, err := ex.Uprobe("SSL_do_handshake", objs.UprobeSslDoHandshake, nil)
+	if err != nil {
+		h.logger.Error("failed to attach the uprobe hook on SSL_do_handshake", zap.Error(err))
+	}
+	ssldhret, err := ex.Uretprobe("SSL_do_handshake", objs.UretprobeSslDoHandshake, nil)
+	if err != nil {
+		h.logger.Error("failed to attach the uretprobe hook on SSL_do_handshake", zap.Error(err))
+	}
+	h.sslDoHandshake = ssldh
+	h.sslDoHandshakeRet = ssldhret
 
 	h.LaunchPerfBufferConsumers(connectionFactory)
 

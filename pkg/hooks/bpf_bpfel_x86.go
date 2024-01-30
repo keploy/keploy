@@ -83,6 +83,9 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetWrite             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
 	SyscallProbeRetWritev            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_writev"`
 	SyscallProbeEntrySocket          *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
+	UprobeSslDoHandshake             *ebpf.ProgramSpec `ebpf:"uprobe_ssl_do_handshake"`
+	UprobeSslWrite                   *ebpf.ProgramSpec `ebpf:"uprobe_ssl_write"`
+	UretprobeSslDoHandshake          *ebpf.ProgramSpec `ebpf:"uretprobe_ssl_do_handshake"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
@@ -105,6 +108,9 @@ type bpfMapSpecs struct {
 	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.MapSpec `ebpf:"keploy_namespace_pid_map"`
 	KeployServerPort          *ebpf.MapSpec `ebpf:"keploy_server_port"`
+	MastersecretDummyMap      *ebpf.MapSpec `ebpf:"mastersecret_dummy_map"`
+	MastersecretEvents        *ebpf.MapSpec `ebpf:"mastersecret_events"`
+	MastersecretMap           *ebpf.MapSpec `ebpf:"mastersecret_map"`
 	PassThroughPorts          *ebpf.MapSpec `ebpf:"pass_through_ports"`
 	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
@@ -112,6 +118,7 @@ type bpfMapSpecs struct {
 	SocketDataEventBufferHeap *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.MapSpec `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.MapSpec `ebpf:"socket_open_events"`
+	SslCtxAddresses           *ebpf.MapSpec `ebpf:"ssl_ctx_addresses"`
 	TaskStructMap             *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
 
@@ -150,6 +157,9 @@ type bpfMaps struct {
 	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.Map `ebpf:"keploy_namespace_pid_map"`
 	KeployServerPort          *ebpf.Map `ebpf:"keploy_server_port"`
+	MastersecretDummyMap      *ebpf.Map `ebpf:"mastersecret_dummy_map"`
+	MastersecretEvents        *ebpf.Map `ebpf:"mastersecret_events"`
+	MastersecretMap           *ebpf.Map `ebpf:"mastersecret_map"`
 	PassThroughPorts          *ebpf.Map `ebpf:"pass_through_ports"`
 	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
 	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
@@ -157,6 +167,7 @@ type bpfMaps struct {
 	SocketDataEventBufferHeap *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents          *ebpf.Map `ebpf:"socket_data_events"`
 	SocketOpenEvents          *ebpf.Map `ebpf:"socket_open_events"`
+	SslCtxAddresses           *ebpf.Map `ebpf:"ssl_ctx_addresses"`
 	TaskStructMap             *ebpf.Map `ebpf:"task_struct_map"`
 }
 
@@ -178,6 +189,9 @@ func (m *bpfMaps) Close() error {
 		m.KeployModeMap,
 		m.KeployNamespacePidMap,
 		m.KeployServerPort,
+		m.MastersecretDummyMap,
+		m.MastersecretEvents,
+		m.MastersecretMap,
 		m.PassThroughPorts,
 		m.ProxyInfoMap,
 		m.RedirectProxyMap,
@@ -185,6 +199,7 @@ func (m *bpfMaps) Close() error {
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
+		m.SslCtxAddresses,
 		m.TaskStructMap,
 	)
 }
@@ -222,6 +237,9 @@ type bpfPrograms struct {
 	SyscallProbeRetWrite             *ebpf.Program `ebpf:"syscall__probe_ret_write"`
 	SyscallProbeRetWritev            *ebpf.Program `ebpf:"syscall__probe_ret_writev"`
 	SyscallProbeEntrySocket          *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
+	UprobeSslDoHandshake             *ebpf.Program `ebpf:"uprobe_ssl_do_handshake"`
+	UprobeSslWrite                   *ebpf.Program `ebpf:"uprobe_ssl_write"`
+	UretprobeSslDoHandshake          *ebpf.Program `ebpf:"uretprobe_ssl_do_handshake"`
 }
 
 func (p *bpfPrograms) Close() error {
@@ -255,6 +273,9 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetWrite,
 		p.SyscallProbeRetWritev,
 		p.SyscallProbeEntrySocket,
+		p.UprobeSslDoHandshake,
+		p.UprobeSslWrite,
+		p.UretprobeSslDoHandshake,
 	)
 }
 
