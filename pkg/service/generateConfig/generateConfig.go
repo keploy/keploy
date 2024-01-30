@@ -34,10 +34,17 @@ record:
   networkName: ""
   delay: 5
   buildDelay: 30s
-  passThroughPorts: []
-  filters:
-    ReqHeader: []
-    urlMethods: {}
+  tests: 
+    filters:
+      - path: ""
+        urlMethods: []
+        headers: {}
+        host: ""
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        ports: 0
 test:
   path: ""
   # mandatory
@@ -46,7 +53,7 @@ test:
   containerName: ""
   networkName: ""
   # example: "test-set-1": ["test-1", "test-2", "test-3"]
-  tests:
+  selectedTests: 
   # to use globalNoise, please follow the guide at the end of this file.
   globalNoise:
     global:
@@ -56,10 +63,14 @@ test:
   buildDelay: 30s
   apiTimeout: 5
   ignoreOrdering: false
-  passThroughPorts: []
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        ports: 0
   withCoverage: false
   coverageReportPath: ""
-  `
+`
 
 func (g *generatorConfig) GenerateConfig(filePath string) {
 	var node yaml.Node
