@@ -27,6 +27,7 @@ import (
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
+
 	// "github.com/docker/docker/daemon/logger"
 
 	"github.com/cloudflare/cfssl/helpers"
@@ -966,7 +967,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 
 			tcpErr := ps.changeListenerToDNS()
 			if tcpErr != nil {
-				ps.logger.Error("fauled to parse the DNS Query with error", zap.Error(tcpErr))
+				ps.logger.Error("failed to parse the DNS Query with error", zap.Error(tcpErr))
 				return
 			}
 		}
