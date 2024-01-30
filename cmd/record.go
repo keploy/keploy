@@ -170,7 +170,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath)
 			if err != nil {
 				if err == errFileNotFound {
-					r.logger.Info("Keploy config not found, ontinuing without configuration")
+					r.logger.Info("Keploy config not found, continuing without configuration")
 				} else {
 					r.logger.Error("", zap.Error(err))
 				}

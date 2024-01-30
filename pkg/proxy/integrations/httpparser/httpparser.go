@@ -502,27 +502,30 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 					portPassThrough = append(portPassThrough, filters)
 				}
 			}
-			// Define the regular expression pattern
 
 			for _, host := range passThrough {
 				regex, err := regexp.Compile(host)
 				if err != nil {
+					logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 					continue
 				}
 				matches := regex.MatchString(req.URL.String())
 				if matches && host != "" || req.Host == host {
 					passthroughHost = true
+					break
 				}
 
 			}
 			for _, filter := range portPassThrough {
 				regex, err := regexp.Compile(filter.Path)
 				if err != nil {
+					logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 					continue
 				}
 				matches := regex.MatchString(req.URL.String())
 				if sourcePort == int(filter.Port) && (matches && filter.Path != "") {
 					passthroughHost = true
+					break
 				}
 			}
 			if !passthroughHost {
@@ -838,21 +841,25 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 	for _, host := range passThrough {
 		regex, err := regexp.Compile(host)
 		if err != nil {
+			logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			continue
 		}
 		matches := regex.MatchString(req.URL.String())
 		if matches && host != "" || req.Host == host {
 			passthroughHost = true
+			break
 		}
 	}
 	for _, filter := range portPassThrough {
 		regex, err := regexp.Compile(filter.Path)
 		if err != nil {
+			logger.Error("failed to compile the regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			continue
 		}
 		matches := regex.MatchString(req.URL.String())
 		if sourcePort == int(filter.Port) && (matches && filter.Path != "") {
 			passthroughHost = true
+			break
 		}
 	}
 	if !passthroughHost {

@@ -175,7 +175,7 @@ func hasBannedHeaders(object map[string]string, bannedHeaders map[string]string)
 				return err, false
 			}
 			headerValueMatch := regex.MatchString(headerNameValue)
-			if headerNameMatch || headerValueMatch {
+			if headerNameMatch && headerValueMatch {
 				return nil, true
 			}
 		}
