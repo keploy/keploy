@@ -74,7 +74,7 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testset
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"
-sed -i '/tests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
+sed -i '/selectedTests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
 
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --generateTestReport --delay 10
