@@ -58,7 +58,7 @@ docker stop ginApp
 done
 
 # Start the keploy in test mode.
-docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --apiTimeout 60 --delay 10
+docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --apiTimeout 60 --delay 10 --generateTestReport
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/test-run-1/report-1.yaml"
