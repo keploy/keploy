@@ -187,6 +187,11 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			if isDockerCmd && len(path) > 0 {
+				curDir, err := os.Getwd()
+				if err != nil {
+					r.logger.Error("failed to get current working directory", zap.Error(err))
+					return err
+				}
 				// Check if the path contains the moving up directory (..)
 				if strings.Contains(path, "..") {
 					path, err = filepath.Abs(filepath.Clean(path))
@@ -194,7 +199,7 @@ func (r *Record) GetCmd() *cobra.Command {
 						r.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
-					relativePath, err := filepath.Rel("/files", path)
+					relativePath, err := filepath.Rel(curDir, path)
 					if err != nil {
 						r.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
 						return nil
@@ -206,7 +211,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
 					// Check if the path is a subdirectory of current directory
 					// Get the current directory path in docker.
-					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					getDir := fmt.Sprintf(`docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "%s" }}{{ .Source }}{{ end }}{{ end }}'`, curDir)
 					cmd := exec.Command("sh", "-c", getDir)
 					out, err := cmd.Output()
 					if err != nil {
