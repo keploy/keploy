@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -929,10 +930,14 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 }
 
 func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
-
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 
 	defer destConn.Close()
+	defer clientConn.Close()
+
+	if clientConn == nil || destConn == nil {
+		return errors.New("one or more connections are nil")
+	}
 
 	// channels for writing messages from proxy to destination or client
 	destinationWriteChannel := make(chan []byte)
@@ -946,32 +951,38 @@ func (ps *ProxySet) callNext(requestBuffer []byte, clientConn, destConn net.Conn
 		}
 	}
 
+	// go routine to read from client
+	go func() {
+		defer ps.hook.Recover(pkg.GenerateRandomID())
+		defer utils.HandlePanic()
+		if clientConn == nil {
+			return
+		}
+		buffer, err := util.ReadBytes(clientConn)
+		if err != nil {
+			logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
+			return
+		}
+		destinationWriteChannel <- buffer
+	}()
+
+	// go routine to read from destination
+	go func() {
+		defer ps.hook.Recover(pkg.GenerateRandomID())
+		defer utils.HandlePanic()
+		if destConn == nil {
+			return
+		}
+		buffer, err := util.ReadBytes(destConn)
+		if err != nil {
+			logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+			return
+		}
+
+		clientWriteChannel <- buffer
+	}()
+
 	for {
-		// go routine to read from client
-		go func() {
-			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer utils.HandlePanic()
-			buffer, err := util.ReadBytes(clientConn)
-			if err != nil {
-				logger.Error("failed to read the request from client in proxy", zap.Error(err), zap.Any("Client Addr", clientConn.RemoteAddr().String()))
-				return
-			}
-			destinationWriteChannel <- buffer
-		}()
-
-		// go routine to read from destination
-		go func() {
-			defer ps.hook.Recover(pkg.GenerateRandomID())
-			defer utils.HandlePanic()
-			buffer, err := util.ReadBytes(destConn)
-			if err != nil {
-				logger.Error("failed to read the response from destination in proxy", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-				return
-			}
-
-			clientWriteChannel <- buffer
-		}()
-
 		select {
 		case requestBuffer := <-destinationWriteChannel:
 			// Write the request message to the actual destination server
