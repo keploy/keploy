@@ -541,6 +541,8 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 
 	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
 
+	t.logger.Info("Upload your test reports for better visualization at https://beta.keploy.io/test-report")
+
 	if err != nil {
 		t.logger.Error(err.Error())
 		return models.TestRunStatusFailed
