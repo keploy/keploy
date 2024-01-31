@@ -126,12 +126,12 @@ func HandlePanic() {
 	}
 }
 
-func DeleteTestReport(logger *zap.Logger, generateTestReport bool) {
-	if generateTestReport {
+func DeleteTestReport(logger *zap.Logger, deleteTestReport bool) {
+	if !deleteTestReport {
 		return
 	}
 
-	//Remove testReports folder if it exists and generateTestReport flag is not set
+	//Remove testReports folder if it exists and deleteTestReport flag is set
 	_, err := os.Stat("keploy/testReports")
 	if os.IsNotExist(err) {
 		return
