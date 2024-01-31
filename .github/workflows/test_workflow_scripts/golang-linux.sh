@@ -71,7 +71,7 @@ sleep 5
 done
 
 # Start the gin-mongo app in test omde.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 --generateTestReport
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/test-run-1/report-1.yaml"
