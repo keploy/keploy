@@ -21,6 +21,8 @@ fi
 config_file="./keploy-config.yaml"
 sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
+sed -i 's/ports: 0/ports: 27017/' "$config_file"
+
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
 
