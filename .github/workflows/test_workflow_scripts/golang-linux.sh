@@ -35,6 +35,9 @@ sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &
 
 # Wait for the application to start.
 app_started=false
+
+sleep 5
+
 while [ "$app_started" = false ]; do
     if curl -X GET http://localhost:8080/CJBKJd92; then
         app_started=true
