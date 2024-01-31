@@ -94,6 +94,8 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	exitCmd := make(chan bool)                 // channel to exit this command
 	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
 
+	//end := make(chan struct{})
+
 	select {
 	case <-stopper:
 		loadedHooks.Stop(true)
@@ -143,7 +145,14 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		if testsTotal != 0 {
 			tele.RecordedTestSuite(path, testsTotal, mocksTotal)
 		}
-
+	// case <-end:
+	// 	abortStopHooksForcefully = true
+	// 	loadedHooks.Stop(false)
+	// 	if testsTotal != 0 {
+	// 		tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
+	// 	}
+	// 	ps.StopProxyServer()
+	// 	return
 	}
 
 	<-exitCmd

@@ -392,7 +392,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, testReportPath, disableReportFile, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+				g.Serve(path, proxyPort, mongoPassword, testReportPath, disableReportFile, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
 				t.tester.Test(path, testReportPath, disableReportFile, appCmd, test.TestOptions{
 					Tests:              tests,
