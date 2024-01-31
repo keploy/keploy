@@ -40,7 +40,7 @@ func NewGraph(logger *zap.Logger) graphInterface {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool, generateTestReport bool) {
+func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool, generateTestReport bool) {
 	var ps *proxy.ProxySet
 
 	if port == 0 {
@@ -97,7 +97,7 @@ func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Dela
 		return
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(g.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
+		ps = proxy.BootProxy(g.logger, proxy.Option{Port: proxyPort, MongoPassword: mongopassword}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
 
 	}
 
