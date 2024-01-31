@@ -39,7 +39,12 @@ app_started=false
 sleep 5
 
 while [ "$app_started" = false ]; do
-    if curl -X GET http://localhost:8080/CJBKJd92; then
+    if curl --request POST \
+  --url http://localhost:8080/url \
+  --header 'content-type: application/json' \
+  --data '{
+  "url": "https://facebook.com"
+}'; then
         app_started=true
     fi
     sleep 3 # wait for 3 seconds before checking again.
