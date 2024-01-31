@@ -268,6 +268,7 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
+			r.logger.Info("Please run keploy compress --path test-set-<number> to compress the generated mocks.yaml file")
 			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough)
 			return nil
 		},

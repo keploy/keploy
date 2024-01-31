@@ -78,6 +78,13 @@ func checkAndCompress(logFilePath string) {
 	}
 }
 
+func fileExists(path string) bool {
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	return false
+}
+
 func compress(cmd *cobra.Command, args []string) error {
 	path, err := cmd.Flags().GetString("path")
 	if err != nil {
@@ -86,13 +93,9 @@ func compress(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(os.Args) < 2 {
-		log.Info("Args", len(os.Args))
 		fmt.Println("Usage: go run compress.go <test-set-number>")
 		os.Exit(1)
 	}
-
-	logFilePath := os.Args[2]
-	log.Info("log file path : ", logFilePath)
 
 	pattern := `test-set-\d+` // Regex to identify the test-set folder correctly (test-set-<number>)
 	re := regexp.MustCompile(pattern)
@@ -103,14 +106,21 @@ func compress(cmd *cobra.Command, args []string) error {
 
 	currentDir, err := os.Getwd()
 	if err != nil {
-		fmt.Println("Error:", err)
+		log.Error("failed to get the current working directory", zap.Any("error", err))
 		return err
 	}
 
 	testSetPath := currentDir + "/keploy" + "/" + path + "/mocks.yaml"
-	log.Debug("test-set path : ", testSetPath)
+	compressedTestSetPath := currentDir + "/keploy" + "/" + path + "/mocks.yaml.gz"
 
-	checkAndCompress(testSetPath)
+	if fileExists(compressedTestSetPath) == true {
+		log.Error("File already compressed")
+	} else if fileExists(testSetPath) == false {
+		log.Error("File doesn't exists. PLease check the path to the test-set folder")
+		return nil
+	} else {
+		checkAndCompress(testSetPath)
+	}
 	return nil
 }
 
@@ -120,7 +130,7 @@ func (c *Compress) GetCmd() *cobra.Command {
 	var compressCmd = &cobra.Command{
 		Use:     "compress mocks.yaml in desired test-set folder",
 		Short:   "Compress desired mocks.yaml file",
-		Example: `keploy compress --path <test-set-number>`,
+		Example: `keploy compress --path test-set-<number>`,
 		RunE:    compress,
 	}
 
