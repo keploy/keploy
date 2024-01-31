@@ -33,6 +33,13 @@ func compressLogFile(logFilePath string) error {
 	defer logFile.Close()
 
 	compressedLogFilePath := logFilePath + ".gz"
+
+	info, err := logFile.Stat()
+	if err != nil {
+		log.Error("failed to get the file info", zap.Any("error", err))
+		return err
+	}
+
 	compressedLogFile, err := os.Create(compressedLogFilePath)
 	if err != nil {
 		return err
@@ -40,6 +47,7 @@ func compressLogFile(logFilePath string) error {
 	defer compressedLogFile.Close()
 
 	gzipWriter := gzip.NewWriter(compressedLogFile)
+	gzipWriter.Name = info.Name()
 	defer gzipWriter.Close()
 
 	_, err = io.Copy(gzipWriter, logFile)
