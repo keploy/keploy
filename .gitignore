@@ -8,6 +8,14 @@
 # Test binary, built with `go test -c`
 *.test
 
+# Ignore the server binary output by `go build`
+server
+
+# Ignore the config and log files
+keploy-config.yaml
+keploy-logs.txt
+
+
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 .deploy.sh
