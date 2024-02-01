@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
+	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -123,6 +125,52 @@ func HandlePanic() {
 		log.Error(Emoji+"Recovered from:", r, "\nstack trace:\n", string(stackTrace))
 		sentry.Flush(time.Second * 2)
 	}
+}
+
+// GenerateGithubActions generates a GitHub Actions workflow file for Keploy
+func GenerateGithubActions(logger *zap.Logger, path string, appCmd string) {
+	// Determine the path based on the alias "keploy"
+	logger.Info("Determining the path of the keploy binary based on the alias \"keploy\"")
+
+	keployPath := "/usr/local/bin/keploy" // Default path
+	aliasCmd := exec.Command("which", "keploy")
+	aliasOutput, err := aliasCmd.Output()
+	if err == nil && len(aliasOutput) > 0 {
+		keployPath = strings.TrimSpace(string(aliasOutput))
+	}
+	logger.Info("Path of the keploy binary determined successfully", zap.String("path", keployPath))
+	// Define the content of the GitHub Actions workflow file
+	actionsFileContent := `name: Keploy
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, reopened, synchronize]
+jobs:
+  e2e-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Test-Report
+        uses: keploy/testgpt@main
+        with:
+          working-directory: ./
+          keploy-path: ` + keployPath + `
+          command: ` + appCmd + `
+`
+
+	// Define the file path where the GitHub Actions workflow file will be saved
+	filePath := ".github/workflows/keploy.yml"
+
+	// Write the content to the file
+	if err := ioutil.WriteFile(filePath, []byte(actionsFileContent), 0644); err != nil {
+		logger.Error("Error writing GitHub Actions workflow file", zap.Error(err))
+		return
+	}
+
+	logger.Info("GitHub Actions workflow file generated successfully", zap.String("path", filePath))
 }
 
 var WarningSign = "\U000026A0"
