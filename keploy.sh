@@ -26,6 +26,14 @@ installKeploy (){
         set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
 
+    check_sudo(){
+        if groups | grep -q '\bdocker\b'; then
+            return 1
+        else
+            return 0
+        fi
+    }
+
     install_keploy_amd() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 
@@ -39,7 +47,9 @@ installKeploy (){
         # Check if the command is for docker or not
         if [[ "$1" == *"docker"* ]]; then
             # Check if the user is a member of the docker group
-            if ! groups | grep -q '\bdocker\b'; then
+            check_sudo
+            sudoCheck=$?
+            if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Linux" ]; then
                 # Add sudo to the alias.
                 ALIAS_CMD="alias keploy='sudo $1'"
             else
@@ -77,8 +87,15 @@ installKeploy (){
 
 
     install_docker() {
-        if ! docker network ls | grep -q 'keploy-network'; then
-            sudo docker network create keploy-network
+        check_sudo
+        sudoCheck=$?
+        network_alias=""
+        if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Linux" ]; then
+            # Add sudo to docker
+            network_alias="sudo"
+        fi
+        if ! $network_alias docker network ls | grep -q 'keploy-network'; then
+            $network_alias docker network create keploy-network
         fi
 
         if [ "$OS_NAME" = "Darwin" ]; then
