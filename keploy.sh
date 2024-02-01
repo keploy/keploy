@@ -21,8 +21,6 @@ installKeploy (){
     install_keploy_arm() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
-        # Check the location of the file
-
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
         set_alias 'sudo -E env PATH="$PATH" keploybin'
@@ -120,7 +118,6 @@ installKeploy (){
                     return
                 fi
             fi
-
 
             echo -n "Do you want to install keploy with Docker or Colima? (docker/colima): "
             read user_input
@@ -227,5 +224,5 @@ installKeploy
 
 if command -v keploy &> /dev/null; then
     keploy example
-    # rm keploy.sh
+    rm keploy.sh
 fi
