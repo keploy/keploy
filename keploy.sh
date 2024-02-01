@@ -118,66 +118,10 @@ installKeploy (){
                     return
                 fi
             fi
-
-            echo -n "Do you want to install keploy with Docker or Colima? (docker/colima): "
-            read user_input
-
-            if [ "$user_input" = "colima" ]; then
-                if [ "$current_context" = "default" ]; then
-                    echo -n
-                    echo 'Error: Docker is using the default context, set to colima using "docker context use colima"'
-                    return
-                fi
-                if ! which colima &> /dev/null; then
-                    echo
-                    echo -e "\e]8;;https://kumojin.com/en/colima-alternative-docker-desktop\aAlternate is to use colima(lightweight and performant alternative to Docker Desktop)\e]8;;\a"
-                    echo -n "Install colima (y/n):"
-                    read user_input
-                    if [ "$user_input" = "y" ]; then
-                        echo "Installing colima via brew"
-                        if command -v brew &> /dev/null; then
-                            brew install colima
-                        else
-                            echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy colima installation\e]8;;\a"
-                            return
-                        fi
-                    elif [ "$user_input" = "n" ]; then
-                        echo "Please install Colima to install Keploy."
-                        return
-                    else
-                        echo "Please enter a valid command"
-                        return
-                    fi
-                else
-                    echo -n "colima found on your system, would you like to proceed with it? (y/n):"
-                    read user_input
-                    if [ "$user_input" = "n" ]; then
-                        echo "Please allow Colima to run Keploy."
-                        return
-                    elif [ "$user_input" != "y" ]; then
-                        echo "Please enter a valid command"
-                        return
-                    fi
-                fi
-
-                if colima status | grep -q "Running"; then
-                    echo "colima is already running."
-                else
-                    colima start
-                fi
-                install_docker
-
-            elif [ "$user_input" = "docker" ]; then
-                if [ "$current_context" = "colima" ]; then
-                    echo -n
-                    echo 'Error: Docker is using the colima context, set to default using "docker context use default"'
-                    return
-                fi
-                install_docker
-
-            else
-                echo "Please enter a valid command"
+            if [ "$current_context" = "colima" ]; then
+                echo "Colima detected, installing keploy"
             fi
+            install_docker
             return
 
         elif [ "$OS_NAME" = "Linux" ]; then
