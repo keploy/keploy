@@ -150,7 +150,7 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		}
 	}
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetTag("Keploy Version", utils.KeployVersion)
+		scope.SetTag("Keploy Version", utils.Version)
 		scope.SetTag("Linux Kernel Version", kernelVersion)
 		scope.SetTag("Architecture", arch)
 		scope.SetTag("Installation ID", installationID)
@@ -240,19 +240,26 @@ func (r *Root) execute() {
 		Use:     "keploy",
 		Short:   "Keploy CLI",
 		Example: rootExamples,
+		Version: utils.Version,
 	}
+
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
+
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	// Manually parse flags to determine debug mode early
+	// Manually parse flags to determine debug mode
 	debugMode = checkForDebugFlag(os.Args[1:])
-	// Now that flags are parsed, set up the l722ogger
+
+	//Set the version template for version command
+	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
+
+	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
 	defer deleteLogs(r.logger)
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {

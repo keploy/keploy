@@ -105,6 +105,7 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 			continue
 		}
 
+
 		data := record.RawSample
 		if len(data) < eventAttributesSize {
 			logger.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(data), eventAttributesSize))
@@ -122,11 +123,23 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 		}
 
 		event.TimestampNano += settings.GetRealTimeOffset()
-		event.EntryTimestampNano += settings.GetRealTimeOffset()
+
+		if event.Direction == structs.IngressTraffic {
+			event.EntryTimestampNano += settings.GetRealTimeOffset()
+			logger.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
+		}
 
 		connectionFactory.GetOrCreate(event.ConnID).AddDataEvent(event)
-
 	}
+}
+
+// convertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
+func convertUnixNanoToTime(unixNano uint64) time.Time {
+	// Unix time is the number of seconds since January 1, 1970 UTC,
+	// so convert nanoseconds to seconds for time.Unix function
+	seconds := int64(unixNano / uint64(time.Second))
+	nanoRemainder := int64(unixNano % uint64(time.Second))
+	return time.Unix(seconds, nanoRemainder)
 }
 
 func socketOpenEventCallback(reader *perf.Reader, connectionFactory *connection.Factory, logger *zap.Logger) {

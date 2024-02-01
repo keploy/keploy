@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -49,6 +51,8 @@ type TestOptions struct {
 	TestsetNoise       models.TestsetNoise
 	WithCoverage       bool
 	CoverageReportPath string
+	IgnoreOrdering     bool
+	PassthroughHosts   []models.Filters
 }
 
 var (
@@ -127,6 +131,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	returnVal.LoadedHooks, err = hooks.NewHook(returnVal.YamlStore, routineId, t.logger)
+	returnVal.LoadedHooks.SetPassThroughHosts(cfg.PassThroughHosts)
 	if err != nil {
 		return returnVal, fmt.Errorf("error while creating hooks %v", err)
 	}
@@ -220,6 +225,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
 		EnableTele:         enableTele,
+		PassThroughHosts:   options.PassthroughHosts,
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
 	// Recover from panic and gracefully shutdown
@@ -239,7 +245,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, options.IgnoreOrdering)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -348,7 +354,16 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		return returnVal
 	}
 	t.logger.Debug(fmt.Sprintf("the config mocks for %s are: %v\nthe testcase mocks are: %v", cfg.TestSet, configMocks, returnVal.TcsMocks))
-	cfg.LoadedHooks.SetConfigMocks(readConfigMocks)
+	fakeTestCase := models.TestCase{
+		Name:     "fake-tc",
+		HttpReq:  models.HttpReq{Timestamp: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
+		HttpResp: models.HttpResp{Timestamp: time.Now()},
+	}
+	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
+	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
+	sort.SliceStable(readTcsMocks, func(i, j int) bool {
+		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+	})
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))
@@ -440,7 +455,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig)
+		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering)
 
 		if !testPass {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
@@ -550,7 +565,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, ignoreOrdering bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -604,7 +619,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		if _, ok := testcases[tc.Name]; !ok && len(testcases) != 0 {
 			continue
 		}
-		// Filter the TCS Mocks based on the test case's request and response timestamp such that mock's timestamps lies between the test's timestamp and then, set the TCS Mocks.
+		// Filter the TCS Mocks based on the test case's request and response
+		// timestamp such that mock's timestamps lies between the test's timestamp
+		// and then, set the TCS Mocks.
 		filteredTcsMocks, _ := cfg.YamlStore.ReadTcsMocks(tc, filepath.Join(cfg.Path, cfg.TestSet))
 		readTcsMocks := []*models.Mock{}
 		for _, mock := range filteredTcsMocks {
@@ -614,8 +631,30 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			}
 			readTcsMocks = append(readTcsMocks, tcsmock)
 		}
-		readTcsMocks = FilterTcsMocks(tc, readTcsMocks, t.logger)
+		readTcsMocks, _ = FilterMocks(tc, readTcsMocks, t.logger)
+		sort.SliceStable(readTcsMocks, func(i, j int) bool {
+			return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
+		})
 		loadedHooks.SetTcsMocks(readTcsMocks)
+
+		// Sort the config mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
+		// and are order by the request timestamp in ascending order
+		// Other mocks are sorted by closest request timestamp to the middle of the test's request and response timestamp
+		rec, err := cfg.YamlStore.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+		if err != nil {
+			t.logger.Error("failed to read the config mocks", zap.Error(err))
+			return models.TestRunStatusFailed
+		}
+		configMocks := []*models.Mock{}
+		for _, mock := range rec {
+			configMock, ok := mock.(*models.Mock)
+			if !ok {
+				continue
+			}
+			configMocks = append(configMocks, configMock)
+		}
+		sortedConfigMocks := SortMocks(tc, configMocks, t.logger)
+		loadedHooks.SetConfigMocks(sortedConfigMocks)
 		if tc.Version == "api.keploy-enterprise.io/v1beta1" {
 			entTcs = append(entTcs, tc.Name)
 		} else if tc.Version != "api.keploy.io/v1beta1" && tc.Version != "api.keploy.io/v1beta2" {
@@ -648,20 +687,21 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		}
 
 		cfg := &SimulateRequestConfig{
-			Tc:           tc,
-			LoadedHooks:  loadedHooks,
-			AppCmd:       appCmd,
-			UserIP:       userIp,
-			TestSet:      testSet,
-			ApiTimeout:   apiTimeout,
-			Success:      &success,
-			Failure:      &failure,
-			Status:       &status,
-			TestReportFS: testReportFS,
-			TestReport:   initialisedValues.TestReport,
-			Path:         path,
-			DockerID:     initialisedValues.DockerID,
-			NoiseConfig:  noiseConfig,
+			Tc:             tc,
+			LoadedHooks:    loadedHooks,
+			AppCmd:         appCmd,
+			UserIP:         userIp,
+			TestSet:        testSet,
+			ApiTimeout:     apiTimeout,
+			Success:        &success,
+			Failure:        &failure,
+			Status:         &status,
+			TestReportFS:   testReportFS,
+			TestReport:     initialisedValues.TestReport,
+			Path:           path,
+			DockerID:       initialisedValues.DockerID,
+			NoiseConfig:    noiseConfig,
+			IgnoreOrdering: ignoreOrdering,
 		}
 		t.SimulateRequest(cfg)
 	}
@@ -686,7 +726,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool) (bool, *models.Result) {
 
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
@@ -735,8 +775,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := "", ""
 	var err error
+	isSame := false
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger)
+		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
 		if err != nil {
 			return false, res
 		}
@@ -800,9 +841,8 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 
 		if !res.BodyResult[0].Normal {
-
 			if json.Valid([]byte(actualResponse.Body)) {
-				patch, err := jsondiff.Compare(cleanExp, cleanAct)
+				patch, err := jsondiff.Compare(tc.HttpResp.Body, actualResponse.Body)
 				if err != nil {
 					t.logger.Warn("failed to compute json diff", zap.Error(err))
 				}
@@ -810,6 +850,10 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					keyStr := op.Path
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
+					}
+					if isSame {
+						logDiffs.hasarrayIndexMismatch = true
+						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 
@@ -820,7 +864,11 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 		t.mutex.Lock()
 		logger.Printf(logs)
-		logDiffs.Render()
+		err := logDiffs.Render()
+		if err != nil {
+			t.logger.Error("failed to render the diffs", zap.Error(err))
+		}
+
 		t.mutex.Unlock()
 
 	} else {

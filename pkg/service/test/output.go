@@ -17,23 +17,30 @@ import (
 const MAX_LINE_LENGTH = 50
 
 type DiffsPrinter struct {
-	testCase  string
-	statusExp string
-	statusAct string
-	headerExp map[string]string
-	headerAct map[string]string
-	bodyExp   string
-	bodyAct   string
-	bodyNoise map[string][]string
-	headNoise map[string][]string
+	testCase              string
+	statusExp             string
+	statusAct             string
+	headerExp             map[string]string
+	headerAct             map[string]string
+	bodyExp               string
+	bodyAct               string
+	bodyNoise             map[string][]string
+	headNoise             map[string][]string
+	hasarrayIndexMismatch bool
+	text                  string
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, ""}
 }
 
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 	d.statusExp, d.statusAct = exp, act
+}
+
+func (d *DiffsPrinter) PushFooterDiff(key string) {
+	d.hasarrayIndexMismatch = true
+	d.text = key
 }
 
 func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]string) {
@@ -45,7 +52,7 @@ func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) 
 }
 
 // Will display and colorize diffs side-by-side
-func (d *DiffsPrinter) Render() {
+func (d *DiffsPrinter) Render() error {
 	diffs := []string{}
 
 	if d.statusExp != d.statusAct {
@@ -73,10 +80,20 @@ func (d *DiffsPrinter) Render() {
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
 	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
+
 	for _, e := range diffs {
 		table.Append([]string{e})
 	}
+	if d.hasarrayIndexMismatch {
+		table.SetHeader([]string{d.text})
+		table.SetAlignment(tablewriter.ALIGN_CENTER)
+		paint := color.New(color.FgYellow).SprintFunc()
+		postPaint := paint(d.text)
+		table.Append([]string{postPaint})
+
+	}
 	table.Render()
+	return nil
 }
 
 /*
@@ -175,10 +192,13 @@ func diffIndex(s1, s2 string) (int, bool) {
  */
 func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 	var diff = gojsondiff.New()
-	dObj, _ := diff.Compare(json1, json2)
+	dObj, err := diff.Compare(json1, json2)
+	if err != nil {
+		return "", err
+	}
 
 	var jsonObject map[string]interface{}
-	err := json.Unmarshal([]byte(json1), &jsonObject)
+	err = json.Unmarshal([]byte(json1), &jsonObject)
 	if err != nil {
 		return "", err
 	}

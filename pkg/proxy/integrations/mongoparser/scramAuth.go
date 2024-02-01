@@ -188,7 +188,6 @@ func updateConversationId(actualMsg map[string]interface{}, newConversationId in
 	return actualMsg, nil
 }
 
-
 // decodeBase64Str is a function variable that wraps the standard Base64 decoding method,
 // taking a Base64 encoded string and returning its decoded byte array and any error.
 var decodeBase64Str func(s string) ([]byte, error) = base64.StdEncoding.DecodeString
@@ -203,16 +202,21 @@ var decodeBase64Str func(s string) ([]byte, error) = base64.StdEncoding.DecodeSt
 //   - A map containing the key-value pairs from the unmarshaled section.
 //   - An error if there's an issue during decoding or unmarshaling.
 func extractMsgFromSection(section string) (map[string]interface{}, error) {
-	sectionStr, err := extractSectionSingle(section)
-	if err != nil {
-		return nil, err
+	var err error
+	var sectionStr string
+	var result map[string]interface{}
+
+	if strings.HasPrefix(section, "{ SectionSingle msg:") {
+		sectionStr, err = extractSectionSingle(section)
+		if err != nil {
+			return nil, err
+		}
+		err = json.Unmarshal([]byte(sectionStr), &result)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	var result map[string]interface{}
-	err = json.Unmarshal([]byte(sectionStr), &result)
-	if err != nil {
-		return nil, err
-	}
 	return result, nil
 }
 

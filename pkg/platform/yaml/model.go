@@ -238,6 +238,7 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 		Version: yamlTestcase.Version,
 		Kind:    yamlTestcase.Kind,
 		Name:    yamlTestcase.Name,
+		Curl:    yamlTestcase.Curl,
 	}
 	switch tc.Kind {
 	case models.HTTP:
