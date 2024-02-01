@@ -53,7 +53,7 @@ type TestOptions struct {
 	CoverageReportPath string
 	IgnoreOrdering     bool
 	PassthroughHosts   []models.Filters
-	DeleteTestReport   bool
+	GenerateTestReport bool
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -263,7 +263,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 
-	defer utils.DeleteTestReport(t.logger, options.DeleteTestReport)
+	defer utils.DeleteTestReports(t.logger, options.GenerateTestReport)
 
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {

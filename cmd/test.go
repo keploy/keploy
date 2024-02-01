@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters, generateTestReport *bool) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -60,6 +60,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *appCmd == "" {
 		*appCmd = confTest.Command
 	}
+
 	for testset, testcases := range confTest.SelectedTests {
 		if _, ok := (*tests)[testset]; !ok {
 			(*tests)[testset] = testcases
@@ -82,6 +83,9 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 		*coverageReportPath = confTest.CoverageReportPath
 	}
 	*withCoverage = *withCoverage || confTest.WithCoverage
+
+	*generateTestReport = *generateTestReport || confTest.GenerateTestReport
+
 	if *apiTimeout == 5 {
 		*apiTimeout = confTest.ApiTimeout
 	}
@@ -106,8 +110,6 @@ type Test struct {
 	tester test.Tester
 	logger *zap.Logger
 }
-
-var deleteTestReport bool
 
 func (t *Test) GetCmd() *cobra.Command {
 	var testCmd = &cobra.Command{
@@ -229,6 +231,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			generateTestReport, err := cmd.Flags().GetBool("generateTestReport")
+			if err != nil {
+				t.logger.Error("failed to read the generateTestReport flag")
+				return err
+			}
+
 			ignoreOrdering, err := cmd.Flags().GetBool("ignoreOrdering")
 			if err != nil {
 				t.logger.Error("failed to read the ignore ordering flag")
@@ -252,7 +260,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			passThroughHosts := []models.Filters{}
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts, &generateTestReport)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("Keploy config not found, continuing without configuration")
@@ -383,7 +391,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele, deleteTestReport)
+				g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele, generateTestReport)
 			} else {
 				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
 					Tests:              tests,
@@ -401,7 +409,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
 					PassthroughHosts:   passThroughHosts,
-					DeleteTestReport:   deleteTestReport,
+					GenerateTestReport: generateTestReport,
 				}, enableTele)
 			}
 
@@ -453,7 +461,7 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Bool("coverage", false, "Capture the code coverage of the go binary in the command flag.")
 	testCmd.Flags().Lookup("coverage").NoOptDefVal = "true"
 
-	testCmd.Flags().BoolVar(&deleteTestReport, "deleteTestReport", false, "Delete Generated test reports")
+	testCmd.Flags().Bool("generateTestReport", true, "Generate test reports")
 
 	testCmd.SilenceUsage = true
 	testCmd.SilenceErrors = true
