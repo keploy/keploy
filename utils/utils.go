@@ -310,3 +310,6 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 	}
 
 }
+
+var WarningSign = "\U000026A0"
+

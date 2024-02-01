@@ -41,6 +41,7 @@ func main() {
 	}else{
 		fmt.Println("Starting keploy in docker environment.")
 	}
+
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
