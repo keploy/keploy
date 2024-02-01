@@ -21,9 +21,11 @@ installKeploy (){
     install_keploy_arm() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
+        # Check the location of the file
+
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
-        set_alias
+        set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
 
     install_keploy_amd() {
@@ -31,13 +33,25 @@ installKeploy (){
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
-        set_alias
+        set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
 
+    # Get the alias to set and set it
     set_alias() {
-        ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploybin'"
-        current_shell=$(ps -p $$ -ocomm=)
-        if [ "$current_shell" = "zsh" ]; then
+        # Check if the command is for docker or not
+        if [[ "$1" == *"docker"* ]]; then
+            # Check if the user is a member of the docker group
+            if ! groups | grep -q '\bdocker\b'; then
+                # Add sudo to the alias.
+                ALIAS_CMD="alias keploy='sudo $1'"
+            else
+                ALIAS_CMD="alias keploy='$1'"
+            fi
+        else
+            ALIAS_CMD="alias keploy='$1'"
+        fi
+        current_shell="$(basename "$SHELL")"
+        if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
             if [ -f ~/.zshrc ]; then
                 if grep -q "alias keploy=" ~/.zshrc; then
                     sed -i '/alias keploy/d' ~/.zshrc
@@ -45,9 +59,9 @@ installKeploy (){
                 echo "$ALIAS_CMD" >> ~/.zshrc
                 source ~/.zshrc
             else
-                alias keploy='sudo -E env PATH="$PATH" keploybin'
+                alias keploy="$1"
             fi
-        elif [ "$current_shell" = "bash" ]; then
+        elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
             if [ -f ~/.bashrc ]; then
                 if grep -q "alias keploy=" ~/.bashrc; then
                     sed -i '/alias keploy/d' ~/.bashrc
@@ -55,33 +69,27 @@ installKeploy (){
                 echo "$ALIAS_CMD" >> ~/.bashrc
                 source ~/.bashrc
             else
-                alias keploy='sudo -E env PATH="$PATH" keploybin'
+                alias keploy="$1"
             fi
         else
-            alias keploy='sudo -E env PATH="$PATH" keploybin'
+            alias keploy="$1"
         fi
     }
 
 
-    install_colima_docker() {
-        if ! docker network ls | grep -q 'keploy-network'; then
-            docker network create keploy-network
-        fi
-        alias keploy='docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
-    }
 
     install_docker() {
         if ! docker network ls | grep -q 'keploy-network'; then
-            docker network create keploy-network
+            sudo docker network create keploy-network
         fi
 
         if [ "$OS_NAME" = "Darwin" ]; then
             if ! docker volume inspect debugfs &>/dev/null; then
                 docker volume create --driver local --opt type=debugfs --opt device=debugfs debugfs
             fi
-            alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
+            set_alias 'docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
         else
-            alias keploy='sudo docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
+            set_alias 'docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
         fi
 
     }
@@ -113,7 +121,7 @@ installKeploy (){
                 fi
             fi
 
-            
+
             echo -n "Do you want to install keploy with Docker or Colima? (docker/colima): "
             read user_input
 
@@ -160,7 +168,7 @@ installKeploy (){
                 else
                     colima start
                 fi
-                install_colima_docker
+                install_docker
 
             elif [ "$user_input" = "docker" ]; then
                 if [ "$current_context" = "colima" ]; then
@@ -219,5 +227,5 @@ installKeploy
 
 if command -v keploy &> /dev/null; then
     keploy example
-    rm keploy.sh
+    # rm keploy.sh
 fi
