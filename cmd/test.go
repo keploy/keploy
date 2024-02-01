@@ -284,6 +284,11 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			if isDockerCmd && len(path) > 0 {
+				curDir, err := os.Getwd()
+				if err != nil {
+					t.logger.Error("failed to get current working directory", zap.Error(err))
+					return err
+				}
 				// Check if the path contains the moving up directory (..)
 				if strings.Contains(path, "..") {
 					path, err = filepath.Abs(filepath.Clean(path))
@@ -291,7 +296,7 @@ func (t *Test) GetCmd() *cobra.Command {
 						t.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
-					relativePath, err := filepath.Rel("/files", path)
+					relativePath, err := filepath.Rel(curDir, path)
 					if err != nil {
 						t.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
 						return nil
@@ -303,7 +308,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
 					// Check if the path is a subdirectory of current directory
 					// Get the current directory path in docker.
-					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					getDir := fmt.Sprintf(`docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "%s" }}{{ .Source }}{{ end }}{{ end }}'`, curDir)
 					cmd := exec.Command("sh", "-c", getDir)
 					out, err := cmd.Output()
 					if err != nil {
@@ -326,6 +331,40 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 			}
 
+			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
+			if err != nil {
+				t.logger.Error("failed to read the mongo password")
+				return err
+			}
+
+			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
+			//Check if app command starts with docker or  docker-compose.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				testCfg := utils.TestFlags{
+					Path:               path,
+					Proxyport:          proxyPort,
+					Command:            appCmd,
+					Testsets:           testsets,
+					ContainerName:      appContainer,
+					NetworkName:        networkName,
+					Delay:              delay,
+					BuildDelay:         buildDelay,
+					ApiTimeout:         apiTimeout,
+					PassThroughPorts:   ports,
+					ConfigPath:         configPath,
+					MongoPassword:      mongoPassword,
+					CoverageReportPath: coverageReportPath,
+					EnableTele:         enableTele,
+				}
+				utils.UpdateKeployToDocker("test", isDockerCompose, testCfg, t.logger)
+				return nil
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -346,6 +385,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
+
 			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
 			if err != nil {
 				t.logger.Error("failed to get the next test report directory", zap.Error(err))
@@ -370,14 +410,6 @@ func (t *Test) GetCmd() *cobra.Command {
 			// Check if the coverage flag is set
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
-
-			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
-			if err != nil {
-				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
-			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
 			if coverage {
 				g := graph.NewGraph(t.logger)
