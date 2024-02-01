@@ -44,8 +44,5 @@ COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
 # Make the entrypoint.sh file executable
 RUN chmod +x /app/entrypoint.sh
 
-# Change working directory (optional depending on your needs)
-WORKDIR /files
-
 # Set the entrypoint
 ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy"]
