@@ -360,6 +360,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					MongoPassword:      mongoPassword,
 					CoverageReportPath: coverageReportPath,
 					EnableTele:         enableTele,
+					WithCoverage:       withCoverage,
 				}
 				utils.UpdateKeployToDocker("test", isDockerCompose, testCfg, t.logger)
 				return nil

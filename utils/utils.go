@@ -263,7 +263,7 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 			keployAlias = keployAlias + " --passThroughPorts=" + fmt.Sprintf("%v ", joinedPorts)
 		}
 		if recordFlags.ConfigPath != "." {
-			keployAlias = keployAlias + " --configPath " + recordFlags.ConfigPath
+			keployAlias = keployAlias + " --config-path " + recordFlags.ConfigPath
 		}
 		if len(recordFlags.Path) > 0 {
 			keployAlias = keployAlias + " --path " + recordFlags.Path
@@ -275,15 +275,15 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 	} else {
 		keployAlias = keployAlias + "\"" + testFlags.Command + "\" "
 		if len(testFlags.PassThroughPorts) > 0 {
-			portSlice := make([]string, len(recordFlags.PassThroughPorts))
-			for i, port := range recordFlags.PassThroughPorts {
+			portSlice := make([]string, len(testFlags.PassThroughPorts))
+			for i, port := range testFlags.PassThroughPorts {
 				portSlice[i] = fmt.Sprintf("%d", port)
 			}
 			joinedPorts := strings.Join(portSlice, ",")
 			keployAlias = keployAlias + " --passThroughPorts=" + fmt.Sprintf("%v ", joinedPorts)
 		}
 		if testFlags.ConfigPath != "." {
-			keployAlias = keployAlias + " --configPath " + testFlags.ConfigPath
+			keployAlias = keployAlias + " --config-path " + testFlags.ConfigPath
 		}
 		if len(testFlags.Testsets) > 0 {
 			testSetSlice := make([]string, len(testFlags.Testsets))
@@ -296,7 +296,7 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 		if len(testFlags.Path) > 0 {
 			keployAlias = keployAlias + " --path " + testFlags.Path
 		}
-		addtionalFlags := appendFlags("containerName", testFlags.ContainerName) + appendFlags("buildDelay", testFlags.BuildDelay.String()) + appendFlags("delay", fmt.Sprintf("%d", testFlags.Delay)) + appendFlags("networkName", testFlags.NetworkName) + appendFlags("enableTele=", fmt.Sprintf("%v", testFlags.EnableTele)) + appendFlags("apiTimeout", fmt.Sprintf("%d", testFlags.ApiTimeout)) + appendFlags("mongoPassword", testFlags.MongoPassword) + appendFlags("coverageReportPath", testFlags.CoverageReportPath) + appendFlags("withCoverage", fmt.Sprintf("%v", testFlags.WithCoverage)) + appendFlags("proxyport", fmt.Sprintf("%d", testFlags.Proxyport))
+		addtionalFlags := appendFlags("containerName", testFlags.ContainerName) + appendFlags("buildDelay", testFlags.BuildDelay.String()) + appendFlags("delay", fmt.Sprintf("%d", testFlags.Delay)) + appendFlags("networkName", testFlags.NetworkName) + appendFlags("enableTele=", fmt.Sprintf("%v", testFlags.EnableTele)) + appendFlags("apiTimeout", fmt.Sprintf("%d", testFlags.ApiTimeout)) + appendFlags("mongoPassword", testFlags.MongoPassword) + appendFlags("coverageReportPath", testFlags.CoverageReportPath) + appendFlags("withCoverage=", fmt.Sprintf("%v", testFlags.WithCoverage)) + appendFlags("proxyport", fmt.Sprintf("%d", testFlags.Proxyport))
 		keployAlias = keployAlias + addtionalFlags
 		cmd = exec.Command("sh", "-c", keployAlias)
 	}
