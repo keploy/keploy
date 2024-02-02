@@ -341,6 +341,41 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 			}
 
+			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
+			if err != nil {
+				t.logger.Error("failed to read the mongo password")
+				return err
+			}
+
+			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
+			//Check if app command starts with docker or  docker-compose.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				testCfg := utils.TestFlags{
+					Path:               path,
+					Proxyport:          proxyPort,
+					Command:            appCmd,
+					Testsets:           testsets,
+					ContainerName:      appContainer,
+					NetworkName:        networkName,
+					Delay:              delay,
+					BuildDelay:         buildDelay,
+					ApiTimeout:         apiTimeout,
+					PassThroughPorts:   ports,
+					ConfigPath:         configPath,
+					MongoPassword:      mongoPassword,
+					CoverageReportPath: coverageReportPath,
+					EnableTele:         enableTele,
+					WithCoverage:       withCoverage,
+				}
+				utils.UpdateKeployToDocker("test", isDockerCompose, testCfg, t.logger)
+				return nil
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -361,6 +396,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			path += "/keploy"
 
 			testReportPath := path + "/testReports"
+
 			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
 			if err != nil {
 				t.logger.Error("failed to get the next test report directory", zap.Error(err))
@@ -385,14 +421,6 @@ func (t *Test) GetCmd() *cobra.Command {
 			// Check if the coverage flag is set
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
-
-			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
-			if err != nil {
-				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
-			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 
 			if coverage {
 				g := graph.NewGraph(t.logger)
