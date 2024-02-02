@@ -304,7 +304,7 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
-
+	logger.Debug("This is the keploy alias", zap.String("keployAlias:", keployAlias))
 	err := cmd.Run()
 	if err != nil {
 		logger.Error("Failed to start keploy in docker", zap.Error(err))
