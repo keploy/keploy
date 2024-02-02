@@ -1,0 +1,25 @@
+name: Build and Release to Snap
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Snapcraft
+        run: sudo snap install snapcraft --classic
+      - name: Build Snap
+        run: snapcraft
+      - name: Publish Snap
+        env:
+          SNAPCRAFT_LOGIN_FILE: ${{ secrets.SNAPCRAFT_LOGIN_FILE }}
+        run: |
+          echo "$SNAPCRAFT_LOGIN_FILE" | base64 --decode --ignore-garbage > snapcraft.login
+          snapcraft login --with snapcraft.login
+          snapcraft upload --release=edge *.snap
