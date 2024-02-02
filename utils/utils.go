@@ -2,9 +2,12 @@ package utils
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -166,24 +169,6 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 		return GitHubRelease{}, err
 	}
 	return release, nil
-}
-
-func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
-	if generateTestReport {
-		return
-	}
-
-	//Remove testReports folder if it exists and generateTestReport flag is set
-	_, err := os.Stat("keploy/testReports")
-	if os.IsNotExist(err) {
-		return
-	}
-	err = os.RemoveAll("keploy/testReports")
-	if err != nil {
-		logger.Error("Error removing testReports folder: %v\n", zap.String("error", err.Error()))
-		return
-	}
-
 }
 
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file
@@ -370,4 +355,5 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 	}
 
 }
+
 var WarningSign = "\U000026A0"
