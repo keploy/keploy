@@ -236,7 +236,6 @@ func (r *Record) GetCmd() *cobra.Command {
 			//Check if app command starts with docker or sudo docker.
 			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
 			if !isDockerCmd && dockerRelatedCmd {
-				// r.logger.Error("Please run the command with sudo -E env PATH=$PATH keploy record -c \"your command\"")
 				isDockerCompose := false
 				if dockerCmd == "docker-compose" {
 					isDockerCompose = true
