@@ -233,6 +233,28 @@ func (r *Record) GetCmd() *cobra.Command {
 					}
 				}
 			}
+			//Check if app command starts with docker or sudo docker.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				recordCfg := utils.RecordFlags{
+					Path:             path,
+					Command:          appCmd,
+					ContainerName:    appContainer,
+					Proxyport:        proxyPort,
+					NetworkName:      networkName,
+					Delay:            delay,
+					BuildDelay:       buildDelay,
+					PassThroughPorts: ports,
+					ConfigPath:       configPath,
+					EnableTele:       enableTele,
+				}
+				utils.UpdateKeployToDocker("record", isDockerCompose, recordCfg, r.logger)
+				return nil
+			}
 
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
