@@ -105,6 +105,7 @@ func socketDataEventCallback(reader *ringbuf.Reader, connectionFactory *connecti
 			continue
 		}
 
+
 		data := record.RawSample
 		if len(data) < eventAttributesSize {
 			logger.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(data), eventAttributesSize))

@@ -3,12 +3,17 @@ package models
 import "time"
 
 type Mock struct {
-	Version Version  `json:"Version,omitempty"`
-	Name    string   `json:"Name,omitempty"`
-	Kind    Kind     `json:"Kind,omitempty"`
-	Spec    MockSpec `json:"Spec,omitempty"`
-	Id      string   `json:"Id,omitempty"`
-	SortOrder int64 `json:"SortOrder,omitempty"`
+	Version      Version      `json:"Version,omitempty"`
+	Name         string       `json:"Name,omitempty"`
+	Kind         Kind         `json:"Kind,omitempty"`
+	Spec         MockSpec     `json:"Spec,omitempty"`
+	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"` // Map for additional test mode information
+}
+
+type TestModeInfo struct {
+	Id         int  `json:"Id,omitempty"`
+	IsFiltered bool `json:"isFiltered,omitempty"`
+	SortOrder  int  `json:"sortOrder,omitempty"`
 }
 
 func (m *Mock) GetKind() string {

@@ -88,6 +88,31 @@ func setupLogger() *zap.Logger {
 		"./keploy-logs.txt",
 	}
 
+	// Check if keploy-log.txt exists, if not create it.
+	_, err := os.Stat("keploy-logs.txt")
+	if os.IsNotExist(err) {
+		_, err := os.Create("keploy-logs.txt")
+		if err != nil {
+			log.Println(Emoji, "failed to create log file", err)
+			return nil
+		}
+	}
+
+	// Check if the permission of the log file is 777, if not set it to 777.
+	fileInfo, err := os.Stat("keploy-logs.txt")
+	if err != nil {
+		log.Println(Emoji, "failed to get the log file info", err)
+		return nil
+	}
+	if fileInfo.Mode().Perm() != 0777 {
+		// Set the permissions of the log file to 777.
+		err = os.Chmod("keploy-logs.txt", 0777)
+		if err != nil {
+			log.Println(Emoji, "failed to set permissions of log file", err)
+			return nil
+		}
+	}
+
 	if debugMode {
 		go func() {
 			defer utils.HandlePanic()
@@ -104,7 +129,7 @@ func setupLogger() *zap.Logger {
 
 	logger, err := logCfg.Build()
 	if err != nil {
-		log.Panic(Emoji, "failed to start the logger for the CLI")
+		log.Panic(Emoji, "failed to start the logger for the CLI", err)
 		return nil
 	}
 	return logger
@@ -150,7 +175,7 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		}
 	}
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetTag("Keploy Version", utils.KeployVersion)
+		scope.SetTag("Keploy Version", utils.Version)
 		scope.SetTag("Linux Kernel Version", kernelVersion)
 		scope.SetTag("Architecture", arch)
 		scope.SetTag("Installation ID", installationID)
@@ -240,19 +265,26 @@ func (r *Root) execute() {
 		Use:     "keploy",
 		Short:   "Keploy CLI",
 		Example: rootExamples,
+		Version: utils.Version,
 	}
+
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
+
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	// Manually parse flags to determine debug mode early
+	// Manually parse flags to determine debug mode
 	debugMode = checkForDebugFlag(os.Args[1:])
-	// Now that flags are parsed, set up the l722ogger
+
+	//Set the version template for version command
+	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
+
+	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
 	defer deleteLogs(r.logger)
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdServe(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {

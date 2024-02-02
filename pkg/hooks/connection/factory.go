@@ -36,7 +36,9 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 	}
 }
 
-func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, ctx context.Context, filters *models.Filters) {
+// ProcessActiveTrackers iterates over all connection the trackers and checks if they are complete. If so, it captures the ingress call and
+// deletes the tracker. If the tracker is inactive for a long time, it deletes it.
+func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.TestFilter) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
@@ -44,14 +46,14 @@ func (factory *Factory) HandleReadyConnections(db platform.TestCaseDB, ctx conte
 		ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
 		if ok {
 
-			if len(requestBuf) == 0 && len(responseBuf) == 0 {
-				factory.logger.Debug("Empty request or response", zap.Any("RecvBufLength", len(requestBuf)), zap.Any("SentBufLength", len(responseBuf)))
+			if len(requestBuf) == 0 || len(responseBuf) == 0 {
+				factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
 				continue
 			}
 
 			parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
 			if err != nil {
-				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err))
+				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
 				continue
 			}
 			parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
@@ -96,7 +98,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.Filters) {
+func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.TestFilter) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))

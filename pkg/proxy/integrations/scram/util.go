@@ -32,7 +32,7 @@ func extractClientNonce(firstMsg string) (string, error) {
 			// value := strings.Split(part, "=")[1]
 			value := strings.TrimPrefix(part, "r=")
 			if value == part {
-				return "", fmt.Errorf("error parsing '%s' for fetching client nonce", part, )
+				return "", fmt.Errorf("error parsing '%s' for fetching client nonce", part)
 			}
 			return value, nil
 		}

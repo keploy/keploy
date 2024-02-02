@@ -70,13 +70,25 @@ sudo kill $pid
 sleep 5
 done
 
-# Start the gin-mongo app in test omde.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --apiTimeout 30 --delay 7
+# Start the gin-mongo app in test mode.
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+
+# move keployv2 to /usr/local/bin/keploy
+mv ./../../keployv2 /usr/local/bin/keploy
+
+sed -i 's/<path for storing stubs>/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
+
+# run in mockrecord mode
+go test
+
+sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
+# run in mocktest mode
+go test
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/report-1.yaml"
+report_file="./keploy/testReports/test-run-1/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/report-2.yaml"
+report_file2="./keploy/testReports/test-run-1/report-1.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
@@ -85,5 +97,3 @@ if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
 else
     exit 1
 fi
-
-docker stop mongoDb
