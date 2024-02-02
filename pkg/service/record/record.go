@@ -79,7 +79,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		loadedHooks.Stop(true)
 		return
 	default:
-		// start the BootProxy
+		// start the BootProxy	
 		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx, 0)
 	}
 
