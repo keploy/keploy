@@ -91,6 +91,31 @@ func setupLogger() *zap.Logger {
 		"./keploy-logs.txt",
 	}
 
+	// Check if keploy-log.txt exists, if not create it.
+	_, err := os.Stat("keploy-logs.txt")
+	if os.IsNotExist(err) {
+		_, err := os.Create("keploy-logs.txt")
+		if err != nil {
+			log.Println(Emoji, "failed to create log file", err)
+			return nil
+		}
+	}
+
+	// Check if the permission of the log file is 777, if not set it to 777.
+	fileInfo, err := os.Stat("keploy-logs.txt")
+	if err != nil {
+		log.Println(Emoji, "failed to get the log file info", err)
+		return nil
+	}
+	if fileInfo.Mode().Perm() != 0777 {
+		// Set the permissions of the log file to 777.
+		err = os.Chmod("keploy-logs.txt", 0777)
+		if err != nil {
+			log.Println(Emoji, "failed to set permissions of log file", err)
+			return nil
+		}
+	}
+
 	if debugMode {
 		go func() {
 			defer utils.HandlePanic()
@@ -107,7 +132,7 @@ func setupLogger() *zap.Logger {
 
 	logger, err := logCfg.Build()
 	if err != nil {
-		log.Panic(Emoji, "failed to start the logger for the CLI")
+		log.Panic(Emoji, "failed to start the logger for the CLI", err)
 		return nil
 	}
 	return logger

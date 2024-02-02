@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	_ "net/http/pprof"
 	"time"
 
@@ -34,8 +35,12 @@ func main() {
 		version = "2-dev"
 	}
 	utils.Version = version
-	fmt.Println(logo, " ")
-	fmt.Printf("version: %v\n\n", version)
+	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER");binaryToDocker != "true" {
+		fmt.Println(logo, " ")
+		fmt.Printf("version: %v\n\n", version)
+	}else{
+		fmt.Println("Starting keploy in docker environment.")
+	}
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
