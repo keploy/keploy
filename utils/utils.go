@@ -133,7 +133,7 @@ func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
 		return
 	}
 
-	//Remove testReports folder if it exists and generateTestReport flag is set
+	//Remove testReports folder if it exists and generateTestReport flag is not set
 	_, err := os.Stat("keploy/testReports")
 	if os.IsNotExist(err) {
 		return
@@ -330,4 +330,5 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 	}
 
 }
+
 var WarningSign = "\U000026A0"
