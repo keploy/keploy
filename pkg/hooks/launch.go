@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/pkg"
+	"go.keploy.io/server/utils"
 	"go.keploy.io/server/pkg/models"
 )
 
@@ -62,7 +63,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 		return nil
 	} else {
-		ok, cmd := h.IsDockerRelatedCmd(appCmd)
+		ok, cmd := utils.IsDockerRelatedCmd(appCmd)
 		if ok {
 
 			h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
@@ -595,37 +596,6 @@ func (h *Hook) injectNetworkToKeploy(appNetwork string) error {
 	return nil
 }
 
-// It checks if the cmd is related to docker or not, it also returns if its a docker compose file
-func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
-	// Check for Docker command patterns
-	dockerCommandPatterns := []string{
-		"docker-compose ",
-		"sudo docker-compose ",
-		"docker compose ",
-		"sudo docker compose ",
-		"docker ",
-		"sudo docker ",
-	}
-
-	for _, pattern := range dockerCommandPatterns {
-		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
-			if strings.Contains(pattern, "compose") {
-				return true, "docker-compose"
-			}
-			return true, "docker"
-		}
-	}
-
-	// Check for Docker Compose file extension
-	dockerComposeFileExtensions := []string{".yaml", ".yml"}
-	for _, extension := range dockerComposeFileExtensions {
-		if strings.HasSuffix(strings.ToLower(cmd), extension) {
-			return true, "docker-compose"
-		}
-	}
-
-	return false, ""
-}
 
 func parseDockerCommand(dockerCmd string) (string, string, error) {
 	// Regular expression patterns
