@@ -293,9 +293,21 @@ func (r *Record) GetCmd() *cobra.Command {
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-
+			params := record.TrafficCaptureParams{
+				Path:             path,
+				ProxyPort:        proxyPort,
+				AppCmd:           appCmd,
+				AppContainer:     appContainer,
+				AppNetwork:       networkName,
+				Delay:            delay,
+				BuildDelay:       buildDelay,
+				Ports:            ports,
+				Filters:          &filters,
+				EnableTele:       enableTele,
+				PassThroughHosts: passThrough,
+			}
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough)
+			r.recorder.CaptureTraffic(params)
 			return nil
 		},
 	}

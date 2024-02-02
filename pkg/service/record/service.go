@@ -6,6 +6,19 @@ import (
 	"go.keploy.io/server/pkg/models"
 )
 
+type TrafficCaptureParams struct {
+	Path             string
+	ProxyPort        uint32
+	AppCmd           string
+	AppContainer     string
+	AppNetwork       string
+	Delay            uint64
+	BuildDelay       time.Duration
+	Ports            []uint
+	Filters          *models.TestFilter
+	EnableTele       bool
+	PassThroughHosts []models.Filters
+}
 type Recorder interface {
-	CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, networkName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters)
+	CaptureTraffic(params TrafficCaptureParams)
 }
