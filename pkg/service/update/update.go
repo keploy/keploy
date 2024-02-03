@@ -19,11 +19,6 @@ type GitHubRelease struct {
 	Body    string `json:"body"`
 }
 
-// updater manages the updating process of the Keploy binary.
-type updater struct {
-	logger *zap.Logger
-}
-
 // NewUpdater initializes a new updater instance.
 func NewUpdater(logger *zap.Logger) Updater {
 	return &updater{
@@ -31,15 +26,15 @@ func NewUpdater(logger *zap.Logger) Updater {
 	}
 }
 
-// Updater defines the contract for updating the Keploy binary.
+// Updater defines the contract for updating keploy.
 type Updater interface {
-	UpdateBinary()
+	Update()
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
-// UpdateBinary initiates the update process for the Keploy binary file.
-func (u *updater) UpdateBinary() {
+// Update initiates the update process for the Keploy binary file.
+func (u *updater) Update() {
 	currentVersion := utils.Version
 
 	isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
@@ -49,9 +44,6 @@ func (u *updater) UpdateBinary() {
 	}
 
 	releaseInfo, err := utils.GetLatestGitHubRelease()
-	latestVersion := releaseInfo.TagName
-	changelog := releaseInfo.Body
-
 	if err != nil {
 		if err == ErrGitHubAPIUnresponsive {
 			u.logger.Error("GitHub API is unresponsive. Update process cannot continue.")
@@ -60,6 +52,8 @@ func (u *updater) UpdateBinary() {
 		}
 		return
 	}
+	latestVersion := releaseInfo.TagName
+	changelog := releaseInfo.Body
 
 	if currentVersion == latestVersion {
 		u.logger.Info("No updates available. Current Version " + currentVersion + " " + latestVersion + " is the latest.")
@@ -123,9 +117,11 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	untarCmd.Stdin, _ = downloadCmd.StdoutPipe()
 
 	if err := downloadCmd.Start(); err != nil {
+		fmt.Errorf("Failed to start download command: %v", err)
 		return err
 	}
 	if err := untarCmd.Start(); err != nil {
+		fmt.Errorf("Failed to start untar command: %v", err)
 		return err
 	}
 

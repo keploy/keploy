@@ -3,20 +3,17 @@ package cmd
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
@@ -282,29 +279,6 @@ func (r *Root) execute() {
 
 	//Set the version template for version command
 	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
-
-	currentVersion := utils.Version
-	// Show update message only if it's not a dev version
-	if !strings.HasSuffix(currentVersion, "-dev") {
-		// Check for the latest release version
-		releaseInfo, err := utils.GetLatestGitHubRelease()
-		if err != nil {
-			r.logger.Debug("Failed to fetch the latest release version", zap.Error(err))
-			return
-		}
-		if releaseInfo.TagName != currentVersion {
-			updatetext := models.HighlightGrayString("keploy update")
-			const msg string = `
-               ╭─────────────────────────────────────╮
-               │ New version available:              │
-               │ %v  ---->   %v  │
-               │ Run %v to update         │
-               ╰─────────────────────────────────────╯
-			   `
-			versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
-			fmt.Printf(versionmsg)
-		}
-	}
 	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
