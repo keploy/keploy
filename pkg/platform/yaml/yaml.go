@@ -259,9 +259,14 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		path = ys.TcsPath
 	}
 
+	path, err := util.ValidatePath(path)
+	if err != nil {
+		return nil, err
+	}
+
 	tcs := []*models.TestCase{}
 
-	_, err := os.Stat(path)
+	_, err = os.Stat(path)
 	if err != nil {
 		dirNames := strings.Split(path, "/")
 		suitName := ""
