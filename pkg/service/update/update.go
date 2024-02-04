@@ -36,6 +36,10 @@ func (u *updater) Update() {
 		u.logger.Info("Please Pull the latest Docker image of Keploy")
 		return
 	}
+	if !strings.HasSuffix(currentVersion, "-dev") {
+		u.logger.Info("You are using a development version of Keploy. Skipping update check.")
+		return
+	}
 
 	releaseInfo, err := utils.GetLatestGitHubRelease()
 	if err != nil {
@@ -44,10 +48,6 @@ func (u *updater) Update() {
 		} else {
 			u.logger.Error("Failed to fetch latest GitHub release version", zap.Error(err))
 		}
-		return
-	}
-	if !strings.HasSuffix(currentVersion, "-dev") {
-		u.logger.Info("You are using a development version of Keploy. Skipping update check.")
 		return
 	}
 
