@@ -305,7 +305,7 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 	}
 
 	sort.Slice(tcs, func(i, j int) bool {
-		return tcs[i].Created < tcs[j].Created
+		return tcs[i].HttpReq.Timestamp.UnixMicro() < tcs[j].HttpReq.Timestamp.UnixMicro()
 	})
 	tcsRead := make([]platform.KindSpecifier, len(tcs))
 	for i, tc := range tcs {
