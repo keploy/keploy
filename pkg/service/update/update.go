@@ -127,27 +127,25 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	untarCmd.Stdin, _ = downloadCmd.StdoutPipe()
 
 	if err := downloadCmd.Start(); err != nil {
-		fmt.Errorf("Failed to start download command: %v", err)
-		return err
+		return fmt.Errorf("Failed to start download command: %v", err)
 	}
 	if err := untarCmd.Start(); err != nil {
-		fmt.Errorf("Failed to start untar command: %v", err)
-		return err
+		return fmt.Errorf("Failed to start untar command: %v", err)
 	}
 
 	if err := downloadCmd.Wait(); err != nil {
-		fmt.Errorf("Failed to wait download command: %v", err)
-		return err
+		return fmt.Errorf("Failed to wait download command: %v", err)
+
 	}
 	if err := untarCmd.Wait(); err != nil {
-		fmt.Errorf("Failed to wait untar command: %v", err)
-		return err
+		return fmt.Errorf("Failed to wait untar command: %v", err)
+
 	}
 
 	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", aliasPath)
 	if err := moveCmd.Run(); err != nil {
-		fmt.Errorf("Failed to move keploy binary to %s: %v", aliasPath, err)
-		return err
+		return fmt.Errorf("Failed to move keploy binary to %s: %v", aliasPath, err)
+
 	}
 
 	return nil
