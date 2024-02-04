@@ -70,11 +70,11 @@ func (u *updater) Update() {
 	}
 	err = u.downloadAndUpdate(downloadUrl)
 	if err != nil {
-		u.logger.Error("update failed", zap.Error(err))
+		u.logger.Error("Update failed!", zap.Error(err))
 		return
 	}
 
-	u.logger.Info("Update successful ")
+	u.logger.Info("Update Successful!")
 
 	changelog = "\n" + string(changelog)
 	var renderer *glamour.TermRenderer
@@ -102,7 +102,7 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	}
 
 	// Determine the path based on the alias "keploy"
-	aliasPath := "/usr/local/bin/keploy" // Default path
+	aliasPath := "/usr/local/bin/keploybin" // Default path
 	aliasCmd := exec.Command("which", "keploy")
 	aliasOutput, err := aliasCmd.Output()
 	if err == nil && len(aliasOutput) > 0 {
@@ -111,14 +111,13 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	// Check if the aliasPath is a valid path
 	_, err = os.Stat(aliasPath)
 	if os.IsNotExist(err) {
-		fmt.Errorf("alias path %s does not exist", aliasPath)
-		return err
+		return fmt.Errorf("alias path %s does not exist", aliasPath)
 	}
 
 	// Check if the aliasPath is a directory
 	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
-		fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
-		return err
+		return fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
+
 	}
 
 	downloadCmd := exec.Command(curlPath, "--silent", "--location", downloadUrl)
