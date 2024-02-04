@@ -7,7 +7,7 @@ import (
 )
 
 // NewCmdUpdate initializes a new command to update the Keploy binary file.
-func NewCmdUpdateBinary(logger *zap.Logger) *Update {
+func NewCmdUpdate(logger *zap.Logger) *Update {
 	updater := update.NewUpdater(logger)
 	return &Update{
 		updater: updater,
@@ -23,7 +23,7 @@ type Update struct {
 
 // GetCmd retrieves the command to update Keploy
 func (u *Update) GetCmd() *cobra.Command {
-	var updateBinaryCmd = &cobra.Command{
+	var updateCmd = &cobra.Command{
 		Use:     "update",
 		Short:   "Update Keploy ",
 		Example: "keploy update",
@@ -33,5 +33,5 @@ func (u *Update) GetCmd() *cobra.Command {
 			return nil
 		},
 	}
-	return updateBinaryCmd
+	return updateCmd
 }

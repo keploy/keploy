@@ -1,4 +1,4 @@
-package updateBinary
+package Update
 
 import (
 	"errors"
@@ -13,12 +13,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// GitHubRelease holds information about the GitHub release.
-type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
-}
-
 // NewUpdater initializes a new updater instance.
 func NewUpdater(logger *zap.Logger) Updater {
 	return &updater{
@@ -26,9 +20,9 @@ func NewUpdater(logger *zap.Logger) Updater {
 	}
 }
 
-// Updater defines the contract for updating keploy.
-type Updater interface {
-	Update()
+// updater manages the updating process of Keploy .
+type updater struct {
+	logger *zap.Logger
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -52,11 +46,16 @@ func (u *updater) Update() {
 		}
 		return
 	}
+	if !strings.HasSuffix(currentVersion, "-dev") {
+		u.logger.Info("You are using a development version of Keploy. Skipping update check.")
+		return
+	}
+
 	latestVersion := releaseInfo.TagName
 	changelog := releaseInfo.Body
 
 	if currentVersion == latestVersion {
-		u.logger.Info("No updates available. Current Version " + currentVersion + " " + latestVersion + " is the latest.")
+		u.logger.Info("You are on the latest version of Keploy: " + latestVersion)
 		return
 	}
 
@@ -109,6 +108,18 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	if err == nil && len(aliasOutput) > 0 {
 		aliasPath = strings.TrimSpace(string(aliasOutput))
 	}
+	// Check if the aliasPath is a valid path
+	_, err = os.Stat(aliasPath)
+	if os.IsNotExist(err) {
+		fmt.Errorf("alias path %s does not exist", aliasPath)
+		return err
+	}
+
+	// Check if the aliasPath is a directory
+	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
+		fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
+		return err
+	}
 
 	downloadCmd := exec.Command(curlPath, "--silent", "--location", downloadUrl)
 	untarCmd := exec.Command("tar", "xz", "-C", "/tmp")
@@ -126,14 +137,17 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	}
 
 	if err := downloadCmd.Wait(); err != nil {
+		fmt.Errorf("Failed to wait download command: %v", err)
 		return err
 	}
 	if err := untarCmd.Wait(); err != nil {
+		fmt.Errorf("Failed to wait untar command: %v", err)
 		return err
 	}
 
 	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", aliasPath)
 	if err := moveCmd.Run(); err != nil {
+		fmt.Errorf("Failed to move keploy binary to %s: %v", aliasPath, err)
 		return err
 	}
 

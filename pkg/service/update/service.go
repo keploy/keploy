@@ -1,8 +1,6 @@
-package updateBinary
+package Update
 
-import "go.uber.org/zap"
-
-// updater manages the updating process of Keploy .
-type updater struct {
-	logger *zap.Logger
+// Updater defines the contract for updating keploy.
+type Updater interface {
+	Update()
 }
