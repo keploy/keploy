@@ -29,7 +29,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(params TrafficCaptureParams) {
+func (r *recorder) CaptureTraffic(captureTrafficConfig models.TrafficCaptureParams) {
 	var ps *proxy.ProxySet
 
 	stopper := make(chan os.Signal, 1)
@@ -38,21 +38,21 @@ func (r *recorder) CaptureTraffic(params TrafficCaptureParams) {
 	models.SetMode(models.MODE_RECORD)
 
 	teleFS := fs.NewTeleFS(r.Logger)
-	tele := telemetry.NewTelemetry(params.EnableTele, false, teleFS, r.Logger, "", nil)
+	tele := telemetry.NewTelemetry(captureTrafficConfig.EnableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
 
-	dirName, err := yaml.NewSessionIndex(params.Path, r.Logger)
+	dirName, err := yaml.NewSessionIndex(captureTrafficConfig.Path, r.Logger)
 	if err != nil {
 		r.Logger.Error("Failed to create the session index file", zap.Error(err))
 		return
 	}
 
-	ys := yaml.NewYamlStore(params.Path+"/"+dirName+"/tests", params.Path+"/"+dirName, "", "", r.Logger, tele)
+	ys := yaml.NewYamlStore(captureTrafficConfig.Path+"/"+dirName+"/tests", captureTrafficConfig.Path+"/"+dirName, "", "", r.Logger, tele)
 	routineId := pkg.GenerateRandomID()
 
 	// Initiate the hooks and update the vacant ProxyPorts map
 	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
-	loadedHooks.SetPassThroughHosts(params.PassThroughHosts)
+	loadedHooks.SetPassThroughHosts(captureTrafficConfig.PassThroughHosts)
 	if err != nil {
 		r.Logger.Error("error while creating hooks", zap.Error(err))
 		return
@@ -71,7 +71,7 @@ func (r *recorder) CaptureTraffic(params TrafficCaptureParams) {
 		return
 	default:
 		// Load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(params.AppCmd, params.AppContainer, 0, ctx, params.Filters); err != nil {
+		if err := loadedHooks.LoadHooks(captureTrafficConfig.AppCmd, captureTrafficConfig.AppContainer, 0, ctx, captureTrafficConfig.Filters); err != nil {
 			return
 		}
 	}
@@ -82,7 +82,7 @@ func (r *recorder) CaptureTraffic(params TrafficCaptureParams) {
 		return
 	default:
 		// Start the BootProxy
-		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: params.ProxyPort}, params.AppCmd, params.AppContainer, 0, "", params.Ports, loadedHooks, ctx, 0)
+		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: captureTrafficConfig.ProxyPort}, captureTrafficConfig.AppCmd, captureTrafficConfig.AppContainer, 0, "", captureTrafficConfig.Ports, loadedHooks, ctx, 0)
 	}
 
 	// Proxy fetches the destIp and destPort from the redirect proxy map
@@ -105,7 +105,7 @@ func (r *recorder) CaptureTraffic(params TrafficCaptureParams) {
 		// Start user application
 		go func() {
 			stopApplication := false
-			if err := loadedHooks.LaunchUserApplication(params.AppCmd, params.AppContainer, params.AppNetwork, params.Delay, params.BuildDelay, false); err != nil {
+			if err := loadedHooks.LaunchUserApplication(captureTrafficConfig.AppCmd, captureTrafficConfig.AppContainer, captureTrafficConfig.AppNetwork, captureTrafficConfig.Delay, captureTrafficConfig.BuildDelay, false); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					r.Logger.Info("keploy terminated user application")
@@ -143,7 +143,7 @@ func (r *recorder) CaptureTraffic(params TrafficCaptureParams) {
 		return
 	case <-abortStopHooksInterrupt:
 		if testsTotal != 0 {
-			tele.RecordedTestSuite(params.Path, testsTotal, mocksTotal)
+			tele.RecordedTestSuite(captureTrafficConfig.Path, testsTotal, mocksTotal)
 		}
 
 	}
