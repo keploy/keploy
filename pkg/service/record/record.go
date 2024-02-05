@@ -1,10 +1,8 @@
 package record
 
 import (
-	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -31,7 +29,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters, enableTele bool, httpRequests []string) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters, enableTele bool) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -93,8 +91,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
 	exitCmd := make(chan bool)                 // channel to exit this command
-	abortStopHooksForcefully := false     
-	stopApplication := false     // boolen to stop closing of keploy via user app error
+	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
 
 	select {
 	case <-stopper:
@@ -104,7 +101,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	default:
 		// start user application
 		go func() {
-			
+			stopApplication := false
 			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay, buildDelay, false); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
@@ -119,7 +116,6 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 					r.Logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 			}
-
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
@@ -132,30 +128,6 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 			}
 		}()
 	}
-	var httpRequestSuccess bool
-	for _, httpRequest := range httpRequests {
-        time.Sleep(time.Duration(Delay) * time.Millisecond) // Adjust the time unit if needed
-        r.Logger.Info("Executing HTTP request", zap.String("request", httpRequest))
-
-        cmd := exec.Command("sh", "-c", httpRequest)
-        var cmdOutput, cmdError bytes.Buffer
-        cmd.Stdout = &cmdOutput
-        cmd.Stderr = &cmdError
-
-        if err := cmd.Run(); err != nil {
-            r.Logger.Error("Error executing HTTP request", zap.String("request", httpRequest), zap.String("error", err.Error()), zap.String("stderr", cmdError.String()))
-        } else {
-			httpRequestSuccess = true
-            r.Logger.Info("HTTP request executed successfully", zap.String("request", httpRequest), zap.String("response", cmdOutput.String()))
-        }
-    }
-	if  httpRequestSuccess {
-		// Stop listening for eBPF events and stop the proxy server.
-		loadedHooks.Stop(!stopApplication)
-		ps.StopProxyServer()
-	}
-
-
 
 	select {
 	case <-stopper:
@@ -174,5 +146,4 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	}
 
 	<-exitCmd
-
 }

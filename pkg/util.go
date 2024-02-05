@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	yamlLib "gopkg.in/yaml.v3"
 	"io"
 	"math/rand"
 	"net/http"
@@ -216,42 +215,4 @@ func GetNextTestReportDir(testReportPath, subDirPrefix string) (string, error) {
 
 	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
 	return newTestReportPath, nil
-}
-
-func StoreHTTPCurlCommands(path string, testSet string) []string {
-	if testSet == "" {
-		return nil
-	}
-	var httpRequests []string
-	if testSet != "" {
-		testCasePath := filepath.Join(path, testSet, "tests")
-		var testCase *models.TestCase // Ensure models.TestCase is correctly defined
-
-		testfiles, err := os.ReadDir(testCasePath)
-		if err != nil {
-			fmt.Errorf("error while reading test files", zap.Error(err))
-			return nil
-		}
-
-		for _, file := range testfiles {
-			if !file.IsDir() {
-				filePath := filepath.Join(testCasePath, file.Name())
-				fileContent, err := os.ReadFile(filePath)
-				if err != nil {
-					fmt.Errorf("error reading file", zap.String("file", filePath), zap.Error(err))
-					continue
-				}
-
-				if err := yamlLib.Unmarshal(fileContent, &testCase); err != nil {
-					fmt.Errorf("error unmarshaling YAML", zap.String("file", filePath), zap.Error(err))
-					continue
-				}
-				httpRequests = append(httpRequests, testCase.Curl)
-				fmt.Print("httpRequests", zap.Any("httpRequests", httpRequests))
-			}
-		}
-
-	}
-	return httpRequests
-
 }
