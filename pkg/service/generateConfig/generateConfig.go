@@ -68,7 +68,7 @@ test:
       - path: ""
         host: ""
         ports: 0
-  disableReportFile: false
+  generateTestReport: true
   withCoverage: false
   coverageReportPath: ""
 `

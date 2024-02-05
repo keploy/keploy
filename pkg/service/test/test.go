@@ -198,7 +198,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, disableReportFile bool, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) Test(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool {
 
 	testRes := false
 	result := true
@@ -208,7 +208,7 @@ func (t *tester) Test(path string, testReportPath string, disableReportFile bool
 		Path:               path,
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
-		DisableReportFile:  disableReportFile,
+		GenerateTestReport: generateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
@@ -240,7 +240,7 @@ func (t *tester) Test(path string, testReportPath string, disableReportFile bool
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, disableReportFile, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, options.IgnoreOrdering)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, initialisedValues.YamlStore, initialisedValues.LoadedHooks, initialisedValues.TestReportFS, nil, options.ApiTimeout, initialisedValues.Ctx, testcases, noiseConfig, false, options.IgnoreOrdering)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -390,8 +390,8 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		Status: string(models.TestRunStatusRunning),
 	}
 
-	// does not generate the test report if disableReportFile flag is present
-	if !cfg.DisableReportFile {
+	// does not generate the test report if generateTestReport flag is false
+	if cfg.GenerateTestReport {
 		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
 		if err != nil {
 			t.logger.Error(err.Error())
@@ -535,7 +535,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	(*resultForTele)[0] += *cfg.Success
 	(*resultForTele)[1] += *cfg.Failure
 
-	if !cfg.DisableReportFile {
+	if cfg.GenerateTestReport {
 
 		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
 
@@ -560,26 +560,26 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	return *cfg.Status
 }
 
-// testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath string, disableReportFile bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, ignoreOrdering bool) models.TestRunStatus {
+// testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
+func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestReport bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHooks *hooks.Hook, testReportFS platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, ignoreOrdering bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
-		TestSet:           testSet,
-		Path:              path,
-		TestReportPath:    testReportPath,
-		DisableReportFile: disableReportFile,
-		AppCmd:            appCmd,
-		AppContainer:      appContainer,
-		AppNetwork:        appNetwork,
-		Delay:             delay,
-		BuildDelay:        buildDelay,
-		Pid:               pid,
-		YamlStore:         ys,
-		LoadedHooks:       loadedHooks,
-		TestReportFS:      testReportFS,
-		TestRunChan:       testRunChan,
-		ApiTimeout:        apiTimeout,
-		Ctx:               ctx,
-		ServeTest:         serveTest,
+		TestSet:            testSet,
+		Path:               path,
+		TestReportPath:     testReportPath,
+		GenerateTestReport: generateTestReport,
+		AppCmd:             appCmd,
+		AppContainer:       appContainer,
+		AppNetwork:         appNetwork,
+		Delay:              delay,
+		BuildDelay:         buildDelay,
+		Pid:                pid,
+		YamlStore:          ys,
+		LoadedHooks:        loadedHooks,
+		TestReportFS:       testReportFS,
+		TestRunChan:        testRunChan,
+		ApiTimeout:         apiTimeout,
+		Ctx:                ctx,
+		ServeTest:          serveTest,
 	}
 	initialisedValues := t.InitialiseRunTestSet(cfg)
 	if initialisedValues.InitialStatus != "" {
@@ -709,16 +709,16 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, disableReportF
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
 	resultsCfg := &FetchTestResultsConfig{
-		TestReportFS:      testReportFS,
-		TestReport:        initialisedValues.TestReport,
-		Status:            &status,
-		TestSet:           testSet,
-		Success:           &success,
-		Failure:           &failure,
-		Ctx:               ctx,
-		TestReportPath:    testReportPath,
-		DisableReportFile: disableReportFile,
-		Path:              path,
+		TestReportFS:       testReportFS,
+		TestReport:         initialisedValues.TestReport,
+		Status:             &status,
+		TestSet:            testSet,
+		Success:            &success,
+		Failure:            &failure,
+		Ctx:                ctx,
+		TestReportPath:     testReportPath,
+		GenerateTestReport: generateTestReport,
+		Path:               path,
 	}
 	status = t.FetchTestResults(resultsCfg)
 	return status

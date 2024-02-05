@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, disableReportFile *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -82,7 +82,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 		*coverageReportPath = confTest.CoverageReportPath
 	}
 	*withCoverage = *withCoverage || confTest.WithCoverage
-	*disableReportFile = *disableReportFile || confTest.DisableReportFile
+	*generateTestReport = *generateTestReport || confTest.GenerateTestReport
 	if *apiTimeout == 5 {
 		*apiTimeout = confTest.ApiTimeout
 	}
@@ -222,7 +222,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
-			disableReportFile, err := cmd.Flags().GetBool("disableReportFile")
+			generateTestReport, err := cmd.Flags().GetBool("generateTestReport")
 			if err != nil {
 				t.logger.Error("failed to read the generate test teport flag")
 				return err
@@ -257,7 +257,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			passThroughHosts := []models.Filters{}
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &disableReportFile, configPath, &ignoreOrdering, &passThroughHosts)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("Keploy config not found, continuing without configuration")
@@ -395,7 +395,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			testReportPath := ""
 
-			if !disableReportFile {
+			if generateTestReport {
 				testReportPath = path + "/testReports"
 	
 				testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
@@ -425,9 +425,9 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, mongoPassword, testReportPath, disableReportFile, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
-				t.tester.Test(path, testReportPath, disableReportFile, appCmd, test.TestOptions{
+				t.tester.Test(path, testReportPath, generateTestReport, appCmd, test.TestOptions{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,
@@ -481,7 +481,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Uint32("pid", 0, "Process id of your application.")
 
-	testCmd.Flags().Bool("disableReportFile", false, "Disable the generation of test report")
+	testCmd.Flags().BoolP("generateTestReport", "g", true, "Generate of test report")
 
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 
