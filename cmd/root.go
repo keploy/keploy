@@ -279,12 +279,11 @@ func (r *Root) execute() {
 
 	//Set the version template for version command
 	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
-
 	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
 	defer deleteLogs(r.logger)
-	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger))
+	r.subCommands = append(r.subCommands, NewCmdRecord(r.logger), NewCmdTest(r.logger), NewCmdExample(r.logger), NewCmdMockRecord(r.logger), NewCmdMockTest(r.logger), NewCmdGenerateConfig(r.logger), NewCmdUpdate(r.logger))
 
 	// add the registered keploy plugins as subcommands to the rootCmd
 	for _, sc := range r.subCommands {
