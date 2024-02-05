@@ -51,7 +51,7 @@ type Test struct {
 	ApiTimeout              uint64              `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts        []uint              `json:"passThroughPorts" yaml:"passThroughPorts"`
 	BypassEndpointsRegistry []string            `json:"bypassEndpointsRegistry" yaml:"bypassEndpointsRegistry"`
-	GenerateTestReport       bool               `json:"generateTestReport" yaml:"generateTestReport"`
+	GenerateTestReport      bool                `json:"generateTestReport" yaml:"generateTestReport"`
 	WithCoverage            bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
 	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
