@@ -6,8 +6,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go.uber.org/zap"
-
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -15,6 +13,7 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -30,13 +29,12 @@ func NewRecorder(logger *zap.Logger) Recorder {
 }
 
 func (r *recorder) CaptureTraffic(captureTrafficConfig models.TrafficCaptureParams) {
-	var ps *proxy.ProxySet
 
+	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	models.SetMode(models.MODE_RECORD)
-
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(captureTrafficConfig.EnableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
@@ -49,8 +47,7 @@ func (r *recorder) CaptureTraffic(captureTrafficConfig models.TrafficCapturePara
 
 	ys := yaml.NewYamlStore(captureTrafficConfig.Path+"/"+dirName+"/tests", captureTrafficConfig.Path+"/"+dirName, "", "", r.Logger, tele)
 	routineId := pkg.GenerateRandomID()
-
-	// Initiate the hooks and update the vacant ProxyPorts map
+	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
 	loadedHooks.SetPassThroughHosts(captureTrafficConfig.PassThroughHosts)
 	if err != nil {
@@ -70,7 +67,7 @@ func (r *recorder) CaptureTraffic(captureTrafficConfig models.TrafficCapturePara
 	case <-stopper:
 		return
 	default:
-		// Load the ebpf hooks into the kernel
+		// load the ebpf hooks into the kernel
 		if err := loadedHooks.LoadHooks(captureTrafficConfig.AppCmd, captureTrafficConfig.AppContainer, 0, ctx, captureTrafficConfig.Filters); err != nil {
 			return
 		}
@@ -81,20 +78,20 @@ func (r *recorder) CaptureTraffic(captureTrafficConfig models.TrafficCapturePara
 		loadedHooks.Stop(true)
 		return
 	default:
-		// Start the BootProxy
+		// start the BootProxy
 		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: captureTrafficConfig.ProxyPort}, captureTrafficConfig.AppCmd, captureTrafficConfig.AppContainer, 0, "", captureTrafficConfig.Ports, loadedHooks, ctx, 0)
 	}
 
-	// Proxy fetches the destIp and destPort from the redirect proxy map
-	// Sending Proxy IP & Port to the ebpf program
+	//proxy fetches the destIp and destPort from the redirect proxy map
+	//Sending Proxy Ip & Port to the ebpf program
 	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
 		return
 	}
 
 	// Channels to communicate between different types of closing keploy
-	abortStopHooksInterrupt := make(chan bool) // Channel to stop closing of keploy via interrupt
-	exitCmd := make(chan bool)                 // Channel to exit this command
-	abortStopHooksForcefully := false          // Boolean to stop closing of keploy via user app error
+	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
+	exitCmd := make(chan bool)                 // channel to exit this command
+	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
 
 	select {
 	case <-stopper:
@@ -102,7 +99,7 @@ func (r *recorder) CaptureTraffic(captureTrafficConfig models.TrafficCapturePara
 		ps.StopProxyServer()
 		return
 	default:
-		// Start user application
+		// start user application
 		go func() {
 			stopApplication := false
 			if err := loadedHooks.LaunchUserApplication(captureTrafficConfig.AppCmd, captureTrafficConfig.AppContainer, captureTrafficConfig.AppNetwork, captureTrafficConfig.Delay, captureTrafficConfig.BuildDelay, false); err != nil {
@@ -112,18 +109,18 @@ func (r *recorder) CaptureTraffic(captureTrafficConfig models.TrafficCapturePara
 					return
 				case hooks.ErrCommandError:
 				case hooks.ErrUnExpected:
-					r.Logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behavior is not expected")
+					r.Logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
 				case hooks.ErrDockerError:
 					stopApplication = true
 				default:
-					r.Logger.Error("unknown error received from application", zap.Error(err))
+					r.Logger.Error("unknown error recieved from application", zap.Error(err))
 				}
 			}
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
-				// Stop listening for the eBPF events
+				// stop listening for the eBPF events
 				loadedHooks.Stop(!stopApplication)
-				// Stop listening for proxy server
+				//stop listening for proxy server
 				ps.StopProxyServer()
 				exitCmd <- true
 			} else {
