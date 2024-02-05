@@ -8,8 +8,10 @@
 # Test binary, built with `go test -c`
 *.test
 
-# Ignore the server binary output by `go build`
-server
+# Ignore the server binary output by `go build` but not any folders with the name server
+/server
+!/server/
+
 
 # Ignore the config and log files
 keploy-config.yaml
