@@ -334,7 +334,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			requestBuffer, err = util.ReadBytes(clientConn)
 			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
-				if !h.IsUsrAppTerminateInitiated() {
+				if !h.IsUserAppTerminateInitiated() {
 					if err == io.EOF {
 						logger.Debug("recieved request buffer is empty in record mode for mongo call")
 						return
@@ -376,7 +376,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 
 				// logStr += tmpStr
 				if err != nil {
-					if !h.IsUsrAppTerminateInitiated() {
+					if !h.IsUserAppTerminateInitiated() {
 						if err == io.EOF {
 							logger.Debug("recieved request buffer is empty in record mode for mongo request")
 							return

@@ -304,8 +304,8 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		tcs = append(tcs, tc)
 	}
 
-	sort.Slice(tcs, func(i, j int) bool {
-		return tcs[i].Created < tcs[j].Created
+	sort.SliceStable(tcs, func(i, j int) bool {
+		return tcs[i].HttpReq.Timestamp.Before(tcs[j].HttpReq.Timestamp)
 	})
 	tcsRead := make([]platform.KindSpecifier, len(tcs))
 	for i, tc := range tcs {
