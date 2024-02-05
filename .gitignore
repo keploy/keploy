@@ -12,7 +12,6 @@
 /server
 !/server/
 
-
 # Ignore the config and log files
 keploy-config.yaml
 keploy-logs.txt
