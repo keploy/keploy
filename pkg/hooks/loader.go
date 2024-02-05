@@ -198,8 +198,16 @@ func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
 	return tcsMocks, nil
 }
 
-func (h *Hook) IsUsrAppTerminateInitiated() bool {
+func (h *Hook) IsUserAppTerminateInitiated() bool {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 	return h.userAppShutdownInitiated
+}
+
+func (h *Hook) SetUserAppTerminateInitiated(state bool) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.userAppShutdownInitiated = state
 }
 
 func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
@@ -402,7 +410,7 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
 	h.logger.Info("keploy has initiated the shutdown of the user application.")
-	h.userAppShutdownInitiated = true
+	h.SetUserAppTerminateInitiated(true)
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
@@ -456,7 +464,7 @@ func deleteFileIfExists(filename string, logger *zap.Logger) error {
 
 func (h *Hook) Stop(forceStop bool) {
 
-	if !forceStop {
+	if !forceStop && !h.IsUserAppTerminateInitiated() {
 		h.logger.Info("Received signal to exit keploy program..")
 		h.StopUserApplication()
 	} else {
