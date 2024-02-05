@@ -472,7 +472,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 
-	testCmd.Flags().Bool("ignoreOrdering", false, "Ignore ordering of array in response")
+	testCmd.Flags().Bool("ignoreOrdering", true, "Ignore ordering of array in response")
 
 	testCmd.Flags().MarkHidden("enableTele")
 
