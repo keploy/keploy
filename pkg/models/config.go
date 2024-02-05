@@ -17,6 +17,7 @@ type Record struct {
 	BuildDelay       time.Duration `json:"buildDelay" yaml:"buildDelay"`
 	PassThroughPorts []uint        `json:"passThroughPorts" yaml:"passThroughPorts"`
 	Filters          Filters       `json:"filters" yaml:"filters"`
+	ReRecord         []string      `json:"reRecord" yaml:"reRecord"`
 }
 
 type Filters struct {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/service/record"
 	"go.keploy.io/server/utils"
@@ -42,7 +43,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = models.Filters{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, configPath string) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, configPath string, reRecord *[]string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -57,6 +58,11 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if len(*path) == 0 {
 		*path = confRecord.Path
 	}
+
+	if len(*reRecord) == 0 {
+		*reRecord = confRecord.ReRecord
+	}
+
 	filters = confRecord.Filters
 	if *proxyPort == 0 {
 		*proxyPort = confRecord.ProxyPort
@@ -144,6 +150,12 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			reRecord, err := cmd.Flags().GetStringSlice("re-record")
+			if err != nil {
+				r.logger.Error("failed to read the re-record flag")
+				return err
+			}
+
 			configPath, err := cmd.Flags().GetString("config-path")
 			if err != nil {
 				r.logger.Error("failed to read the config path")
@@ -156,7 +168,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, configPath)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, configPath, &reRecord)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("continuing without configuration file because file not found")
@@ -257,7 +269,18 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele)
+			if len(reRecord) > 0 {
+				for _, testSet := range reRecord {
+					httpRequests:=pkg.StoreHTTPCurlCommands(path, testSet)
+					r.logger.Info("httpRequests", zap.Any("httpRequests", httpRequests))
+					r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, httpRequests)
+					
+
+
+				}
+			}else {
+			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele,[]string{} )
+			}
 			return nil
 		},
 	}
@@ -279,6 +302,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().UintSlice("passThroughPorts", []uint{}, "Ports of Outgoing dependency calls to be ignored as mocks")
 
 	recordCmd.Flags().String("config-path", ".", "Path to the local directory where keploy configuration file is stored")
+
+	recordCmd.Flags().StringSlice("re-record", []string{}, "Re-record the testcases/mocks for the given testcases/mocks")
 
 	recordCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 	recordCmd.Flags().MarkHidden("enableTele")
