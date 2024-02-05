@@ -21,6 +21,8 @@ fi
 config_file="./keploy-config.yaml"
 sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
+sed -i 's/ports: 0/ports: 27017/' "$config_file"
+
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
 
@@ -33,8 +35,16 @@ sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &
 
 # Wait for the application to start.
 app_started=false
+
+sleep 5
+
 while [ "$app_started" = false ]; do
-    if curl -X GET http://localhost:8080/CJBKJd92; then
+    if curl --request POST \
+  --url http://localhost:8080/url \
+  --header 'content-type: application/json' \
+  --data '{
+  "url": "https://facebook.com"
+}'; then
         app_started=true
     fi
     sleep 3 # wait for 3 seconds before checking again.
