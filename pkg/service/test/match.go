@@ -179,7 +179,7 @@ func matchJsonWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		}
 		if !ignoreOrdering {
 			for i := 0; i < expSlice.Len(); i++ {
-				if valMatchJsonComparisonResult, er := matchJsonWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering); er == nil && !valMatchJsonComparisonResult.isExact {
+				if valMatchJsonComparisonResult, er := matchJsonWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering); er != nil || !valMatchJsonComparisonResult.isExact {
 					isExact = false
 					break
 				}
