@@ -63,7 +63,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, nil, serveTest, false)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, true, "", "", "", delay, 30*time.Second, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, nil, serveTest, false)
 	}()
 
 	testRunID := <-testRunChan
