@@ -36,7 +36,7 @@ func (u *updater) Update() {
 		u.logger.Info("Please Pull the latest Docker image of Keploy")
 		return
 	}
-	if !strings.HasSuffix(currentVersion, "-dev") {
+	if strings.HasSuffix(currentVersion, "-dev") {
 		u.logger.Info("You are using a development version of Keploy. Skipping update check.")
 		return
 	}
