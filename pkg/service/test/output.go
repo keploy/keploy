@@ -11,6 +11,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/yudai/gojsondiff"
 	"github.com/yudai/gojsondiff/formatter"
+	"go.keploy.io/server/utils"
 )
 
 // Chars PER expected/actual string. Can be changed no problem
@@ -85,12 +86,14 @@ func (d *DiffsPrinter) Render() error {
 		table.Append([]string{e})
 	}
 	if d.hasarrayIndexMismatch {
-		table.SetHeader([]string{d.text})
+		yellowPaint := color.New(color.FgYellow).SprintFunc()
+		redPaint := color.New(color.FgRed).SprintFunc()
+		initalPart := yellowPaint(utils.WarningSign + " Expected and actual value of ")
+		midPartpaint := redPaint(d.text)
+		endPaint := yellowPaint(" are in different order but have the same objects")
+		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
-		paint := color.New(color.FgYellow).SprintFunc()
-		postPaint := paint(d.text)
-		table.Append([]string{postPaint})
-
+		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 	table.Render()
 	return nil

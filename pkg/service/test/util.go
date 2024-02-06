@@ -22,6 +22,17 @@ import (
 	"go.uber.org/zap"
 )
 
+type jsonComparisonResult struct {
+	matches     bool     // Indicates if the JSON strings match according to the criteria
+	isExact     bool     // Indicates if the match is exact, considering ordering and noise
+	differences []string // Lists the keys or indices of values that are not the same
+}
+
+type validatedJSON struct {
+	expected interface{} // The expected JSON
+	actual   interface{} // The actual JSON
+}
+
 type InitialiseRunTestSetReturn struct {
 	Tcs           []*models.TestCase
 	ErrChan       chan error

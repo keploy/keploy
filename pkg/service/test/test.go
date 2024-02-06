@@ -760,11 +760,16 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	}
 
 	// stores the json body after removing the noise
-	cleanExp, cleanAct := "", ""
-	var err error
-	isSame := false
+	cleanExp, cleanAct := tc.HttpResp.Body, actualResponse.Body
+	var jsonComparisonResult jsonComparisonResult
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
+		//validate the stored json
+		validatedJSON, err := ValidateAndMarshalJson(t.logger, &cleanExp, &cleanAct)
+		if err != nil {
+			return false, res
+		}
+		jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
+		pass = jsonComparisonResult.isExact
 		if err != nil {
 			return false, res
 		}
@@ -838,9 +843,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					if isSame {
+					if jsonComparisonResult.matches {
 						logDiffs.hasarrayIndexMismatch = true
-						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
+						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 
