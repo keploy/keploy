@@ -391,7 +391,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	// starts the testrun
-	if generateTestReport {
+	if cfg.GenerateTestReport {
 		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
 		if err != nil {
 			t.logger.Error(err.Error())
