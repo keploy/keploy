@@ -56,9 +56,6 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	testReportFS := yaml.NewTestReportFS(g.logger)
 	teleFS := fs.NewTeleFS(g.logger)
 
-	// Delete the generated test report if flag is not set
-	defer utils.DeleteTestReports(g.logger, generateTestReport)
-
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore("", "", "", "", g.logger, tele)

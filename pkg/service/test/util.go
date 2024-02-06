@@ -63,22 +63,23 @@ type TestConfig struct {
 }
 
 type RunTestSetConfig struct {
-	TestSet        string
-	Path           string
-	TestReportPath string
-	AppCmd         string
-	AppContainer   string
-	AppNetwork     string
-	Delay          uint64
-	BuildDelay     time.Duration
-	Pid            uint32
-	YamlStore      platform.TestCaseDB
-	LoadedHooks    *hooks.Hook
-	TestReportFS   platform.TestReportDB
-	TestRunChan    chan string
-	ApiTimeout     uint64
-	Ctx            context.Context
-	ServeTest      bool
+	TestSet            string
+	Path               string
+	TestReportPath     string
+	AppCmd             string
+	AppContainer       string
+	AppNetwork         string
+	Delay              uint64
+	BuildDelay         time.Duration
+	Pid                uint32
+	YamlStore          platform.TestCaseDB
+	LoadedHooks        *hooks.Hook
+	TestReportFS       platform.TestReportDB
+	TestRunChan        chan string
+	ApiTimeout         uint64
+	Ctx                context.Context
+	ServeTest          bool
+	GenerateTestReport bool
 }
 
 type SimulateRequestConfig struct {
@@ -100,15 +101,16 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   platform.TestReportDB
-	TestReport     *models.TestReport
-	Status         *models.TestRunStatus
-	TestSet        string
-	Success        *int
-	Failure        *int
-	Ctx            context.Context
-	TestReportPath string
-	Path           string
+	TestReportFS       platform.TestReportDB
+	TestReport         *models.TestReport
+	Status             *models.TestRunStatus
+	TestSet            string
+	Success            *int
+	Failure            *int
+	Ctx                context.Context
+	TestReportPath     string
+	Path               string
+	GenerateTestReport bool
 }
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {

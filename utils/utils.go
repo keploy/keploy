@@ -138,24 +138,6 @@ func HandlePanic() {
 	}
 }
 
-func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
-	if generateTestReport {
-		return
-	}
-
-	//Remove testReports folder if it exists and generateTestReport flag is not set
-	_, err := os.Stat("keploy/testReports")
-	if os.IsNotExist(err) {
-		return
-	}
-	err = os.RemoveAll("keploy/testReports")
-	if err != nil {
-		logger.Error("Error removing testReports folder: %v\n", zap.String("error", err.Error()))
-		return
-	}
-
-}
-
 // getLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
 func GetLatestGitHubRelease() (GitHubRelease, error) {
 	// GitHub repository details
