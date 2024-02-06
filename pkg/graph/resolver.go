@@ -20,7 +20,6 @@ type Resolver struct {
 	Logger             *zap.Logger
 	Path               string
 	TestReportPath     string
-	GenerateTestReport bool
 	Delay              uint64
 	AppPid             uint32
 	ApiTimeout         uint64
