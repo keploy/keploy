@@ -265,4 +265,6 @@ func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
 		logger.Error("Error while removing test reports: %v", zap.String("error", err.Error()))
 		return
 	}
+
+	logger.Info("Test Reports are being removed since generateTestReport flag is set false")
 }

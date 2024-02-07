@@ -407,6 +407,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 			return returnVal
 		}
 	} else {
+		t.logger.Info("Test Reports are not being generated since generateTestReport flag is set false")
 		index := strings.Split(cfg.TestSet, "-")[2]
 		returnVal.TestReport.Name = fmt.Sprintf("report-%v", index)
 	}
@@ -546,6 +547,8 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	if cfg.GenerateTestReport {
 		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
 		t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
+	} else {
+		t.logger.Info("Test Reports are not being generated since generateTestReport flag is set false")
 	}
 
 	if *cfg.Status == models.TestRunStatusFailed {
