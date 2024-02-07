@@ -1,5 +1,5 @@
 package generateConfig
 
 type GeneratorConfig interface {
-	GenerateConfig(path string)
+	GenerateConfig(path string, options GenerateConfigOptions)
 }
