@@ -30,7 +30,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters, keployRecorderStopTimer time.Duration) {
+func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters, recordTimer time.Duration) {
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
@@ -40,10 +40,10 @@ func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, ap
 		return
 	}
 	tcDB := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
-	r.CaptureTraffic(path, proxyPort, appCmd, appContainer, appNetwork, dirName, delay, buildDelay, ports, filters, tcDB, tele, passThroughHosts, keployRecorderStopTimer)
+	r.CaptureTraffic(path, proxyPort, appCmd, appContainer, appNetwork, dirName, delay, buildDelay, ports, filters, tcDB, tele, passThroughHosts, recordTimer)
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters, keployRecorderStopTimer time.Duration) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters, recordTimer time.Duration) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -106,10 +106,10 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// check whether user has provided any timer duration
-		if keployRecorderStopTimer != 0 {
+		if recordTimer != 0 {
 			go func() {
-				r.Logger.Info("Setting a timer of " + keployRecorderStopTimer.String())
-				timer := time.After(keployRecorderStopTimer)
+				r.Logger.Info("Setting a timer of " + recordTimer.String())
+				timer := time.After(recordTimer)
 				select {
 				case <-timer:
 					r.Logger.Warn("Time up! Stopping the timer")

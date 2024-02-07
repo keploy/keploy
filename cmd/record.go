@@ -42,7 +42,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = models.TestFilter{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, passThrough *[]models.Filters, configPath string, keployRecorderStopTimer *time.Duration) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, passThrough *[]models.Filters, configPath string, recordTimer *time.Duration) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -165,14 +165,14 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
-			keployRecorderStopTimer, err := cmd.Flags().GetDuration("keployRecorderStopTimer")
+			recordTimer, err := cmd.Flags().GetDuration("recordTimer")
 			if err != nil {
 				r.logger.Error("Failed to read the timer value")
 			}
 
 			passThrough := []models.Filters{}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath, &keployRecorderStopTimer)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath, &recordTimer)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("Keploy config not found, continuing without configuration")
@@ -299,7 +299,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				}
 			}
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough, keployRecorderStopTimer)
+			r.recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough, recordTimer)
 			return nil
 		},
 	}
@@ -308,7 +308,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 	recordCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
-	recordCmd.Flags().DurationP("keployRecorderStopTimer", "t", 0, "Command to initiate a timer that automatically stops the Keploy recorder after a specified duration of time")
+	recordCmd.Flags().DurationP("recordTimer", "t", 0, "Timer to stop keploy recorder after a specified time")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
