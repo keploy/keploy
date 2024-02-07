@@ -42,8 +42,8 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(options *models.TestConfigOptions) error {
-	configFilePath := filepath.Join(options.ConfigPath, "keploy-config.yaml")
+func (t *Test) getTestConfig(options models.TestConfigOptions) error {
+	configFilePath := filepath.Join(*options.ConfigPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
 	}
@@ -51,50 +51,50 @@ func (t *Test) getTestConfig(options *models.TestConfigOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
-	if len(options.Path) == 0 {
-		options.Path = confTest.Path
+	if len(*options.Path) == 0 {
+		*options.Path = confTest.Path
 	}
-	if options.ProxyPort == 0 {
-		options.ProxyPort = confTest.ProxyPort
+	if *options.ProxyPort == 0 {
+		*options.ProxyPort = confTest.ProxyPort
 	}
-	if len(options.AppCmd) == 0 {
-		options.AppCmd = confTest.Command
+	if len(*options.AppCmd) == 0 {
+		*options.AppCmd = confTest.Command
 	}
 	for testset, testcases := range confTest.SelectedTests {
-		if _, ok := options.Tests[testset]; !ok {
-			options.Tests[testset] = testcases
+		if _, ok := (*options.Tests)[testset]; !ok {
+			(*options.Tests)[testset] = testcases
 		}
 	}
-	if len(options.AppContainer) == 0 {
-		options.AppContainer = confTest.ContainerName
+	if len(*options.AppContainer) == 0 {
+		*options.AppContainer = confTest.ContainerName
 	}
-	if len(options.NetworkName) == 0 {
-		options.NetworkName = confTest.NetworkName
+	if len(*options.NetworkName) == 0 {
+		*options.NetworkName = confTest.NetworkName
 	}
-	if options.Delay == 5 {
-		options.Delay = confTest.Delay
+	if *options.Delay == 5 {
+		*options.Delay = confTest.Delay
 	}
-	if options.BuildDelay == 30*time.Second && confTest.BuildDelay != 0 {
-		options.BuildDelay = confTest.BuildDelay
+	if *options.BuildDelay == 30*time.Second && confTest.BuildDelay != 0 {
+		*options.BuildDelay = confTest.BuildDelay
 	}
-	if len(options.CoverageReportPath) == 0 {
-		options.CoverageReportPath = confTest.CoverageReportPath
+	if len(*options.CoverageReportPath) == 0 {
+		*options.CoverageReportPath = confTest.CoverageReportPath
 	}
-	options.WithCoverage = options.WithCoverage || confTest.WithCoverage
-	if options.ApiTimeout == 5 {
-		options.ApiTimeout = confTest.ApiTimeout
+	*options.WithCoverage = *options.WithCoverage || confTest.WithCoverage
+	if *options.ApiTimeout == 5 {
+		*options.ApiTimeout = confTest.ApiTimeout
 	}
-	options.GlobalNoise = confTest.GlobalNoise.Global
-	options.TestSetNoise = confTest.GlobalNoise.Testsets
-	if !options.IgnoreOrdering {
-		options.IgnoreOrdering = confTest.IgnoreOrdering
+	*options.GlobalNoise = confTest.GlobalNoise.Global
+	*options.TestSetNoise = confTest.GlobalNoise.Testsets
+	if !*options.IgnoreOrdering {
+		*options.IgnoreOrdering = confTest.IgnoreOrdering
 	}
-	passThroughPortProvided := len(options.PassThroughPorts) == 0
+	passThroughPortProvided := len(*options.PassThroughPorts) == 0
 	for _, filter := range confTest.Stubs.Filters {
 		if filter.Port != 0 && filter.Host == "" && filter.Path == "" && passThroughPortProvided {
-			options.PassThroughPorts = append(options.PassThroughPorts, filter.Port)
+			*options.PassThroughPorts = append(*options.PassThroughPorts, filter.Port)
 		} else {
-			options.PassThroughHosts = append(options.PassThroughHosts, filter)
+			*options.PassThroughHosts = append(*options.PassThroughHosts, filter)
 		}
 	}
 
@@ -250,24 +250,24 @@ func (t *Test) GetCmd() *cobra.Command {
 			passThroughHosts := []models.Filters{}
 
 			err = t.getTestConfig(
-				&models.TestConfigOptions{
-					Path:               path,
-					ProxyPort:          proxyPort,
-					AppCmd:             appCmd,
-					Tests:              tests,
-					AppContainer:       appContainer,
-					NetworkName:        networkName,
-					Delay:              delay,
-					BuildDelay:         buildDelay,
-					PassThroughPorts:   ports,
-					ApiTimeout:         apiTimeout,
-					GlobalNoise:        globalNoise,
-					TestSetNoise:       testsetNoise,
-					CoverageReportPath: coverageReportPath,
-					WithCoverage:       withCoverage,
-					ConfigPath:         configPath,
-					IgnoreOrdering:     ignoreOrdering,
-					PassThroughHosts:   passThroughHosts,
+				models.TestConfigOptions{
+					Path:               &path,
+					ProxyPort:          &proxyPort,
+					AppCmd:             &appCmd,
+					Tests:              &tests,
+					AppContainer:       &appContainer,
+					NetworkName:        &networkName,
+					Delay:              &delay,
+					BuildDelay:         &buildDelay,
+					PassThroughPorts:   &ports,
+					ApiTimeout:         &apiTimeout,
+					GlobalNoise:        &globalNoise,
+					TestSetNoise:       &testsetNoise,
+					CoverageReportPath: &coverageReportPath,
+					WithCoverage:       &withCoverage,
+					ConfigPath:         &configPath,
+					IgnoreOrdering:     &ignoreOrdering,
+					PassThroughHosts:   &passThroughHosts,
 				},
 			)
 			if err != nil {
