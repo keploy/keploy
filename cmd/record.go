@@ -42,7 +42,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = models.TestFilter{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, passThrough *[]models.Filters, configPath string) error {
+func (t *Record) GetRecordConfig(options *models.RecordOptions, configPath string) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -54,37 +54,37 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 		fmt.Println(utils.ConfigGuide)
 		return nil
 	}
-	if len(*path) == 0 {
-		*path = confRecord.Path
+	if len(options.Path) == 0 {
+		options.Path = confRecord.Path
 	}
 
 	filters = confRecord.Tests
 
-	if *proxyPort == 0 {
-		*proxyPort = confRecord.ProxyPort
+	if options.ProxyPort == 0 {
+		options.ProxyPort = confRecord.ProxyPort
 	}
-	if *appCmd == "" {
-		*appCmd = confRecord.Command
+	if options.AppCmd == "" {
+		options.AppCmd = confRecord.Command
 	}
-	if *appContainer == "" {
-		*appContainer = confRecord.ContainerName
+	if options.AppContainer == "" {
+		options.AppContainer = confRecord.ContainerName
 	}
-	if *networkName == "" {
-		*networkName = confRecord.NetworkName
+	if options.AppNetwork == "" {
+		options.AppNetwork = confRecord.NetworkName
 	}
-	if *Delay == 5 {
-		*Delay = confRecord.Delay
+	if options.Delay == 5 {
+		options.Delay = confRecord.Delay
 	}
-	if *buildDelay == 30*time.Second && confRecord.BuildDelay != 0 {
-		*buildDelay = confRecord.BuildDelay
+	if options.BuildDelay == 30*time.Second && confRecord.BuildDelay != 0 {
+		options.BuildDelay = confRecord.BuildDelay
 	}
-	passThroughPortProvided := len(*passThroughPorts) == 0
+	passThroughPortProvided := len(options.Ports) == 0
 
 	for _, filter := range confRecord.Stubs.Filters {
 		if filter.Port != 0 && filter.Host == "" && filter.Path == "" && passThroughPortProvided {
-			*passThroughPorts = append(*passThroughPorts, filter.Port)
+			options.Ports = append(options.Ports, filter.Port)
 		} else {
-			*passThrough = append(*passThrough, filter)
+			options.PassThroughHosts = append(options.PassThroughHosts, filter)
 		}
 	}
 
@@ -167,7 +167,19 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			passThrough := []models.Filters{}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath)
+			err = r.GetRecordConfig(&models.RecordOptions{
+				Path:             path,
+				ProxyPort:        proxyPort,
+				AppCmd:           appCmd,
+				AppContainer:     appContainer,
+				AppNetwork:       networkName,
+				Delay:            delay,
+				BuildDelay:       buildDelay,
+				Ports:            ports,
+				Filters:          &filters,
+				EnableTele:       enableTele,
+				PassThroughHosts: passThrough,
+			}, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("Keploy config not found, continuing without configuration")
