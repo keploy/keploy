@@ -319,7 +319,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				PassThroughHosts: passThrough,
 			}
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(options)
+			r.recorder.StartCaptureTraffic(options)
 			return nil
 		},
 	}

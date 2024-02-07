@@ -30,12 +30,6 @@ func NewRecorder(logger *zap.Logger) Recorder {
 }
 
 func (r *recorder) StartCaptureTraffic(options models.RecordOptions) {
-
-	var ps *proxy.ProxySet
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
-
-	models.SetMode(models.MODE_RECORD)
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(options.EnableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
@@ -44,11 +38,11 @@ func (r *recorder) StartCaptureTraffic(options models.RecordOptions) {
 		r.Logger.Error("Failed to create the session index file", zap.Error(err))
 		return
 	}
-	tcDB := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
-	r.CaptureTraffic(path, proxyPort, appCmd, appContainer, appNetwork, dirName, delay, buildDelay, ports, filters, tcDB, tele, passThroughHosts)
+	tcDB := yaml.NewYamlStore(options.Path+"/"+dirName+"/tests", options.Path+"/"+dirName, "", "", r.Logger, tele)
+	r.CaptureTraffic(options, dirName, tcDB, tele)
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters) {
+func (r *recorder) CaptureTraffic(options models.RecordOptions, dirName string, ys platform.TestCaseDB, tele *telemetry.Telemetry) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -56,7 +50,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	models.SetMode(models.MODE_RECORD)
 	tele.Ping(false)
-  routineId := pkg.GenerateRandomID()
+	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
 	loadedHooks.SetPassThroughHosts(options.PassThroughHosts)

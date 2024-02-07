@@ -8,6 +8,6 @@ import (
 
 type Recorder interface {
 	StartCaptureTraffic(options models.RecordOptions)
-  CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, networkName string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, tcDB platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters)
+  	CaptureTraffic(options models.RecordOptions,  dirName string, tcDB platform.TestCaseDB, tele *telemetry.Telemetry)
 	
 }
