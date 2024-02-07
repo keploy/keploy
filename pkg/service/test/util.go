@@ -113,6 +113,7 @@ type FetchTestResultsConfig struct {
 	Ctx            context.Context
 	TestReportPath string
 	Path           string
+	EnableColor    bool
 }
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {

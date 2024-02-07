@@ -33,17 +33,21 @@ type Root struct {
 
 var debugMode bool
 
+// Modify the colorConsoleEncoder to support both colorized and non-colorized output
 type colorConsoleEncoder struct {
 	*zapcore.EncoderConfig
 	zapcore.Encoder
 }
 
-func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
-	return colorConsoleEncoder{
-		EncoderConfig: &cfg,
-		// Using the default ConsoleEncoder can avoid rewriting interfaces such as ObjectEncoder
-		Encoder: zapcore.NewConsoleEncoder(cfg),
+// Define a global flag to control ANSI color code usage
+var EnableColor bool
+
+// Function to create a new console encoder with or without colorization
+func NewConsoleEncoder(cfg zapcore.EncoderConfig) zapcore.Encoder {
+	if EnableColor {
+		return zapcore.NewConsoleEncoder(cfg)
 	}
+	return zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
 }
 
 // EncodeEntry overrides ConsoleEncoder's EncodeEntry
@@ -52,11 +56,20 @@ func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fie
 	if err != nil {
 		return nil, err
 	}
-
-	bytesArr := bytes.Replace(buff.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
-	buff.Reset()
-	buff.AppendString(string(bytesArr))
+	// Replace ANSI color codes if they are not enabled
+	if !EnableColor {
+		bytesArr := bytes.Replace(buff.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
+		buff.Reset()
+		buff.AppendString(string(bytesArr))
+	}
 	return buff, err
+}
+
+func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
+	return colorConsoleEncoder{
+		EncoderConfig: &cfg,
+		Encoder:       NewConsoleEncoder(cfg),
+	}
 }
 
 // Clone overrides ConsoleEncoder's Clone
@@ -74,14 +87,20 @@ func init() {
 	})
 }
 
+// Function to create a new logger with or without colorized output
 func setupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
 
-	logCfg.Encoding = "colorConsole"
+	// Check if ANSI color codes should be enabled
+	if EnableColor {
+		logCfg.Encoding = "colorConsole"
+	} else {
+		logCfg.Encoding = "console"
+	}
 
 	// Customize the encoder config to put the emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
-	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 
 	logCfg.OutputPaths = []string{
 		"stdout",
@@ -273,6 +292,8 @@ func (r *Root) execute() {
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
+
+	rootCmd.PersistentFlags().BoolVar(&EnableColor, "enableColor", true, "Enable ANSI color codes")
 
 	// Manually parse flags to determine debug mode
 	debugMode = checkForDebugFlag(os.Args[1:])
