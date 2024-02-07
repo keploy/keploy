@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/telemetry"
@@ -38,7 +39,7 @@ type Yaml struct {
 	mutex       sync.RWMutex
 }
 
-func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) *Yaml {
+func NewYamlStore(tcsPath string, mockPath string, tcsName string, mockName string, Logger *zap.Logger, tele *telemetry.Telemetry) platform.TestCaseDB {
 	return &Yaml{
 		TcsPath:     tcsPath,
 		MockPath:    mockPath,
@@ -130,7 +131,7 @@ func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) err
 	return nil
 }
 
-func containsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, requestMethod models.Method) (error, bool) {
+func ContainsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, requestMethod models.Method) (error, bool) {
 	urlMatched := false
 	parsedURL, err := url.Parse(requestUrl)
 	if err != nil {
@@ -161,7 +162,7 @@ func containsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, 
 	return nil, urlMatched
 }
 
-func hasBannedHeaders(object map[string]string, bannedHeaders map[string]string) (error, bool) {
+func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string) (error, bool) {
 	for headerName, headerNameValue := range object {
 		for bannedHeaderName, bannedHeaderValue := range bannedHeaders {
 			regex, err := regexp.Compile(headerName)
@@ -194,11 +195,11 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 
 	if ok {
 		for _, testFilter := range testFilters.Filters {
-			if err, containsMatch := containsMatchingUrl(testFilter.UrlMethods, testFilter.Path, tc.HttpReq.URL, tc.HttpReq.Method); err == nil && containsMatch {
+			if err, containsMatch := ContainsMatchingUrl(testFilter.UrlMethods, testFilter.Path, tc.HttpReq.URL, tc.HttpReq.Method); err == nil && containsMatch {
 				bypassTestCase = true
 			} else if err != nil {
 				return fmt.Errorf("%s failed to check matching url, error %s", Emoji, err.Error())
-			} else if bannerHeaderCheck, hasHeader := hasBannedHeaders(tc.HttpReq.Header, testFilter.Headers); bannerHeaderCheck == nil && hasHeader {
+			} else if bannerHeaderCheck, hasHeader := HasBannedHeaders(tc.HttpReq.Header, testFilter.Headers); bannerHeaderCheck == nil && hasHeader {
 				bypassTestCase = true
 			} else if bannerHeaderCheck != nil {
 				return fmt.Errorf("%s failed to check banned header, error %s", Emoji, err.Error())
@@ -253,35 +254,30 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 	return nil
 }
 
-func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, options platform.KindSpecifier) ([]platform.KindSpecifier, error) {
-
-	if path == "" {
-		path = ys.TcsPath
-	}
-
+func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier, options platform.KindSpecifier) ([]platform.KindSpecifier, error) {
+	path := ys.MockPath + "/" + testSet + "/tests"
 	tcs := []*models.TestCase{}
 
-	_, err := os.Stat(path)
+	mockPath, err := util.ValidatePath(path)
 	if err != nil {
-		dirNames := strings.Split(path, "/")
-		suitName := ""
-		if len(dirNames) > 1 {
-			suitName = dirNames[len(dirNames)-2]
-		}
-		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", suitName))
+		return nil, err
+	}
+	_, err = os.Stat(mockPath)
+	if err != nil {
+		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", testSet))
 		tcsRead := make([]platform.KindSpecifier, len(tcs))
 		return tcsRead, nil
 	}
 
-	dir, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
+	dir, err := os.OpenFile(mockPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", path))
+		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", mockPath))
 		return nil, err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", path))
+		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", mockPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -290,7 +286,7 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		yamlTestcase, err := read(path, name)
+		yamlTestcase, err := read(mockPath, name)
 		if err != nil {
 			ys.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
 			return nil, err
@@ -370,21 +366,18 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	return nil
 }
 
-func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]platform.KindSpecifier, error) {
+func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, testSet string) ([]platform.KindSpecifier, error) {
 	tc, readTcs := tcRead.(*models.TestCase)
 	var (
 		tcsMocks = make([]platform.KindSpecifier, 0)
 	)
-
-	if path == "" {
-		path = ys.MockPath
-	}
 
 	mockName := "mocks"
 	if ys.MockName != "" {
 		mockName = ys.MockName
 	}
 
+	path := ys.MockPath + "/" + testSet
 	mockPath, err := util.ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
 		return nil, err
@@ -454,25 +447,21 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, path string) ([]plat
 
 }
 
-func (ys *Yaml) ReadConfigMocks(path string) ([]platform.KindSpecifier, error) {
+func (ys *Yaml) ReadConfigMocks(testSet string) ([]platform.KindSpecifier, error) {
 	var (
 		configMocks = make([]platform.KindSpecifier, 0)
 	)
-
-	if path == "" {
-		path = ys.MockPath
-	}
 
 	mockName := "mocks"
 	if ys.MockName != "" {
 		mockName = ys.MockName
 	}
+	path := ys.MockPath + "/" + testSet
 
 	mockPath, err := util.ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
 		return nil, err
 	}
-
 	if _, err := os.Stat(mockPath); err == nil {
 
 		yamls, err := read(path, mockName)
@@ -559,4 +548,8 @@ var idCounter int64 = -1
 
 func getNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
+}
+
+func (ys *Yaml) ReadTestSessionIndices() ([]string, error) {
+	return pkg.ReadSessionIndices(ys.MockPath, ys.Logger)
 }

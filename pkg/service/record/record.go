@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -28,7 +29,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) CaptureTraffic(options models.RecordOptions) {
+func (r *recorder) StartCaptureTraffic(options models.RecordOptions) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -38,15 +39,24 @@ func (r *recorder) CaptureTraffic(options models.RecordOptions) {
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(options.EnableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
-
 	dirName, err := yaml.NewSessionIndex(options.Path, r.Logger)
 	if err != nil {
 		r.Logger.Error("Failed to create the session index file", zap.Error(err))
 		return
 	}
+	tcDB := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
+	r.CaptureTraffic(path, proxyPort, appCmd, appContainer, appNetwork, dirName, delay, buildDelay, ports, filters, tcDB, tele, passThroughHosts)
+}
 
-	ys := yaml.NewYamlStore(options.Path+"/"+dirName+"/tests", options.Path+"/"+dirName, "", "", r.Logger, tele)
-	routineId := pkg.GenerateRandomID()
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters) {
+
+	var ps *proxy.ProxySet
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+
+	models.SetMode(models.MODE_RECORD)
+	tele.Ping(false)
+  routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
 	loadedHooks.SetPassThroughHosts(options.PassThroughHosts)

@@ -33,22 +33,22 @@ const (
 )
 
 type TestCase struct {
-	Version  Version             `json:"version"`
-	Kind     Kind                `json:"kind"`
-	Name     string              `json:"name"`
-	Created  int64               `json:"created"`
-	Updated  int64               `json:"updated"`
-	Captured int64               `json:"captured"`
-	HttpReq  HttpReq             `json:"http_req"`
-	HttpResp HttpResp            `json:"http_resp"`
-	AllKeys  map[string][]string `json:"all_keys"`
-	GrpcResp GrpcResp            `json:"grpcResp"`
-	GrpcReq  GrpcReq             `json:"grpcReq"`
-	Anchors  map[string][]string `json:"anchors"`
-	Noise    map[string][]string `json:"noise"`
-	Mocks    []*Mock             `json:"mocks"`
-	Type     string              `json:"type"`
-	Curl     string              `json:"curl"`
+	Version  Version             `json:"version" bson:"version"`
+	Kind     Kind                `json:"kind" bson:"kind"`
+	Name     string              `json:"name" bson:"name"`
+	Created  int64               `json:"created" bson:"created"`
+	Updated  int64               `json:"updated" bson:"updated"`
+	Captured int64               `json:"captured" bson:"captured"`
+	HttpReq  HttpReq             `json:"http_req" bson:"http_req"`
+	HttpResp HttpResp            `json:"http_resp" bson:"http_resp"`
+	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys"`
+	GrpcResp GrpcResp            `json:"grpcResp" bson:"grpcResp"`
+	GrpcReq  GrpcReq             `json:"grpcReq" bson:"grpcReq"`
+	Anchors  map[string][]string `json:"anchors" bson:"anchors"`
+	Noise    map[string][]string `json:"noise" bson:"noise"`
+	Mocks    []*Mock             `json:"mocks" bson:"mocks"`
+	Type     string              `json:"type" bson:"type"`
+	Curl     string              `json:"curl" bson:"curl"`
 }
 
 func (tc *TestCase) GetKind() string {
