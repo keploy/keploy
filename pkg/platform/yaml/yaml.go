@@ -259,16 +259,16 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		path = ys.TcsPath
 	}
 
-	path, err := util.ValidatePath(path)
+	testpath, err := util.ValidatePath(path)
 	if err != nil {
 		return nil, err
 	}
 
 	tcs := []*models.TestCase{}
 
-	_, err = os.Stat(path)
+	_, err = os.Stat(testpath)
 	if err != nil {
-		dirNames := strings.Split(path, "/")
+		dirNames := strings.Split(testpath, "/")
 		suitName := ""
 		if len(dirNames) > 1 {
 			suitName = dirNames[len(dirNames)-2]
@@ -278,15 +278,15 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		return tcsRead, nil
 	}
 
-	dir, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
+	dir, err := os.OpenFile(testpath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", path))
+		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", testpath))
 		return nil, err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", path))
+		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", testpath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -295,7 +295,7 @@ func (ys *Yaml) ReadTestcase(path string, lastSeenId platform.KindSpecifier, opt
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		yamlTestcase, err := read(path, name)
+		yamlTestcase, err := read(testpath, name)
 		if err != nil {
 			ys.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
 			return nil, err
