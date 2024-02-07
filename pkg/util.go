@@ -222,7 +222,7 @@ func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
 	if generateTestReport {
 		return
 	}
-
+	
 	_, err := os.Stat("keploy/testReports")
 	if os.IsNotExist(err) {
 		return
@@ -232,5 +232,4 @@ func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
 		logger.Error("Error while removing test reports: %v", zap.String("error", err.Error()))
 		return
 	}
-
 }
