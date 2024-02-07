@@ -3,7 +3,6 @@ package models
 import "time"
 
 type Mock struct {
-<<<<<<< HEAD
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
 	Kind         Kind         `json:"Kind,omitempty" bson:"Kind,omitempty"`
@@ -15,13 +14,6 @@ type TestModeInfo struct {
 	Id         int  `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
 	SortOrder  int  `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
-=======
-	Version Version  `json:"Version,omitempty" bson:"Version,omitempty"`
-	Name    string   `json:"Name,omitempty" bson:"Name,omitempty"`
-	Kind    Kind     `json:"Kind,omitempty" bson:"Kind,omitempty"`
-	Spec    MockSpec `json:"Spec,omitempty" bson:"Spec,omitempty"`
-	Id      string   `json:"Id,omitempty" bson:"Id,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 }
 
 func (m *Mock) GetKind() string {

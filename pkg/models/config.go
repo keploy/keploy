@@ -2,6 +2,55 @@ package models
 
 import "time"
 
+const DefaultConfig = `
+record:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  delay: 5
+  buildDelay: 30s
+  tests: 
+    filters:
+      - path: ""
+        urlMethods: []
+        headers: {}
+        host: ""
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        ports: 0
+test:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  # example: "test-set-1": ["test-1", "test-2", "test-3"]
+  selectedTests: 
+  # to use globalNoise, please follow the guide at the end of this file.
+  globalNoise:
+    global:
+      body: {}
+      header: {}
+  delay: 5
+  buildDelay: 30s
+  apiTimeout: 5
+  ignoreOrdering: false
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        ports: 0
+  withCoverage: false
+  coverageReportPath: ""
+`
+
+
 type Config struct {
 	Record Record `json:"record" yaml:"record"`
 	Test   Test   `json:"test" yaml:"test"`

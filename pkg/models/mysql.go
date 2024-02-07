@@ -40,15 +40,7 @@ type MySQLHandshakeV10Packet struct {
 	ProtocolVersion uint8  `json:"protocol_version,omitempty" yaml:"protocol_version,omitempty,flow" bson:"protocol_version,omitempty"`
 	ServerVersion   string `json:"server_version,omitempty" yaml:"server_version,omitempty,flow" bson:"server_version,omitempty"`
 	ConnectionID    uint32 `json:"connection_id,omitempty" yaml:"connection_id,omitempty,flow" bson:"connection_id,omitempty"`
-<<<<<<< HEAD
-<<<<<<< HEAD
 	AuthPluginData  string `json:"auth_plugin_data,omitempty" yaml:"auth_plugin_data,omitempty,flow" bson:"auth_plugin_data,omitempty"`
-=======
-	AuthPluginData  []byte `json:"auth_plugin_data,omitempty" yaml:"auth_plugin_data,omitempty,flow" bson:"auth_plugin_data,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
-	AuthPluginData  string `json:"auth_plugin_data,omitempty" yaml:"auth_plugin_data,omitempty,flow" bson:"auth_plugin_data,omitempty"`
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 	CapabilityFlags uint32 `json:"capability_flags,omitempty" yaml:"capability_flags,omitempty,flow" bson:"capability_flags,omitempty"`
 	CharacterSet    uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow" bson:"character_set,omitempty"`
 	StatusFlags     uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow" bson:"status_flags,omitempty"`
@@ -63,7 +55,6 @@ type PluginDetails struct {
 type MySQLHandshakeResponseOk struct {
 	PacketIndicator string        `json:"packet_indicator,omitempty" yaml:"packet_indicator,omitempty,flow" bson:"packet_indicator,omitempty"`
 	PluginDetails   PluginDetails `json:"plugin_details,omitempty" yaml:"plugin_details,omitempty,flow" bson:"plugin_details,omitempty"`
-<<<<<<< HEAD
 	RemainingBytes  string        `json:"remaining_bytes,omitempty" yaml:"remaining_bytes,omitempty,flow" bson:"remaining_bytes,omitempty"`
 }
 
@@ -76,23 +67,6 @@ type MySQLHandshakeResponse struct {
 	AuthData        string `json:"auth_data,omitempty" yaml:"auth_data,omitempty,flow" bson:"auth_data,omitempty"`
 	Database        string `json:"database,omitempty" yaml:"database,omitempty,flow" bson:"database,omitempty"`
 	AuthPluginName  string `json:"auth_plugin_name,omitempty" yaml:"auth_plugin_name,omitempty,flow" bson:"auth_plugin_name,omitempty"`
-<<<<<<< HEAD
-=======
-	RemainingBytes  []byte        `json:"remaining_bytes,omitempty" yaml:"remaining_bytes,omitempty,flow" bson:"remaining_bytes,omitempty"`
-}
-
-type MySQLHandshakeResponse struct {
-	CapabilityFlags uint32   `json:"capability_flags,omitempty" yaml:"capability_flags,omitempty,flow" bson:"capability_flags,omitempty"`
-	MaxPacketSize   uint32   `json:"max_packet_size,omitempty" yaml:"max_packet_size,omitempty,flow" bson:"max_packet_size,omitempty"`
-	CharacterSet    uint8    `json:"character_set,omitempty" yaml:"character_set,omitempty,flow" bson:"character_set,omitempty"`
-	Reserved        [23]byte `json:"reserved,omitempty" yaml:"reserved,omitempty,flow" bson:"reserved,omitempty"`
-	Username        string   `json:"username,omitempty" yaml:"username,omitempty,flow" bson:"username,omitempty"`
-	AuthData        []byte   `json:"auth_data,omitempty" yaml:"auth_data,omitempty,flow" bson:"auth_data,omitempty"`
-	Database        string   `json:"database,omitempty" yaml:"database,omitempty,flow" bson:"database,omitempty"`
-	AuthPluginName  string   `json:"auth_plugin_name,omitempty" yaml:"auth_plugin_name,omitempty,flow" bson:"auth_plugin_name,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 }
 
 type MySQLQueryPacket struct {
@@ -104,15 +78,7 @@ type MySQLComStmtExecute struct {
 	StatementID    uint32           `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
 	Flags          byte             `json:"flags,omitempty" yaml:"flags,omitempty,flow" bson:"flags,omitempty"`
 	IterationCount uint32           `json:"iteration_count,omitempty" yaml:"iteration_count,omitempty,flow" bson:"iteration_count,omitempty"`
-<<<<<<< HEAD
-<<<<<<< HEAD
 	NullBitmap     string           `json:"null_bitmap,omitempty" yaml:"null_bitmap,omitempty,flow" bson:"null_bitmap,omitempty"`
-=======
-	NullBitmap     []byte           `json:"null_bitmap,omitempty" yaml:"null_bitmap,omitempty,flow" bson:"null_bitmap,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
-	NullBitmap     string           `json:"null_bitmap,omitempty" yaml:"null_bitmap,omitempty,flow" bson:"null_bitmap,omitempty"`
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 	ParamCount     uint16           `json:"param_count,omitempty" yaml:"param_count,omitempty,flow" bson:"param_count,omitempty"`
 	Parameters     []BoundParameter `json:"parameters,omitempty" yaml:"parameters,omitempty,flow" bson:"parameters,omitempty"`
 }
@@ -135,10 +101,6 @@ type MySQLStmtPrepareOk struct {
 type MySQLResultSet struct {
 	Columns             []*ColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow" bson:"columns,omitempty"`
 	Rows                []*Row              `json:"rows,omitempty" yaml:"rows,omitempty,flow" bson:"rows,omitempty"`
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 0fb22b3 (fix: adds json marshaller/unmarshaller for mongo models)
 	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow" bson:"eofPresent,omitempty"`
 	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow" bson:"paddingPresent,omitempty"`
 	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow" bson:"eofPresentFinal,omitempty"`
@@ -146,18 +108,6 @@ type MySQLResultSet struct {
 	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow" bson:"optionalPadding,omitempty"`
 	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optionalEOFBytes,omitempty"`
 	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eofAfterColumns,omitempty"`
-<<<<<<< HEAD
-=======
-	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow" bson:"eof_present,omitempty"`
-	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow" bson:"padding_present,omitempty"`
-	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow" bson:"eof_present_final,omitempty"`
-	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow" bson:"padding_present_final,omitempty"`
-	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow" bson:"optional_padding,omitempty"`
-	OptionalEOFBytes    []byte              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow" bson:"optional_eof_bytes,omitempty"`
-	EOFAfterColumns     []byte              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow" bson:"eof_after_columns,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
->>>>>>> 0fb22b3 (fix: adds json marshaller/unmarshaller for mongo models)
 }
 
 type PacketHeader struct {
@@ -188,15 +138,7 @@ type ColumnDefinition struct {
 
 type Row struct {
 	Header  RowHeader             `json:"header,omitempty" yaml:"header,omitempty,flow" bson:"header,omitempty"`
-<<<<<<< HEAD
-<<<<<<< HEAD
 	Columns []RowColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow" bson:"columns,omitempty"`
-=======
-	Columns []RowColumnDefinition `json:"row_column_definition,omitempty" yaml:"row_column_definition,omitempty,flow" bson:"row_column_definition,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
-	Columns []RowColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow" bson:"columns,omitempty"`
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 }
 
 type MySQLOKPacket struct {
@@ -216,29 +158,13 @@ type MySQLERRPacket struct {
 }
 
 type MySQLComStmtPreparePacket struct {
-<<<<<<< HEAD
-<<<<<<< HEAD
 	Query string `json:"query,omitempty" yaml:"query,omitempty,flow" bson:"query,omitempty"`
-=======
-	Query string `bson:"query,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
-	Query string `json:"query,omitempty" yaml:"query,omitempty,flow" bson:"query,omitempty"`
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 }
 
 type MySQLCOM_STMT_SEND_LONG_DATA struct {
 	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
 	ParameterID uint16 `json:"parameter_id,omitempty" yaml:"parameter_id,omitempty,flow" bson:"parameter_id,omitempty"`
-<<<<<<< HEAD
-<<<<<<< HEAD
 	Data        string `json:"data,omitempty" yaml:"data,omitempty,flow" bson:"data,omitempty"`
-=======
-	Data        []byte `json:"data,omitempty" yaml:"data,omitempty,flow" bson:"data,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
-	Data        string `json:"data,omitempty" yaml:"data,omitempty,flow" bson:"data,omitempty"`
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 }
 
 type MySQLCOM_STMT_RESET struct {
@@ -253,30 +179,14 @@ type MySQLComStmtFetchPacket struct {
 
 type MySQLComChangeUserPacket struct {
 	User         string `json:"user,omitempty" yaml:"user,omitempty,flow" bson:"user,omitempty"`
-<<<<<<< HEAD
-<<<<<<< HEAD
 	Auth         string `json:"auth,omitempty" yaml:"auth,omitempty,flow" bson:"auth,omitempty"`
-=======
-	Auth         []byte `json:"auth,omitempty" yaml:"auth,omitempty,flow" bson:"auth,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
-	Auth         string `json:"auth,omitempty" yaml:"auth,omitempty,flow" bson:"auth,omitempty"`
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 	Db           string `json:"db,omitempty" yaml:"db,omitempty,flow" bson:"db,omitempty"`
 	CharacterSet uint8  `json:"character_set,omitempty" yaml:"character_set,omitempty,flow" bson:"character_set,omitempty"`
 	AuthPlugin   string `json:"auth_plugin,omitempty" yaml:"auth_plugin,omitempty,flow" bson:"auth_plugin,omitempty"`
 }
 
 type MySQLComStmtClosePacket struct {
-<<<<<<< HEAD
-<<<<<<< HEAD
 	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
-=======
-	StatementID uint32 `bson:"statement_id,omitempty"`
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
-=======
-	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
->>>>>>> c50c237 (merge: fixes the conflicting types of mysql)
 }
 
 type AuthSwitchResponsePacket struct {
@@ -287,8 +197,4 @@ type AuthSwitchRequestPacket struct {
 	StatusTag      byte   `json:"status_tag,omitempty" yaml:"status_tag,omitempty,flow" bson:"status_tag,omitempty"`
 	PluginName     string `json:"plugin_name,omitempty" yaml:"plugin_name,omitempty,flow" bson:"plugin_name,omitempty"`
 	PluginAuthData string `json:"plugin_authdata,omitempty" yaml:"plugin_authdata,omitempty,flow" bson:"plugin_authdata,omitempty"`
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)

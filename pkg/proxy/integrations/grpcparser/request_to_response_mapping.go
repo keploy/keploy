@@ -74,14 +74,7 @@ func FilterMocksBasedOnGrpcRequest(grpcReq models.GrpcReq, hook *hooks.Hook) (*m
 		}
 
 		if isMatched {
-<<<<<<< HEAD
 			isDeleted := hook.DeleteTcsMock(matchedMock)
-=======
-			isDeleted, err := hook.DeleteTcsMock(matchedMock)
-			if err != nil {
-				return nil, fmt.Errorf("error while deleting tcs mock: %v", err)
-			}
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 			if !isDeleted {
 				continue
 			}

@@ -50,7 +50,7 @@ func (g *GenerateConfig) GetCmd() *cobra.Command {
 				}
 			}
 
-			g.generatorConfig.GenerateConfig(filePath)
+			g.generatorConfig.GenerateConfig(filePath, generateConfig.GenerateConfigOptions{})
 			return nil
 		},
 	}
