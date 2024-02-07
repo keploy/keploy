@@ -289,21 +289,22 @@ func (r *Root) execute() {
 		releaseInfo, err := utils.GetLatestGitHubRelease()
 		if err != nil {
 			r.logger.Debug("Failed to fetch the latest release version", zap.Error(err))
-			return
-		}
-		if releaseInfo.TagName != currentVersion {
-			updatetext := models.HighlightGrayString("keploy update")
-			const msg string = `
+		} else {
+			if releaseInfo.TagName != currentVersion {
+				updatetext := models.HighlightGrayString("keploy update")
+				const msg string = `
                ╭─────────────────────────────────────╮
                │ New version available:              │
                │ %v  ---->   %v       │
                │ Run %v to update         │
                ╰─────────────────────────────────────╯
 			   `
-			versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
-			fmt.Printf(versionmsg)
+				versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
+				fmt.Printf(versionmsg)
+			}
 		}
 	}
+
 	// Now that flags are parsed, set up the logger
 	r.logger = setupLogger()
 	r.logger = modifyToSentryLogger(r.logger, sentry.CurrentHub().Client())
