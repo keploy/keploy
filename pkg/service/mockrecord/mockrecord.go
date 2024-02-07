@@ -51,11 +51,6 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 		s.logger.Error("error while creating hooks", zap.Error(err))
 		return
 	}
-<<<<<<< HEAD
-
-=======
-	
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
 		return
 	}

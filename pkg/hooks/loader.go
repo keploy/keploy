@@ -11,10 +11,6 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
-<<<<<<< HEAD
-=======
-	"sort"
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +20,6 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/google/uuid"
 
 	"go.uber.org/zap"
 
@@ -55,12 +50,8 @@ type Hook struct {
 
 	logger                   *zap.Logger
 	proxyPort                uint32
-<<<<<<< HEAD
 	tcsMocks                 *treeDb
 	configMocks              *treeDb
-=======
-	localDb                  *localDb
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
@@ -112,7 +103,6 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 		logger.Fatal("failed to create internal docker client", zap.Error(err))
 	}
 
-<<<<<<< HEAD
 	customComparator := func(a, b interface{}) int {
 		aStruct := a.(models.TestModeInfo)
 		bStruct := b.(models.TestModeInfo)
@@ -131,31 +121,12 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 
 	configMocks := NewTreeDb(customComparator)
 	tcsMocks := NewTreeDb(customComparator)
-=======
-	schemaMap := map[string]map[string]string{
-		mockTable: {
-			mockTableIndex: mockTableIndexField,
-		},
-		configMockTable: {
-			configMockTableIndex: configMockTableIndexField,
-		},
-	}
-
-	ldb, err := NewLocalDb(schemaMap)
-	if err != nil {
-		return nil, fmt.Errorf("error while creating new LocalDb: %v", err)
-	}
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 
 	return &Hook{
 		logger:        logger,
 		TestCaseDB:    db,
-<<<<<<< HEAD
 		configMocks:   configMocks,
 		tcsMocks:      tcsMocks,
-=======
-		localDb:       ldb,
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
 		idc:           idc,
@@ -171,7 +142,6 @@ func (h *Hook) GetProxyPort() uint32 {
 	return h.proxyPort
 }
 
-<<<<<<< HEAD
 func (h *Hook) GetPassThroughHosts() models.Stubs {
 	return h.passThroughHosts
 }
@@ -182,8 +152,6 @@ func (h *Hook) SetPassThroughHosts(passThroughHosts []models.Filters) {
 	}
 }
 
-=======
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -194,7 +162,6 @@ func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	return nil
 }
 
-<<<<<<< HEAD
 func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.tcsMocks.deleteAll()
 	for index, mock := range m {
@@ -229,46 +196,6 @@ func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
 		}
 	}
 	return tcsMocks, nil
-=======
-func (h *Hook) SetTcsMocks(m []*models.Mock) error {
-	h.localDb.deleteAll(mockTable, mockTableIndex)
-	for _, mock := range m {
-		mock.Id = uuid.NewString()
-		err := h.localDb.insert(mockTable, mock)
-		if err != nil {
-			return fmt.Errorf("error while inserting tcs mock into localDb: %v", err)
-		}
-	}
-	return nil
-}
-
-func (h *Hook) SetConfigMocks(m []*models.Mock) error {
-	h.localDb.deleteAll(configMockTable, configMockTableIndex)
-	for _, mock := range m {
-		mock.Id = uuid.NewString()
-		err := h.localDb.insert(configMockTable, mock)
-		if err != nil {
-			return fmt.Errorf("error while inserting config-mock into localDb: %v", err)
-		}
-	}
-	return nil
-}
-
-func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
-	it, err := h.localDb.getAll(mockTable, mockTableIndex)
-	if err != nil {
-		return nil, fmt.Errorf("error while getting all tcs mocks from localDb %v", err)
-	}
-	var mocks []*models.Mock
-	for obj := it.Next(); obj != nil; obj = it.Next() {
-		p := obj.(*models.Mock)
-		mocks = append(mocks, p)
-	}
-	sort.Slice(mocks, func(i, j int) bool {
-		return mocks[i].Spec.ReqTimestampMock.Before(mocks[j].Spec.ReqTimestampMock)
-	})
-	return mocks, nil
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 }
 
 func (h *Hook) IsUserAppTerminateInitiated() bool {
@@ -277,7 +204,6 @@ func (h *Hook) IsUserAppTerminateInitiated() bool {
 	return h.userAppShutdownInitiated
 }
 
-<<<<<<< HEAD
 func (h *Hook) SetUserAppTerminateInitiated(state bool) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
@@ -309,43 +235,6 @@ func (h *Hook) DeleteConfigMock(mock *models.Mock) bool {
 
 func (h *Hook) ResetDeps() int {
 	h.tcsMocks.deleteAll()
-=======
-
-func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
-	it, err := h.localDb.getAll(configMockTable, configMockTableIndex)
-	if err != nil {
-		return nil, fmt.Errorf("error while getting all config-mocks from localDb %v", err)
-	}
-	var mocks []*models.Mock
-	for obj := it.Next(); obj != nil; obj = it.Next() {
-		p := obj.(*models.Mock)
-		mocks = append(mocks, p)
-	}
-	sort.Slice(mocks, func(i, j int) bool {
-		return mocks[i].Spec.ReqTimestampMock.Before(mocks[j].Spec.ReqTimestampMock)
-	})
-	return mocks, nil
-}
-
-func (h *Hook) DeleteTcsMock(mock *models.Mock) (bool, error) {
-	isDeleted, err := h.localDb.delete(mockTable, mock)
-	if err != nil {
-		return isDeleted, fmt.Errorf("error while deleting tcs mocks %v from localDb %v", mock, err)
-	}
-	return isDeleted, nil
-}
-
-func (h *Hook) DeleteConfigMock(mock *models.Mock) (bool, error) {
-	isDeleted, err := h.localDb.delete(configMockTable, configMockTableIndex)
-	if err != nil {
-		return isDeleted, fmt.Errorf("error while deleting config-mocks %v from localDb %v", mock, err)
-	}
-	return isDeleted, nil
-}
-
-func (h *Hook) ResetDeps() int {
-	h.localDb.deleteAll(mockTable, mockTableIndex)
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	return 1
 }
 

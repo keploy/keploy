@@ -30,7 +30,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters, enableTele bool, passThroughHosts []models.Filters) {
+func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters) {
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
@@ -43,7 +43,7 @@ func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, ap
 	r.CaptureTraffic(path, proxyPort, appCmd, appContainer, appNetwork, dirName, delay, buildDelay, ports, filters, tcDB, tele, passThroughHosts)
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.Filters, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -55,10 +55,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
 	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
-<<<<<<< HEAD
 	loadedHooks.SetPassThroughHosts(passThroughHosts)
-=======
->>>>>>> 70bcbc0 (merge: resolves merge conflicts)
 	if err != nil {
 		r.Logger.Error("error while creating hooks", zap.Error(err))
 		return

@@ -327,7 +327,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 
 	t.logger.Debug(fmt.Sprintf("the testcases for %s are: %v", cfg.TestSet, returnVal.Tcs))
 	var readConfigMocks []*models.Mock
-	configMocks, err := cfg.Storage.ReadConfigMocks(filepath.Join(cfg.Path, cfg.TestSet))
+	configMocks, err := cfg.Storage.ReadConfigMocks(cfg.TestSet)
 	for _, mock := range configMocks {
 		configMock, ok := mock.(*models.Mock)
 		if !ok {
@@ -336,7 +336,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		readConfigMocks = append(readConfigMocks, configMock)
 	}
 	var readTcsMocks []*models.Mock
-	readTcsMockss, err := cfg.Storage.ReadTcsMocks(nil, filepath.Join(cfg.Path, cfg.TestSet))
+	readTcsMockss, err := cfg.Storage.ReadTcsMocks(nil, cfg.TestSet)
 	for _, mock := range readTcsMockss {
 		configMock, ok := mock.(*models.Mock)
 		if !ok {
@@ -356,10 +356,13 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 		HttpResp: models.HttpResp{Timestamp: time.Now()},
 	}
 	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
+	t.logger.Info(fmt.Sprintf("the oss config mocks for %s are: %v\n", cfg.TestSet, readConfigMocks))
+	
 	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
 	sort.SliceStable(readTcsMocks, func(i, j int) bool {
 		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
 	})
+	t.logger.Info(fmt.Sprintf("the oss tcs mocks for %s are: %v\n", cfg.TestSet, readTcsMocks))
 	cfg.LoadedHooks.SetTcsMocks(readTcsMocks)
 	returnVal.ErrChan = make(chan error, 1)
 	t.logger.Debug("", zap.Any("app pid", cfg.Pid))

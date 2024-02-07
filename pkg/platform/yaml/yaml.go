@@ -131,7 +131,7 @@ func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) err
 	return nil
 }
 
-func containsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, requestMethod models.Method) (error, bool) {
+func ContainsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, requestMethod models.Method) (error, bool) {
 	urlMatched := false
 	parsedURL, err := url.Parse(requestUrl)
 	if err != nil {
@@ -162,7 +162,7 @@ func containsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, 
 	return nil, urlMatched
 }
 
-func hasBannedHeaders(object map[string]string, bannedHeaders map[string]string) (error, bool) {
+func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string) (error, bool) {
 	for headerName, headerNameValue := range object {
 		for bannedHeaderName, bannedHeaderValue := range bannedHeaders {
 			regex, err := regexp.Compile(headerName)
@@ -195,11 +195,11 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 
 	if ok {
 		for _, testFilter := range testFilters.Filters {
-			if err, containsMatch := containsMatchingUrl(testFilter.UrlMethods, testFilter.Path, tc.HttpReq.URL, tc.HttpReq.Method); err == nil && containsMatch {
+			if err, containsMatch := ContainsMatchingUrl(testFilter.UrlMethods, testFilter.Path, tc.HttpReq.URL, tc.HttpReq.Method); err == nil && containsMatch {
 				bypassTestCase = true
 			} else if err != nil {
 				return fmt.Errorf("%s failed to check matching url, error %s", Emoji, err.Error())
-			} else if bannerHeaderCheck, hasHeader := hasBannedHeaders(tc.HttpReq.Header, testFilter.Headers); bannerHeaderCheck == nil && hasHeader {
+			} else if bannerHeaderCheck, hasHeader := HasBannedHeaders(tc.HttpReq.Header, testFilter.Headers); bannerHeaderCheck == nil && hasHeader {
 				bypassTestCase = true
 			} else if bannerHeaderCheck != nil {
 				return fmt.Errorf("%s failed to check banned header, error %s", Emoji, err.Error())
@@ -550,6 +550,6 @@ func getNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
-func (ys *Yaml) ReadTestSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
-	return pkg.ReadSessionIndices(path, Logger)
+func (ys *Yaml) ReadTestSessionIndices() ([]string, error) {
+	return pkg.ReadSessionIndices(ys.MockPath, ys.Logger)
 }
