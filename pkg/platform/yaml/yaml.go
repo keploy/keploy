@@ -268,6 +268,7 @@ func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier,
 		tcsRead := make([]platform.KindSpecifier, len(tcs))
 		return tcsRead, nil
 	}
+
 	dir, err := os.OpenFile(mockPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", mockPath))
