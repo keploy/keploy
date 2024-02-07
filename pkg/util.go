@@ -216,3 +216,17 @@ func GetNextTestReportDir(testReportPath, subDirPrefix string) (string, error) {
 	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
 	return newTestReportPath, nil
 }
+
+func DeleteTestReports(logger *zap.Logger) {
+
+	_, err := os.Stat("keploy/testReports")
+	if os.IsNotExist(err) {
+		return
+	}
+	err = os.RemoveAll("keploy/testReports")
+	if err != nil {
+		logger.Error("Error while removing test reports: %v", zap.String("error", err.Error()))
+		return
+	}
+
+}

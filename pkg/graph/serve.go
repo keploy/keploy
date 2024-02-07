@@ -40,8 +40,10 @@ func NewGraph(logger *zap.Logger) graphInterface {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
+func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, generateTestReport bool, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
 	var ps *proxy.ProxySet
+
+	defer pkg.DeleteTestReports(g.logger)
 
 	if port == 0 {
 		port = defaultPort
@@ -112,17 +114,18 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 
 	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
 		Resolvers: &Resolver{
-			Tester:         tester,
-			TestReportFS:   testReportFS,
-			YS:             ys,
-			LoadedHooks:    loadedHooks,
-			Logger:         g.logger,
-			Path:           path,
-			TestReportPath: testReportPath,
-			Delay:          Delay,
-			AppPid:         pid,
-			ApiTimeout:     apiTimeout,
-			ServeTest:      len(appCmd) != 0,
+			Tester:             tester,
+			TestReportFS:       testReportFS,
+			YS:                 ys,
+			LoadedHooks:        loadedHooks,
+			Logger:             g.logger,
+			Path:               path,
+			TestReportPath:     testReportPath,
+			GenerateTestReport: generateTestReport,
+			Delay:              Delay,
+			AppPid:             pid,
+			ApiTimeout:         apiTimeout,
+			ServeTest:          len(appCmd) != 0,
 		},
 	}))
 
