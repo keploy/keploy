@@ -217,7 +217,11 @@ func GetNextTestReportDir(testReportPath, subDirPrefix string) (string, error) {
 	return newTestReportPath, nil
 }
 
-func DeleteTestReports(logger *zap.Logger) {
+func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
+
+	if generateTestReport {
+		return
+	}
 
 	_, err := os.Stat("keploy/testReports")
 	if os.IsNotExist(err) {

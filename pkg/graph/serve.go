@@ -43,7 +43,7 @@ const defaultPort = 6789
 func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, generateTestReport bool, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
 	var ps *proxy.ProxySet
 
-	defer pkg.DeleteTestReports(g.logger)
+	defer pkg.DeleteTestReports(g.logger, generateTestReport)
 
 	if port == 0 {
 		port = defaultPort
