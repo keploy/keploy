@@ -42,8 +42,8 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
-	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
+func (t *Test) getTestConfig(options *models.TestConfigOptions) error {
+	configFilePath := filepath.Join(options.ConfigPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
 	}
@@ -51,51 +51,50 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if err != nil {
 		return fmt.Errorf("failed to get the test config from config file due to error: %s", err)
 	}
-	if len(*path) == 0 {
-		*path = confTest.Path
+	if len(options.Path) == 0 {
+		options.Path = confTest.Path
 	}
-	if *proxyPort == 0 {
-		*proxyPort = confTest.ProxyPort
+	if options.ProxyPort == 0 {
+		options.ProxyPort = confTest.ProxyPort
 	}
-	if *appCmd == "" {
-		*appCmd = confTest.Command
+	if len(options.AppCmd) == 0 {
+		options.AppCmd = confTest.Command
 	}
 	for testset, testcases := range confTest.SelectedTests {
-		if _, ok := (*tests)[testset]; !ok {
-			(*tests)[testset] = testcases
+		if _, ok := options.Tests[testset]; !ok {
+			options.Tests[testset] = testcases
 		}
 	}
-	if *appContainer == "" {
-		*appContainer = confTest.ContainerName
+	if len(options.AppContainer) == 0 {
+		options.AppContainer = confTest.ContainerName
 	}
-	if *networkName == "" {
-		*networkName = confTest.NetworkName
+	if len(options.NetworkName) == 0 {
+		options.NetworkName = confTest.NetworkName
 	}
-	if *Delay == 5 {
-		*Delay = confTest.Delay
+	if options.Delay == 5 {
+		options.Delay = confTest.Delay
 	}
-	if *buildDelay == 30*time.Second && confTest.BuildDelay != 0 {
-		*buildDelay = confTest.BuildDelay
+	if options.BuildDelay == 30*time.Second && confTest.BuildDelay != 0 {
+		options.BuildDelay = confTest.BuildDelay
 	}
-
-	if len(*coverageReportPath) == 0 {
-		*coverageReportPath = confTest.CoverageReportPath
+	if len(options.CoverageReportPath) == 0 {
+		options.CoverageReportPath = confTest.CoverageReportPath
 	}
-	*withCoverage = *withCoverage || confTest.WithCoverage
-	if *apiTimeout == 5 {
-		*apiTimeout = confTest.ApiTimeout
+	options.WithCoverage = options.WithCoverage || confTest.WithCoverage
+	if options.ApiTimeout == 5 {
+		options.ApiTimeout = confTest.ApiTimeout
 	}
-	*globalNoise = confTest.GlobalNoise.Global
-	*testSetNoise = confTest.GlobalNoise.Testsets
-	if !*ignoreOrdering {
-		*ignoreOrdering = confTest.IgnoreOrdering
+	options.GlobalNoise = confTest.GlobalNoise.Global
+	options.TestSetNoise = confTest.GlobalNoise.Testsets
+	if !options.IgnoreOrdering {
+		options.IgnoreOrdering = confTest.IgnoreOrdering
 	}
-	passThroughPortProvided := len(*passThroughPorts) == 0
+	passThroughPortProvided := len(options.PassThroughPorts) == 0
 	for _, filter := range confTest.Stubs.Filters {
 		if filter.Port != 0 && filter.Host == "" && filter.Path == "" && passThroughPortProvided {
-			*passThroughPorts = append(*passThroughPorts, filter.Port)
+			options.PassThroughPorts = append(options.PassThroughPorts, filter.Port)
 		} else {
-			*passThroughHosts = append(*passThroughHosts, filter)
+			options.PassThroughHosts = append(options.PassThroughHosts, filter)
 		}
 	}
 
@@ -250,7 +249,27 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			passThroughHosts := []models.Filters{}
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts)
+			err = t.getTestConfig(
+				&models.TestConfigOptions{
+					Path:               path,
+					ProxyPort:          proxyPort,
+					AppCmd:             appCmd,
+					Tests:              tests,
+					AppContainer:       appContainer,
+					NetworkName:        networkName,
+					Delay:              delay,
+					BuildDelay:         buildDelay,
+					PassThroughPorts:   ports,
+					ApiTimeout:         apiTimeout,
+					GlobalNoise:        globalNoise,
+					TestSetNoise:       testsetNoise,
+					CoverageReportPath: coverageReportPath,
+					WithCoverage:       withCoverage,
+					ConfigPath:         configPath,
+					IgnoreOrdering:     ignoreOrdering,
+					PassThroughHosts:   passThroughHosts,
+				},
+			)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("Keploy config not found, continuing without configuration")
