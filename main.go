@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"os"
 	_ "net/http/pprof"
+	"os"
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
@@ -35,10 +35,10 @@ func main() {
 		version = "2-dev"
 	}
 	utils.Version = version
-	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER");binaryToDocker != "true" {
+	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
 		fmt.Println(logo, " ")
 		fmt.Printf("version: %v\n\n", version)
-	}else{
+	} else {
 		fmt.Println("Starting keploy in docker environment.")
 	}
 	//Initialise sentry.

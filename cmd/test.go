@@ -412,11 +412,13 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
+			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 			if coverage {
 				g := graph.NewGraph(t.logger)
 				g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
-				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+
+				t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,
@@ -472,7 +474,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 
-	testCmd.Flags().Bool("ignoreOrdering", false, "Ignore ordering of array in response")
+	testCmd.Flags().Bool("ignoreOrdering", true, "Ignore ordering of array in response")
 
 	testCmd.Flags().MarkHidden("enableTele")
 
