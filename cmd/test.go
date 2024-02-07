@@ -404,6 +404,8 @@ func (t *Test) GetCmd() *cobra.Command {
 						t.logger.Error("failed to get the next test report directory", zap.Error(err))
 						return err
 					}
+			} else {
+				t.logger.Info("Test Reports are not being generated since generateTestReport flag is set false")
 			}
 			
 			var hasContainerName bool
