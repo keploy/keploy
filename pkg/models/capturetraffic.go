@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-type TrafficCaptureParams struct {
+type RecordOptions struct {
 	Path             string
 	ProxyPort        uint32
 	AppCmd           string

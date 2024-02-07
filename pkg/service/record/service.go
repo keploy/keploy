@@ -5,5 +5,5 @@ import (
 )
 
 type Recorder interface {
-	CaptureTraffic(captureTrafficConfig models.TrafficCaptureParams)
+	CaptureTraffic(options models.RecordOptions)
 }

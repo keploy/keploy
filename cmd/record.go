@@ -293,7 +293,7 @@ func (r *Record) GetCmd() *cobra.Command {
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-			captureTrafficConfig := models.TrafficCaptureParams{
+			options := models.RecordOptions{
 				Path:             path,
 				ProxyPort:        proxyPort,
 				AppCmd:           appCmd,
@@ -307,7 +307,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				PassThroughHosts: passThrough,
 			}
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(captureTrafficConfig)
+			r.recorder.CaptureTraffic(options)
 			return nil
 		},
 	}
