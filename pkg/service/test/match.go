@@ -86,7 +86,7 @@ func ValidateAndMarshalJson(log *zap.Logger, exp, act *string) (validatedJSON, e
 func matchJsonWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (jsonComparisonResult, error) {
 	var matchJsonComparisonResult jsonComparisonResult
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
-		return matchJsonComparisonResult, errors.New("type not matched ")
+		return matchJsonComparisonResult, typeNotMatch
 	}
 	if expected == nil && actual == nil {
 		matchJsonComparisonResult.isExact = true

@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -20,6 +21,10 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
+)
+
+var (
+	typeNotMatch = errors.New("type not matched")
 )
 
 type jsonComparisonResult struct {

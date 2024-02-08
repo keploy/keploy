@@ -204,7 +204,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise,
 				pass = false
 			}
 			jsonComparisonResult, err := JsonDiffWithNoiseControl(logger, validatedJSON, reqBodyNoise, false)
-			if err != nil || !jsonComparisonResult.matches {
+			if (err != nil && err != typeNotMatch) || !jsonComparisonResult.matches {
 				logger.Debug("test case http req body is not equal", zap.Any("tcs1HttpReqBody", tcs1.HttpReq.Body), zap.Any("tcs2HttpReqBody", tcs2.HttpReq.Body))
 				pass = false
 			} else {
@@ -323,7 +323,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 				pass = false
 			}
 			jsonComparisonResult, err := JsonDiffWithNoiseControl(logger, validatedJSON, bodyNoise, false)
-			if err != nil || !jsonComparisonResult.matches {
+			if (err != nil && err != typeNotMatch) || !jsonComparisonResult.matches {
 				logger.Debug("test case http resp body is not equal", zap.Any("tcs1HttpRespBody", tcs1.HttpResp.Body), zap.Any("tcs2HttpRespBody", tcs2.HttpResp.Body))
 				pass = false
 			} else {

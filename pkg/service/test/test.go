@@ -357,7 +357,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
 	t.logger.Debug(fmt.Sprintf("the oss config mocks for %s are: %v\n", cfg.TestSet, readConfigMocks))
-	
+
 	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
 	sort.SliceStable(readTcsMocks, func(i, j int) bool {
 		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
@@ -778,7 +778,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 		jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
 		pass = jsonComparisonResult.isExact
-		if err != nil {
+		if err != nil && err != typeNotMatch {
 			return false, res
 		}
 		// debug log for cleanExp and cleanAct
