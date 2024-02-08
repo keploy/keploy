@@ -142,10 +142,11 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			}
 		}
 		if isHeartBeat(opReq, *mongoRequests[0].Header, mongoRequests[0].Message, logger) {
-			logger.Debug("recieved a heartbeat request for mongo")
+			logger.Debug("recieved a heartbeat request for mongo", zap.Any("config mocks", len(configMocks)))
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
 			for configIndex, configMock := range configMocks {
+				logger.Debug("the config mock is: ", zap.Any("config mock", configMock), zap.Any("actual request", mongoRequests))
 				if len(configMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range configMock.Spec.MongoRequests {
 						if len(configMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
@@ -175,8 +176,8 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 								logger.Error("failed to unmarshal the section of incoming request to bson document", zap.Error(err))
 								continue
 							}
-							logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
 							score := calculateMatchingScore(expected, actual)
+							logger.Debug("the expected and actual msg in the heartbeat OpQuery query.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", score))
 							if score > maxMatchScore {
 								maxMatchScore = score
 								bestMatchIndex = configIndex
@@ -197,6 +198,7 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 								}
 							}
 							currentScore := scoreSum / float64(len(mongoRequests))
+							logger.Debug("the expected and actual msg in the heartbeat OpMsg single section.", zap.Any("expected", req.Message.(*models.MongoOpMessage).Sections), zap.Any("actual", mongoRequests[i].Message.(*models.MongoOpMessage).Sections), zap.Any("score", currentScore))
 							if currentScore > maxMatchScore {
 								maxMatchScore = currentScore
 								bestMatchIndex = configIndex
@@ -334,7 +336,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			requestBuffer, err = util.ReadBytes(clientConn)
 			logger.Debug("reading from the mongo connection", zap.Any("", string(requestBuffer)))
 			if err != nil {
-				if !h.IsUsrAppTerminateInitiated() {
+				if !h.IsUserAppTerminateInitiated() {
 					if err == io.EOF {
 						logger.Debug("recieved request buffer is empty in record mode for mongo call")
 						return
@@ -376,7 +378,7 @@ func encodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 
 				// logStr += tmpStr
 				if err != nil {
-					if !h.IsUsrAppTerminateInitiated() {
+					if !h.IsUserAppTerminateInitiated() {
 						if err == io.EOF {
 							logger.Debug("recieved request buffer is empty in record mode for mongo request")
 							return
@@ -606,11 +608,6 @@ func recordMessage(h *hooks.Hook, requestBuffer, responseBuffer []byte, mongoReq
 func hasSecondSetBit(num int) bool {
 	// Shift the number right by 1 bit and check if the least significant bit is set
 	return (num>>1)&1 == 1
-}
-
-func hasSixteenthBit(num int) bool {
-	// Shift the number right by 1 bit and check if the least significant bit is set
-	return (num>>16)&1 == 1
 }
 
 // Skip heartbeat from capturing in the global set of mocks. Since, the heartbeat packet always contain the "hello" boolean.

@@ -14,10 +14,6 @@ installKeploy (){
         esac
     done
 
-    get_current_docker_context() {
-        current_context=$(docker context ls --format '{{.Name}} {{if .Current}}*{{end}}' | grep '*' | awk '{print $1}')
-    }
-
     install_keploy_arm() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
@@ -42,6 +38,16 @@ installKeploy (){
         set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
 
+    append_to_rc() {
+        last_byte=$(tail -c 1 ~/.zshrc)
+        if [[ "$last_byte" != "" ]]; then
+            echo -e "\n$1" >> $2
+        else
+            echo "$1" >> $2
+        fi
+        source $2
+    }
+
     # Get the alias to set and set it
     set_alias() {
         # Check if the command is for docker or not
@@ -62,20 +68,26 @@ installKeploy (){
         if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
             if [ -f ~/.zshrc ]; then
                 if grep -q "alias keploy=" ~/.zshrc; then
-                    sed -i '/alias keploy/d' ~/.zshrc
+                    if [ "$OS_NAME" = "Darwin" ]; then
+                        sed -i '' '/alias keploy/d' ~/.zshrc
+                    else
+                        sed -i '/alias keploy/d' ~/.zshrc
+                    fi
                 fi
-                echo "$ALIAS_CMD" >> ~/.zshrc
-                source ~/.zshrc
+                append_to_rc "$ALIAS_CMD" ~/.zshrc
             else
                 alias keploy="$1"
             fi
         elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
             if [ -f ~/.bashrc ]; then
                 if grep -q "alias keploy=" ~/.bashrc; then
-                    sed -i '/alias keploy/d' ~/.bashrc
+                    if [ "$OS_NAME" = "Darwin" ]; then
+                        sed -i '' '/alias keploy/d' ~/.bashrc
+                    else
+                        sed -i '/alias keploy/d' ~/.bashrc
+                    fi
                 fi
-                echo "$ALIAS_CMD" >> ~/.bashrc
-                source ~/.bashrc
+                append_to_rc "$ALIAS_CMD" ~/.bashrc
             else
                 alias keploy="$1"
             fi
@@ -106,8 +118,7 @@ installKeploy (){
         else
             set_alias 'docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
         fi
-
-    }
+}
 
 
     ARCH=$(uname -m)
@@ -115,28 +126,9 @@ installKeploy (){
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
-            get_current_docker_context
             if ! which docker &> /dev/null; then
-                echo -n "Docker not found on device, install docker? (y/n):"
-                read user_input
-                if [ "$user_input" = "y" ]; then
-                    echo "Installing docker via brew"
-                    if command -v brew &> /dev/null; then
-                       brew install docker
-                    else
-                        echo "\e]8;;https://brew.sh\abrew is not installed, install brew for easy docker installation\e]8;;\a"
-                        return
-                    fi
-                elif [ "$user_input" != "n" ]; then
-                    echo "Please enter a valid command"
-                    return
-                else
-                    echo "Please install docker to install keploy"
-                    return
-                fi
-            fi
-            if [ "$current_context" = "colima" ]; then
-                echo "Colima detected, installing keploy"
+                echo -n "Docker not found on device, please install docker to use Keploy"
+                return
             fi
             install_docker
             return
@@ -185,5 +177,5 @@ installKeploy
 
 if command -v keploy &> /dev/null; then
     keploy example
-    rm keploy.sh
+    # rm keploy.sh
 fi

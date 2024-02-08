@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/pkg"
+	"go.keploy.io/server/utils"
 	"go.keploy.io/server/pkg/models"
 )
 
@@ -62,7 +63,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		}
 		return nil
 	} else {
-		ok, cmd := h.IsDockerRelatedCmd(appCmd)
+		ok, cmd := utils.IsDockerRelatedCmd(appCmd)
 		if ok {
 
 			h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
@@ -77,7 +78,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				dockerComposeFile := findDockerComposeFile()
 
 				if dockerComposeFile == "" {
-					return fmt.Errorf("Can't find the docker compose file of user. Are you in the right directory?")
+					return fmt.Errorf("can't find the docker compose file of user. Are you in the right directory? ")
 				}
 
 				// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
@@ -123,7 +124,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 						err := h.idc.MakeNetworkExternal(dockerComposeFile, newComposeFile)
 						if err != nil {
 							h.logger.Error("couldn't make your docker network external")
-							return fmt.Errorf("Error while updating network to external: %v\n", err)
+							return fmt.Errorf("error while updating network to external: %v", err)
 						}
 
 						h.logger.Info("successfully made your docker network external")
@@ -595,37 +596,6 @@ func (h *Hook) injectNetworkToKeploy(appNetwork string) error {
 	return nil
 }
 
-// It checks if the cmd is related to docker or not, it also returns if its a docker compose file
-func (h *Hook) IsDockerRelatedCmd(cmd string) (bool, string) {
-	// Check for Docker command patterns
-	dockerCommandPatterns := []string{
-		"docker-compose ",
-		"sudo docker-compose ",
-		"docker compose ",
-		"sudo docker compose ",
-		"docker ",
-		"sudo docker ",
-	}
-
-	for _, pattern := range dockerCommandPatterns {
-		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
-			if strings.Contains(pattern, "compose") {
-				return true, "docker-compose"
-			}
-			return true, "docker"
-		}
-	}
-
-	// Check for Docker Compose file extension
-	dockerComposeFileExtensions := []string{".yaml", ".yml"}
-	for _, extension := range dockerComposeFileExtensions {
-		if strings.HasSuffix(strings.ToLower(cmd), extension) {
-			return true, "docker-compose"
-		}
-	}
-
-	return false, ""
-}
 
 func parseDockerCommand(dockerCmd string) (string, string, error) {
 	// Regular expression patterns
@@ -657,7 +627,6 @@ func getInodeNumber(pid int) uint64 {
 
 	f, err := os.Stat(filepath)
 	if err != nil {
-		fmt.Errorf("%v failed to get the inode number or namespace Id:", Emoji, err)
 		return 0
 	}
 	// Dev := (f.Sys().(*syscall.Stat_t)).Dev

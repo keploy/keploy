@@ -187,6 +187,11 @@ func (r *Record) GetCmd() *cobra.Command {
 			}
 
 			if isDockerCmd && len(path) > 0 {
+				curDir, err := os.Getwd()
+				if err != nil {
+					r.logger.Error("failed to get current working directory", zap.Error(err))
+					return err
+				}
 				// Check if the path contains the moving up directory (..)
 				if strings.Contains(path, "..") {
 					path, err = filepath.Abs(filepath.Clean(path))
@@ -194,7 +199,7 @@ func (r *Record) GetCmd() *cobra.Command {
 						r.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
-					relativePath, err := filepath.Rel("/files", path)
+					relativePath, err := filepath.Rel(curDir, path)
 					if err != nil {
 						r.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
 						return nil
@@ -206,7 +211,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
 					// Check if the path is a subdirectory of current directory
 					// Get the current directory path in docker.
-					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					getDir := fmt.Sprintf(`docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "%s" }}{{ .Source }}{{ end }}{{ end }}'`, curDir)
 					cmd := exec.Command("sh", "-c", getDir)
 					out, err := cmd.Output()
 					if err != nil {
@@ -227,6 +232,28 @@ func (r *Record) GetCmd() *cobra.Command {
 						return nil
 					}
 				}
+			}
+			//Check if app command starts with docker or sudo docker.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				recordCfg := utils.RecordFlags{
+					Path:             path,
+					Command:          appCmd,
+					ContainerName:    appContainer,
+					Proxyport:        proxyPort,
+					NetworkName:      networkName,
+					Delay:            delay,
+					BuildDelay:       buildDelay,
+					PassThroughPorts: ports,
+					ConfigPath:       configPath,
+					EnableTele:       enableTele,
+				}
+				utils.UpdateKeployToDocker("record", isDockerCompose, recordCfg, r.logger)
+				return nil
 			}
 
 			//if user provides relative path
@@ -266,9 +293,8 @@ func (r *Record) GetCmd() *cobra.Command {
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.CaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough)
+			r.recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough)
 			return nil
 		},
 	}
