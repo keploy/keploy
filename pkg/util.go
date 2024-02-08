@@ -261,8 +261,5 @@ func SetChmodPermission(filePath string) error {
 		}
 		return nil
 	})
-	if err != nil {
-		panic(err)
-	}
 	return err
 }
