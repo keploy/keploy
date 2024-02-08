@@ -40,11 +40,11 @@ type colorConsoleEncoder struct {
 }
 
 // Define a global flag to control ANSI color code usage
-var EnableColor bool
+var EnableASNIColor bool
 
 // Function to create a new console encoder with or without colorization
 func NewConsoleEncoder(cfg zapcore.EncoderConfig) zapcore.Encoder {
-	if EnableColor {
+	if EnableASNIColor {
 		return zapcore.NewConsoleEncoder(cfg)
 	}
 	return zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
@@ -57,7 +57,7 @@ func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fie
 		return nil, err
 	}
 	// Replace ANSI color codes if they are not enabled
-	if !EnableColor {
+	if EnableASNIColor {
 		bytesArr := bytes.Replace(buff.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
 		buff.Reset()
 		buff.AppendString(string(bytesArr))
@@ -92,7 +92,7 @@ func setupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
 
 	// Check if ANSI color codes should be enabled
-	if EnableColor {
+	if EnableASNIColor {
 		logCfg.Encoding = "colorConsole"
 	} else {
 		logCfg.Encoding = "console"
@@ -293,7 +293,7 @@ func (r *Root) execute() {
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 
-	rootCmd.PersistentFlags().BoolVar(&EnableColor, "enableColor", true, "Enable ANSI color codes")
+	rootCmd.PersistentFlags().BoolVar(&EnableASNIColor, "enableASNIColor", true, "Enable ANSI color codes")
 
 	// Manually parse flags to determine debug mode
 	debugMode = checkForDebugFlag(os.Args[1:])

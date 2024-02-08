@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters, EnableColor *bool) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters, EnableASNIColor *bool) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -197,9 +197,9 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
-			EnableColor, err := cmd.Flags().GetBool("enableColor")
+			EnableASNIColor, err := cmd.Flags().GetBool("enableASNIColor")
 			if err != nil {
-				t.logger.Error("Failed to get the enableColor flag", zap.Error((err)))
+				t.logger.Error("Failed to get the enableASNIColor flag", zap.Error((err)))
 				return err
 			}
 
@@ -256,7 +256,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			passThroughHosts := []models.Filters{}
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts, &EnableColor)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath, &ignoreOrdering, &passThroughHosts, &EnableASNIColor)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("Keploy config not found, continuing without configuration")
@@ -367,7 +367,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					CoverageReportPath: coverageReportPath,
 					EnableTele:         enableTele,
 					WithCoverage:       withCoverage,
-					EnableColor:        EnableColor,
+					EnableASNIColor:        &EnableASNIColor,
 				}
 				utils.UpdateKeployToDocker("test", isDockerCompose, testCfg, t.logger)
 				return nil
@@ -441,7 +441,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
 					PassthroughHosts:   passThroughHosts,
-					EnableColor:        EnableColor,
+					EnableASNIColor:        &EnableASNIColor,
 				}, enableTele)
 			}
 

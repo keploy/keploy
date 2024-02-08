@@ -86,34 +86,35 @@ type RunTestSetConfig struct {
 }
 
 type SimulateRequestConfig struct {
-	Tc             *models.TestCase
-	LoadedHooks    *hooks.Hook
-	AppCmd         string
-	UserIP         string
-	TestSet        string
-	ApiTimeout     uint64
-	Success        *int
-	Failure        *int
-	Status         *models.TestRunStatus
-	TestReportFS   platform.TestReportDB
-	TestReport     *models.TestReport
-	Path           string
-	DockerID       bool
-	NoiseConfig    models.GlobalNoise
-	IgnoreOrdering bool
+	Tc              *models.TestCase
+	LoadedHooks     *hooks.Hook
+	AppCmd          string
+	UserIP          string
+	TestSet         string
+	ApiTimeout      uint64
+	Success         *int
+	Failure         *int
+	Status          *models.TestRunStatus
+	TestReportFS    platform.TestReportDB
+	TestReport      *models.TestReport
+	Path            string
+	DockerID        bool
+	NoiseConfig     models.GlobalNoise
+	IgnoreOrdering  bool
+	EnableASNIColor bool
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   platform.TestReportDB
-	TestReport     *models.TestReport
-	Status         *models.TestRunStatus
-	TestSet        string
-	Success        *int
-	Failure        *int
-	Ctx            context.Context
-	TestReportPath string
-	Path           string
-	EnableColor    bool
+	TestReportFS    platform.TestReportDB
+	TestReport      *models.TestReport
+	Status          *models.TestRunStatus
+	TestSet         string
+	Success         *int
+	Failure         *int
+	Ctx             context.Context
+	TestReportPath  string
+	Path            string
+	EnableASNIColor *bool
 }
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
