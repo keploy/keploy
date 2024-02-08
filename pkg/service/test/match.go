@@ -88,6 +88,8 @@ func matchJsonWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		return matchJsonComparisonResult, errors.New("type not matched ")
 	}
 	if expected == nil && actual == nil {
+		matchJsonComparisonResult.isExact = true
+		matchJsonComparisonResult.matches = true
 		return matchJsonComparisonResult, nil
 	}
 	x := reflect.ValueOf(expected)
@@ -108,6 +110,18 @@ func matchJsonWithNoiseHandling(key string, expected, actual interface{}, noiseM
 	case reflect.Map:
 		expMap := expected.(map[string]interface{})
 		actMap := actual.(map[string]interface{})
+		copiedExpMap := make(map[string]interface{})
+		copiedActMap := make(map[string]interface{})
+
+		// Copy each key-value pair from expMap to copiedExpMap
+		for key, value := range expMap {
+			copiedExpMap[key] = value
+		}
+
+		// Repeat the same process for actual map
+		for key, value := range actMap {
+			copiedActMap[key] = value
+		}
 		isExact := true
 		differences := []string{}
 		for k, v := range expMap {
@@ -124,8 +138,8 @@ func matchJsonWithNoiseHandling(key string, expected, actual interface{}, noiseM
 			}
 			// remove the noisy key from both expected and actual JSON.
 			if _, ok := CheckStringExist(prefix+k, noiseMap); ok {
-				delete(expMap, prefix+k)
-				delete(actMap, k)
+				delete(copiedExpMap, prefix+k)
+				delete(copiedActMap, k)
 				continue
 			}
 		}
