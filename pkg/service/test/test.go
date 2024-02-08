@@ -275,11 +275,11 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	// Sorting completeTestReport map according to testSuiteName (Keys)
 	testSuiteNames := make([]string, 0, len(completeTestReport))
 
-    for testSuiteName := range completeTestReport {
-        testSuiteNames = append(testSuiteNames, testSuiteName)
-    }
+		for testSuiteName := range completeTestReport {
+        	testSuiteNames = append(testSuiteNames, testSuiteName)
+    	}
 
-    sort.Strings(testSuiteNames)
+    	sort.Strings(testSuiteNames)
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
