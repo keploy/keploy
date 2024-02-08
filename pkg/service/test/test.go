@@ -55,10 +55,10 @@ type TestOptions struct {
 	PassthroughHosts   []models.Filters
 }
 
-type Tuple struct {
-    First int
-    Second int
-    Third int
+type TestReportVerdict struct {
+	total int
+    passed int
+    failed int
 }
 
 var (
@@ -67,7 +67,7 @@ var (
 	totalTestFailed int
 )
 
-var completeTestReport = make(map[string]Tuple)
+var completeTestReport = make(map[string]TestReportVerdict)
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
@@ -271,12 +271,21 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			break
 		}
 	}
+	
+	// Sorting completeTestReport map according to testSuiteName (Keys)
+	testSuiteNames := make([]string, 0, len(completeTestReport))
+
+    for testSuiteName := range completeTestReport {
+        testSuiteNames = append(testSuiteNames, testSuiteName)
+    }
+
+    sort.Strings(testSuiteNames)
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
 	pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
-	for testSuiteName, verdict := range completeTestReport {
-		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, verdict.Third, verdict.First, verdict.Second)
+	for _, testSuiteName := range testSuiteNames {
+		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
 	}
 
 	pp.Printf("\n<=========================================> \n\n")
@@ -575,7 +584,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	totalTestPassed += cfg.TestReport.Success
 	totalTestFailed += cfg.TestReport.Failure
 
-	verdict := Tuple{cfg.TestReport.Success, cfg.TestReport.Failure, cfg.TestReport.Total}
+	verdict := TestReportVerdict{cfg.TestReport.Success, cfg.TestReport.Failure, cfg.TestReport.Total}
 
 	completeTestReport[cfg.TestReport.TestSet] = verdict
 
