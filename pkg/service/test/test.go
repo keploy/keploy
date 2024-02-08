@@ -58,7 +58,7 @@ type TestOptions struct {
 type Tuple struct {
     First int
     Second int
-Third int
+    Third int
 }
 
 var (
