@@ -88,8 +88,14 @@ func (d *DiffsPrinter) Render() error {
 	if d.hasarrayIndexMismatch {
 		yellowPaint := color.New(color.FgYellow).SprintFunc()
 		redPaint := color.New(color.FgRed).SprintFunc()
-		initalPart := yellowPaint(utils.WarningSign + " Expected and actual value of ")
-		midPartpaint := redPaint(d.text)
+		startPart := " Expected and actual value"
+		var midPartpaint string
+		if len(d.text) > 0 {
+			midPartpaint = redPaint(d.text)
+			startPart += " of "
+		}
+		initalPart := yellowPaint(utils.WarningSign + startPart)
+
 		endPaint := yellowPaint(" are in different order but have the same objects")
 		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
