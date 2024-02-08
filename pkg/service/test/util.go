@@ -17,7 +17,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/yaml"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -32,16 +32,17 @@ type InitialiseRunTestSetReturn struct {
 	TcsMocks      []*models.Mock
 }
 
-type InitialiseTestReturn struct {
+type TestEnvironmentSetup struct {
 	Sessions                 []string
-	TestReportFS             *yaml.TestReport
+	TestReportFS             platform.TestReportDB
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
-	YamlStore                platform.TestCaseDB
+	Storage                  platform.TestCaseDB
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
+	IgnoreOrdering           bool
 }
 
 type TestConfig struct {
@@ -58,7 +59,11 @@ type TestConfig struct {
 	ApiTimeout         uint64
 	WithCoverage       bool
 	CoverageReportPath string
-	EnableTele         bool
+	TestReport         platform.TestReportDB
+	Storage            platform.TestCaseDB
+	Tele               *telemetry.Telemetry
+	PassThroughHosts   []models.Filters
+	IgnoreOrdering     bool
 }
 
 type RunTestSetConfig struct {
@@ -71,7 +76,7 @@ type RunTestSetConfig struct {
 	Delay          uint64
 	BuildDelay     time.Duration
 	Pid            uint32
-	YamlStore      platform.TestCaseDB
+	Storage        platform.TestCaseDB
 	LoadedHooks    *hooks.Hook
 	TestReportFS   platform.TestReportDB
 	TestRunChan    chan string
@@ -81,20 +86,21 @@ type RunTestSetConfig struct {
 }
 
 type SimulateRequestConfig struct {
-	Tc           *models.TestCase
-	LoadedHooks  *hooks.Hook
-	AppCmd       string
-	UserIP       string
-	TestSet      string
-	ApiTimeout   uint64
-	Success      *int
-	Failure      *int
-	Status       *models.TestRunStatus
-	TestReportFS platform.TestReportDB
-	TestReport   *models.TestReport
-	Path         string
-	DockerID     bool
-	NoiseConfig  models.GlobalNoise
+	Tc             *models.TestCase
+	LoadedHooks    *hooks.Hook
+	AppCmd         string
+	UserIP         string
+	TestSet        string
+	ApiTimeout     uint64
+	Success        *int
+	Failure        *int
+	Status         *models.TestRunStatus
+	TestReportFS   platform.TestReportDB
+	TestReport     *models.TestReport
+	Path           string
+	DockerID       bool
+	NoiseConfig    models.GlobalNoise
+	IgnoreOrdering bool
 }
 
 type FetchTestResultsConfig struct {

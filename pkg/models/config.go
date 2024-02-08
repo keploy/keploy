@@ -2,46 +2,108 @@ package models
 
 import "time"
 
+const DefaultConfig = `
+record:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  delay: 5
+  buildDelay: 30s
+  tests: 
+    filters:
+      - path: ""
+        urlMethods: []
+        headers: {}
+        host: ""
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        ports: 0
+test:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  # example: "test-set-1": ["test-1", "test-2", "test-3"]
+  selectedTests: 
+  # to use globalNoise, please follow the guide at the end of this file.
+  globalNoise:
+    global:
+      body: {}
+      header: {}
+  delay: 5
+  buildDelay: 30s
+  apiTimeout: 5
+  ignoreOrdering: false
+  stubs:
+    filters:
+      - path: ""
+        host: ""
+        ports: 0
+  withCoverage: false
+  coverageReportPath: ""
+`
+
+
 type Config struct {
 	Record Record `json:"record" yaml:"record"`
 	Test   Test   `json:"test" yaml:"test"`
 }
 
 type Record struct {
-	Path             string        `json:"path" yaml:"path"`
-	Command          string        `json:"command" yaml:"command"`
-	ProxyPort        uint32        `json:"proxyport" yaml:"proxyport"`
-	ContainerName    string        `json:"containerName" yaml:"containerName"`
-	NetworkName      string        `json:"networkName" yaml:"networkName"`
-	Delay            uint64        `json:"delay" yaml:"delay"`
-	BuildDelay       time.Duration `json:"buildDelay" yaml:"buildDelay"`
-	PassThroughPorts []uint        `json:"passThroughPorts" yaml:"passThroughPorts"`
-	Filters          Filters       `json:"filters" yaml:"filters"`
+	Path          string        `json:"path" yaml:"path"`
+	Command       string        `json:"command" yaml:"command"`
+	ProxyPort     uint32        `json:"proxyport" yaml:"proxyport"`
+	ContainerName string        `json:"containerName" yaml:"containerName"`
+	NetworkName   string        `json:"networkName" yaml:"networkName"`
+	Delay         uint64        `json:"delay" yaml:"delay"`
+	BuildDelay    time.Duration `json:"buildDelay" yaml:"buildDelay"`
+	Tests         TestFilter    `json:"tests" yaml:"tests"`
+	Stubs         Stubs         `json:"stubs" yaml:"stubs"`
 }
 
+type TestFilter struct {
+	Filters []Filters `json:"filters" yaml:"filters"`
+}
+
+type Stubs struct {
+	Filters []Filters `json:"filters" yaml:"filters"`
+}
 type Filters struct {
-	ReqHeader  []string            `json:"req_header" yaml:"req_header"`
-	URLMethods map[string][]string `json:"urlMethods" yaml:"urlMethods"`
+	Path       string            `json:"path" yaml:"path"`
+	UrlMethods []string          `json:"urlMethods" yaml:"urlMethods"`
+	Host       string            `json:"host" yaml:"host"`
+	Headers    map[string]string `json:"headers" yaml:"headers"`
+	Port       uint              `json:"ports" yaml:"ports"`
 }
 
-func (filter *Filters) GetKind() string {
-	return "filter"
+func (tests *TestFilter) GetKind() string {
+	return "Tests"
 }
 
 type Test struct {
-	Path               string              `json:"path" yaml:"path"`
-	Command            string              `json:"command" yaml:"command"`
-	ProxyPort          uint32              `json:"proxyport" yaml:"proxyport"`
-	ContainerName      string              `json:"containerName" yaml:"containerName"`
-	NetworkName        string              `json:"networkName" yaml:"networkName"`
-	Tests              map[string][]string `json:"tests" yaml:"tests"`
-	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise"`
-	Delay              uint64              `json:"delay" yaml:"delay"`
-	BuildDelay         time.Duration       `json:"buildDelay" yaml:"buildDelay"`
-	ApiTimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout"`
-	PassThroughPorts   []uint              `json:"passThroughPorts" yaml:"passThroughPorts"`
-	WithCoverage       bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
-	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
+	Path                    string              `json:"path" yaml:"path"`
+	Command                 string              `json:"command" yaml:"command"`
+	ProxyPort               uint32              `json:"proxyport" yaml:"proxyport"`
+	ContainerName           string              `json:"containerName" yaml:"containerName"`
+	NetworkName             string              `json:"networkName" yaml:"networkName"`
+	SelectedTests           map[string][]string `json:"selectedTests" yaml:"selectedTests"`
+	GlobalNoise             Globalnoise         `json:"globalNoise" yaml:"globalNoise"`
+	Delay                   uint64              `json:"delay" yaml:"delay"`
+	BuildDelay              time.Duration       `json:"buildDelay" yaml:"buildDelay"`
+	ApiTimeout              uint64              `json:"apiTimeout" yaml:"apiTimeout"`
+	PassThroughPorts        []uint              `json:"passThroughPorts" yaml:"passThroughPorts"`
+	BypassEndpointsRegistry []string            `json:"bypassEndpointsRegistry" yaml:"bypassEndpointsRegistry"`
+	WithCoverage            bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
+	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
+	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
+	Stubs                   Stubs               `json:"stubs" yaml:"stubs"`
 }
 
 type Globalnoise struct {
