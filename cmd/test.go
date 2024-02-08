@@ -443,6 +443,14 @@ func (t *Test) GetCmd() *cobra.Command {
 					PassthroughHosts:   passThroughHosts,
 					EnableASNIColor:        &EnableASNIColor,
 				}, enableTele)
+
+				cmd := exec.Command("sudo", "chmod", "-R", "777", path)
+				err = cmd.Run()
+				if err != nil {
+					t.logger.Error("failed to set the permission of keploy directory", zap.Error(err))
+					return err
+				}
+
 			}
 
 			return nil
