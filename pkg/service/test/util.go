@@ -115,6 +115,12 @@ type FetchTestResultsConfig struct {
 	Path           string
 }
 
+type TestReportVerdict struct {
+    	total int
+    	passed int
+    	failed int
+}
+
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
 	m := map[string][]string{}
 	for k, v := range h {

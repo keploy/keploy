@@ -55,12 +55,6 @@ type TestOptions struct {
 	PassthroughHosts   []models.Filters
 }
 
-type TestReportVerdict struct {
-    	total int
-    	passed int
-    	failed int
-}
-
 var (
     	totalTests int
     	totalTestPassed int
