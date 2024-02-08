@@ -55,11 +55,19 @@ type TestOptions struct {
 	PassthroughHosts   []models.Filters
 }
 
+type Tuple struct {
+    First int
+    Second int
+	Third int
+}
+
 var (
 	totalTests int
 	totalTestPassed int
 	totalTestFailed int
 )
+
+var completeTestReport = make(map[string]Tuple)
 
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
@@ -267,7 +275,14 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		}
 	}
 
-	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", totalTests, totalTestPassed, totalTestFailed)
+	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
+
+	pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
+	for testSuiteName, verdict := range completeTestReport {
+		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, verdict.Third, verdict.First, verdict.Second)
+	}
+
+	pp.Printf("\n<=========================================> \n\n")
 
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 	// log the overall code coverage for the test run of go binaries
@@ -551,6 +566,10 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	totalTests += cfg.TestReport.Total
 	totalTestPassed += cfg.TestReport.Success
 	totalTestFailed += cfg.TestReport.Failure
+
+	verdict := Tuple{cfg.TestReport.Success, cfg.TestReport.Failure, cfg.TestReport.Total}
+
+	completeTestReport[cfg.TestReport.TestSet] = verdict
 
 	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
 
