@@ -358,7 +358,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
 	t.logger.Debug(fmt.Sprintf("the oss config mocks for %s are: %v\n", cfg.TestSet, readConfigMocks))
-	
+
 	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
 	sort.SliceStable(readTcsMocks, func(i, j int) bool {
 		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
@@ -455,7 +455,6 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		fmt.Println("Value of cfg.enableasnicolor", cfg.EnableASNIColor)
 		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, &cfg.EnableASNIColor)
 
 		if !testPass {
@@ -813,10 +812,8 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 
 		var logger *pp.PrettyPrinter
 		var logs string
-		fmt.Println("Value of EnableASCIColor: ", *EnableASCIColor)
 
 		if *EnableASCIColor {
-			fmt.Println("Printing with color: ")
 			logger = pp.New()
 			logger.WithLineInfo = false
 			logger.SetColorScheme(models.FailingColorScheme)
