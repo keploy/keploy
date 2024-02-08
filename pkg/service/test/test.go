@@ -56,15 +56,15 @@ type TestOptions struct {
 }
 
 type TestReportVerdict struct {
-    total int
-    passed int
-    failed int
+		total int
+		passed int
+		failed int
 }
 
 var (
-	totalTests int
-	totalTestPassed int
-	totalTestFailed int
+    totalTests int
+    totalTestPassed int
+    totalTestFailed int
 )
 
 var completeTestReport = make(map[string]TestReportVerdict)
