@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"sync/atomic"
 	"time"
 
@@ -91,8 +90,8 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
 		}
 		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
-		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
-		err = cmd.Run()
+		
+		err = pkg.SetReadPermission(keployPath, 0777)
 		if err != nil {
 			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 			return false, err

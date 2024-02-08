@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -248,4 +248,22 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 		}
 	}
 	return indices, nil
+}
+
+func SetReadPermission(filePath string, mode fs.FileMode) error {
+	err := filepath.Walk(filePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Set permissions for each file/directory
+		err = os.Chmod(path, mode) // Replace 0777 with desired permissions
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	return err
 }
