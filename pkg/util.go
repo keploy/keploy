@@ -255,8 +255,8 @@ func SetReadPermission(filePath string, mode fs.FileMode) error {
 		if err != nil {
 			return err
 		}
-		// Set permissions for each file/directory
-		err = os.Chmod(path, mode) // Replace 0777 with desired permissions
+		
+		err = os.Chmod(path, mode) 
 		if err != nil {
 			return err
 		}
