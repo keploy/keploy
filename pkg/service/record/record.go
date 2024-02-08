@@ -9,7 +9,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
@@ -39,21 +38,26 @@ func (r *recorder) StartCaptureTraffic(options models.RecordOptions) {
 		return
 	}
 	tcDB := yaml.NewYamlStore(options.Path+"/"+dirName+"/tests", options.Path+"/"+dirName, "", "", r.Logger, tele)
-	r.CaptureTraffic(options, dirName, tcDB, tele)
+	r.CaptureTraffic(RecordEnvironment{
+		options: options,
+		dirName: dirName,
+		tcDB:    tcDB,
+		tele:    tele,
+	})
 }
 
-func (r *recorder) CaptureTraffic(options models.RecordOptions, dirName string, ys platform.TestCaseDB, tele *telemetry.Telemetry) {
+func (r *recorder) CaptureTraffic(renv RecordEnvironment) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
 	models.SetMode(models.MODE_RECORD)
-	tele.Ping(false)
+	renv.tele.Ping(false)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
-	loadedHooks.SetPassThroughHosts(options.PassThroughHosts)
+	loadedHooks, err := hooks.NewHook(renv.tcDB, routineId, r.Logger)
+	loadedHooks.SetPassThroughHosts(renv.options.PassThroughHosts)
 	if err != nil {
 		r.Logger.Error("error while creating hooks", zap.Error(err))
 		return
@@ -72,7 +76,7 @@ func (r *recorder) CaptureTraffic(options models.RecordOptions, dirName string, 
 		return
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(options.AppCmd, options.AppContainer, 0, ctx, options.Filters); err != nil {
+		if err := loadedHooks.LoadHooks(renv.options.AppCmd, renv.options.AppContainer, 0, ctx, renv.options.Filters); err != nil {
 			return
 		}
 	}
@@ -83,7 +87,7 @@ func (r *recorder) CaptureTraffic(options models.RecordOptions, dirName string, 
 		return
 	default:
 		// start the BootProxy
-		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: options.ProxyPort}, options.AppCmd, options.AppContainer, 0, "", options.Ports, loadedHooks, ctx, 0)
+		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: renv.options.ProxyPort}, renv.options.AppCmd, renv.options.AppContainer, 0, "", renv.options.Ports, loadedHooks, ctx, 0)
 	}
 
 	//proxy fetches the destIp and destPort from the redirect proxy map
@@ -106,7 +110,7 @@ func (r *recorder) CaptureTraffic(options models.RecordOptions, dirName string, 
 		// start user application
 		go func() {
 			stopApplication := false
-			if err := loadedHooks.LaunchUserApplication(options.AppCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, false); err != nil {
+			if err := loadedHooks.LaunchUserApplication(renv.options.AppCmd, renv.options.AppContainer, renv.options.AppNetwork, renv.options.Delay, renv.options.BuildDelay, false); err != nil {
 				switch err {
 				case hooks.ErrInterrupted:
 					r.Logger.Info("keploy terminated user application")
@@ -138,13 +142,13 @@ func (r *recorder) CaptureTraffic(options models.RecordOptions, dirName string, 
 		abortStopHooksForcefully = true
 		loadedHooks.Stop(false)
 		if testsTotal != 0 {
-			tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
+			renv.tele.RecordedTestSuite(renv.dirName, testsTotal, mocksTotal)
 		}
 		ps.StopProxyServer()
 		return
 	case <-abortStopHooksInterrupt:
 		if testsTotal != 0 {
-			tele.RecordedTestSuite(options.Path, testsTotal, mocksTotal)
+			renv.tele.RecordedTestSuite(renv.options.Path, testsTotal, mocksTotal)
 		}
 
 	}

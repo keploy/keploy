@@ -164,10 +164,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				r.logger.Error("failed to read the disable telemetry flag")
 				return err
 			}
-
-			passThrough := []models.Filters{}
-
-			err = r.GetRecordConfig(&models.RecordOptions{
+			recordConfig := models.RecordOptions{
 				Path:             path,
 				ProxyPort:        proxyPort,
 				AppCmd:           appCmd,
@@ -178,8 +175,12 @@ func (r *Record) GetCmd() *cobra.Command {
 				Ports:            ports,
 				Filters:          &filters,
 				EnableTele:       enableTele,
-				PassThroughHosts: passThrough,
-			}, configPath)
+				PassThroughHosts: []models.Filters{},
+			}
+
+			passThrough := []models.Filters{}
+
+			err = r.GetRecordConfig(&recordConfig, configPath)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("Keploy config not found, continuing without configuration")
@@ -305,21 +306,9 @@ func (r *Record) GetCmd() *cobra.Command {
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-			options := models.RecordOptions{
-				Path:             path,
-				ProxyPort:        proxyPort,
-				AppCmd:           appCmd,
-				AppContainer:     appContainer,
-				AppNetwork:       networkName,
-				Delay:            delay,
-				BuildDelay:       buildDelay,
-				Ports:            ports,
-				Filters:          &filters,
-				EnableTele:       enableTele,
-				PassThroughHosts: passThrough,
-			}
+			recordConfig.PassThroughHosts = passThrough
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.StartCaptureTraffic(options)
+			r.recorder.StartCaptureTraffic(recordConfig)
 			return nil
 		},
 	}

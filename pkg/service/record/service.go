@@ -6,8 +6,13 @@ import (
 	"go.keploy.io/server/pkg/platform/telemetry"
 )
 
+type RecordEnvironment struct {
+	options models.RecordOptions
+	dirName string
+	tcDB    platform.TestCaseDB
+	tele    *telemetry.Telemetry
+}
 type Recorder interface {
 	StartCaptureTraffic(options models.RecordOptions)
-  	CaptureTraffic(options models.RecordOptions,  dirName string, tcDB platform.TestCaseDB, tele *telemetry.Telemetry)
-	
+	CaptureTraffic(RecordEnvironment)
 }
