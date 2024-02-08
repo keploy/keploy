@@ -21,6 +21,8 @@ fi
 config_file="./keploy-config.yaml"
 sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
+sed -i 's/ports: 0/ports: 27017/' "$config_file"
+
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
 
@@ -33,8 +35,16 @@ sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &
 
 # Wait for the application to start.
 app_started=false
+
+sleep 5
+
 while [ "$app_started" = false ]; do
-    if curl -X GET http://localhost:8080/CJBKJd92; then
+    if curl --request POST \
+  --url http://localhost:8080/url \
+  --header 'content-type: application/json' \
+  --data '{
+  "url": "https://facebook.com"
+}'; then
         app_started=true
     fi
     sleep 3 # wait for 3 seconds before checking again.
@@ -70,13 +80,25 @@ sudo kill $pid
 sleep 5
 done
 
-# Start the gin-mongo app in test omde.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --apiTimeout 30 --delay 7
+# Start the gin-mongo app in test mode.
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+
+# move keployv2 to /usr/local/bin/keploy
+mv ./../../keployv2 /usr/local/bin/keploy
+
+sed -i 's/<path for storing stubs>/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
+
+# run in mockrecord mode
+go test
+
+sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
+# run in mocktest mode
+go test
 
 # Get the test results from the testReport file.
 report_file="./keploy/testReports/test-run-1/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-run-1/report-2.yaml"
+report_file2="./keploy/testReports/test-run-1/report-1.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
@@ -85,5 +107,3 @@ if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
 else
     exit 1
 fi
-
-docker stop mongoDb

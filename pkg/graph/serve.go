@@ -40,7 +40,7 @@ func NewGraph(logger *zap.Logger) graphInterface {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
+func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
 	var ps *proxy.ProxySet
 
 	if port == 0 {
@@ -57,7 +57,7 @@ func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Dela
 	teleFS := fs.NewTeleFS(g.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
 	tele.Ping(false)
-	ys := yaml.NewYamlStore("", "", "", "", g.logger, tele)
+	ys := yaml.NewYamlStore(path, path, "", "", g.logger, tele)
 	routineId := pkg.GenerateRandomID()
 	// Initiate the hooks
 	loadedHooks, err := hooks.NewHook(ys, routineId, g.logger)
@@ -93,7 +93,7 @@ func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Dela
 		return
 	default:
 		// start the proxy
-		ps = proxy.BootProxy(g.logger, proxy.Option{Port: proxyPort}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
+		ps = proxy.BootProxy(g.logger, proxy.Option{Port: proxyPort, MongoPassword: mongopassword}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
 
 	}
 
@@ -114,7 +114,7 @@ func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Dela
 		Resolvers: &Resolver{
 			Tester:         tester,
 			TestReportFS:   testReportFS,
-			YS:             ys,
+			Storage:        ys,
 			LoadedHooks:    loadedHooks,
 			Logger:         g.logger,
 			Path:           path,
@@ -202,7 +202,7 @@ func (g *graph) Serve(path string, proxyPort uint32, testReportPath string, Dela
 }
 
 // Gracefully shut down the HTTP server with a timeout
-func (g *graph)stopGraphqlServer(httpSrv *http.Server) {
+func (g *graph) stopGraphqlServer(httpSrv *http.Server) {
 	shutdown := make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
