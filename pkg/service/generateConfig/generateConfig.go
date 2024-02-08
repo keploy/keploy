@@ -52,7 +52,7 @@ func (g *generatorConfig) GenerateConfig(filePath string, options GenerateConfig
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
 
-	err = pkg.SetReadPermission(filePath, 0777)
+	err = pkg.SetChmodPermission(filePath)
 	if err != nil {
 		g.logger.Error("failed to set the permission of config file", zap.Error(err))
 		return

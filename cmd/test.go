@@ -437,7 +437,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				}, enableTele)
 
 
-				err = pkg.SetReadPermission(path, 0777)
+				err = pkg.SetChmodPermission(path)
 				if err != nil {
 					t.logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 					return err

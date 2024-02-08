@@ -91,7 +91,7 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 		}
 		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
 		
-		err = pkg.SetReadPermission(keployPath, 0777)
+		err = pkg.SetChmodPermission(keployPath)
 		if err != nil {
 			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 			return false, err

@@ -250,13 +250,12 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	return indices, nil
 }
 
-func SetReadPermission(filePath string, mode fs.FileMode) error {
+func SetChmodPermission(filePath string) error {
 	err := filepath.Walk(filePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		
-		err = os.Chmod(path, mode) 
+		err = os.Chmod(path, 0777) 
 		if err != nil {
 			return err
 		}
