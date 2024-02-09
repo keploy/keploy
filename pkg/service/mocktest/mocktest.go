@@ -66,7 +66,7 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 
 	tcsMocks, err := ys.ReadTcsMocks(&models.TestCase{}, "")
 	if err != nil {
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(false)
 		ps.StopProxyServer()
 		return
 	}
@@ -87,7 +87,7 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	configMocks, err := ys.ReadConfigMocks("")
 
 	if err != nil {
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(false)
 		ps.StopProxyServer()
 		return
 	}
@@ -129,6 +129,6 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		tele.MockTestRun(usedMocks)
 	}
 	// Shutdown other resources
-	loadedHooks.Stop(true)
+	loadedHooks.Stop(false)
 	ps.StopProxyServer()
 }

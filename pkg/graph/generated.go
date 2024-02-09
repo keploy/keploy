@@ -47,6 +47,7 @@ type DirectiveRoot struct {
 type ComplexityRoot struct {
 	Mutation struct {
 		RunTestSet func(childComplexity int, testSet string) int
+		StopProxy  func(childComplexity int) int
 	}
 
 	Query struct {
@@ -67,6 +68,7 @@ type ComplexityRoot struct {
 
 type MutationResolver interface {
 	RunTestSet(ctx context.Context, testSet string) (*model.RunTestSetResponse, error)
+	StopProxy(ctx context.Context) (bool, error)
 }
 type QueryResolver interface {
 	TestSets(ctx context.Context) ([]string, error)
@@ -99,6 +101,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.Mutation.RunTestSet(childComplexity, args["testSet"].(string)), true
+
+	case "Mutation.stopProxy":
+		if e.complexity.Mutation.StopProxy == nil {
+			break
+		}
+
+		return e.complexity.Mutation.StopProxy(childComplexity), true
 
 	case "Query.testSetStatus":
 		if e.complexity.Query.TestSetStatus == nil {
@@ -381,7 +390,7 @@ func (ec *executionContext) _Mutation_runTestSet(ctx context.Context, field grap
 	}
 	res := resTmp.(*model.RunTestSetResponse)
 	fc.Result = res
-	return ec.marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx, field.Selections, res)
+	return ec.marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐRunTestSetResponse(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) fieldContext_Mutation_runTestSet(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
@@ -412,6 +421,50 @@ func (ec *executionContext) fieldContext_Mutation_runTestSet(ctx context.Context
 	if fc.Args, err = ec.field_Mutation_runTestSet_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_stopProxy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_Mutation_stopProxy(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().StopProxy(rctx)
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_Mutation_stopProxy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
 	}
 	return fc, nil
 }
@@ -488,7 +541,7 @@ func (ec *executionContext) _Query_testSetStatus(ctx context.Context, field grap
 	}
 	res := resTmp.(*model.TestSetStatus)
 	fc.Result = res
-	return ec.marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx, field.Selections, res)
+	return ec.marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) fieldContext_Query_testSetStatus(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
@@ -2628,6 +2681,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "stopProxy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_stopProxy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -3171,11 +3231,11 @@ func (ec *executionContext) marshalNBoolean2bool(ctx context.Context, sel ast.Se
 	return res
 }
 
-func (ec *executionContext) marshalNRunTestSetResponse2goᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v model.RunTestSetResponse) graphql.Marshaler {
+func (ec *executionContext) marshalNRunTestSetResponse2goᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v model.RunTestSetResponse) graphql.Marshaler {
 	return ec._RunTestSetResponse(ctx, sel, &v)
 }
 
-func (ec *executionContext) marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v *model.RunTestSetResponse) graphql.Marshaler {
+func (ec *executionContext) marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v *model.RunTestSetResponse) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			ec.Errorf(ctx, "the requested element is null which the schema does not allow")
@@ -3232,11 +3292,11 @@ func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel
 	return ret
 }
 
-func (ec *executionContext) marshalNTestSetStatus2goᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v model.TestSetStatus) graphql.Marshaler {
+func (ec *executionContext) marshalNTestSetStatus2goᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v model.TestSetStatus) graphql.Marshaler {
 	return ec._TestSetStatus(ctx, sel, &v)
 }
 
-func (ec *executionContext) marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v *model.TestSetStatus) graphql.Marshaler {
+func (ec *executionContext) marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v *model.TestSetStatus) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			ec.Errorf(ctx, "the requested element is null which the schema does not allow")

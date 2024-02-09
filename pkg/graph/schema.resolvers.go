@@ -78,6 +78,26 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	return &model.RunTestSetResponse{Success: true, TestRunID: testRunID}, nil
 }
 
+// StopProxy is the resolver for the stopProxy field.
+func (r *mutationResolver) StopProxy(ctx context.Context) (bool, error) {
+	// if r.Resolver == nil {
+	// 	err := fmt.Errorf(Emoji + "failed to get Resolver")
+	// 	return false, err
+	// }
+
+	// proxy := r.Resolver.Proxy
+
+	// if proxy == nil {
+	// 	r.Logger.Error("failed to get proxy from resolver")
+	// 	return false, fmt.Errorf(Emoji + "failed to stop the proxy")
+	// }
+
+	// proxy.Stop()
+	// r.Logger.Debug("proxy stopped")
+	// return true, nil
+	panic("not implemented")
+}
+
 // TestSets is the resolver for the testSets field.
 func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	if r.Resolver == nil {
@@ -105,8 +125,10 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 // TestSetStatus is the resolver for the testSetStatus field.
 func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error) {
 	//Initiate the telemetry.
-	var store = fs.NewTeleFS(r.Logger)
-	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
+	// var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
+
+	// var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
+	
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err

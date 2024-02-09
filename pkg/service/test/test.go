@@ -37,7 +37,9 @@ type tester struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
 }
-type TestOptions struct {
+type Options struct {
+	BasePath           string
+	ReportPath         string
 	MongoPassword      string
 	Delay              uint64
 	BuildDelay         time.Duration
@@ -53,6 +55,7 @@ type TestOptions struct {
 	CoverageReportPath string
 	IgnoreOrdering     bool
 	PassthroughHosts   []models.Filters
+	EnableTele         bool
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -139,7 +142,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 
 	select {
 	case <-stopper:
-		returnVal.LoadedHooks.Stop(true)
+		returnVal.LoadedHooks.Stop(false)
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// start the proxy
@@ -167,7 +170,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		select {
 		case <-stopper:
 			returnVal.AbortStopHooksForcefully = true
-			returnVal.LoadedHooks.Stop(false)
+			returnVal.LoadedHooks.Stop(true)
 			//Call the telemetry events.
 			if resultForTele[0] != 0 || resultForTele[1] != 0 {
 				cfg.Tele.Testrun(resultForTele[0], resultForTele[1])
@@ -187,7 +190,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, opt Options, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
 
 	testRes := false
 	result := true
@@ -195,23 +198,23 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 
 	cfg := &TestConfig{
 		Path:               path,
-		Proxyport:          options.ProxyPort,
+		Proxyport:          opt.ProxyPort,
 		TestReportPath:     testReportPath,
 		AppCmd:             appCmd,
-		AppContainer:       options.AppContainer,
-		AppNetwork:         options.AppContainer,
-		Delay:              options.Delay,
-		BuildDelay:         options.BuildDelay,
-		PassThroughPorts:   options.PassThroughPorts,
-		ApiTimeout:         options.ApiTimeout,
-		MongoPassword:      options.MongoPassword,
-		WithCoverage:       options.WithCoverage,
-		CoverageReportPath: options.CoverageReportPath,
+		AppContainer:       opt.AppContainer,
+		AppNetwork:         opt.AppContainer,
+		Delay:              opt.Delay,
+		BuildDelay:         opt.BuildDelay,
+		PassThroughPorts:   opt.PassThroughPorts,
+		ApiTimeout:         opt.ApiTimeout,
+		MongoPassword:      opt.MongoPassword,
+		WithCoverage:       opt.WithCoverage,
+		CoverageReportPath: opt.CoverageReportPath,
 		Tele:               tele,
 		TestReport:         testReportStorage,
 		Storage:            tcsStorage,
-		PassThroughHosts:   options.PassthroughHosts,
-		IgnoreOrdering:     options.IgnoreOrdering,
+		PassThroughHosts:   opt.PassthroughHosts,
+		IgnoreOrdering:     opt.IgnoreOrdering,
 	}
 	sessions, err := cfg.Storage.ReadTestSessionIndices()
 	if err != nil {
@@ -227,16 +230,16 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	}
 	for _, sessionIndex := range sessions {
 		// checking whether the provided testset match with a recorded testset.
-		testcases := ArrayToMap(options.Tests[sessionIndex])
-		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
+		testcases := ArrayToMap(opt.Tests[sessionIndex])
+		if _, ok := opt.Tests[sessionIndex]; !ok && len(opt.Tests) != 0 {
 			continue
 		}
-		noiseConfig := options.GlobalNoise
-		if tsNoise, ok := options.TestsetNoise[sessionIndex]; ok {
-			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
+		noiseConfig := opt.GlobalNoise
+		if tsNoise, ok := opt.TestsetNoise[sessionIndex]; ok {
+			noiseConfig = LeftJoinNoise(opt.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, opt.AppContainer, opt.AppNetwork, opt.Delay, opt.BuildDelay, 0, nil, opt.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -259,7 +262,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	}
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 	// log the overall code coverage for the test run of go binaries
-	if options.WithCoverage {
+	if opt.WithCoverage {
 		t.logger.Info("there is a opportunity to get the coverage here")
 		// logs the coverage using covdata
 		coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
@@ -283,7 +286,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	if !initialisedValues.AbortStopHooksForcefully {
 		initialisedValues.AbortStopHooksInterrupt <- true
 		// stop listening for the eBPF events
-		initialisedValues.LoadedHooks.Stop(true)
+		initialisedValues.LoadedHooks.Stop(false)
 		//stop listening for proxy server
 		initialisedValues.ProxySet.StopProxyServer()
 		return true
@@ -293,12 +296,12 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	return false
 }
 
-func (t *tester) StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) StartTest(ctx context.Context, cmd string, opt Options) bool {
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
-	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage)
+	return t.Test(path, testReportPath, appCmd, opt, tele, reportStorage, mockStorage)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -357,7 +360,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
 	t.logger.Debug(fmt.Sprintf("the oss config mocks for %s are: %v\n", cfg.TestSet, readConfigMocks))
-	
+
 	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
 	sort.SliceStable(readTcsMocks, func(i, j int) bool {
 		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
@@ -841,8 +844,8 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 				if err != nil {
 					t.logger.Warn("failed to compute json diff", zap.Error(err))
 				}
-				for _, op := range patch {
-					keyStr := op.Path
+				for _, opt := range patch {
+					keyStr := opt.Path
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
@@ -850,7 +853,7 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 						logDiffs.hasarrayIndexMismatch = true
 						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
 					}
-					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+					logDiffs.PushBodyDiff(fmt.Sprint(opt.OldValue), fmt.Sprint(opt.Value), bodyNoise)
 
 				}
 			} else {

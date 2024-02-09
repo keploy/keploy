@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -24,17 +25,24 @@ type Telemetry struct {
 	client         *http.Client
 }
 
-func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, version string, GlobalMap map[string]interface{}) *Telemetry {
-	if version == "" {
-		version = utils.Version
+type Options struct {
+	Enabled   bool
+	Version   string
+	GlobalMap map[string]interface{}
+}
+
+func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
+	if opt.Version == "" {
+		opt.Version = utils.Version
 	}
+	store := fs.NewTeleFS(logger)
+
 	tele := Telemetry{
-		Enabled:       enabled,
-		OffMode:       offMode,
+		Enabled:       opt.Enabled,
 		logger:        logger,
 		store:         store,
-		KeployVersion: version,
-		GlobalMap:     GlobalMap,
+		KeployVersion: opt.Version,
+		GlobalMap:     opt.GlobalMap,
 		client:        &http.Client{Timeout: 10 * time.Second},
 	}
 	return &tele

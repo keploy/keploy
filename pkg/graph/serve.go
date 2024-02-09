@@ -37,15 +37,16 @@ func NewGraph(logger *zap.Logger) graphInterface {
 	}
 }
 
+// defaultPort is the default port for the graphql server
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
 func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
-	var ps *proxy.ProxySet
-
 	if port == 0 {
 		port = defaultPort
 	}
+
+	var ps *proxy.ProxySet
 
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
@@ -72,6 +73,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	ctx := context.Background()
 
 	// load the ebpf hooks into the kernel
+
 	select {
 	case <-stopper:
 		return
@@ -89,7 +91,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(false)
 		return
 	default:
 		// start the proxy
@@ -158,7 +160,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	abortStopHooksForcefully := false
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(false)
 		ps.StopProxyServer()
 		return
 	default:
@@ -179,7 +181,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
-				loadedHooks.Stop(true)
+				loadedHooks.Stop(false)
 				ps.StopProxyServer()
 				exitCmd <- true
 				//stop listening for proxy server
@@ -192,7 +194,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	select {
 	case <-stopper:
 		abortStopHooksForcefully = true
-		loadedHooks.Stop(false)
+		loadedHooks.Stop(true)
 		ps.StopProxyServer()
 		return
 	case <-abortStopHooksInterrupt:
