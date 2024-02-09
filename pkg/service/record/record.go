@@ -112,7 +112,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 				timer := time.After(recordTimer)
 				select {
 				case <-timer:
-					r.Logger.Warn("Time up! Stopping the timer")
+					r.Logger.Warn("Time up! Stopping keploy")
 					stopper <- os.Interrupt
 				}
 			}()

@@ -308,7 +308,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 	recordCmd.Flags().StringP("command", "c", "", "Command to start the user application")
 
-	recordCmd.Flags().DurationP("recordTimer", "t", 0, "Timer to stop keploy recorder after a specified time")
+	recordCmd.Flags().Duration("recordTimer", 0, "Timer to stop keploy recorder after a specified time")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
