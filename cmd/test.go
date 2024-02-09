@@ -13,19 +13,26 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/graph"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewCmdTest(logger *zap.Logger) *Test {
-	tester := test.NewTester(logger)
-	return &Test{
-		tester: tester,
-		logger: logger,
-	}
+func init() {
+	// register the test command
+	RegisteredCmds = append(RegisteredCmds, &Test{})
 }
+
+type Test struct {
+}
+
+// func NewCmdTest(logger *zap.Logger) *Test {
+// 	tester := test.NewTester(logger)
+// 	return &Test{
+// 		tester: tester,
+// 		logger: logger,
+// 	}
+// }
 
 func ReadTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
@@ -102,12 +109,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	return nil
 }
 
-type Test struct {
-	tester test.Tester
-	logger *zap.Logger
-}
-
-func (t *Test) GetCmd() *cobra.Command {
+func (t *Test) GetCmd(logger *zap.Logger) *cobra.Command {
 	var testCmd = &cobra.Command{
 		Use:     "test",
 		Short:   "run the recorded testcases and execute assertions",
@@ -418,7 +420,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
 
-				t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
+				t.tester.StartTest(path, testReportPath, appCmd, Options{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,

@@ -20,4 +20,5 @@ type Query {
 
 type Mutation {
   runTestSet(testSet: String!): RunTestSetResponse!
+  stopProxy: Boolean!
 }

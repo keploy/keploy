@@ -15,10 +15,65 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TheZeroSlave/zapsentry"
 	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+var ErrFileNotFound = errors.New("file Not found")
+var WarningSign = "\U000026A0"
+
+func ModifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
+	cfg := zapsentry.Configuration{
+		Level:             zapcore.ErrorLevel, //when to send message to sentry
+		EnableBreadcrumbs: true,               // enable sending breadcrumbs to Sentry
+		BreadcrumbLevel:   zapcore.InfoLevel,  // at what level should we sent breadcrumbs to sentry
+		Tags: map[string]string{
+			"component": "system",
+		},
+	}
+	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(client))
+
+	//in case of err it will return noop core. So we don't need to attach it to logger.
+	if err != nil {
+		log.Debug("failed to init zap", zap.Error(err))
+		return log
+	}
+
+	log = zapsentry.AttachCoreToLogger(core, log)
+	kernelVersion := ""
+	if runtime.GOOS == "linux" {
+		cmd := exec.Command("uname", "-r")
+		kernelBytes, err := cmd.Output()
+		if err != nil {
+			log.Debug("failed to get kernel version", zap.Error(err))
+		} else {
+			kernelVersion = string(kernelBytes)
+		}
+	}
+	arch := runtime.GOARCH
+	installationID, err := fs.NewTeleFS(log).Get(false)
+	if err != nil {
+		log.Debug("failed to get installationID", zap.Error(err))
+	}
+	if installationID == "" {
+		installationID, err = fs.NewTeleFS(log).Get(true)
+		if err != nil {
+			log.Debug("failed to get installationID for new user.", zap.Error(err))
+		}
+	}
+	sentry.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetTag("Keploy Version", Version)
+		scope.SetTag("Linux Kernel Version", kernelVersion)
+		scope.SetTag("Architecture", arch)
+		scope.SetTag("Installation ID", installationID)
+		// Add more context as needed
+	})
+	return log
+}
 
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
@@ -355,5 +410,3 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 	}
 
 }
-
-var WarningSign = "\U000026A0"

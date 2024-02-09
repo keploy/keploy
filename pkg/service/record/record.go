@@ -81,7 +81,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(false)
 		return
 	default:
 		// start the BootProxy
@@ -101,7 +101,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(false)
 		ps.StopProxyServer()
 		return
 	default:
@@ -125,7 +125,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
-				loadedHooks.Stop(!stopApplication)
+				loadedHooks.Stop(stopApplication)
 				//stop listening for proxy server
 				ps.StopProxyServer()
 				exitCmd <- true
@@ -138,7 +138,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	select {
 	case <-stopper:
 		abortStopHooksForcefully = true
-		loadedHooks.Stop(false)
+		loadedHooks.Stop(true)
 		if testsTotal != 0 {
 			tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
 		}

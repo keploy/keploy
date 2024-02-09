@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/pkg/service/mockrecord"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +31,7 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				mr.logger.Error(Emoji + "failed to read the testset path input")
+				mr.logger.Error(utils.Emoji + "failed to read the testset path input")
 				return
 			}
 
@@ -38,17 +39,17 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
 				if err != nil {
-					mr.logger.Error(Emoji+"failed to get the absolute path from relative path", zap.Error(err))
+					mr.logger.Error(utils.Emoji+"failed to get the absolute path from relative path", zap.Error(err))
 					return
 				}
 				path = absPath
 			} else if len(path) == 0 { // if user doesn't provide any path
 				err := fmt.Errorf("could not find the test case path, please provide a valid one")
-				mr.logger.Error(Emoji, zap.Any("testPath", path), zap.Error(err))
+				mr.logger.Error(utils.Emoji, zap.Any("testPath", path), zap.Error(err))
 				return
 			} else {
 				// user provided the absolute path
-				mr.logger.Debug(Emoji, zap.Any("testPath", path))
+				mr.logger.Debug(utils.Emoji, zap.Any("testPath", path))
 			}
 
 			path += "/stubs"
@@ -56,24 +57,24 @@ func (mr *MockRecord) GetCmd() *cobra.Command {
 			pid, err := cmd.Flags().GetUint32("pid")
 
 			if err != nil {
-				mr.logger.Error(Emoji+"Failed to get the pid of the application", zap.Error((err)))
+				mr.logger.Error(utils.Emoji+"Failed to get the pid of the application", zap.Error((err)))
 			}
 
 			dir, err := cmd.Flags().GetString("mockName")
 			if err != nil {
-				mr.logger.Error(Emoji + "failed to read the mockName name")
+				mr.logger.Error(utils.Emoji + "failed to read the mockName name")
 				return
 			}
 
 			enableTele, err := cmd.Flags().GetBool("enableTele")
 			if err != nil {
-				mr.logger.Error(Emoji + "failed to read the enableTele flag")
+				mr.logger.Error(utils.Emoji + "failed to read the enableTele flag")
 				return
 			}
 
 			proxyPort, err := cmd.Flags().GetUint32("proxyport")
 			if err != nil {
-				mr.logger.Error(Emoji + "failed to read the proxy port")
+				mr.logger.Error(utils.Emoji + "failed to read the proxy port")
 				return
 			}
 

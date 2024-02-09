@@ -85,7 +85,7 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 		readDock.Name = fmt.Sprintf("report-%v", lastIndex)
 	}
 
-	_, err := util.CreateYamlFile(path, readDock.Name, fe.Logger)
+	_, err := createYamlFile(path, readDock.Name, fe.Logger)
 	if err != nil {
 		return err
 	}

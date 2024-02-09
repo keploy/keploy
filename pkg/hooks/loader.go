@@ -437,7 +437,7 @@ func (h *Hook) Recover(id int) {
 		stackTrace := debug.Stack()
 
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId), zap.Any("stack trace", string(stackTrace)))
-		h.Stop(true)
+		h.Stop(false)
 		// stop the user application cmd
 		h.StopUserApplication()
 		if id != h.mainRoutineId {
@@ -462,13 +462,14 @@ func deleteFileIfExists(filename string, logger *zap.Logger) error {
 	return nil
 }
 
-func (h *Hook) Stop(forceStop bool) {
+// TODO - What is the meaning of forceStop?
+func (h *Hook) Stop(stopApp bool) {
 
-	if !forceStop && !h.IsUserAppTerminateInitiated() {
-		h.logger.Info("Received signal to exit keploy program..")
+	if stopApp && !h.IsUserAppTerminateInitiated() {
+		h.logger.Info("keploy has initiated the shutdown of the user application.")
 		h.StopUserApplication()
 	} else {
-		h.logger.Info("Exiting keploy program gracefully.")
+		h.logger.Info("stopping the eBPF resources...")
 	}
 
 	//deleting kdocker-compose.yaml file if made during the process in case of docker-compose env

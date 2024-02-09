@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
+	"github.com/labstack/gommon/log"
 	"go.keploy.io/server/cmd"
 	"go.keploy.io/server/utils"
 )
@@ -41,16 +41,17 @@ func main() {
 	} else {
 		fmt.Println("Starting keploy in docker environment.")
 	}
+
 	//Initialise sentry.
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
 		TracesSampleRate: 1.0,
 	})
-	log.Level = 0
 	if err != nil {
 		log.Debug("Could not initialise sentry.", err)
 	}
 	defer utils.HandlePanic()
 	defer sentry.Flush(2 * time.Second)
+
 	cmd.Execute()
 }

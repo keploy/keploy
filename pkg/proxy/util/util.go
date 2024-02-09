@@ -54,54 +54,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	return nil
 }
 
-func ValidatePath(path string) (string, error) {
-	// Validate the input to prevent directory traversal attack
-	if strings.Contains(path, "..") {
-		return "", errors.New("invalid path: contains '..' indicating directory traversal")
-	}
-	return path, nil
-}
 
-// createYamlFile is used to create the yaml file along with the path directory (if does not exists)
-func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
-	// checks id the yaml exists
-	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
-	if err != nil {
-		return false, err
-	}
-	if _, err := os.Stat(yamlPath); err != nil {
-		// creates the path director if does not exists
-		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
-		if err != nil {
-			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-			return false, err
-		}
-
-		// create the yaml file
-		_, err := os.Create(yamlPath)
-		if err != nil {
-			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-			return false, err
-		}
-
-		// since, keploy requires root access. The permissions for generated files
-		// should be updated to share it with all users.
-		keployPath := path
-		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
-			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
-		}
-		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
-		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
-		err = cmd.Run()
-		if err != nil {
-			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
-			return false, err
-		}
-
-		return true, nil
-	}
-	return false, nil
-}
 
 func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int), logger *zap.Logger) ([]byte, error) {
 
