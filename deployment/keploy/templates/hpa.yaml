@@ -10,16 +10,16 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: {{ include "verification-server.fullname" . }}
-  minReplicas: {{ .Values.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }} # Non-editable: Managed by autoscaling
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }} # Non-editable: Managed by autoscaling
   metrics:
-    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }} # Non-editable: Managed by autoscaling
     - type: Resource
       resource:
         name: cpu
-        targetAverageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+        targetAverageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }} 
     {{- end }}
-    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }} # Non-editable: Managed by autoscaling
     - type: Resource
       resource:
         name: memory

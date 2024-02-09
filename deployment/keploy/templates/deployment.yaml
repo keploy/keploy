@@ -5,7 +5,9 @@ metadata:
   labels:
     {{- include "verification-server.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
+  {{- if not .Values.autoscaling.enabled }} 
+
+    # Editable: you will be able to specify the number of replicas if autoscaling is not enabled.
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
@@ -24,6 +26,8 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
+       # Non-editable: Specifies the service account associated with the pod
       serviceAccountName: {{ include "verification-server.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -31,10 +35,17 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+
+           # Editable: Specifies the container image repository and tag
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+
+           # Editable: Specifies the policy for pulling the container image
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+           # Editable: Specifies the command to run inside the container
           command: {{ .Values.command }}
           ports:
+             # Editable: Specifies the container port for HTTP traffic
             - name: http
               containerPort: {{ .Values.httpPort }}
               protocol: TCP
@@ -54,14 +65,20 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
+
+      # Editable: Specifies the node selector for the pod
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}
+
+      # Editable: Specifies the affinity rules for the pod
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.tolerations }}
+      
+      # Editable: Specifies the tolerations for the pod
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
