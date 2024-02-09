@@ -776,11 +776,16 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		if err != nil {
 			return false, res
 		}
-		jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
-		pass = jsonComparisonResult.isExact
-		if err != nil && err != typeNotMatch {
-			return false, res
+		if validatedJSON.isIdentical {
+			jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
+			pass = jsonComparisonResult.isExact
+			if err != nil {
+				return false, res
+			}
+		} else {
+			pass = false
 		}
+
 		// debug log for cleanExp and cleanAct
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))

@@ -3,7 +3,6 @@ package test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -23,10 +22,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	typeNotMatch = errors.New("type not matched")
-)
-
 type jsonComparisonResult struct {
 	matches     bool     // Indicates if the JSON strings match according to the criteria
 	isExact     bool     // Indicates if the match is exact, considering ordering and noise
@@ -34,8 +29,9 @@ type jsonComparisonResult struct {
 }
 
 type validatedJSON struct {
-	expected interface{} // The expected JSON
-	actual   interface{} // The actual JSON
+	expected    interface{} // The expected JSON
+	actual      interface{} // The actual JSON
+	isIdentical bool
 }
 
 type InitialiseRunTestSetReturn struct {

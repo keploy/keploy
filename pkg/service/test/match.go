@@ -66,6 +66,7 @@ func ValidateAndMarshalJson(log *zap.Logger, exp, act *string) (validatedJSON, e
 	validatedJSON.expected = expected
 	validatedJSON.actual = actual
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
+		validatedJSON.isIdentical = false
 		return validatedJSON, nil
 	}
 	cleanExp, err := json.Marshal(expected)
@@ -78,7 +79,7 @@ func ValidateAndMarshalJson(log *zap.Logger, exp, act *string) (validatedJSON, e
 	}
 	*exp = string(cleanExp)
 	*act = string(cleanAct)
-
+	validatedJSON.isIdentical = true
 	return validatedJSON, nil
 }
 
@@ -86,7 +87,7 @@ func ValidateAndMarshalJson(log *zap.Logger, exp, act *string) (validatedJSON, e
 func matchJsonWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (jsonComparisonResult, error) {
 	var matchJsonComparisonResult jsonComparisonResult
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
-		return matchJsonComparisonResult, typeNotMatch
+		return matchJsonComparisonResult, errors.New("type not matched")
 	}
 	if expected == nil && actual == nil {
 		matchJsonComparisonResult.isExact = true
