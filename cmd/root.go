@@ -291,7 +291,7 @@ func (r *Root) execute() {
 	}
 
 	if err := rootCmd.Execute(); err != nil {
-		r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
+		// r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
 		os.Exit(1)
 	}
 }
