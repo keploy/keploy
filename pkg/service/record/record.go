@@ -66,21 +66,27 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	mocksTotal := make(map[string]int)
 	testsTotal := 0
-	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ctx = context.WithValue(ctx, "mocksTotal", &mocksTotal)
 	ctx = context.WithValue(ctx, "testsTotal", &testsTotal)
 
 	select {
 	case <-stopper:
+		cancel()
 		return
 	default:
 		// load the ebpf hooks into the kernel
 		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx, filters); err != nil {
+			cancel()
 			return
 		}
 	}
 
 	select {
 	case <-stopper:
+		cancel()
 		loadedHooks.Stop(true)
 		return
 	default:
@@ -103,6 +109,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	case <-stopper:
 		loadedHooks.Stop(true)
 		ps.StopProxyServer()
+		cancel()
 		return
 	default:
 		// start user application
@@ -125,6 +132,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
+				cancel()
 				loadedHooks.Stop(!stopApplication)
 				//stop listening for proxy server
 				ps.StopProxyServer()
@@ -143,6 +151,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 			tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
 		}
 		ps.StopProxyServer()
+		cancel()
 		return
 	case <-abortStopHooksInterrupt:
 		if testsTotal != 0 {

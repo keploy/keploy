@@ -125,20 +125,23 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	if err != nil {
 		return returnVal, fmt.Errorf("error while creating hooks %v", err)
 	}
-	returnVal.LoadedHooks.SetPassThroughHosts(cfg.PassThroughHosts)
-
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	select {
 	case <-stopper:
+		cancel()
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// load the ebpf hooks into the kernel
-		if err := returnVal.LoadedHooks.LoadHooks(cfg.AppCmd, cfg.AppContainer, 0, context.Background(), nil); err != nil {
+		if err := returnVal.LoadedHooks.LoadHooks(cfg.AppCmd, cfg.AppContainer, 0, ctx, nil); err != nil {
+			cancel()
 			return returnVal, err
 		}
 	}
 
 	select {
 	case <-stopper:
+		cancel()
 		returnVal.LoadedHooks.Stop(true)
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
@@ -161,11 +164,12 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	returnVal.AbortStopHooksForcefully = false          // boolen to stop closing of keploy via user app error
 	returnVal.ExitCmd = make(chan bool)                 // channel to exit this command
 	resultForTele := []int{0, 0}
-	returnVal.Ctx = context.WithValue(context.Background(), "resultForTele", &resultForTele)
+	returnVal.Ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
 
 	go func() {
 		select {
 		case <-stopper:
+			cancel()
 			returnVal.AbortStopHooksForcefully = true
 			returnVal.LoadedHooks.Stop(false)
 			//Call the telemetry events.
@@ -357,7 +361,7 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 	sortedConfigMocks := SortMocks(&fakeTestCase, readConfigMocks, t.logger)
 	t.logger.Debug(fmt.Sprintf("the oss config mocks for %s are: %v\n", cfg.TestSet, readConfigMocks))
-	
+
 	cfg.LoadedHooks.SetConfigMocks(sortedConfigMocks)
 	sort.SliceStable(readTcsMocks, func(i, j int) bool {
 		return readTcsMocks[i].Spec.ReqTimestampMock.Before(readTcsMocks[j].Spec.ReqTimestampMock)
