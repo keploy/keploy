@@ -139,7 +139,6 @@ func (hc *halfConn) prepareCipherSpecTLS13(version uint16, cipher any) {
 // to the ones previously passed to prepareCipherSpec.
 func (hc *halfConn) changeCipherSpec() error {
 	if hc.nextCipher == nil || hc.version == VersionTLS13 {
-		fmt.Printf("[DEBUG] [alertInternalError] Point 1")
 		return alertInternalError
 	}
 	hc.cipher = hc.nextCipher
@@ -333,7 +332,6 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 
 		if hc.version == VersionTLS13 {
 			if typ != recordTypeApplicationData {
-				fmt.Printf("[DEBUG] Point 1")
 				return nil, 0, alertUnexpectedMessage
 			}
 			if len(plaintext) > maxPlaintext+1 {
@@ -347,7 +345,6 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 					break
 				}
 				if i == 0 {
-					fmt.Printf("[DEBUG] Point 2")
 					return nil, 0, alertUnexpectedMessage
 				}
 			}
@@ -595,12 +592,10 @@ func (tpc *TLSPassThroughConnection) readRecordOrCCS() (bool, error) {
 
 	switch typ {
 	default:
-		fmt.Printf("[DEBUG] Point 4")
 		return false, tpc.In.setErrorLocked(tpc.sendAlert(alertUnexpectedMessage))
 
 	case recordTypeAlert:
 		if len(data) != 2 {
-			fmt.Printf("[DEBUG] Point 5")
 			return false, tpc.In.setErrorLocked(tpc.sendAlert(alertUnexpectedMessage))
 		}
 		if alert(data[1]) == alertCloseNotify {
@@ -616,7 +611,6 @@ func (tpc *TLSPassThroughConnection) readRecordOrCCS() (bool, error) {
 		case alertLevelError:
 			return false, tpc.In.setErrorLocked(&net.OpError{Op: "remote error", Err: alert(data[1])})
 		default:
-			fmt.Printf("[DEBUG] Point 6")
 			return false, tpc.In.setErrorLocked(tpc.sendAlert(alertUnexpectedMessage))
 		}
 
@@ -644,7 +638,6 @@ func (tpc *TLSPassThroughConnection) readRecordOrCCS() (bool, error) {
 		tpc.input.Reset(data)
 	case recordTypeHandshake:
 		if len(data) == 0 {
-			fmt.Printf("[DEBUG] Point 8")
 			return false, tpc.In.setErrorLocked(tpc.sendAlert(alertUnexpectedMessage))
 		}
 		tpc.hand.Write(data)
@@ -658,7 +651,6 @@ func (tpc *TLSPassThroughConnection) readRecordOrCCS() (bool, error) {
 func (tpc *TLSPassThroughConnection) retryReadRecord(readChangeCipherSpec bool) (bool, error) {
 	tpc.retryCount++
 	if tpc.retryCount > maxUselessRecords {
-		fmt.Printf("[DEBUG] Point 8")
 		tpc.sendAlert(alertUnexpectedMessage)
 		return readChangeCipherSpec, tpc.In.setErrorLocked(errors.New("tls: too many ignored records"))
 	}
@@ -937,7 +929,6 @@ func (tpc *TLSPassThroughConnection) readHandshake() (any, error) {
 	data := tpc.hand.Bytes()
 	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if n > maxHandshake {
-		fmt.Printf("[DEBUG] [alertInternalError] Point 2")
 		tpc.sendAlertLocked(alertInternalError)
 		return nil, tpc.In.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", n, maxHandshake))
 	}
@@ -998,7 +989,6 @@ func (tpc *TLSPassThroughConnection) unmarshalHandshakeMessage(data []byte) (han
 	case typeKeyUpdate:
 		m = new(keyUpdateMsg)
 	default:
-		fmt.Printf("[DEBUG] Point 10")
 		return nil, tpc.In.setErrorLocked(tpc.sendAlert(alertUnexpectedMessage))
 	}
 
@@ -1008,7 +998,6 @@ func (tpc *TLSPassThroughConnection) unmarshalHandshakeMessage(data []byte) (han
 	data = append([]byte(nil), data...)
 
 	if !m.unmarshal(data) {
-		fmt.Printf("[DEBUG] Point 11")
 		return nil, tpc.In.setErrorLocked(tpc.sendAlert(alertUnexpectedMessage))
 	}
 
@@ -1042,7 +1031,6 @@ func (tpc *TLSPassThroughConnection) Write(b []byte) (int, error) {
 	}
 
 	if !tpc.isHandshakeComplete.Load() {
-		fmt.Printf("[DEBUG] [alertInternalError] Point 3")
 		return 0, alertInternalError
 	}
 
@@ -1072,7 +1060,6 @@ func (tpc *TLSPassThroughConnection) Write(b []byte) (int, error) {
 func (tpc *TLSPassThroughConnection) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 	cipherSuite := CipherSuiteTLS13ByID(tpc.CipherSuite)
 	if cipherSuite == nil {
-		fmt.Printf("[DEBUG] [alertInternalError] Point 4")
 		return tpc.In.setErrorLocked(tpc.sendAlert(alertInternalError))
 	}
 

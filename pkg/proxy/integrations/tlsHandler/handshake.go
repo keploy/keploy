@@ -2,7 +2,6 @@ package tlsHandler
 
 import (
 	"errors"
-	"fmt"
 	"go.keploy.io/server/pkg/proxy/util"
 	"net"
 )
@@ -26,6 +25,7 @@ func GetDestinationURL(clientHelloBuffer []byte) (string, error) {
 }
 
 func Handshake(requestBuffer []byte, clientConn, destConn net.Conn) (*TLSPassThroughConnection, *TLSPassThroughConnection, error) {
+	// TODO: This works for the handshake format of TLS 1.3, must write functions for other TLS versions
 	clientTLSConn := TLSPassThroughConnection{
 		conn: clientConn,
 	}
@@ -59,7 +59,6 @@ func Handshake(requestBuffer []byte, clientConn, destConn net.Conn) (*TLSPassThr
 	if err != nil {
 		return nil, nil, err
 	}
-	fmt.Printf("[Debug] Destination Local Address before client hello: %s\n", destConn.LocalAddr())
 	_, err = destConn.Write(requestBuffer)
 	if err != nil {
 		return nil, nil, err
@@ -95,7 +94,7 @@ func Handshake(requestBuffer []byte, clientConn, destConn net.Conn) (*TLSPassThr
 	clientTLSConn.In.version = serverHello.supportedVersion
 	clientTLSConn.Out.version = serverHello.supportedVersion
 	destTLSConn.In.version = serverHello.supportedVersion
-	clientTLSConn.Out.version = serverHello.supportedVersion
+	destTLSConn.Out.version = serverHello.supportedVersion
 
 	_, err = clientConn.Write(responseBuffer)
 	if err != nil {
