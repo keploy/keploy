@@ -84,7 +84,6 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetWritev            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_writev"`
 	SyscallProbeEntrySocket          *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 	UprobeSslDoHandshake             *ebpf.ProgramSpec `ebpf:"uprobe_ssl_do_handshake"`
-	UprobeSslWrite                   *ebpf.ProgramSpec `ebpf:"uprobe_ssl_write"`
 	UretprobeSslDoHandshake          *ebpf.ProgramSpec `ebpf:"uretprobe_ssl_do_handshake"`
 }
 
@@ -108,7 +107,6 @@ type bpfMapSpecs struct {
 	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.MapSpec `ebpf:"keploy_namespace_pid_map"`
 	KeployServerPort          *ebpf.MapSpec `ebpf:"keploy_server_port"`
-	MastersecretDummyMap      *ebpf.MapSpec `ebpf:"mastersecret_dummy_map"`
 	MastersecretEvents        *ebpf.MapSpec `ebpf:"mastersecret_events"`
 	MastersecretMap           *ebpf.MapSpec `ebpf:"mastersecret_map"`
 	PassThroughPorts          *ebpf.MapSpec `ebpf:"pass_through_ports"`
@@ -157,7 +155,6 @@ type bpfMaps struct {
 	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
 	KeployNamespacePidMap     *ebpf.Map `ebpf:"keploy_namespace_pid_map"`
 	KeployServerPort          *ebpf.Map `ebpf:"keploy_server_port"`
-	MastersecretDummyMap      *ebpf.Map `ebpf:"mastersecret_dummy_map"`
 	MastersecretEvents        *ebpf.Map `ebpf:"mastersecret_events"`
 	MastersecretMap           *ebpf.Map `ebpf:"mastersecret_map"`
 	PassThroughPorts          *ebpf.Map `ebpf:"pass_through_ports"`
@@ -189,7 +186,6 @@ func (m *bpfMaps) Close() error {
 		m.KeployModeMap,
 		m.KeployNamespacePidMap,
 		m.KeployServerPort,
-		m.MastersecretDummyMap,
 		m.MastersecretEvents,
 		m.MastersecretMap,
 		m.PassThroughPorts,
@@ -238,7 +234,6 @@ type bpfPrograms struct {
 	SyscallProbeRetWritev            *ebpf.Program `ebpf:"syscall__probe_ret_writev"`
 	SyscallProbeEntrySocket          *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 	UprobeSslDoHandshake             *ebpf.Program `ebpf:"uprobe_ssl_do_handshake"`
-	UprobeSslWrite                   *ebpf.Program `ebpf:"uprobe_ssl_write"`
 	UretprobeSslDoHandshake          *ebpf.Program `ebpf:"uretprobe_ssl_do_handshake"`
 }
 
@@ -274,7 +269,6 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetWritev,
 		p.SyscallProbeEntrySocket,
 		p.UprobeSslDoHandshake,
-		p.UprobeSslWrite,
 		p.UretprobeSslDoHandshake,
 	)
 }

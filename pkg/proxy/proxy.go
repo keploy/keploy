@@ -10,6 +10,8 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/pkg/hooks/structs"
+	"go.keploy.io/server/pkg/proxy/integrations/tlsHandler"
 	"io"
 	"io/ioutil"
 	"log"
@@ -22,7 +24,6 @@ import (
 	"sync"
 
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/proxy/integrations/grpcparser"
 	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgresParser"
 	"go.keploy.io/server/utils"
@@ -740,90 +741,29 @@ func extractClientRandom(data []byte) ([32]byte, error) {
 	return clientRandomArray, nil
 }
 
-func (ps *ProxySet) handleTLSHandshake(requestBuffer []byte, clientConn, destConn net.Conn, ClientRandom [32]byte, logger *zap.Logger) ([]byte, error) {
-	_, err := destConn.Write(requestBuffer)
+func (ps *ProxySet) WrapTLSConnection(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) (*tlsHandler.TLSPassThroughConnection, *tlsHandler.TLSPassThroughConnection, error) {
+	clientTLSConn, destTLSConn, err := tlsHandler.Handshake(requestBuffer, clientConn, destConn)
 	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err))
+		return nil, nil, err
 	}
 
-	clientBufferChannel := make(chan []byte)
-	destBufferChannel := make(chan []byte)
-	returnBufferChannel := make(chan []byte)
-	errChannel := make(chan error)
+	time.Sleep(1 * time.Second)
+	var value structs.MasterSecretEvent
 
-	// read requests from client
-	go func() {
-		// Recover from panic and gracefully shutdown
-		defer utils.HandlePanic()
-		for {
-			buffer, err := util.ReadBytes(clientConn)
-			if err != nil {
-				logger.Error("failed to read message from the destination server", zap.Error(err))
-				errChannel <- err
-				break
-			}
-
-			if (!isTLSHandshake(buffer)) && (buffer[0] != 0x14) {
-				returnBufferChannel <- buffer
-				break
-			}
-
-			clientBufferChannel <- buffer
-		}
-	}()
-	// read response from destination
-	go func() {
-		// Recover from panic and gracefully shutdown
-		defer utils.HandlePanic()
-		for {
-			buffer, err := util.ReadBytes(destConn)
-			if err != nil {
-				logger.Error("failed to read message from the destination server", zap.Error(err))
-				errChannel <- err
-			}
-
-			if (!isTLSHandshake(buffer)) && (buffer[0] != 0x14) {
-				returnBufferChannel <- buffer
-				break
-			}
-
-			destBufferChannel <- buffer
-		}
-	}()
-
-	for {
-		select {
-		case buffer := <-clientBufferChannel:
-			// Write the request message to the destination
-			_, err := destConn.Write(buffer)
-			if err != nil {
-				logger.Error("failed to write request message to the destination server", zap.Error(err))
-				return nil, err
-			}
-		case buffer := <-destBufferChannel:
-			// Write the response message to the client
-			_, err := clientConn.Write(buffer)
-			if err != nil {
-				logger.Error("failed to write response to the client", zap.Error(err))
-				return nil, err
-			}
-		case buffer := <-returnBufferChannel:
-			// TLS handshake has been completed
-			var value structs.MasterSecretEvent
-
-			err := ps.hook.MastersecretMap.Lookup(&ClientRandom, &value)
-			if err != nil {
-				logger.Error("failed to retrieve SSL key log", zap.Error(err))
-				return nil, err
-			}
-
-			// TODO: Use the SSL Key Log retrieved from the MastersecretMap to decrypt packets
-
-			return buffer, nil
-		case buffer := <-errChannel:
-			return nil, buffer
-		}
+	err = ps.hook.MastersecretMap.Lookup(&clientTLSConn.ClientRandom, &value)
+	if err != nil {
+		logger.Error("failed to retrieve SSL key log", zap.Error(err))
+		return nil, nil, err
 	}
+
+	if clientTLSConn.Vers == tlsHandler.VersionTLS13 {
+		clientTLSConn.In.SetTrafficSecret(tlsHandler.CipherSuiteTLS13ByID(clientTLSConn.CipherSuite), value.ClientAppTrafficSecret[:])
+		clientTLSConn.Out.SetTrafficSecret(tlsHandler.CipherSuiteTLS13ByID(clientTLSConn.CipherSuite), value.ServerAppTrafficSecret[:])
+		destTLSConn.In.SetTrafficSecret(tlsHandler.CipherSuiteTLS13ByID(clientTLSConn.CipherSuite), value.ServerAppTrafficSecret[:])
+		destTLSConn.Out.SetTrafficSecret(tlsHandler.CipherSuiteTLS13ByID(clientTLSConn.CipherSuite), value.ClientAppTrafficSecret[:])
+	}
+
+	return clientTLSConn, destTLSConn, err
 }
 
 func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
@@ -864,9 +804,6 @@ func (ps *ProxySet) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Context) {
-	//defining client random byte array to be filled for TLS connections
-	var clientRandom [32]byte
-
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
@@ -940,15 +877,6 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 			r:      multiReader,
 			logger: ps.logger,
 		}
-		if isTLS {
-			// Extract Client Random from the packet
-			clientRandomBuffer, err := reader.Peek(43)
-			clientRandom, err = extractClientRandom(clientRandomBuffer)
-			if err != nil {
-				ps.logger.Error("failed to extract client random from handshake data", zap.Error(err))
-				return
-			}
-		}
 		// attempt to read the conn until buffer is either filled or connection is closed
 		var buffer []byte
 		buffer, err = util.ReadBytes(conn)
@@ -983,15 +911,23 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 		if isTLS {
 			logger.Debug("", zap.Any("isTLS", isTLS))
+			destinationUrl, err = tlsHandler.GetDestinationURL(buffer)
+			if err != nil {
+				logger.Error("failed to get the destination url", zap.Error(err))
+			}
 			dst, err = net.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort))
 			if err != nil && models.GetMode() != models.MODE_TEST {
 				logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
 				return
 			}
-			buffer, err = ps.handleTLSHandshake(buffer, conn, dst, clientRandom, logger)
+			conn, dst, err = ps.WrapTLSConnection(buffer, conn, dst, logger)
 			if err != nil {
-				logger.Error("failed to handle the TLS connection")
+				logger.Error("failed to handle the TLS connection", zap.Error(err))
+			}
+			buffer, err = util.ReadBytes(conn)
+			if err != nil {
+				logger.Error("failed to read data from TLS wrapped client connection", zap.Error(err))
 			}
 		} else {
 			dst, err = net.Dial("tcp", actualAddress)
