@@ -39,7 +39,7 @@ installKeploy (){
     }
 
     append_to_rc() {
-        last_byte=$(tail -c 1 ~/.zshrc)
+        last_byte=$(tail -c 1 $2)
         if [[ "$last_byte" != "" ]]; then
             echo -e "\n$1" >> $2
         else
@@ -130,28 +130,25 @@ installKeploy (){
                 echo -n "Docker not found on device, please install docker to use Keploy"
                 return
             fi
+
+            # Check if docker is running
+            if ! docker info &> /dev/null; then
+                echo "Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again."
+                return
+            fi
             install_docker
             return
 
         elif [ "$OS_NAME" = "Linux" ]; then
-            echo -n "Do you want to install keploy with Linux or Docker? (linux/docker): "
-            read user_input
             if ! sudo mountpoint -q /sys/kernel/debug; then
                 sudo mount -t debugfs debugfs /sys/kernel/debug
             fi
-            if [ "$user_input" = "linux" ]; then
-                if [ "$ARCH" = "x86_64" ]; then
-                    install_keploy_amd
-                elif [ "$ARCH" = "aarch64" ]; then
-                    install_keploy_arm
-                else
-                    echo "Unsupported architecture: $ARCH"
-                    return
-                fi
-            elif [ "$user_input" = "docker" ]; then
-                install_docker
+            if [ "$ARCH" = "x86_64" ]; then
+                install_keploy_amd
+            elif [ "$ARCH" = "aarch64" ]; then
+                install_keploy_arm
             else
-                echo "Please enter a valid command"
+                echo "Unsupported architecture: $ARCH"
                 return
             fi
         elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
