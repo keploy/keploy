@@ -188,7 +188,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB, EnableANSIColor *bool) bool {
+func (t *tester) Test(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB, EnableANSIColor *bool) bool {
 
 	testRes := false
 	result := true
@@ -198,6 +198,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		Path:               path,
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
+		GenerateTestReport: generateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
@@ -237,7 +238,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, EnableANSIColor, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, EnableANSIColor, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -258,6 +259,25 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			break
 		}
 	}
+
+	// Sorting completeTestReport map according to testSuiteName (Keys)
+	testSuiteNames := make([]string, 0, len(completeTestReport))
+
+	for testSuiteName := range completeTestReport {
+		testSuiteNames = append(testSuiteNames, testSuiteName)
+	}
+
+	sort.Strings(testSuiteNames)
+
+	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
+
+	pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
+	for _, testSuiteName := range testSuiteNames {
+		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
+	}
+
+	pp.Printf("\n<=========================================> \n\n")
+
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 	// log the overall code coverage for the test run of go binaries
 	if options.WithCoverage {
@@ -294,12 +314,12 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	return false
 }
 
-func (t *tester) StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) StartTest(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool {
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
-	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage, options.EnableANSIColor)
+	return t.Test(path, testReportPath, generateTestReport, appCmd, options, tele, reportStorage, mockStorage, options.EnableANSIColor)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -399,11 +419,16 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	// starts the testrun
-	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
-	if err != nil {
-		t.logger.Error(err.Error())
-		returnVal.InitialStatus = models.TestRunStatusFailed
-		return returnVal
+	if cfg.GenerateTestReport {
+		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
+		if err != nil {
+			t.logger.Error(err.Error())
+			returnVal.InitialStatus = models.TestRunStatusFailed
+			return returnVal
+		}
+	} else {
+		index := strings.Split(cfg.TestSet, "-")[2]
+		returnVal.TestReport.Name = fmt.Sprintf("report-%v", index)
 	}
 
 	//if running keploy-tests along with unit tests
@@ -538,19 +563,25 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	(*resultForTele)[0] += *cfg.Success
 	(*resultForTele)[1] += *cfg.Failure
 
-	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
+	if cfg.GenerateTestReport {
+		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
+		t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
+	}
 
-	t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
 	if *cfg.Status == models.TestRunStatusFailed {
 		pp.SetColorScheme(models.FailingColorScheme)
 	} else {
 		pp.SetColorScheme(models.PassingColorScheme)
 	}
 
-	if !*cfg.EnableANSIColor {
-		// Print without ANSI color codes
-		pp.ColoringEnabled = false
-	}
+	totalTests += cfg.TestReport.Total
+	totalTestPassed += cfg.TestReport.Success
+	totalTestFailed += cfg.TestReport.Failure
+
+	verdict := TestReportVerdict{total: cfg.TestReport.Total, failed: cfg.TestReport.Failure, passed: cfg.TestReport.Success}
+
+	completeTestReport[cfg.TestReport.TestSet] = verdict
+
 	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
 
 	if err != nil {
@@ -563,25 +594,26 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	return *cfg.Status
 }
 
-// testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, EnableANSIColor *bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
+// testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
+func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestReport bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, EnableANSIColor *bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
-		TestSet:        testSet,
-		Path:           path,
-		TestReportPath: testReportPath,
-		AppCmd:         appCmd,
-		AppContainer:   appContainer,
-		AppNetwork:     appNetwork,
-		Delay:          delay,
-		BuildDelay:     buildDelay,
-		Pid:            pid,
-		Storage:        initialisedValues.Storage,
-		LoadedHooks:    initialisedValues.LoadedHooks,
-		TestReportFS:   initialisedValues.TestReportFS,
-		TestRunChan:    testRunChan,
-		ApiTimeout:     apiTimeout,
-		Ctx:            initialisedValues.Ctx,
-		ServeTest:      serveTest,
+		TestSet:            testSet,
+		Path:               path,
+		TestReportPath:     testReportPath,
+		GenerateTestReport: generateTestReport,
+		AppCmd:             appCmd,
+		AppContainer:       appContainer,
+		AppNetwork:         appNetwork,
+		Delay:              delay,
+		BuildDelay:         buildDelay,
+		Pid:                pid,
+		Storage:            initialisedValues.Storage,
+		LoadedHooks:        initialisedValues.LoadedHooks,
+		TestReportFS:       initialisedValues.TestReportFS,
+		TestRunChan:        testRunChan,
+		ApiTimeout:         apiTimeout,
+		Ctx:                initialisedValues.Ctx,
+		ServeTest:          serveTest,
 	}
 
 	initialisedTestSets := t.InitialiseRunTestSet(cfg)
@@ -712,15 +744,16 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
 	resultsCfg := &FetchTestResultsConfig{
-		TestReportFS:    initialisedValues.TestReportFS,
-		TestReport:      initialisedTestSets.TestReport,
-		Status:          &status,
-		TestSet:         testSet,
-		Success:         &success,
-		Failure:         &failure,
-		Ctx:             initialisedValues.Ctx,
-		TestReportPath:  testReportPath,
-		Path:            path,
+		TestReportFS:        initialisedValues.TestReportFS,
+		TestReport:          initialisedTestSets.TestReport,
+		Status:              &status,
+		TestSet:             testSet,
+		Success:             &success,
+		Failure:             &failure,
+		Ctx:                 initialisedValues.Ctx,
+		TestReportPath:      testReportPath,
+		GenerateTestReport: generateTestReport,
+		Path:                path,
 		EnableANSIColor: EnableANSIColor,
 	}
 	status = t.FetchTestResults(resultsCfg)

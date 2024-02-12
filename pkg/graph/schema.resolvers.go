@@ -70,7 +70,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
 		enableANSIColor := true
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, nil, nil, serveTest, &enableANSIColor, initialisedValues)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, true, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, nil, nil, serveTest, &enableANSIColor, initialisedValues)
 	}()
 
 	testRunID := <-testRunChan
