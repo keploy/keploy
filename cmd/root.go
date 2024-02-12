@@ -32,7 +32,7 @@ type Root struct {
 }
 
 var debugMode bool
-var EnableASNIColor bool
+var EnableANSIColor bool
 
 type colorConsoleEncoder struct {
 	*zapcore.EncoderConfig
@@ -40,7 +40,7 @@ type colorConsoleEncoder struct {
 }
 
 func NewColorConsole(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
-	if !EnableASNIColor {
+	if !EnableANSIColor {
 		return zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
 	}
 	return colorConsoleEncoder{
@@ -248,9 +248,9 @@ func checkForDebugFlag(args []string) bool {
 	return false
 }
 
-func checkForEnableASNIColorFlag(args []string) bool {
+func checkForEnableANSIColorFlag(args []string) bool {
 	for _, arg := range args {
-		if arg == "--enableASNIColor=false" {
+		if arg == "--enableANSIColor=false" {
 			return false
 		}
 	}
@@ -285,11 +285,11 @@ func (r *Root) execute() {
 	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
-	rootCmd.PersistentFlags().BoolVar(&EnableASNIColor, "enableASNIColor", true, "Enable ANSI color codes")
+	rootCmd.PersistentFlags().BoolVar(&EnableANSIColor, "enableANSIColor", true, "Enable ANSI color codes")
 
 	// Manually parse flags to determine debug mode
 	debugMode = checkForDebugFlag(os.Args[1:])
-	EnableASNIColor = checkForEnableASNIColorFlag(os.Args[1:])
+	EnableANSIColor = checkForEnableANSIColorFlag(os.Args[1:])
 	//Set the version template for version command
 	rootCmd.SetVersionTemplate(`{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`)
 	// Now that flags are parsed, set up the logger

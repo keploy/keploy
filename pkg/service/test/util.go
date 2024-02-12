@@ -101,7 +101,7 @@ type SimulateRequestConfig struct {
 	DockerID        bool
 	NoiseConfig     models.GlobalNoise
 	IgnoreOrdering  bool
-	EnableASNIColor bool
+	EnableANSIColor bool
 }
 
 type FetchTestResultsConfig struct {
@@ -114,7 +114,7 @@ type FetchTestResultsConfig struct {
 	Ctx             context.Context
 	TestReportPath  string
 	Path            string
-	EnableASNIColor *bool
+	EnableANSIColor *bool
 }
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {

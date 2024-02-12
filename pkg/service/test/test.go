@@ -53,7 +53,7 @@ type TestOptions struct {
 	CoverageReportPath string
 	IgnoreOrdering     bool
 	PassthroughHosts   []models.Filters
-	EnableASNIColor    *bool
+	EnableANSIColor    *bool
 }
 
 func NewTester(logger *zap.Logger) Tester {
@@ -188,7 +188,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB, EnableASNIColor *bool) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB, EnableANSIColor *bool) bool {
 
 	testRes := false
 	result := true
@@ -237,7 +237,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, EnableASNIColor, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, EnableANSIColor, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -299,7 +299,7 @@ func (t *tester) StartTest(path string, testReportPath string, appCmd string, op
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
-	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage, options.EnableASNIColor)
+	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage, options.EnableANSIColor)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -455,7 +455,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, &cfg.EnableASNIColor)
+		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, &cfg.EnableANSIColor)
 
 		if !testPass {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
@@ -541,18 +541,17 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
 
 	t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
-
-	if !*cfg.EnableASNIColor {
-		// Print without ANSI color codes
-		fmt.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
+	if *cfg.Status == models.TestRunStatusFailed {
+		pp.SetColorScheme(models.FailingColorScheme)
 	} else {
-		if *cfg.Status == models.TestRunStatusFailed {
-			pp.SetColorScheme(models.FailingColorScheme)
-		} else {
-			pp.SetColorScheme(models.PassingColorScheme)
-		}
-		pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
+		pp.SetColorScheme(models.PassingColorScheme)
 	}
+
+	if !*cfg.EnableANSIColor {
+		// Print without ANSI color codes
+		pp.ColoringEnabled = false
+	}
+	pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For testrun with id: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", cfg.TestReport.TestSet, cfg.TestReport.Total, cfg.TestReport.Success, cfg.TestReport.Failure)
 
 	if err != nil {
 		t.logger.Error(err.Error())
@@ -565,7 +564,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, EnableASNIColor *bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, EnableANSIColor *bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:        testSet,
 		Path:           path,
@@ -702,7 +701,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 			DockerID:        initialisedTestSets.DockerID,
 			NoiseConfig:     noiseConfig,
 			IgnoreOrdering:  initialisedValues.IgnoreOrdering,
-			EnableASNIColor: *EnableASNIColor,
+			EnableANSIColor: *EnableANSIColor,
 		}
 		t.SimulateRequest(cfg)
 	}
@@ -722,13 +721,13 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		Ctx:             initialisedValues.Ctx,
 		TestReportPath:  testReportPath,
 		Path:            path,
-		EnableASNIColor: EnableASNIColor,
+		EnableANSIColor: EnableANSIColor,
 	}
 	status = t.FetchTestResults(resultsCfg)
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool, EnableASCIColor *bool) (bool, *models.Result) {
+func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool, EnableANSIColor *bool) (bool, *models.Result) {
 
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
@@ -809,28 +808,15 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 
 	if !pass {
 		logDiffs := NewDiffsPrinter(tc.Name)
-
-		var logger *pp.PrettyPrinter
-		var logs string
-
-		if *EnableASCIColor {
-			logger = pp.New()
-			logger.WithLineInfo = false
-			logger.SetColorScheme(models.FailingColorScheme)
-			logs = logger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-			t.mutex.Lock()
-			logger.Printf(logs)
-			err := logDiffs.Render()
-			if err != nil {
-				t.logger.Error("failed to render the diffs", zap.Error(err))
-			}
-			t.mutex.Unlock()
-		} else {
-			logs = fmt.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-			t.mutex.Lock()
-			fmt.Printf(logs)
-			t.mutex.Unlock()
+		logger := pp.New()
+		if !*EnableANSIColor {
+			logger.SetColoringEnabled(false)
 		}
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.FailingColorScheme)
+		var logs = ""
+
+		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
 
 		// ------------ DIFFS RELATED CODE -----------
 		if !res.StatusCode.Normal {
@@ -881,24 +867,18 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 		}
 
 	} else {
-		var logger *pp.PrettyPrinter
-		var log2 = ""
-
-		if *EnableASCIColor {
-			logger = pp.New()
-			logger.WithLineInfo = false
-			logger.SetColorScheme(models.FailingColorScheme)
-			log2 = logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-			t.mutex.Lock()
-			logger.Printf(log2)
-			t.mutex.Unlock()
-
-		} else {
-			log2 = fmt.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-			t.mutex.Lock()
-			fmt.Printf(log2)
-			t.mutex.Unlock()
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		if !*EnableANSIColor {
+			logger.SetColoringEnabled(false)
 		}
+		var log2 = ""
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+		t.mutex.Lock()
+		logger.Printf(log2)
+		t.mutex.Unlock()
+
 	}
 
 	return pass, res

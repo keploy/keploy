@@ -233,7 +233,7 @@ type TestFlags struct {
 	CoverageReportPath string
 	EnableTele         bool
 	WithCoverage       bool
-	EnableASNIColor    *bool
+	EnableANSIColor    *bool
 }
 
 func getAlias(keployAlias *string, logger *zap.Logger) {
