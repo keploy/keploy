@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -274,7 +275,13 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		testSuiteNames = append(testSuiteNames, testSuiteName)
 	}
 
-	sort.Strings(testSuiteNames)
+	sort.SliceStable(testSuiteNames, func(i, j int) bool {
+
+        num1, _ := strconv.Atoi(strings.Split(testSuiteNames[i], "-")[2])
+        num2, _ := strconv.Atoi(strings.Split(testSuiteNames[j], "-")[2])
+
+        return num1 < num2
+    })
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
