@@ -56,6 +56,14 @@ type TestOptions struct {
 	EnableANSIColor    *bool
 }
 
+var (
+	totalTests      int
+	totalTestPassed int
+	totalTestFailed int
+)
+
+var completeTestReport = make(map[string]TestReportVerdict)
+
 func NewTester(logger *zap.Logger) Tester {
 	return &tester{
 		logger: logger,
@@ -744,17 +752,17 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
 	resultsCfg := &FetchTestResultsConfig{
-		TestReportFS:        initialisedValues.TestReportFS,
-		TestReport:          initialisedTestSets.TestReport,
-		Status:              &status,
-		TestSet:             testSet,
-		Success:             &success,
-		Failure:             &failure,
-		Ctx:                 initialisedValues.Ctx,
-		TestReportPath:      testReportPath,
+		TestReportFS:       initialisedValues.TestReportFS,
+		TestReport:         initialisedTestSets.TestReport,
+		Status:             &status,
+		TestSet:            testSet,
+		Success:            &success,
+		Failure:            &failure,
+		Ctx:                initialisedValues.Ctx,
+		TestReportPath:     testReportPath,
 		GenerateTestReport: generateTestReport,
-		Path:                path,
-		EnableANSIColor: EnableANSIColor,
+		Path:               path,
+		EnableANSIColor:    EnableANSIColor,
 	}
 	status = t.FetchTestResults(resultsCfg)
 	return status
