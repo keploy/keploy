@@ -524,7 +524,7 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 
 	err := cmd.Run()
 	if err != nil {
-		if h.userAppShutdownInitiated {
+		if h.IsUserAppTerminateInitiated() {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
 					if status.Signaled() {
