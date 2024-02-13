@@ -77,6 +77,10 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 	if !ok {
 		return fmt.Errorf("%s failed to read test report in yaml file", Emoji)
 	}
+	_, path_err := util.ValidatePath(path)
+	if path_err != nil {
+		return path_err
+	}
 	if readDock.Name == "" {
 		lastIndex, err := findLastIndex(path, fe.Logger)
 		if err != nil {
