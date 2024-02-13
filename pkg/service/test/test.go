@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strings"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -281,18 +281,18 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 			return false
 		}
 
-        num1, err := strconv.Atoi(strings.Split(testSuiteNames[i], "-")[2])
+		num1, err := strconv.Atoi(strings.Split(testSuiteNames[i], "-")[2])
 		if err != nil {
 			return false
 		}
 
-        num2, err := strconv.Atoi(strings.Split(testSuiteNames[j], "-")[2])
+		num2, err := strconv.Atoi(strings.Split(testSuiteNames[j], "-")[2])
 		if err != nil {
 			return false
 		}
 
-        return num1 < num2
-    })
+		return num1 < num2
+	})
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
