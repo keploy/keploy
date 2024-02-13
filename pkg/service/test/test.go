@@ -277,16 +277,18 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 
 	sort.SliceStable(testSuiteNames, func(i, j int) bool {
 
-		if len(testSuiteNames[i]) > 16 || len(testSuiteNames[j]) > 16 {
-			return false
-		}
+		test1 := strings.Split(testSuiteNames[i], "-")
+		lenEl := len(test1)-1
 
-		num1, err := strconv.Atoi(strings.Split(testSuiteNames[i], "-")[2])
+		num1, err := strconv.Atoi(test1[lenEl])
 		if err != nil {
 			return false
 		}
 
-		num2, err := strconv.Atoi(strings.Split(testSuiteNames[j], "-")[2])
+		test2 := strings.Split(testSuiteNames[j], "-")
+		lenEl = len(test2)-1
+
+		num2, err := strconv.Atoi(test2[lenEl])
 		if err != nil {
 			return false
 		}
