@@ -278,22 +278,21 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 	sort.SliceStable(testSuiteNames, func(i, j int) bool {
 
 		test1 := strings.Split(testSuiteNames[i], "-")
-		lenEl := len(test1)-1
+		test2 := strings.Split(testSuiteNames[j], "-")
 
-		num1, err := strconv.Atoi(test1[lenEl])
-		if err != nil {
-			return false
+		if len(test1) < 3 || len(test2) < 3 {
+			return testSuiteNames[i] < testSuiteNames[j]
 		}
 
-		test2 := strings.Split(testSuiteNames[j], "-")
-		lenEl = len(test2)-1
+		num1, err1 := strconv.Atoi(test1[2])
+		num2, err2 := strconv.Atoi(test2[2])
 
-		num2, err := strconv.Atoi(test2[lenEl])
-		if err != nil {
+		if err1 != nil || err2 != nil {
 			return false
 		}
 
 		return num1 < num2
+
 	})
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
