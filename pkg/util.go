@@ -249,3 +249,22 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	}
 	return indices, nil
 }
+
+func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
+
+	if generateTestReport {
+		return
+	}
+	
+	_, err := os.Stat("keploy/testReports")
+	if os.IsNotExist(err) {
+		return
+	}
+	err = os.RemoveAll("keploy/testReports")
+	if err != nil {
+		logger.Error("Error while removing test reports: %v", zap.String("error", err.Error()))
+		return
+	}
+
+	logger.Info("Test Reports are being removed since generateTestReport flag is set false")
+}
