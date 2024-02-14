@@ -20,6 +20,8 @@ installKeploy (){
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
         set_alias 'sudo -E env PATH="$PATH" keploybin'
+
+        add_network
     }
 
     check_sudo(){
@@ -36,6 +38,8 @@ installKeploy (){
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
         set_alias 'sudo -E env PATH="$PATH" keploybin'
+
+        add_network
     }
 
     append_to_rc() {
@@ -96,9 +100,15 @@ installKeploy (){
         fi
     }
 
-
-
-    install_docker() {
+    add_network() {
+        if ! which docker &> /dev/null; then
+            echo -n "Docker not found on device, please install docker and reinstall keploy if you are willing to use applications with docker"
+            return
+        fi
+        if ! docker info &> /dev/null; then
+            echo "Please start Docker and reinstall keploy if you are willing to use applications with docker"
+            return
+        fi
         check_sudo
         sudoCheck=$?
         network_alias=""
@@ -109,7 +119,9 @@ installKeploy (){
         if ! $network_alias docker network ls | grep -q 'keploy-network'; then
             $network_alias docker network create keploy-network
         fi
+    }
 
+    install_docker() {
         if [ "$OS_NAME" = "Darwin" ]; then
             if ! docker volume inspect debugfs &>/dev/null; then
                 docker volume create --driver local --opt type=debugfs --opt device=debugfs debugfs
