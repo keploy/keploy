@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -274,7 +275,25 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		testSuiteNames = append(testSuiteNames, testSuiteName)
 	}
 
-	sort.Strings(testSuiteNames)
+	sort.SliceStable(testSuiteNames, func(i, j int) bool {
+
+		testSuitePartsI := strings.Split(testSuiteNames[i], "-")
+		testSuitePartsJ := strings.Split(testSuiteNames[j], "-")
+
+		if len(testSuitePartsI) < 3 || len(testSuitePartsJ) < 3 {
+			return testSuiteNames[i] < testSuiteNames[j]
+		}
+
+		testSuiteIDNumberI, err1 := strconv.Atoi(testSuitePartsI[2])
+		testSuiteIDNumberJ, err2 := strconv.Atoi(testSuitePartsJ[2])
+
+		if err1 != nil || err2 != nil {
+			return false
+		}
+
+		return testSuiteIDNumberI < testSuiteIDNumberJ
+
+	})
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
@@ -506,12 +525,14 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		}
 
 		cfg.TestReportFS.SetResult(cfg.TestReport.Name, &models.TestResult{
-			Kind:       models.HTTP,
-			Name:       cfg.TestReport.Name,
-			Status:     testStatus,
-			Started:    started.Unix(),
-			Completed:  time.Now().UTC().Unix(),
-			TestCaseID: cfg.Tc.Name,
+			Kind:         models.HTTP,
+			Name:         cfg.TestReport.Name,
+			Status:       testStatus,
+			Started:      started.Unix(),
+			Completed:    time.Now().UTC().Unix(),
+			TestCasePath: cfg.Path + "/" + cfg.TestSet,
+			MockPath:     cfg.Path + "/" + cfg.TestSet + "/mocks.yaml",
+			TestCaseID:   cfg.Tc.Name,
 			Req: models.HttpReq{
 				Method:     cfg.Tc.HttpReq.Method,
 				ProtoMajor: cfg.Tc.HttpReq.ProtoMajor,
@@ -520,6 +541,9 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 				URLParams:  cfg.Tc.HttpReq.URLParams,
 				Header:     cfg.Tc.HttpReq.Header,
 				Body:       cfg.Tc.HttpReq.Body,
+				Binary:     cfg.Tc.HttpReq.Binary,
+				Form:       cfg.Tc.HttpReq.Form,
+				Timestamp:  cfg.Tc.HttpReq.Timestamp,
 			},
 			Res: models.HttpResp{
 				StatusCode:    cfg.Tc.HttpResp.StatusCode,
@@ -528,12 +552,9 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 				StatusMessage: cfg.Tc.HttpResp.StatusMessage,
 				ProtoMajor:    cfg.Tc.HttpResp.ProtoMajor,
 				ProtoMinor:    cfg.Tc.HttpResp.ProtoMinor,
+				Binary:        cfg.Tc.HttpResp.Binary,
+				Timestamp:     cfg.Tc.HttpResp.Timestamp,
 			},
-			// Mocks:        httpSpec.Mocks,
-			// TestCasePath: tcsPath,
-			TestCasePath: cfg.Path + "/" + cfg.TestSet,
-			// MockPath:     mockPath,
-			// Noise:        httpSpec.Assertions["noise"],
 			Noise:  cfg.Tc.Noise,
 			Result: *testResult,
 		})
