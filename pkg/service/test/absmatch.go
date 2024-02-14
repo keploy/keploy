@@ -121,8 +121,8 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise,
 		},
 		HostResult: models.StringResult{
 			Normal:   false,
-			Expected: tcs1.HttpReq.Host,
-			Actual:   tcs2.HttpReq.Host,
+			Expected: tcs1.HttpReq.Header["Host"],
+			Actual:   tcs2.HttpReq.Header["Host"],
 		},
 	}
 
@@ -217,10 +217,10 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise,
 	}
 
 	//compare host
-	if tcs1.HttpReq.Host == tcs2.HttpReq.Host {
+	if tcs1.HttpReq.Header["Host"] == tcs2.HttpReq.Header["Host"] {
 		reqResult.HostResult.Normal = true
 	} else {
-		logger.Debug("test case http req host is not equal", zap.Any("tcs1HttpReqHost", tcs1.HttpReq.Host), zap.Any("tcs2HttpReqHost", tcs2.HttpReq.Host))
+		logger.Debug("test case http req host is not equal", zap.Any("tcs1HttpReqHost", tcs1.HttpReq.Header["Host"]), zap.Any("tcs2HttpReqHost", tcs2.HttpReq.Header["Host"]))
 		pass = false
 	}
 
