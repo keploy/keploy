@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -435,8 +434,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	//Matching algorithmm
 	//Get the mocks
 	for {
-		remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
-		sourcePort := remoteAddr.Port
+
 		//Check if the expected header is present
 		if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
 			//Send the 100 continue response
@@ -472,14 +470,14 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 		reqBody, err := ioutil.ReadAll(req.Body)
 		if err != nil {
-			logger.Error("failed to read from request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			logger.Error("failed to read from request body", zap.Error(err))
 			return
 		}
 
 		//parse request url
 		reqURL, err := url.Parse(req.URL.String())
 		if err != nil {
-			logger.Error("failed to parse request url", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			logger.Error("failed to parse request url", zap.Error(err))
 			return
 		}
 
@@ -489,47 +487,22 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		isMatched, stub, err := match(req, reqBody, reqURL, isReqBodyJSON, h, logger, clientConn, destConn, requestBuffer, h.Recover)
 
 		if err != nil {
-			logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			logger.Error("error while matching http mocks", zap.Error(err))
 		}
+
 		if !isMatched {
 			passthroughHost := false
-			for _, filters := range h.GetPassThroughHosts().Filters {
-				if filters.Host != "" {
-					regex, err := regexp.Compile(filters.Host)
-					if err != nil {
-						logger.Error("failed to compile the host regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-						continue
-					}
-					passthroughHost = regex.MatchString(req.Host)
-					if !passthroughHost {
-						continue
-					}
-				}
-				if filters.Path != "" {
-					regex, err := regexp.Compile(filters.Path)
-					if err != nil {
-						logger.Error("failed to compile the path regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-						continue
-					}
-					passthroughHost = regex.MatchString(req.URL.String())
-					if !passthroughHost {
-						continue
-					}
-				}
-
-				portSatisfied := filters.Port != 0 && sourcePort == int(filters.Port)
-				if (portSatisfied && passthroughHost) || (filters.Port == 0 && passthroughHost) {
-					break
-				} else if filters.Port != 0 {
-					passthroughHost = false
+			for _, host := range models.PassThroughHosts {
+				if req.Host == host {
+					passthroughHost = true
 				}
 			}
 			if !passthroughHost {
-				logger.Error("Didn't match any prexisting http mock", zap.Any("metadata", getReqMeta(req)))
+				logger.Error("Didn't match any prexisting http mock")
 			}
 			_, err := util.Passthrough(clientConn, destConn, [][]byte{requestBuffer}, h.Recover, logger)
 			if err != nil {
-				logger.Error("failed to passthrough http request", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				logger.Error("failed to passthrough http request", zap.Error(err))
 			}
 			return
 		}
@@ -549,12 +522,12 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			gw := gzip.NewWriter(&compressedBuffer)
 			_, err := gw.Write([]byte(body))
 			if err != nil {
-				logger.Error("failed to compress the response body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				logger.Error("failed to compress the response body", zap.Error(err))
 				return
 			}
 			err = gw.Close()
 			if err != nil {
-				logger.Error("failed to close the gzip writer", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				logger.Error("failed to close the gzip writer", zap.Error(err))
 				return
 			}
 			logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
@@ -580,7 +553,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 
 		_, err = clientConn.Write([]byte(responseString))
 		if err != nil {
-			logger.Error("failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			logger.Error("failed to write the mock output to the user application", zap.Error(err))
 			return
 		}
 
@@ -602,8 +575,6 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	var finalReq []byte
 	var err error
 
-	remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
-	sourcePort := remoteAddr.Port
 	//closing the destination connection
 	defer destConn.Close()
 
@@ -692,7 +663,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					}
 
 					// saving last request/response on this connection.
-					err := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
+					err := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
 					if err != nil {
 						logger.Error("failed to parse the final http request and response", zap.Error(err))
 						return err
@@ -723,7 +694,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			if err == io.EOF {
 				logger.Debug("connection closed by the server", zap.Error(err))
 				//check if before EOF complete response came, and try to parse it.
-				parseErr := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
+				parseErr := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
 				if parseErr != nil {
 					logger.Error("failed to parse the final http request and response", zap.Error(parseErr))
 					return parseErr
@@ -737,7 +708,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 
 		logger.Debug("This is the final response: " + string(finalResp))
 
-		err = ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
+		err = ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
 		if err != nil {
 			logger.Error("failed to parse the final http request and response", zap.Error(err))
 			return err
@@ -766,7 +737,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 }
 
 // ParseFinalHttp is used to parse the final http request and response and save it in a yaml file
-func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTimestampcMock time.Time, ctx context.Context, logger *zap.Logger, h *hooks.Hook, sourcePort int) error {
+func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTimestampcMock time.Time, ctx context.Context, logger *zap.Logger, h *hooks.Hook) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
@@ -780,14 +751,14 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			logger.Error("failed to read the http request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			logger.Error("failed to read the http request body", zap.Error(err))
 			return err
 		}
 	}
 	// converts the response message buffer to http response
 	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(finalResp)), req)
 	if err != nil {
-		logger.Error("failed to parse the http response message", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+		logger.Error("failed to parse the http response message", zap.Error(err))
 		return err
 	}
 	//Add the content length to the headers.
@@ -803,7 +774,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 			if ok {
 				gzipReader, err := gzip.NewReader(reader)
 				if err != nil {
-					logger.Error("failed to create a gzip reader", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+					logger.Error("failed to create a gzip reader", zap.Error(err))
 					return err
 				}
 				respParsed.Body = gzipReader
@@ -811,7 +782,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			logger.Error("failed to read the the http response body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			logger.Error("failed to read the the http response body", zap.Error(err))
 			return err
 		}
 		logger.Debug("This is the response body: " + string(respBody))
@@ -825,35 +796,9 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		"operation": req.Method,
 	}
 	passthroughHost := false
-	for _, filters := range h.GetPassThroughHosts().Filters {
-		if filters.Host != "" {
-			regex, err := regexp.Compile(filters.Host)
-			if err != nil {
-				logger.Error("failed to compile the host regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-				continue
-			}
-			passthroughHost = regex.MatchString(req.Host)
-			if !passthroughHost {
-				continue
-			}
-		}
-		if filters.Path != "" {
-			regex, err := regexp.Compile(filters.Path)
-			if err != nil {
-				logger.Error("failed to compile the path regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-				continue
-			}
-			passthroughHost = regex.MatchString(req.URL.String())
-			if !passthroughHost {
-				continue
-			}
-		}
-
-		portMatched := filters.Port != 0 && sourcePort == int(filters.Port)
-		if (portMatched && passthroughHost) || (filters.Port == 0 && passthroughHost) {
-			break
-		} else if filters.Port != 0 {
-			passthroughHost = false
+	for _, host := range models.PassThroughHosts {
+		if req.Host == host {
+			passthroughHost = true
 		}
 	}
 	if !passthroughHost {
@@ -875,6 +820,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 						Header:     pkg.ToYamlHttpHeader(req.Header),
 						Body:       string(reqBody),
 						URLParams:  pkg.UrlParams(req),
+						Host:       req.Host,
 					},
 					HttpResp: &models.HttpResp{
 						StatusCode: respParsed.StatusCode,
@@ -888,7 +834,7 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 			}, ctx)
 
 			if err != nil {
-				logger.Error("failed to store the http mock", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				logger.Error("failed to store the http mock", zap.Error(err))
 			}
 		}()
 
@@ -903,18 +849,4 @@ func hasCompleteHeaders(httpChunk []byte) bool {
 
 	// Check if the byte slice contains the header end sequence
 	return bytes.Contains(httpChunk, headerEndSequence)
-}
-
-// extract the request metadata from the request
-func getReqMeta(req *http.Request) map[string]string {
-	reqMeta := map[string]string{}
-	if req != nil {
-		// get request metadata
-		reqMeta = map[string]string{
-			"method": req.Method,
-			"url":    req.URL.String(),
-			"host":   req.Host,
-		}
-	}
-	return reqMeta
 }

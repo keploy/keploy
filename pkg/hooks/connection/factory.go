@@ -38,44 +38,50 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // ProcessActiveTrackers iterates over all connection the trackers and checks if they are complete. If so, it captures the ingress call and
 // deletes the tracker. If the tracker is inactive for a long time, it deletes it.
-func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.TestFilter) {
+func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.Filters) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
 	for connID, tracker := range factory.connections {
-		ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
-		if ok {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
+			if ok {
 
-			if len(requestBuf) == 0 || len(responseBuf) == 0 {
-				factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
-				continue
+				if len(requestBuf) == 0 || len(responseBuf) == 0 {
+					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+					continue
+				}
+
+				parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
+				if err != nil {
+					factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
+					continue
+				}
+				parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
+				if err != nil {
+					factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
+					continue
+				}
+
+				switch models.GetMode() {
+				case models.MODE_RECORD:
+					// capture the ingress call for record cmd
+					factory.logger.Debug("capturing ingress call from tracker in record mode")
+					capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest, filters)
+				case models.MODE_TEST:
+					factory.logger.Debug("skipping tracker in test mode")
+				default:
+					factory.logger.Warn("Keploy mode is not set to record or test. Tracker is being skipped.",
+						zap.Any("current mode", models.GetMode()))
+				}
+
+			} else if tracker.IsInactive(factory.inactivityThreshold) {
+				trackersToDelete = append(trackersToDelete, connID)
 			}
 
-			parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
-			if err != nil {
-				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
-				continue
-			}
-			parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
-			if err != nil {
-				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
-				continue
-			}
-
-			switch models.GetMode() {
-			case models.MODE_RECORD:
-				// capture the ingress call for record cmd
-				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest, filters)
-			case models.MODE_TEST:
-				factory.logger.Debug("skipping tracker in test mode")
-			default:
-				factory.logger.Warn("Keploy mode is not set to record or test. Tracker is being skipped.",
-					zap.Any("current mode", models.GetMode()))
-			}
-
-		} else if tracker.IsInactive(factory.inactivityThreshold) {
-			trackersToDelete = append(trackersToDelete, connID)
 		}
 	}
 
@@ -98,7 +104,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.TestFilter) {
+func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.Filters) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
@@ -130,11 +136,10 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Timestamp: reqTimeTest,
 		},
 		HttpResp: models.HttpResp{
-			StatusCode:    resp.StatusCode,
-			Header:        pkg.ToYamlHttpHeader(resp.Header),
-			Body:          string(respBody),
-			Timestamp:     resTimeTest,
-			StatusMessage: http.StatusText(resp.StatusCode),
+			StatusCode: resp.StatusCode,
+			Header:     pkg.ToYamlHttpHeader(resp.Header),
+			Body:       string(respBody),
+			Timestamp:  resTimeTest,
 		},
 		Noise: map[string][]string{},
 		// Mocks: mocks,

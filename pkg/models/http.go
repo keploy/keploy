@@ -12,9 +12,11 @@ type HttpReq struct {
 	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
 	Header     map[string]string `json:"header" yaml:"header"`
 	Body       string            `json:"body" yaml:"body"`
+	BodyType   string            `json:"body_type" yaml:"body_type"`
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
+	Host       string            `json:"host" yaml:"host"`
 }
 
 type FormData struct {
@@ -27,6 +29,7 @@ type HttpResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
 	Body          string            `json:"body" yaml:"body"`
+	BodyType      string            `json:"body_type" yaml:"body_type"`
 	StatusMessage string            `json:"status_message" yaml:"status_message"`
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`

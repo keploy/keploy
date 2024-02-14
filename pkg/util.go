@@ -5,13 +5,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/fs"
 	"math/rand"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strconv"
-	"regexp"
 	"strings"
 	"time"
 
@@ -184,87 +179,4 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 		curl = curl + fmt.Sprintf("  --data '%s'", body)
 	}
 	return curl
-}
-
-func GetNextTestReportDir(testReportPath, subDirPrefix string) (string, error) {
-	latestReportNumber := 1
-
-	if _, err := os.Stat(testReportPath); !os.IsNotExist(err) {
-		file, err := os.Open(testReportPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to open directory: %w", err)
-		}
-		defer file.Close()
-
-		files, err := file.Readdir(-1) // -1 to read all files and directories
-		if err != nil {
-			return "", fmt.Errorf("failed to read directory: %w", err)
-		}
-
-		for _, f := range files {
-			if f.IsDir() && strings.HasPrefix(f.Name(), subDirPrefix) {
-				reportNumber, err := strconv.Atoi(strings.TrimPrefix(f.Name(), subDirPrefix))
-				if err != nil {
-					return "", fmt.Errorf("failed to parse report number: %w", err)
-				}
-				if reportNumber > latestReportNumber {
-					latestReportNumber = reportNumber
-				}
-			}
-		}
-		latestReportNumber++ // increment to create a new report directory
-	}
-
-	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
-	return newTestReportPath, nil
-}
-
-func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
-	indices := []string{}
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
-	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
-	}
-
-	files, err := dir.ReadDir(0)
-	if err != nil {
-		return indices, err
-	}
-
-	for _, v := range files {
-		// Define the regular expression pattern
-		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
-
-		// Compile the regular expression
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			return indices, err
-		}
-
-		// Check if the string matches the pattern
-		if regex.MatchString(v.Name()) {
-			indices = append(indices, v.Name())
-		}
-	}
-	return indices, nil
-}
-
-func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
-
-	if generateTestReport {
-		return
-	}
-	
-	_, err := os.Stat("keploy/testReports")
-	if os.IsNotExist(err) {
-		return
-	}
-	err = os.RemoveAll("keploy/testReports")
-	if err != nil {
-		logger.Error("Error while removing test reports: %v", zap.String("error", err.Error()))
-		return
-	}
-
-	logger.Info("Test Reports are being removed since generateTestReport flag is set false")
 }

@@ -1,20 +1,19 @@
 package test
 
 import (
+	"context"
 	"time"
 
+	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/telemetry"
 )
 
 type Tester interface {
-	Test(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool
-	StartTest(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool
-	RunTestSet(testSet, path, testReportPath string, generateTestReport bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, testEnv TestEnvironmentSetup) models.TestRunStatus
-	InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error)
+	Test(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool
+	RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, ys platform.TestCaseDB, loadedHook *hooks.Hook, testReportfs platform.TestReportDB, testRunChan chan string, apiTimeout uint64, ctx context.Context, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool) models.TestRunStatus
+	InitialiseTest(cfg *TestConfig) (InitialiseTestReturn, error)
 	InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn
 	SimulateRequest(cfg *SimulateRequestConfig)
 	FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunStatus
-
 }

@@ -66,8 +66,9 @@ type Tracker struct {
 	mutex  sync.RWMutex
 	logger *zap.Logger
 
-	reqTimestamps []time.Time
-	isNewRequest  bool
+	reqTimestamps  []time.Time
+	respTimestamps []time.Time
+	isNewRequest   bool
 }
 
 func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
@@ -127,8 +128,6 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 
 	requestBuf, responseBuf := []byte{}, []byte{}
 
-	var reqTimestamps, respTimestamp time.Time
-
 	//if recTestCounter > 0, it means that we have num(recTestCounter) of request and response present in the queues to record.
 	if conn.recTestCounter > 0 {
 		if (len(conn.userReqSizes) > 0 && len(conn.kernelReqSizes) > 0) &&
@@ -162,7 +161,6 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 
 			if conn.verifyResponseData(expectedSentBytes, actualSentBytes) {
 				validRes = true
-				respTimestamp = time.Now()
 			} else {
 				conn.logger.Debug("Malformed response", zap.Any("ExpectedSentBytes", expectedSentBytes), zap.Any("ActualSentBytes", actualSentBytes))
 				recordTraffic = false
@@ -220,7 +218,6 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 				conn.userReqs = conn.userReqs[1:]
 
 				responseBuf = conn.resp
-				respTimestamp = time.Now()
 			} else {
 				conn.logger.Debug("no data buffer for request", zap.Any("Length of RecvBufQueue", len(conn.userReqs)))
 				recordTraffic = false
@@ -239,6 +236,8 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))
 	}
 
+	var reqTimestamps time.Time
+	var respTimestamps time.Time
 	// Checking if record traffic is recorded and request & response timestamp is captured or not.
 	if recordTraffic {
 		if len(conn.reqTimestamps) > 0 {
@@ -257,10 +256,25 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			recordTraffic = false
 		}
 
-		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestamps, respTimestamp))
+		if len(conn.respTimestamps) > 0 {
+			// Get the timestamp of current request
+			respTimestamps = conn.respTimestamps[0]
+			// Pop the timestamp of current request
+			conn.respTimestamps = conn.respTimestamps[1:]
+		} else {
+			conn.logger.Debug("no response timestamp found")
+			if len(requestBuf) > 0 {
+				reqLine := strings.Split(string(requestBuf), "\n")
+				if models.GetMode() == models.MODE_RECORD && len(reqLine) > 0 && reqLine[0] != "" {
+					conn.logger.Warn(fmt.Sprintf("failed to capture response timestamp for a request. Please record it again if important:%v", reqLine[0]))
+				}
+			}
+			recordTraffic = false
+		}
+		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestamps, respTimestamps))
 	}
 
-	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp
+	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamps
 }
 
 // reset resets the connection's request and response data buffers.
@@ -306,6 +320,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		// Capturing the timestamp of response as the response just started to come.
 		// This is to ensure that we capture the response timestamp for the first chunk of the response.
 		if !conn.isNewRequest {
+			conn.respTimestamps = append(conn.respTimestamps, time.Now())
 			conn.isNewRequest = true
 		}
 

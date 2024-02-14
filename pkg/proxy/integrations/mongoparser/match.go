@@ -13,7 +13,7 @@ func match(h *hooks.Hook, mongoRequests []models.MongoRequest, logger *zap.Logge
 	for {
 		tcsMocks, err := h.GetTcsMocks()
 		if err != nil {
-			return false, nil, fmt.Errorf("error while getting tcs mock: %v", err)
+			fmt.Errorf("error while getting tcs mock: %v", err)
 		}
 		maxMatchScore := 0.0
 		bestMatchIndex := -1

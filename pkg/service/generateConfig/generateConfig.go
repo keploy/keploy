@@ -5,10 +5,9 @@ import (
 	"os/exec"
 	"sync"
 
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
+  "go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -18,10 +17,6 @@ type generatorConfig struct {
 	mutex  sync.Mutex
 }
 
-type GenerateConfigOptions struct {
-  ConfigStr string
-}
-
 func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
 	return &generatorConfig{
 		logger: logger,
@@ -29,14 +24,45 @@ func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
 	}
 }
 
-func (g *generatorConfig) GenerateConfig(filePath string, options GenerateConfigOptions) {
+var config = `
+record:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  delay: 5
+  buildDelay: 30s
+  passThroughPorts: []
+  filters:
+    ReqHeader: []
+    urlMethods: {}
+test:
+  path: ""
+  # mandatory
+  command: ""
+  proxyport: 0
+  containerName: ""
+  networkName: ""
+  # example: "test-set-1": ["test-1", "test-2", "test-3"]
+  tests:
+  # to use globalNoise, please follow the guide at the end of this file.
+  globalNoise:
+    global:
+      body: {}
+      header: {}
+  delay: 5
+  buildDelay: 30s
+  apiTimeout: 5
+  passThroughPorts: []
+  withCoverage: false
+  coverageReportPath: ""
+  `
+
+func (g *generatorConfig) GenerateConfig(filePath string) {
 	var node yaml.Node
-	data := []byte(models.DefaultConfig)
-
-  if options.ConfigStr != ""{
-    data = []byte(options.ConfigStr)
-  }
-
+	data := []byte(config)
 	if err := yaml.Unmarshal(data, &node); err != nil {
 		g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))
 	}
@@ -45,7 +71,7 @@ func (g *generatorConfig) GenerateConfig(filePath string, options GenerateConfig
 		g.logger.Fatal("Failed to marshal the config", zap.Error(err))
 	}
 
-	finalOutput := append(results, []byte(utils.ConfigGuide)...)
+  finalOutput := append(results, []byte(utils.ConfigGuide)...)
 
 	err = os.WriteFile(filePath, finalOutput, os.ModePerm)
 	if err != nil {

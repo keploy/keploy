@@ -7,6 +7,7 @@ import (
 
 	"errors"
 	"fmt"
+
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -530,6 +531,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 									Value: "Etc/UTC",
 								},
 							}
+
 						}
 					}
 

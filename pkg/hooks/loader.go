@@ -93,8 +93,7 @@ type Hook struct {
 	writev        link.Link
 	writevRet     link.Link
 
-	idc              clients.InternalDockerClient
-	passThroughHosts models.Stubs
+	idc clients.InternalDockerClient
 }
 
 func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Hook, error) {
@@ -140,16 +139,6 @@ func (h *Hook) SetProxyPort(port uint32) {
 
 func (h *Hook) GetProxyPort() uint32 {
 	return h.proxyPort
-}
-
-func (h *Hook) GetPassThroughHosts() models.Stubs {
-	return h.passThroughHosts
-}
-
-func (h *Hook) SetPassThroughHosts(passThroughHosts []models.Filters) {
-	h.passThroughHosts = models.Stubs{
-		Filters: passThroughHosts,
-	}
 }
 
 func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
@@ -198,16 +187,8 @@ func (h *Hook) GetTcsMocks() ([]*models.Mock, error) {
 	return tcsMocks, nil
 }
 
-func (h *Hook) IsUserAppTerminateInitiated() bool {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
+func (h *Hook) IsUsrAppTerminateInitiated() bool {
 	return h.userAppShutdownInitiated
-}
-
-func (h *Hook) SetUserAppTerminateInitiated(state bool) {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	h.userAppShutdownInitiated = state
 }
 
 func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
@@ -410,7 +391,7 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 // StopUserApplication stops the user application
 func (h *Hook) StopUserApplication() {
 	h.logger.Info("keploy has initiated the shutdown of the user application.")
-	h.SetUserAppTerminateInitiated(true)
+	h.userAppShutdownInitiated = true
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
 		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() {
@@ -464,7 +445,7 @@ func deleteFileIfExists(filename string, logger *zap.Logger) error {
 
 func (h *Hook) Stop(forceStop bool) {
 
-	if !forceStop && !h.IsUserAppTerminateInitiated() {
+	if !forceStop {
 		h.logger.Info("Received signal to exit keploy program..")
 		h.StopUserApplication()
 	} else {
@@ -528,7 +509,7 @@ func (h *Hook) Stop(forceStop bool) {
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -no-global-types -target $TARGET bpf keploy_ebpf.c -- -I./headers -I./headers/$TARGET
-func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context, filters *models.TestFilter) error {
+func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Context, filters *models.Filters) error {
 	if err := settings.InitRealTimeOffset(); err != nil {
 		h.logger.Error("failed to fix the BPF clock", zap.Error(err))
 		return err
@@ -565,12 +546,23 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 
 	connectionFactory := connection.NewFactory(time.Minute, h.logger)
 	go func() {
-		// Recover from panic and gracefully shutdown
-		defer h.Recover(pkg.GenerateRandomID())
-		defer utils.HandlePanic()
-		for {
-			connectionFactory.ProcessActiveTrackers(h.TestCaseDB, ctx, filters)
-			time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+			defer utils.HandlePanic()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					connectionFactory.ProcessActiveTrackers(h.TestCaseDB, ctx, filters)
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+
 		}
 	}()
 

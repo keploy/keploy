@@ -17,30 +17,23 @@ import (
 const MAX_LINE_LENGTH = 50
 
 type DiffsPrinter struct {
-	testCase              string
-	statusExp             string
-	statusAct             string
-	headerExp             map[string]string
-	headerAct             map[string]string
-	bodyExp               string
-	bodyAct               string
-	bodyNoise             map[string][]string
-	headNoise             map[string][]string
-	hasarrayIndexMismatch bool
-	text                  string
+	testCase  string
+	statusExp string
+	statusAct string
+	headerExp map[string]string
+	headerAct map[string]string
+	bodyExp   string
+	bodyAct   string
+	bodyNoise map[string][]string
+	headNoise map[string][]string
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, ""}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}}
 }
 
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 	d.statusExp, d.statusAct = exp, act
-}
-
-func (d *DiffsPrinter) PushFooterDiff(key string) {
-	d.hasarrayIndexMismatch = true
-	d.text = key
 }
 
 func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]string) {
@@ -80,17 +73,8 @@ func (d *DiffsPrinter) Render() error {
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
 	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
-
 	for _, e := range diffs {
 		table.Append([]string{e})
-	}
-	if d.hasarrayIndexMismatch {
-		table.SetHeader([]string{d.text})
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
-		paint := color.New(color.FgYellow).SprintFunc()
-		postPaint := paint(d.text)
-		table.Append([]string{postPaint})
-
 	}
 	table.Render()
 	return nil

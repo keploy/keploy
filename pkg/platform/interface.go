@@ -2,16 +2,18 @@ package platform
 
 import (
 	"context"
+
+	"go.keploy.io/server/pkg/platform/telemetry"
 )
 
 type TestCaseDB interface {
 	WriteTestcase(tc KindSpecifier, ctx context.Context, filters KindSpecifier) error
 	WriteMock(tc KindSpecifier, ctx context.Context) error
+	GetTele() *telemetry.Telemetry
 
-	ReadTestcases(testSet string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
-	ReadTcsMocks(tc KindSpecifier, testSet string) ([]KindSpecifier, error)
-	ReadConfigMocks(testSet string) ([]KindSpecifier, error)
-	ReadTestSessionIndices() ([]string, error)
+	ReadTestcase(path string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
+	ReadTcsMocks(tc KindSpecifier, path string) ([]KindSpecifier, error)
+	ReadConfigMocks(path string) ([]KindSpecifier, error)
 }
 
 type TestReportDB interface {

@@ -72,18 +72,23 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	serverSideDecoder := NewDecoder()
 	wg.Add(1)
 	go func() {
-		// Recover from panic and gracefully shutdown
-		defer h.Recover(pkg.GenerateRandomID())
-		defer utils.HandlePanic()
-		defer wg.Done()
-		err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder, ctx)
-		if err != nil {
-			// check for EOF error
-			if err == io.EOF {
-				logger.Debug("EOF error received from client. Closing connection")
-				return
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+			defer utils.HandlePanic()
+			defer wg.Done()
+			err := TransferFrame(destConn, clientConn, streamInfoCollection, isReqFromClient, serverSideDecoder, ctx)
+			if err != nil {
+				// check for EOF error
+				if err == io.EOF {
+					logger.Debug("EOF error received from client. Closing connection")
+					return
+				}
+				logger.Error("failed to transfer frame from client to server", zap.Error(err))
 			}
-			logger.Error("failed to transfer frame from client to server", zap.Error(err))
 		}
 	}()
 
@@ -91,13 +96,18 @@ func encodeOutgoingGRPC(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	clientSideDecoder := NewDecoder()
 	wg.Add(1)
 	go func() {
-		// Recover from panic and gracefully shutdown
-		defer h.Recover(pkg.GenerateRandomID())
-		defer utils.HandlePanic()
-		defer wg.Done()
-		err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder, ctx)
-		if err != nil {
-			logger.Error("failed to transfer frame from server to client", zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Recover from panic and gracefully shutdown
+			defer h.Recover(pkg.GenerateRandomID())
+			defer utils.HandlePanic()
+			defer wg.Done()
+			err := TransferFrame(clientConn, destConn, streamInfoCollection, !isReqFromClient, clientSideDecoder, ctx)
+			if err != nil {
+				logger.Error("failed to transfer frame from server to client", zap.Error(err))
+			}
 		}
 	}()
 

@@ -20,7 +20,7 @@ type TestReport struct {
 	Logger *zap.Logger
 }
 
-func NewTestReportFS(logger *zap.Logger) platform.TestReportDB {
+func NewTestReportFS(logger *zap.Logger) *TestReport {
 	return &TestReport{
 		tests:  make(map[string][]platform.KindSpecifier), // Correctly initialize the map
 		m:      sync.Mutex{},
@@ -54,11 +54,8 @@ func (fe *TestReport) GetResults(runId string) ([]platform.KindSpecifier, error)
 }
 
 func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.KindSpecifier, error) {
-	testpath, err := util.ValidatePath(filepath.Join(path, name+".yaml"))
-	if err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(testpath, os.O_RDONLY, os.ModePerm)
+
+	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return &models.TestReport{}, err
 	}
@@ -75,7 +72,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Kin
 func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindSpecifier) error {
 	readDock, ok := doc.(*models.TestReport)
 	if !ok {
-		return fmt.Errorf("%s failed to read test report in yaml file", Emoji)
+		return fmt.Errorf("%s failed to read test report in yaml file.", Emoji)
 	}
 	if readDock.Name == "" {
 		lastIndex, err := findLastIndex(path, fe.Logger)
@@ -97,14 +94,9 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 	}
 	data = append(data, d...)
 
-	validatedPath, err := util.ValidatePath(filepath.Join(path, readDock.Name+".yaml"))
-    if err != nil {
-        return fmt.Errorf("%s failed to validate path: %s", Emoji, err.Error())
-    }
-    
-    err = os.WriteFile(validatedPath, data, os.ModePerm)
-    if err != nil {
-        return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
-    }
+	err = os.WriteFile(filepath.Join(path, readDock.Name+".yaml"), data, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
+	}
 	return nil
 }

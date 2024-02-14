@@ -6,17 +6,16 @@ import (
 )
 
 const (
-	NoSqlDB             string = "NO_SQL_DB"
-	SqlDB               string = "SQL_DB"
-	GRPC                string = "GRPC"
-	HttpClient          string = "HTTP_CLIENT"
-	TestSetPattern      string = "test-set-"
-	String              string = "string"
-	TestRunTemplateName string = "test-run-"
+	NoSqlDB        string = "NO_SQL_DB"
+	SqlDB          string = "SQL_DB"
+	GRPC           string = "GRPC"
+	HttpClient     string = "HTTP_CLIENT"
+	TestSetPattern string = "test-set-"
+	String         string = "string"
 )
 
 var (
-	PassThroughHosts = []string{"^dc\\.services\\.visualstudio\\.com$"}
+	PassThroughHosts = []string{"dc.services.visualstudio.com"}
 )
 
 var orangeColorSGR = []color.Attribute{38, 5, 208}
@@ -24,7 +23,6 @@ var orangeColorSGR = []color.Attribute{38, 5, 208}
 var HighlightString = color.New(orangeColorSGR...).SprintFunc()
 var HighlightPassingString = color.New(color.FgGreen).SprintFunc()
 var HighlightFailingString = color.New(color.FgRed).SprintFunc()
-var HighlightGrayString = color.New(color.FgHiBlack).SprintFunc()
 
 var PassingColorScheme = pp.ColorScheme{
 	String:          pp.Green,

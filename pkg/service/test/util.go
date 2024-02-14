@@ -17,7 +17,7 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -32,24 +32,22 @@ type InitialiseRunTestSetReturn struct {
 	TcsMocks      []*models.Mock
 }
 
-type TestEnvironmentSetup struct {
+type InitialiseTestReturn struct {
 	Sessions                 []string
-	TestReportFS             platform.TestReportDB
-	Ctx                      context.Context
+	TestReportFS             *yaml.TestReport
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
-	Storage                  platform.TestCaseDB
+	YamlStore                platform.TestCaseDB
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
-	IgnoreOrdering           bool
+	Stopper                  chan os.Signal
 }
 
 type TestConfig struct {
 	Path               string
 	Proxyport          uint32
 	TestReportPath     string
-	GenerateTestReport bool
 	AppCmd             string
 	MongoPassword      string
 	AppContainer       string
@@ -60,68 +58,56 @@ type TestConfig struct {
 	ApiTimeout         uint64
 	WithCoverage       bool
 	CoverageReportPath string
-	TestReport         platform.TestReportDB
-	Storage            platform.TestCaseDB
-	Tele               *telemetry.Telemetry
-	PassThroughHosts   []models.Filters
-	IgnoreOrdering     bool
+	EnableTele         bool
 }
 
 type RunTestSetConfig struct {
-	TestSet            string
-	Path               string
-	TestReportPath     string
-	GenerateTestReport bool
-	AppCmd             string
-	AppContainer       string
-	AppNetwork         string
-	Delay              uint64
-	BuildDelay         time.Duration
-	Pid                uint32
-	Storage            platform.TestCaseDB
-	LoadedHooks        *hooks.Hook
-	TestReportFS       platform.TestReportDB
-	TestRunChan        chan string
-	ApiTimeout         uint64
-	Ctx                context.Context
-	ServeTest          bool
+	TestSet        string
+	Path           string
+	TestReportPath string
+	AppCmd         string
+	AppContainer   string
+	AppNetwork     string
+	Delay          uint64
+	BuildDelay     time.Duration
+	Pid            uint32
+	YamlStore      platform.TestCaseDB
+	LoadedHooks    *hooks.Hook
+	TestReportFS   platform.TestReportDB
+	TestRunChan    chan string
+	ApiTimeout     uint64
+	Ctx            context.Context
+	ServeTest      bool
 }
 
 type SimulateRequestConfig struct {
-	Tc             *models.TestCase
-	LoadedHooks    *hooks.Hook
-	AppCmd         string
-	UserIP         string
-	TestSet        string
-	ApiTimeout     uint64
-	Success        *int
-	Failure        *int
-	Status         *models.TestRunStatus
-	TestReportFS   platform.TestReportDB
-	TestReport     *models.TestReport
-	Path           string
-	DockerID       bool
-	NoiseConfig    models.GlobalNoise
-	IgnoreOrdering bool
+	Tc           *models.TestCase
+	LoadedHooks  *hooks.Hook
+	AppCmd       string
+	UserIP       string
+	TestSet      string
+	ApiTimeout   uint64
+	Success      *int
+	Failure      *int
+	Status       *models.TestRunStatus
+	TestReportFS platform.TestReportDB
+	TestReport   *models.TestReport
+	Path         string
+	DockerID     bool
+	Ctx          context.Context
+	NoiseConfig  models.GlobalNoise
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS       platform.TestReportDB
-	TestReport         *models.TestReport
-	Status             *models.TestRunStatus
-	TestSet            string
-	Success            *int
-	Failure            *int
-	Ctx                context.Context
-	TestReportPath     string
-	GenerateTestReport bool
-	Path               string
-}
-
-type TestReportVerdict struct {
-	total  int
-	passed int
-	failed int
+	TestReportFS   platform.TestReportDB
+	TestReport     *models.TestReport
+	Status         *models.TestRunStatus
+	TestSet        string
+	Success        *int
+	Failure        *int
+	Ctx            context.Context
+	TestReportPath string
+	Path           string
 }
 
 func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
