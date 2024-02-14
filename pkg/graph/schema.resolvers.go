@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"time"
 
+	"go.keploy.io/server/pkg/graph/model"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/platform/yaml"
-	"go.keploy.io/server/pkg/graph/model"
+	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
@@ -45,7 +45,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
 	}
 
-	ys := r.Resolver.YS
+	ys := r.Resolver.Storage
 	if ys == nil {
 		r.Logger.Error("failed to get ys from resolver")
 		return nil, fmt.Errorf(Emoji+"failed to run testSet:%v", testSet)
@@ -59,11 +59,17 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
-
+	initialisedValues := test.TestEnvironmentSetup{
+		Ctx:            ctx,
+		LoadedHooks:    loadedHooks,
+		TestReportFS:   testReportFS,
+		Storage:        ys,
+		IgnoreOrdering: false,
+	}
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, ys, loadedHooks, testReportFS, testRunChan, r.ApiTimeout, ctx, nil, nil, serveTest)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, true, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, nil, nil, serveTest, initialisedValues)
 	}()
 
 	testRunID := <-testRunChan
@@ -80,7 +86,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	}
 	testPath := r.Resolver.Path
 
-	testSets, err := yaml.ReadSessionIndices(testPath, r.Logger)
+	testSets, err := r.Resolver.Storage.ReadTestSessionIndices()
 	if err != nil {
 		r.Resolver.Logger.Error("failed to fetch test sets", zap.Any("testPath", testPath), zap.Error(err))
 		return nil, err

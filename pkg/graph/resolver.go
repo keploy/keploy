@@ -13,15 +13,16 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type Resolver struct {
-	Tester         test.Tester
-	TestReportFS   platform.TestReportDB
-	YS             platform.TestCaseDB
-	LoadedHooks    *hooks.Hook
-	Logger         *zap.Logger
-	Path           string
-	TestReportPath string
-	Delay          uint64
-	AppPid         uint32
-	ApiTimeout     uint64
-	ServeTest      bool
+	Tester             test.Tester
+	TestReportFS       platform.TestReportDB
+	Storage            platform.TestCaseDB
+	LoadedHooks        *hooks.Hook
+	Logger             *zap.Logger
+	Path               string
+	TestReportPath     string
+	GenerateTestReport bool
+	Delay              uint64
+	AppPid             uint32
+	ApiTimeout         uint64
+	ServeTest          bool
 }

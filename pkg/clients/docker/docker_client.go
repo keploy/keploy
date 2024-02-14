@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -336,10 +337,16 @@ func (idc *internalDockerClient) CheckNetworkInfo(filePath string) (bool, bool, 
 	return false, false, ""
 }
 
-// Inspect Keploy docker container to get bind mount for /files
+// Inspect Keploy docker container to get bind mount for current directory
 func (idc *internalDockerClient) GetHostWorkingDirectory() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
+
+	curDir, err := os.Getwd()
+	if err != nil {
+		idc.logger.Error("failed to get current working directory", zap.Error(err))
+		return "", err
+	}
 
 	container, err := idc.ContainerInspect(ctx, "keploy-v2")
 	if err != nil {
@@ -347,14 +354,14 @@ func (idc *internalDockerClient) GetHostWorkingDirectory() (string, error) {
 		return "", err
 	}
 	containerMounts := container.Mounts
-	// Loop through container mounts and find the mount for /files in the container
+	// Loop through container mounts and find the mount for current directory in the container
 	for _, mount := range containerMounts {
-		if mount.Destination == "/files" {
-			idc.logger.Debug("found mount for /files in keploy-v2 container", zap.Any("mount", mount))
+		if mount.Destination == curDir {
+			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
 			return mount.Source, nil
 		}
 	}
-	return "", fmt.Errorf("could not find mount for /files in keploy-v2 container")
+	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
 }
 
 // ReplaceRelativePaths replaces relative paths in bind mounts with absolute paths

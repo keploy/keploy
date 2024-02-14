@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -434,7 +435,8 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 	//Matching algorithmm
 	//Get the mocks
 	for {
-
+		remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+		sourcePort := remoteAddr.Port
 		//Check if the expected header is present
 		if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
 			//Send the 100 continue response
@@ -489,12 +491,37 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		if err != nil {
 			logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 		}
-
 		if !isMatched {
 			passthroughHost := false
-			for _, host := range models.PassThroughHosts {
-				if req.Host == host {
-					passthroughHost = true
+			for _, filters := range h.GetPassThroughHosts().Filters {
+				if filters.Host != "" {
+					regex, err := regexp.Compile(filters.Host)
+					if err != nil {
+						logger.Error("failed to compile the host regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+						continue
+					}
+					passthroughHost = regex.MatchString(req.Host)
+					if !passthroughHost {
+						continue
+					}
+				}
+				if filters.Path != "" {
+					regex, err := regexp.Compile(filters.Path)
+					if err != nil {
+						logger.Error("failed to compile the path regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+						continue
+					}
+					passthroughHost = regex.MatchString(req.URL.String())
+					if !passthroughHost {
+						continue
+					}
+				}
+
+				portSatisfied := filters.Port != 0 && sourcePort == int(filters.Port)
+				if (portSatisfied && passthroughHost) || (filters.Port == 0 && passthroughHost) {
+					break
+				} else if filters.Port != 0 {
+					passthroughHost = false
 				}
 			}
 			if !passthroughHost {
@@ -575,6 +602,8 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 	var finalReq []byte
 	var err error
 
+	remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+	sourcePort := remoteAddr.Port
 	//closing the destination connection
 	defer destConn.Close()
 
@@ -663,7 +692,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 					}
 
 					// saving last request/response on this connection.
-					err := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
+					err := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
 					if err != nil {
 						logger.Error("failed to parse the final http request and response", zap.Error(err))
 						return err
@@ -694,7 +723,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 			if err == io.EOF {
 				logger.Debug("connection closed by the server", zap.Error(err))
 				//check if before EOF complete response came, and try to parse it.
-				parseErr := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
+				parseErr := ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
 				if parseErr != nil {
 					logger.Error("failed to parse the final http request and response", zap.Error(parseErr))
 					return parseErr
@@ -708,7 +737,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 
 		logger.Debug("This is the final response: " + string(finalResp))
 
-		err = ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h)
+		err = ParseFinalHttp(finalReq, finalResp, reqTimestampMock, resTimestampcMock, ctx, logger, h, sourcePort)
 		if err != nil {
 			logger.Error("failed to parse the final http request and response", zap.Error(err))
 			return err
@@ -737,7 +766,7 @@ func encodeOutgoingHttp(request []byte, clientConn, destConn net.Conn, logger *z
 }
 
 // ParseFinalHttp is used to parse the final http request and response and save it in a yaml file
-func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTimestampcMock time.Time, ctx context.Context, logger *zap.Logger, h *hooks.Hook) error {
+func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTimestampcMock time.Time, ctx context.Context, logger *zap.Logger, h *hooks.Hook, sourcePort int) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(finalReq)))
@@ -796,9 +825,35 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 		"operation": req.Method,
 	}
 	passthroughHost := false
-	for _, host := range models.PassThroughHosts {
-		if req.Host == host {
-			passthroughHost = true
+	for _, filters := range h.GetPassThroughHosts().Filters {
+		if filters.Host != "" {
+			regex, err := regexp.Compile(filters.Host)
+			if err != nil {
+				logger.Error("failed to compile the host regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				continue
+			}
+			passthroughHost = regex.MatchString(req.Host)
+			if !passthroughHost {
+				continue
+			}
+		}
+		if filters.Path != "" {
+			regex, err := regexp.Compile(filters.Path)
+			if err != nil {
+				logger.Error("failed to compile the path regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				continue
+			}
+			passthroughHost = regex.MatchString(req.URL.String())
+			if !passthroughHost {
+				continue
+			}
+		}
+
+		portMatched := filters.Port != 0 && sourcePort == int(filters.Port)
+		if (portMatched && passthroughHost) || (filters.Port == 0 && passthroughHost) {
+			break
+		} else if filters.Port != 0 {
+			passthroughHost = false
 		}
 	}
 	if !passthroughHost {
@@ -820,7 +875,6 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 						Header:     pkg.ToYamlHttpHeader(req.Header),
 						Body:       string(reqBody),
 						URLParams:  pkg.UrlParams(req),
-						Host:       req.Host,
 					},
 					HttpResp: &models.HttpResp{
 						StatusCode: respParsed.StatusCode,

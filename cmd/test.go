@@ -27,7 +27,6 @@ func NewCmdTest(logger *zap.Logger) *Test {
 	}
 }
 
-
 func ReadTestConfig(configPath string) (*models.Test, error) {
 	file, err := os.OpenFile(configPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -43,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThorughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, configPath string) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -61,7 +60,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *appCmd == "" {
 		*appCmd = confTest.Command
 	}
-	for testset, testcases := range confTest.Tests {
+	for testset, testcases := range confTest.SelectedTests {
 		if _, ok := (*tests)[testset]; !ok {
 			(*tests)[testset] = testcases
 		}
@@ -78,18 +77,29 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if *buildDelay == 30*time.Second && confTest.BuildDelay != 0 {
 		*buildDelay = confTest.BuildDelay
 	}
-	if len(*passThorughPorts) == 0 {
-		*passThorughPorts = confTest.PassThroughPorts
-	}
+
 	if len(*coverageReportPath) == 0 {
 		*coverageReportPath = confTest.CoverageReportPath
 	}
 	*withCoverage = *withCoverage || confTest.WithCoverage
+	*generateTestReport = *generateTestReport || confTest.GenerateTestReport
 	if *apiTimeout == 5 {
 		*apiTimeout = confTest.ApiTimeout
 	}
 	*globalNoise = confTest.GlobalNoise.Global
 	*testSetNoise = confTest.GlobalNoise.Testsets
+	if !*ignoreOrdering {
+		*ignoreOrdering = confTest.IgnoreOrdering
+	}
+	passThroughPortProvided := len(*passThroughPorts) == 0
+	for _, filter := range confTest.Stubs.Filters {
+		if filter.Port != 0 && filter.Host == "" && filter.Path == "" && passThroughPortProvided {
+			*passThroughPorts = append(*passThroughPorts, filter.Port)
+		} else {
+			*passThroughHosts = append(*passThroughHosts, filter)
+		}
+	}
+
 	return nil
 }
 
@@ -212,9 +222,21 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			generateTestReport, err := cmd.Flags().GetBool("generateTestReport")
+			if err != nil {
+				t.logger.Error("failed to read the generate test teport flag")
+				return err
+			}
+
 			enableTele, err := cmd.Flags().GetBool("enableTele")
 			if err != nil {
 				t.logger.Error("failed to read the disable telemetry flag")
+				return err
+			}
+
+			ignoreOrdering, err := cmd.Flags().GetBool("ignoreOrdering")
+			if err != nil {
+				t.logger.Error("failed to read the ignore ordering flag")
 				return err
 			}
 
@@ -233,10 +255,12 @@ func (t *Test) GetCmd() *cobra.Command {
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, configPath)
+			passThroughHosts := []models.Filters{}
+
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
-					t.logger.Info("continuing without configuration file because file not found")
+					t.logger.Info("Keploy config not found, continuing without configuration")
 				} else {
 					t.logger.Error("", zap.Error(err))
 				}
@@ -267,6 +291,11 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			if isDockerCmd && len(path) > 0 {
+				curDir, err := os.Getwd()
+				if err != nil {
+					t.logger.Error("failed to get current working directory", zap.Error(err))
+					return err
+				}
 				// Check if the path contains the moving up directory (..)
 				if strings.Contains(path, "..") {
 					path, err = filepath.Abs(filepath.Clean(path))
@@ -274,7 +303,7 @@ func (t *Test) GetCmd() *cobra.Command {
 						t.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", path))
 						return nil
 					}
-					relativePath, err := filepath.Rel("/files", path)
+					relativePath, err := filepath.Rel(curDir, path)
 					if err != nil {
 						t.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", path))
 						return nil
@@ -286,7 +315,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				} else if strings.HasPrefix(path, "/") { // Check if the path is absolute path.
 					// Check if the path is a subdirectory of current directory
 					// Get the current directory path in docker.
-					getDir := `docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "/files" }}{{ .Source }}{{ end }}{{ end }}'`
+					getDir := fmt.Sprintf(`docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "%s" }}{{ .Source }}{{ end }}{{ end }}'`, curDir)
 					cmd := exec.Command("sh", "-c", getDir)
 					out, err := cmd.Output()
 					if err != nil {
@@ -309,6 +338,41 @@ func (t *Test) GetCmd() *cobra.Command {
 				}
 			}
 
+			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
+			if err != nil {
+				t.logger.Error("failed to read the mongo password")
+				return err
+			}
+
+			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
+			//Check if app command starts with docker or  docker-compose.
+			dockerRelatedCmd, dockerCmd := utils.IsDockerRelatedCmd(appCmd)
+			if !isDockerCmd && dockerRelatedCmd {
+				isDockerCompose := false
+				if dockerCmd == "docker-compose" {
+					isDockerCompose = true
+				}
+				testCfg := utils.TestFlags{
+					Path:               path,
+					Proxyport:          proxyPort,
+					Command:            appCmd,
+					Testsets:           testsets,
+					ContainerName:      appContainer,
+					NetworkName:        networkName,
+					Delay:              delay,
+					BuildDelay:         buildDelay,
+					ApiTimeout:         apiTimeout,
+					PassThroughPorts:   ports,
+					ConfigPath:         configPath,
+					MongoPassword:      mongoPassword,
+					CoverageReportPath: coverageReportPath,
+					EnableTele:         enableTele,
+					WithCoverage:       withCoverage,
+				}
+				utils.UpdateKeployToDocker("test", isDockerCompose, testCfg, t.logger)
+				return nil
+			}
+
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
@@ -327,16 +391,23 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			path += "/keploy"
+			t.logger.Info("", zap.Any("keploy test and mock path", path))
 
-			testReportPath := path + "/testReports"
-			testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
-			if err != nil {
-				t.logger.Error("failed to get the next test report directory", zap.Error(err))
-				return err
+			testReportPath := ""
+
+			if generateTestReport {
+				testReportPath = path + "/testReports"
+	
+				testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
+					t.logger.Info("", zap.Any("keploy testReport path", testReportPath))
+					if err != nil {
+						t.logger.Error("failed to get the next test report directory", zap.Error(err))
+						return err
+					}
+			} else {
+				t.logger.Info("Test Reports are not being generated since generateTestReport flag is set false")
 			}
-
-			t.logger.Info("", zap.Any("keploy test and mock path", path), zap.Any("keploy testReport path", testReportPath))
-
+			
 			var hasContainerName bool
 			if isDockerCmd {
 				if strings.Contains(appCmd, "--name") {
@@ -354,19 +425,13 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			t.logger.Debug("the ports are", zap.Any("ports", ports))
 
-			mongoPassword, err := cmd.Flags().GetString("mongoPassword")
-			if err != nil {
-				t.logger.Error("failed to read the ports of outgoing calls to be ignored")
-				return err
-			}
-
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
-
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
-				t.tester.Test(path, testReportPath, appCmd, test.TestOptions{
+
+				t.tester.StartTest(path, testReportPath, generateTestReport, appCmd, test.TestOptions{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,
@@ -380,7 +445,17 @@ func (t *Test) GetCmd() *cobra.Command {
 					TestsetNoise:       testsetNoise,
 					WithCoverage:       withCoverage,
 					CoverageReportPath: coverageReportPath,
+					IgnoreOrdering:     ignoreOrdering,
+					PassthroughHosts:   passThroughHosts,
 				}, enableTele)
+
+				cmd := exec.Command("sudo", "chmod", "-R", "777", path)
+				err = cmd.Run()
+				if err != nil {
+					t.logger.Error("failed to set the permission of keploy directory", zap.Error(err))
+					return err
+				}
+
 			}
 
 			return nil
@@ -418,11 +493,16 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Uint32("pid", 0, "Process id of your application.")
 
+	testCmd.Flags().BoolP("generateTestReport", "g", true, "Generate the test report")
+
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
+
+	testCmd.Flags().Bool("ignoreOrdering", true, "Ignore ordering of array in response")
 
 	testCmd.Flags().MarkHidden("enableTele")
 
 	testCmd.Flags().Bool("withCoverage", false, "Capture the code coverage of the go binary in the command flag.")
+
 	testCmd.Flags().Lookup("withCoverage").NoOptDefVal = "true"
 
 	testCmd.Flags().Bool("coverage", false, "Capture the code coverage of the go binary in the command flag.")

@@ -9,6 +9,7 @@ type TestReport struct {
 	Total   int          `json:"total" yaml:"total"`
 	Tests   []TestResult `json:"tests" yaml:"tests,omitempty"`
 	TestSet string       `json:"testSet" yaml:"test_set"`
+	ID      string       `-`
 }
 
 func (tr *TestReport) GetKind() string {
@@ -84,9 +85,9 @@ type Header struct {
 
 type BodyResult struct {
 	Normal   bool     `json:"normal" bson:"normal" yaml:"normal"`
-	Type     BodyType `json:"type" bson:"type" yaml:"type"`
 	Expected string   `json:"expected" bson:"expected" yaml:"expected"`
 	Actual   string   `json:"actual" bson:"actual" yaml:"actual"`
+	Type     BodyType `json:"type" bson:"type" yaml:"type"`
 }
 
 type TestStatus string
