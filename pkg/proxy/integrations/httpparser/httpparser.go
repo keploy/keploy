@@ -875,7 +875,6 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 						Header:     pkg.ToYamlHttpHeader(req.Header),
 						Body:       string(reqBody),
 						URLParams:  pkg.UrlParams(req),
-						Host:       req.Host,
 					},
 					HttpResp: &models.HttpResp{
 						StatusCode: respParsed.StatusCode,
