@@ -161,6 +161,11 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		return returnVal, err
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := returnVal.LoadedHooks.SendDnsPort(returnVal.ProxySet.DnsPort); err != nil {
+		return returnVal, err
+	}
+
 	// filter the required destination ports
 	if err := returnVal.LoadedHooks.SendPassThroughPorts(cfg.PassThroughPorts); err != nil {
 		return returnVal, err
