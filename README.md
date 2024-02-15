@@ -92,6 +92,8 @@ From Go's gopher 🐹 to Python's snake 🐍, we support:
 ![Java](https://img.shields.io/badge/java-%23ED8B00.svg?style=for-the-badge&logo=java&logoColor=white)
 ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
+![Rust](https://img.shields.io/badge/Rust-darkred?style=for-the-badge&logo=rust&logoColor=white)
+![C#](https://img.shields.io/badge/csharp-purple?style=for-the-badge&logo=csharp&logoColor=white)
 
 ## 🎩 How's the Magic Happen?
 Our magical 🧙‍♂️ Keploy proxy captures and replays **ALL**(CRUD operations, including non-idempotent APIs) of your app's network interactions.
@@ -121,7 +123,7 @@ On MacOS and Windows, additional tools are required for Keploy due to the lack o
 To get started let's set Keploy alias by running. 
 
 ```shell
- curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
 
 ## Capturing Testcases
@@ -144,58 +146,6 @@ To run the testcases and generate a test coverage report, use this terminal comm
 keploy test -c "CMD_TO_RUN_APP" --delay 10
 ```
 
-<img src="https://cdn4.iconfinder.com/data/icons/logos-and-brands/512/97_Docker_logo_logos-512.png" width="20" height="20"> Record-Replay on Docker </img>
--
-
-### Recording Testcases and Data Mocks
-
-Here are a few points to consider before recording!
-- If you're running via **docker-compose**, ensure to include the `<CONTAINER_NAME>` under your application service in the docker-compose.yaml file [like this](https://github.com/keploy/samples-python/blob/9d6cf40da2eb75f6e035bedfb30e54564785d5c9/flask-mongo/docker-compose.yml#L14).
-- You must run all of the containers on the same network when you're using **docker run command** (you can add your custom **network name** using `--network` flag in **docker run command**).
-- In your **Docker Compose** file, every container should run on the same network.
-- `Docker_CMD_to_run_user_container` refers to the Docker **command for launching** the application.
-- Add the required commands to your DockerFile as stated below.
-
-```Dockerfile
-...
-# Download the ca.crt file
-RUN curl -o ca.crt https://raw.githubusercontent.com/keploy/keploy/main/pkg/proxy/asset/ca.crt
-
-RUN curl -o setup_ca.sh https://raw.githubusercontent.com/keploy/keploy/main/pkg/proxy/asset/setup_ca.sh
-
-# Give execute permission to the setup_ca.sh script
-RUN chmod +x setup_ca.sh
-...
-
-# Run the CA setup script and then run the application server
-CMD ["/bin/bash", "-c", "source ./setup_ca.sh && <your app running command>"]
-```
-Note: Also add **curl** installation command if **curl** is not installed on your image
-
-To capture test cases, **Execute** the following command within your application's **root directory**.
-
-```shell
-keploy record -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>"
-```
-Perform API calls using tools like [Hoppscotch](https://hoppscotch.io/), [Postman](https://www.postman.com/), or cURL commands.
-
-Keploy will capture the API calls you've conducted, generating test suites comprising **test cases (KTests) and data mocks (KMocks)** in `YAML` format.
-
-### Running Testcases
-
-To execute the test cases, follow these steps in the **root directory** of your application.
-
-When using **docker-compose** to start the application, it's important to ensure that the `--containerName` parameter matches the container name in your `docker-compose.yaml` file.
-
-
-```shell
-keploy test -c "Docker_CMD_to_run_user_container --network <network_name>" --containerName "<container_name>" --delay 20
-```
-
-Voilà! 🧑🏻‍💻 We have the tests with data mocks running! 🐰🎉
-
-You'll be able to see the test cases that ran with the results report on the console as well as locally in the `testReport` directory.
-
 ## 🤔 Questions?
 Reach out to us. We're here to help!
 
@@ -204,7 +154,7 @@ Reach out to us. We're here to help!
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
 
-> ##  **If You Had Fun:** Please leave a 🌟 star on this repo!  It's free, and you'll bring a smile. 😄 👏
+> ###  **If You Had Fun:** Please leave a 🌟 star on this repo!  It's free, and you'll bring a smile. 😄 👏
 
 ## 💖 Let's Build Together!
 Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is golden. Take a peek at our:
@@ -212,7 +162,6 @@ Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is gol
 📜 [Contribution Guidelines](https://github.com/keploy/keploy/blob/main/CONTRIBUTING.md)
 
 ❤️ [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
-
 
 
 ## 🐲 The Challenges We Face!
