@@ -94,6 +94,11 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := loadedHooks.SendDnsPort(ps.DnsPort); err != nil {
+		return
+	}
+
 	// Channels to communicate between different types of closing keploy
 	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
 	exitCmd := make(chan bool)                 // channel to exit this command
