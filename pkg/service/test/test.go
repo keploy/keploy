@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -274,7 +275,25 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		testSuiteNames = append(testSuiteNames, testSuiteName)
 	}
 
-	sort.Strings(testSuiteNames)
+	sort.SliceStable(testSuiteNames, func(i, j int) bool {
+
+		testSuitePartsI := strings.Split(testSuiteNames[i], "-")
+		testSuitePartsJ := strings.Split(testSuiteNames[j], "-")
+
+		if len(testSuitePartsI) < 3 || len(testSuitePartsJ) < 3 {
+			return testSuiteNames[i] < testSuiteNames[j]
+		}
+
+		testSuiteIDNumberI, err1 := strconv.Atoi(testSuitePartsI[2])
+		testSuiteIDNumberJ, err2 := strconv.Atoi(testSuitePartsJ[2])
+
+		if err1 != nil || err2 != nil {
+			return false
+		}
+
+		return testSuiteIDNumberI < testSuiteIDNumberJ
+
+	})
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
