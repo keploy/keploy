@@ -64,6 +64,11 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		return
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := loadedHooks.SendDnsPort(ps.DnsPort); err != nil {
+		return
+	}
+
 	tcsMocks, err := ys.ReadTcsMocks(&models.TestCase{}, "")
 	if err != nil {
 		loadedHooks.Stop(true)
