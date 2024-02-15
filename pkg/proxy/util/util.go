@@ -8,8 +8,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"path/filepath"
@@ -61,6 +61,14 @@ func ValidatePath(path string) (string, error) {
 	}
 	return path, nil
 }
+func setUmask(mask int) error {
+	prevUmask := syscall.Umask(mask)
+	// Check if there was an error in setting the umask
+	if prevUmask == mask {
+		return fmt.Errorf("failed to set umask to %o", mask)
+	}
+	return nil
+}
 
 // createYamlFile is used to create the yaml file along with the path directory (if does not exists)
 func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
@@ -70,6 +78,10 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 		return false, err
 	}
 	if _, err := os.Stat(yamlPath); err != nil {
+		// Temporarily set umask to allow broader permissions
+		if err := setUmask(0); err != nil {
+			panic(err)
+		}
 		// creates the path director if does not exists
 		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
 		if err != nil {
@@ -83,7 +95,10 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
 			return false, err
 		}
-
+		// Reset the umask to the previous value
+		if err := setUmask(0022); err != nil {
+			panic(err)
+		}
 		// since, keploy requires root access. The permissions for generated files
 		// should be updated to share it with all users.
 		keployPath := path
@@ -91,8 +106,8 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
 		}
 		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
-		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
-		err = cmd.Run()
+		// cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
+		// err = cmd.Run()
 		if err != nil {
 			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 			return false, err
