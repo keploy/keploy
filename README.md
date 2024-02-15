@@ -56,6 +56,10 @@
   <a href="https://twitter.com/Keploy_io">
     <img src="https://img.shields.io/badge/follow-%40keployio-1DA1F2?logo=twitter&style=social" alt="Keploy Twitter" />
   </a>
+
+  <a href="https://landscape.cncf.io/?item=app-definition-and-development--continuous-integration-delivery--keploy">
+    <img src="https://img.shields.io/badge/CNCF%20Landscape-5699C6?logo=cncf&style=social" alt="Keploy CNCF Landscape" />
+  </a>
 </h4>
 
 ## 🎤 Introducing Keploy 🐰
