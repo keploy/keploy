@@ -23,7 +23,7 @@ func InitRealTimeOffset() error {
 	}
 	realTimeOffset = uint64(time.Second)*(uint64(realTime.Sec)-uint64(monotonicTime.Sec)) + uint64(realTime.Nsec) - uint64(monotonicTime.Nsec)
 	// realTimeCopy := time.Unix(int64(realTimeOffset/1e9), int64(realTimeOffset%1e9))
-	// logger.Debug(fmt.Sprintf("%s real time offset is: %v", Emoji, realTimeCopy))
+	// log.Debug(fmt.Sprintf("%s real time offset is: %v", Emoji, realTimeCopy))
 	return nil
 }
 

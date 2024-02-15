@@ -30,7 +30,7 @@ type graph struct {
 	mutex  sync.Mutex
 }
 
-func NewGraph(logger *zap.Logger) graphInterface {
+func New(logger *zap.Logger) graphInterface {
 	return &graph{
 		logger: logger,
 		mutex:  sync.Mutex{},

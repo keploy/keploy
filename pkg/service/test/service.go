@@ -2,12 +2,11 @@ package test
 
 import (
 	"context"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"time"
 
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/proxy"
 )
 
@@ -18,6 +17,24 @@ type Tester interface {
 	InitRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn
 	SimRequest(cfg *SimulateRequestConfig)
 	FetchResults(cfg *FetchTestResultsConfig) models.TestRunStatus
+}
+
+type TestCaseDB interface {
+	WriteTestcase(tc KindSpecifier, ctx context.Context, filters KindSpecifier) error
+	WriteMock(tc KindSpecifier, ctx context.Context) error
+	ReadTestcases(testSet string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
+	ReadTcsMocks(tc KindSpecifier, testSet string) ([]KindSpecifier, error)
+	ReadConfigMocks(testSet string) ([]KindSpecifier, error)
+	ReadTestSessionIndices() ([]string, error)
+}
+
+type TestReportDB interface {
+	Lock()
+	Unlock()
+	SetResult(runId string, test KindSpecifier)
+	GetResults(runId string) ([]KindSpecifier, error)
+	Read(ctx context.Context, path, name string) (KindSpecifier, error)
+	Write(ctx context.Context, path string, doc KindSpecifier) error
 }
 
 type InitialiseRunTestSetReturn struct {
@@ -32,12 +49,12 @@ type InitialiseRunTestSetReturn struct {
 
 type TestEnvironmentSetup struct {
 	Sessions                 []string
-	TestReportFS             platform.TestReportDB
+	TestReportFS             TestReportDB
 	Ctx                      context.Context
 	AbortStopHooksForcefully bool
 	ProxySet                 *proxy.ProxySet
 	ExitCmd                  chan bool
-	Storage                  platform.TestCaseDB
+	Storage                  TestCaseDB
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 	IgnoreOrdering           bool
@@ -57,8 +74,8 @@ type TestConfig struct {
 	ApiTimeout         uint64
 	WithCoverage       bool
 	CoverageReportPath string
-	TestReport         platform.TestReportDB
-	Storage            platform.TestCaseDB
+	TestReport         TestReportDB
+	Storage            TestCaseDB
 	Tele               *telemetry.Telemetry
 	PassThroughHosts   []models.Filters
 	IgnoreOrdering     bool
@@ -74,9 +91,9 @@ type RunTestSetConfig struct {
 	Delay          uint64
 	BuildDelay     time.Duration
 	Pid            uint32
-	Storage        platform.TestCaseDB
+	Storage        TestCaseDB
 	LoadedHooks    *hooks.Hook
-	TestReportFS   platform.TestReportDB
+	TestReportFS   TestReportDB
 	TestRunChan    chan string
 	ApiTimeout     uint64
 	Ctx            context.Context
@@ -93,7 +110,7 @@ type SimulateRequestConfig struct {
 	Success        *int
 	Failure        *int
 	Status         *models.TestRunStatus
-	TestReportFS   platform.TestReportDB
+	TestReportFS   TestReportDB
 	TestReport     *models.TestReport
 	Path           string
 	DockerID       bool
@@ -102,7 +119,7 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS   platform.TestReportDB
+	TestReportFS   TestReportDB
 	TestReport     *models.TestReport
 	Status         *models.TestRunStatus
 	TestSet        string

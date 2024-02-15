@@ -11,7 +11,7 @@ import (
 
 // AbsMatch (Absolute Match) compares two test cases and returns a boolean value indicating whether they are equal or not.
 // It also returns a AbsResult object which contains the results of the comparison.
-// Parameters: tcs1, tcs2, noiseConfig, logger
+// Parameters: tcs1, tcs2, noiseConfig, log
 // Returns: bool, *models.AbsResult
 func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise, logger *zap.Logger) (bool, *models.AbsResult) {
 	if tcs1 == nil || tcs2 == nil {

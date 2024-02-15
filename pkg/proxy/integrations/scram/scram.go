@@ -70,7 +70,7 @@ func GenerateServerFinalMessage(authMessage, mechanism, password, salt string, i
 // - recordedRequestMsg: The byte slice containing the recorded client's first message.
 // - recievedRequestMsg: The byte slice containing the received client's first message.
 // - firstResponseMsg: The byte slice containing the server's initial response message.
-// - logger: An instance of a logger from the zap package.
+// - log: An instance of a log from the zap package.
 //
 // Returns:
 // - A modified server's first response message with the nonce replaced.
@@ -99,7 +99,7 @@ func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstRes
 // Parameters:
 //   - firstRequest: The initial request string from the client.
 //   - firstResponse: The server's first response string.
-//   - logger: An instance of a logger for logging errors and activities.
+//   - log: An instance of a log for logging errors and activities.
 //
 // Returns:
 //   - A string representing the complete authentication message. If there's an

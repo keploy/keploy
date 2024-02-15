@@ -13,7 +13,7 @@ type Config struct {
 	Port uint32
 }
 
-// Init will initialize the core keploy servives
+// Init will initialize: hooks and proxy
 func Init(ctx context.Context, config Config) error {
 	// disable init logs from the cfssl library
 	log.Level = 0
@@ -30,5 +30,5 @@ func Init(ctx context.Context, config Config) error {
 	}
 
 	// start the proxy
-	ps := proxy.BootProxy(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx, 0)
+	ps := proxy.Sart(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx, 0)
 }
