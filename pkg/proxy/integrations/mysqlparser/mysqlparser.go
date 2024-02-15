@@ -473,7 +473,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 	configMocks, _ := h.GetConfigMocks()
 	tcsMocks, _ := h.GetTcsMocks()
 	for {
-		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
+		//log.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
 			if len(configMocks) == 0 {
 				logger.Debug("No more config mocks available")
@@ -533,7 +533,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					continue
 				} else {
 					// Handle other errors
-					// logger.Error("Failed to read bytes from clientConn", zap.Error(err))
+					// log.Error("Failed to read bytes from clientConn", zap.Error(err))
 					return
 				}
 			}

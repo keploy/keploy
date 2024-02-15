@@ -4,13 +4,10 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
 )
 
-func NewCmdExample(logger *zap.Logger) *Example {
-	return &Example{
-		logger: logger,
-	}
+func init() {
+	Register("example", Example)
 }
 
 var customHelpTemplate = `
@@ -94,11 +91,7 @@ Docker
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
 `
 
-type Example struct {
-	logger *zap.Logger
-}
-
-func (e *Example) GetCmd() *cobra.Command {
+func Example() *cobra.Command {
 	var customSetup bool
 	var exampleCmd = &cobra.Command{
 		Use:   "example",
@@ -111,10 +104,10 @@ func (e *Example) GetCmd() *cobra.Command {
 			}
 			if customSetup {
 				fmt.Println(examples)
-			} else {
-				fmt.Println(exampleOneClickInstall)
-				fmt.Println(withoutexampleOneClickInstall)
+				return nil
 			}
+			fmt.Println(exampleOneClickInstall)
+			fmt.Println(withoutexampleOneClickInstall)
 			return nil
 		},
 	}

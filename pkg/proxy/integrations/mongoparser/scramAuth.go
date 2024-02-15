@@ -54,7 +54,7 @@ var authMessageMap map[string]string = map[string]string{}
 //   - actualRequestSections: The sections from the recieved request received.
 //   - expectedRequestSections: The sections that are recorded in the auth request.
 //   - responseSection: The section to be used for the response.
-//   - logger: The logging instance for recording activities and errors.
+//   - log: The logging instance for recording activities and errors.
 //
 // Returns:
 //   - The generated response string.
@@ -330,7 +330,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 // Parameters:
 //   - actualMsg: The actual message map from the client.
 //   - responseSection: The section string to be used for the response.
-//   - logger: The logging instance for recording activities and errors.
+//   - log: The logging instance for recording activities and errors.
 //
 // Returns:
 //   - The updated response section string.

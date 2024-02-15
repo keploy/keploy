@@ -29,6 +29,10 @@ func (g *GenerateConfig) GetCmd() *cobra.Command {
 		Use:     "generate-config",
 		Short:   "generate the keploy configuration file",
 		Example: "keploy generate-config --path /path/to/localdir",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// override root command's persistent pre run
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			configPath, err := cmd.Flags().GetString("path")

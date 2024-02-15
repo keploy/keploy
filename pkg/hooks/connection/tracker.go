@@ -285,10 +285,10 @@ func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint6
 // func (conn *Tracker) Malformed() bool {
 // 	conn.mutex.RLock()
 // 	defer conn.mutex.RUnlock()
-// 	// conn.logger.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes received in userspace", conn.reqSize))
-// 	// conn.logger.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.respSize))
-// 	// conn.logger.Debug("", zap.Any("Request buffer", string(conn.req)))
-// 	// conn.logger.Debug("", zap.Any("Response buffer", string(conn.resp)))
+// 	// conn.log.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes received in userspace", conn.reqSize))
+// 	// conn.log.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.respSize))
+// 	// conn.log.Debug("", zap.Any("Request buffer", string(conn.req)))
+// 	// conn.log.Debug("", zap.Any("Response buffer", string(conn.resp)))
 // 	return conn.closeTimestamp != 0 &&
 // 		conn.totalReadBytes != conn.reqSize &&
 // 		conn.totalWrittenBytes != conn.respSize
@@ -384,7 +384,7 @@ func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
 		conn.logger.Debug("Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
 	}
-	// conn.logger.Debug("Got an open event from eBPF", zap.Any("File Descriptor", event.ConnID.FD))
+	// conn.log.Debug("Got an open event from eBPF", zap.Any("File Descriptor", event.ConnID.FD))
 	conn.openTimestamp = event.TimestampNano
 }
 

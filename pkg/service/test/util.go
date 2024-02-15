@@ -1,7 +1,6 @@
 package test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,11 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
 
@@ -315,7 +310,7 @@ func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*mod
 
 	// Append the unfiltered mocks to the filtered mocks
 	sortedMocks := append(filteredMocks, unFilteredMocks...)
-	// logger.Info("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
+	// log.Info("sorted mocks after sorting accornding to the testcase timestamps", zap.Any("testcase", tc.Name), zap.Any("mocks", sortedMocks))
 	for _, v := range sortedMocks {
 		logger.Debug("sorted mocks", zap.Any("testcase", tc.Name), zap.Any("mocks", v))
 	}

@@ -22,12 +22,12 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/utils"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 )
 
 const (
-	// TODO : Remove hard-coded container & network name.
+	// TODO: Remove hard-coded container & network name.
 	KeployContainerName = "keploy-v2"
 	KeployNetworkName   = "keploy-network"
 )
@@ -369,7 +369,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 						//Inspecting the application container again since the ip and pid takes some time to be linked to the container.
 						containerDetails, err := dockerClient.ContainerInspect(context.Background(), appContainer)
 						if err != nil {
-							// h.logger.Debug(fmt.Sprintf("failed to get inspect:%v by containerName", containerDetails), zap.Error(err))
+							// h.log.Debug(fmt.Sprintf("failed to get inspect:%v by containerName", containerDetails), zap.Error(err))
 							continue
 						}
 
@@ -595,7 +595,6 @@ func (h *Hook) injectNetworkToKeploy(appNetwork string) error {
 	h.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", KeployContainerName), zap.Any("appNetwork", appNetwork))
 	return nil
 }
-
 
 func parseDockerCommand(dockerCmd string) (string, string, error) {
 	// Regular expression patterns

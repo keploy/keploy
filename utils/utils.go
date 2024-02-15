@@ -5,18 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/TheZeroSlave/zapsentry"
-	"github.com/cloudflare/cfssl/log"
 	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.uber.org/zap"
@@ -25,6 +29,32 @@ import (
 
 var ErrFileNotFound = errors.New("file Not found")
 var WarningSign = "\U000026A0"
+
+func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) {
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		// Construct the Viper key and the env variable name
+		if viperKeyPrefix == "" {
+			viperKeyPrefix = cmd.Name()
+		}
+		viper.SetEnvPrefix("KEPLOY")
+		viperKey := viperKeyPrefix + "." + flag.Name
+		envVarName := strings.ToUpper(viperKeyPrefix + "_" + flag.Name)
+		envVarName = strings.ReplaceAll(envVarName, ".", "_")
+
+		// Bind the flag to Viper with the constructed key
+		err := viper.BindPFlag(viperKey, flag)
+		if err != nil {
+			logger.Error("Failed to bind flag to config", zap.Error(err))
+		}
+
+		// Tell Viper to also read this flag's value from the corresponding env variable
+		err = viper.BindEnv(viperKey, envVarName)
+		if err != nil {
+			logger.Error("Failed to bind environment variables to config", zap.Error(err))
+
+		}
+	})
+}
 
 func ModifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 	cfg := zapsentry.Configuration{
@@ -37,7 +67,7 @@ func ModifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 	}
 	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(client))
 
-	//in case of err it will return noop core. So we don't need to attach it to logger.
+	//in case of err it will return noop core. So we don't need to attach it to log.
 	if err != nil {
 		log.Debug("failed to init zap", zap.Error(err))
 		return log
@@ -181,14 +211,15 @@ func attachLogFileToSentry(logFilePath string) {
 	sentry.Flush(time.Second * 5)
 }
 
-func HandlePanic() {
+func HandlePanic(logger *zap.Logger) {
+	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
 		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 		// Get the stack trace
 		stackTrace := debug.Stack()
 
-		log.Error(Emoji+"Recovered from:", r, "\nstack trace:\n", string(stackTrace))
+		logger.Error(Emoji+"Recovered from:", zap.String("stack trace", string(stackTrace)))
 		sentry.Flush(time.Second * 2)
 	}
 }
@@ -227,7 +258,7 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 }
 
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file
-func IsDockerRelatedCmd(cmd string) (bool, string) {
+func IsDockerRelatedCmd(cmd string) bool {
 	// Check for Docker command patterns
 	dockerCommandPatterns := []string{
 		"docker-compose ",
@@ -333,80 +364,77 @@ func appendFlags(flagName string, flagValue string) string {
 	return ""
 }
 
-func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{}, logger *zap.Logger) {
-	var recordFlags RecordFlags
-	var testFlags TestFlags
-	//Check the type of flags.
-	switch flag := flags.(type) {
-	case RecordFlags:
-		recordFlags = flag
-	case TestFlags:
-		testFlags = flag
-	default:
-		logger.Error("Unknown flags provided")
-		return
-	}
+func RunInDocker(logger *zap.Logger, command string) error {
 	var keployAlias string
-	getAlias(&keployAlias, logger)
-	keployAlias = keployAlias + cmdName + " -c "
-	var cmd *exec.Cmd
-	if cmdName == "record" {
-		keployAlias = keployAlias + "\"" + recordFlags.Command + "\" "
-		if len(recordFlags.PassThroughPorts) > 0 {
-			portSlice := make([]string, len(recordFlags.PassThroughPorts))
-			for i, port := range recordFlags.PassThroughPorts {
-				portSlice[i] = fmt.Sprintf("%d", port)
-			}
-			joinedPorts := strings.Join(portSlice, ",")
-			keployAlias = keployAlias + " --passThroughPorts=" + fmt.Sprintf("%v ", joinedPorts)
-		}
-		if recordFlags.ConfigPath != "." {
-			keployAlias = keployAlias + " --config-path " + recordFlags.ConfigPath
-		}
-		if len(recordFlags.Path) > 0 {
-			keployAlias = keployAlias + " --path " + recordFlags.Path
-		}
-		addtionalFlags := appendFlags("containerName", recordFlags.ContainerName) + appendFlags("buildDelay ", recordFlags.BuildDelay.String()) + appendFlags("delay", fmt.Sprintf("%d", recordFlags.Delay)) + appendFlags("proxyport", fmt.Sprintf("%d", recordFlags.Proxyport)) + appendFlags("networkName", recordFlags.NetworkName) + appendFlags("enableTele=", fmt.Sprintf("%v", recordFlags.EnableTele))
-		keployAlias = keployAlias + addtionalFlags
-		cmd = exec.Command("sh", "-c", keployAlias)
-
-	} else {
-		keployAlias = keployAlias + "\"" + testFlags.Command + "\" "
-		if len(testFlags.PassThroughPorts) > 0 {
-			portSlice := make([]string, len(testFlags.PassThroughPorts))
-			for i, port := range testFlags.PassThroughPorts {
-				portSlice[i] = fmt.Sprintf("%d", port)
-			}
-			joinedPorts := strings.Join(portSlice, ",")
-			keployAlias = keployAlias + " --passThroughPorts=" + fmt.Sprintf("%v ", joinedPorts)
-		}
-		if testFlags.ConfigPath != "." {
-			keployAlias = keployAlias + " --config-path " + testFlags.ConfigPath
-		}
-		if len(testFlags.Testsets) > 0 {
-			testSetSlice := make([]string, len(testFlags.Testsets))
-			for i, testSet := range testFlags.Testsets {
-				testSetSlice[i] = fmt.Sprintf("%v", testSet)
-			}
-			joinedTestSets := strings.Join(testSetSlice, ",")
-			keployAlias = keployAlias + " --testsets=" + fmt.Sprintf("%v", joinedTestSets)
-		}
-		if len(testFlags.Path) > 0 {
-			keployAlias = keployAlias + " --path " + testFlags.Path
-		}
-		addtionalFlags := appendFlags("containerName", testFlags.ContainerName) + appendFlags("buildDelay", testFlags.BuildDelay.String()) + appendFlags("delay", fmt.Sprintf("%d", testFlags.Delay)) + appendFlags("networkName", testFlags.NetworkName) + appendFlags("enableTele=", fmt.Sprintf("%v", testFlags.EnableTele)) + appendFlags("apiTimeout", fmt.Sprintf("%d", testFlags.ApiTimeout)) + appendFlags("mongoPassword", testFlags.MongoPassword) + appendFlags("coverageReportPath", testFlags.CoverageReportPath) + appendFlags("withCoverage=", fmt.Sprintf("%v", testFlags.WithCoverage)) + appendFlags("proxyport", fmt.Sprintf("%d", testFlags.Proxyport))
-		keployAlias = keployAlias + addtionalFlags
-		cmd = exec.Command("sh", "-c", keployAlias)
+	//Get the correct keploy alias.
+	err := getAlias(&keployAlias, logger)
+	if err != nil {
+		return err
 	}
-
+	cmd := exec.Command("sh", "-c", keployAlias+command)
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 	logger.Debug("This is the keploy alias", zap.String("keployAlias:", keployAlias))
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		logger.Error("Failed to start keploy in docker", zap.Error(err))
-		return
+		return err
+	}
+	return nil
+}
+
+// Keys returns an array containing the keys of the given map.
+func Keys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func SentryInit(logger *zap.Logger, dsn string) {
+	go func() {
+		//Initialise sentry.
+		err := sentry.Init(sentry.ClientOptions{
+			Dsn:              dsn,
+			TracesSampleRate: 1.0,
+		})
+		if err != nil {
+			logger.Debug("Could not initialise sentry.", zap.Error(err))
+		}
+	}()
+}
+
+func GetUniqueReportDir(testReportPath, subDirPrefix string) (string, error) {
+	latestReportNumber := 1
+
+	if _, err := os.Stat(testReportPath); !os.IsNotExist(err) {
+		file, err := os.Open(testReportPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to open directory: %w", err)
+		}
+		defer file.Close()
+
+		files, err := file.Readdir(-1) // -1 to read all files and directories
+		if err != nil {
+			return "", fmt.Errorf("failed to read directory: %w", err)
+		}
+
+		for _, f := range files {
+			if f.IsDir() && strings.HasPrefix(f.Name(), subDirPrefix) {
+				reportNumber, err := strconv.Atoi(strings.TrimPrefix(f.Name(), subDirPrefix))
+				if err != nil {
+					return "", fmt.Errorf("failed to parse report number: %w", err)
+				}
+				if reportNumber > latestReportNumber {
+					latestReportNumber = reportNumber
+				}
+			}
+		}
+		latestReportNumber++ // increment to create a new report directory
 	}
 
+	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
+	return newTestReportPath, nil
 }

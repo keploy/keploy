@@ -1,15 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/cmd"
+	updateSvc "go.keploy.io/server/pkg/service/update"
+	"go.keploy.io/server/utils"
+	"go.keploy.io/server/utils/log"
+	"go.uber.org/zap"
 	_ "net/http/pprof"
 	"os"
-	"time"
-
-	sentry "github.com/getsentry/sentry-go"
-	"github.com/labstack/gommon/log"
-	"go.keploy.io/server/cmd"
-	"go.keploy.io/server/utils"
 )
 
 // version is the version of the server and will be injected during build by ldflags
@@ -31,6 +32,12 @@ const logo string = `
 `
 
 func main() {
+	printLogo()
+	ctx := utils.NewCtx()
+	start(ctx)
+}
+
+func printLogo() {
 	if version == "" {
 		version = "2-dev"
 	}
@@ -41,17 +48,23 @@ func main() {
 	} else {
 		fmt.Println("Starting keploy in docker environment.")
 	}
+}
 
-	//Initialise sentry.
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              dsn,
-		TracesSampleRate: 1.0,
-	})
-	if err != nil {
-		log.Debug("Could not initialise sentry.", err)
+// setup and hook the different flags
+func start(ctx context.Context) {
+	// Now that flags are parsed, set up the log
+	logger := log.New()
+	logger = utils.ModifyToSentryLogger(logger, sentry.CurrentHub().Client())
+	defer log.DeleteLogs(logger)
+
+	utils.SentryInit(logger, dsn)
+	defer utils.HandlePanic(logger)
+
+	svc := cmd.NewServices(updateSvc.NewUpdater(logger))
+
+	rootCmd := cmd.Root(ctx, logger, svc)
+	if err := rootCmd.Execute(); err != nil {
+		logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
+		os.Exit(1)
 	}
-	defer utils.HandlePanic()
-	defer sentry.Flush(2 * time.Second)
-
-	cmd.Execute()
 }

@@ -1,4 +1,4 @@
-package logger
+package log
 
 import (
 	"log"
@@ -73,7 +73,7 @@ func New() *zap.Logger {
 
 	logger, err := logCfg.Build()
 	if err != nil {
-		log.Panic(Emoji, "failed to start the logger for the CLI", err)
+		log.Panic(Emoji, "failed to start the log for the CLI", err)
 		return nil
 	}
 	return logger

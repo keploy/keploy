@@ -1,6 +1,7 @@
 package Update
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -28,27 +29,25 @@ type updater struct {
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 // Update initiates the update process for the Keploy binary file.
-func (u *updater) Update() {
+func (u *updater) Update(ctx context.Context) error {
 	currentVersion := utils.Version
 
 	isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 	if isDockerCmd {
-		u.logger.Info("Please Pull the latest Docker image of Keploy")
-		return
+		return errors.New("please Pull the latest Docker image of keploy")
 	}
 	if strings.HasSuffix(currentVersion, "-dev") {
-		u.logger.Info("You are using a development version of Keploy. Skipping update check.")
-		return
+		return errors.New("you are using a development version of Keploy. Skipping update check")
 	}
 
 	releaseInfo, err := utils.GetLatestGitHubRelease()
 	if err != nil {
-		if err == ErrGitHubAPIUnresponsive {
+		if errors.Is(err, ErrGitHubAPIUnresponsive) {
 			u.logger.Error("GitHub API is unresponsive. Update process cannot continue.")
-		} else {
-			u.logger.Error("Failed to fetch latest GitHub release version", zap.Error(err))
+			return errors.New("gitHub API is unresponsive. Update process cannot continue")
 		}
-		return
+		u.logger.Error("failed to fetch latest GitHub release version")
+		return err
 	}
 
 	latestVersion := releaseInfo.TagName
@@ -61,17 +60,15 @@ func (u *updater) Update() {
 
 	u.logger.Info("Updating to Version: " + latestVersion)
 
-	arch := runtime.GOARCH
 	downloadUrl := ""
-	if arch == "amd64" {
+	if runtime.GOARCH == "amd64" {
 		downloadUrl = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
 	} else {
 		downloadUrl = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
 	}
 	err = u.downloadAndUpdate(downloadUrl)
 	if err != nil {
-		u.logger.Error("Update failed!", zap.Error(err))
-		return
+		return err
 	}
 
 	u.logger.Info("Update Successful!")
@@ -84,13 +81,13 @@ func (u *updater) Update() {
 
 	renderer, err = glamour.NewTermRenderer(termRendererOpts...)
 	if err != nil {
-		u.logger.Error("Failed to initialize renderer", zap.Error(err))
-		return
+		u.logger.Error("failed to initialize renderer", zap.Error(err))
+		return err
 	}
 	changelog, err = renderer.Render(changelog)
 	if err != nil {
-		u.logger.Error("Failed to render release notes", zap.Error(err))
-		return
+		u.logger.Error("failed to render release notes", zap.Error(err))
+		return err
 	}
 	fmt.Println(changelog)
 }
@@ -117,7 +114,6 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	// Check if the aliasPath is a directory
 	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
 		return fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
-
 	}
 
 	downloadCmd := exec.Command(curlPath, "--silent", "--location", downloadUrl)
@@ -127,24 +123,24 @@ func (u *updater) downloadAndUpdate(downloadUrl string) error {
 	untarCmd.Stdin, _ = downloadCmd.StdoutPipe()
 
 	if err := downloadCmd.Start(); err != nil {
-		return fmt.Errorf("Failed to start download command: %v", err)
+		return fmt.Errorf("failed to start download command: %v", err)
 	}
 	if err := untarCmd.Start(); err != nil {
-		return fmt.Errorf("Failed to start untar command: %v", err)
+		return fmt.Errorf("failed to start untar command: %v", err)
 	}
 
 	if err := downloadCmd.Wait(); err != nil {
-		return fmt.Errorf("Failed to wait download command: %v", err)
+		return fmt.Errorf("failed to wait download command: %v", err)
 
 	}
 	if err := untarCmd.Wait(); err != nil {
-		return fmt.Errorf("Failed to wait untar command: %v", err)
+		return fmt.Errorf("failed to wait untar command: %v", err)
 
 	}
 
 	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", aliasPath)
 	if err := moveCmd.Run(); err != nil {
-		return fmt.Errorf("Failed to move keploy binary to %s: %v", aliasPath, err)
+		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
 
 	}
 

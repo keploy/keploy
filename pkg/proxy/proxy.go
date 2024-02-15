@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -191,33 +190,33 @@ func JavaCAExists(alias, storepass, cacertsPath string) bool {
 	return err == nil
 }
 
-// get jdk path from application pid using proc file system in case of running application via IDE's
-func getJavaHomeFromPID(pid string) (string, error) {
-	cmdlinePath := fmt.Sprintf("/proc/%s/cmdline", pid)
-	file, err := os.Open(cmdlinePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Split(bufio.ScanWords) // cmdline arguments are separated by NULL bytes
-
-	if scanner.Scan() {
-		javaExecPath := filepath.Dir(filepath.Dir(scanner.Text()))
-		index := strings.Index(javaExecPath, "/bin/java")
-
-		if index != -1 {
-			path := javaExecPath[:index+len("/bin/java")]
-			if strings.HasSuffix(path, "/bin/java") {
-				jdkPath := strings.TrimSuffix(strings.TrimSpace(path), "/bin/java")
-				return jdkPath, nil
-			}
-
-		}
-	}
-	return "", fmt.Errorf("failed to find JAVA_HOME from PID")
-}
+//// get jdk path from application pid using proc file system in case of running application via IDE's
+//func getJavaHomeFromPID(pid string) (string, error) {
+//	cmdlinePath := fmt.Sprintf("/proc/%s/cmdline", pid)
+//	file, err := os.Open(cmdlinePath)
+//	if err != nil {
+//		return "", err
+//	}
+//	defer file.Close()
+//
+//	scanner := bufio.NewScanner(file)
+//	scanner.Split(bufio.ScanWords) // cmdline arguments are separated by NULL bytes
+//
+//	if scanner.Scan() {
+//		javaExecPath := filepath.Dir(filepath.Dir(scanner.Text()))
+//		index := strings.Index(javaExecPath, "/bin/java")
+//
+//		if index != -1 {
+//			path := javaExecPath[:index+len("/bin/java")]
+//			if strings.HasSuffix(path, "/bin/java") {
+//				jdkPath := strings.TrimSuffix(strings.TrimSpace(path), "/bin/java")
+//				return jdkPath, nil
+//			}
+//
+//		}
+//	}
+//	return "", fmt.Errorf("failed to find JAVA_HOME from PID")
+//}
 
 // getJavaHome returns the JAVA_HOME path
 func getJavaHome() (string, error) {
@@ -242,19 +241,21 @@ func getJavaHome() (string, error) {
 }
 
 // InstallJavaCA installs the CA in the Java keystore
-func InstallJavaCA(logger *zap.Logger, caPath string, pid uint32, isJavaServe bool) {
+func InstallJavaCA(logger *zap.Logger, caPath string) {
 	// check if java is installed
 	if isJavaInstalled() {
 		var javaHome string
 		var err error
-		logger.Debug("", zap.Any("isJavaServe", isJavaServe))
-		if pid != 0 && isJavaServe { // in case of unit tests, we know the pid beforehand
-			logger.Debug("checking java path from proc file system", zap.Any("pid", pid))
-			javaHome, err = getJavaHomeFromPID(strconv.Itoa(int(pid)))
-		} else {
-			logger.Debug("checking java path from default java home")
-			javaHome, err = getJavaHome()
-		}
+		//if pid != 0 { // in case of unit tests, we know the pid beforehand
+		//	logger.Debug("checking java path from proc file system", zap.Any("pid", pid))
+		//	javaHome, err = getJavaHomeFromPID(strconv.Itoa(int(pid)))
+		//} else {
+		//	logger.Debug("checking java path from default java home")
+		//	javaHome, err = getJavaHome()
+		//}
+
+		logger.Debug("checking java path from default java home")
+		javaHome, err = getJavaHome()
 
 		if err != nil {
 			logger.Error("Java detected but failed to find JAVA_HOME", zap.Error(err))
@@ -305,7 +306,7 @@ func Register(parserName string, parser DependencyHandler) {
 }
 
 // BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context, delay uint64) *ProxySet {
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context, delay uint64) *ProxySet {
 	//Register all the parsers in the map.
 	Register("grpc", grpcparser.NewGrpcParser(logger, h))
 	Register("postgres", postgresparser.NewPostgresParser(logger, h))
@@ -333,11 +334,8 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			return nil
 		}
 
-		//check if serve command is used by java application
-		isJavaServe := containsJava(lang)
-
 		// install CA in the java keystore if java is installed
-		InstallJavaCA(logger, caPath, pid, isJavaServe)
+		InstallJavaCA(logger, caPath)
 
 	}
 
@@ -636,7 +634,7 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		if !found {
 			// If not found in cache, resolve the DNS query
-			// answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
+			// answers = resolveDNSQuery(question.Name, ps.log, ps.DnsServerTimeout)
 
 			if answers == nil || len(answers) == 0 {
 				// If the resolution failed, return a default A record with Proxy IP
