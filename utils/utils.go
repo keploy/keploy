@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
@@ -169,6 +170,16 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 		return GitHubRelease{}, err
 	}
 	return release, nil
+}
+
+// SetUmask sets the umask to the given mask and returns an error if it fails
+func SetUmask(mask int) error {
+	prevUmask := syscall.Umask(mask)
+	// Check if there was an error in setting the umask
+	if prevUmask == mask {
+		return fmt.Errorf("failed to set umask to %o", mask)
+	}
+	return nil
 }
 
 // It checks if the cmd is related to docker or not, it also returns if its a docker compose file

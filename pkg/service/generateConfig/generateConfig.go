@@ -2,7 +2,6 @@ package generateConfig
 
 import (
 	"os"
-	"os/exec"
 	"sync"
 
 	"go.keploy.io/server/pkg/models"
@@ -19,7 +18,7 @@ type generatorConfig struct {
 }
 
 type GenerateConfigOptions struct {
-  ConfigStr string
+	ConfigStr string
 }
 
 func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
@@ -33,9 +32,9 @@ func (g *generatorConfig) GenerateConfig(filePath string, options GenerateConfig
 	var node yaml.Node
 	data := []byte(models.DefaultConfig)
 
-  if options.ConfigStr != ""{
-    data = []byte(options.ConfigStr)
-  }
+	if options.ConfigStr != "" {
+		data = []byte(options.ConfigStr)
+	}
 
 	if err := yaml.Unmarshal(data, &node); err != nil {
 		g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))
@@ -47,17 +46,17 @@ func (g *generatorConfig) GenerateConfig(filePath string, options GenerateConfig
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 
+	err = utils.SetUmask(0)
+	if err != nil {
+		g.logger.Error("Failed to set umask", zap.Error(err))
+	}
 	err = os.WriteFile(filePath, finalOutput, os.ModePerm)
 	if err != nil {
 		g.logger.Fatal("Failed to write config file", zap.Error(err))
 	}
-
-	cmd := exec.Command("sudo", "chmod", "-R", "777", filePath)
-	err = cmd.Run()
+	err = utils.SetUmask(0022)
 	if err != nil {
-		g.logger.Error("failed to set the permission of config file", zap.Error(err))
-		return
+		g.logger.Error("Failed to set umask", zap.Error(err))
 	}
-
 	g.logger.Info("Config file generated successfully")
 }

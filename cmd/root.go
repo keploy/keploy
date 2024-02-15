@@ -87,9 +87,14 @@ func setupLogger() *zap.Logger {
 		"stdout",
 		"./keploy-logs.txt",
 	}
-
+	// Set the umask to 0 to ensure that the log file has the correct permissions.
+	err := utils.SetUmask(0)
+	if err != nil {
+		log.Println(Emoji, "failed to set umask", err)
+		return nil
+	}
 	// Check if keploy-log.txt exists, if not create it.
-	_, err := os.Stat("keploy-logs.txt")
+	_, err = os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
 		_, err := os.Create("keploy-logs.txt")
 		if err != nil {
@@ -97,22 +102,12 @@ func setupLogger() *zap.Logger {
 			return nil
 		}
 	}
-
-	// Check if the permission of the log file is 777, if not set it to 777.
-	fileInfo, err := os.Stat("keploy-logs.txt")
+	// Set the umask to previous value.
+	err = utils.SetUmask(0022)
 	if err != nil {
-		log.Println(Emoji, "failed to get the log file info", err)
+		log.Println(Emoji, "failed to set umask", err)
 		return nil
 	}
-	if fileInfo.Mode().Perm() != 0777 {
-		// Set the permissions of the log file to 777.
-		err = os.Chmod("keploy-logs.txt", 0777)
-		if err != nil {
-			log.Println(Emoji, "failed to set permissions of log file", err)
-			return nil
-		}
-	}
-
 	if debugMode {
 		go func() {
 			defer utils.HandlePanic()

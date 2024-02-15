@@ -156,14 +156,17 @@ func isJavaInstalled() bool {
 
 // to extract ca certificate to temp
 func ExtractCertToTemp() (string, error) {
+	// Set the umask to allow access to the file for all users
+	err := utils.SetUmask(0)
+	if err != nil {
+		return "", err
+	}
 	tempFile, err := ioutil.TempFile("", "ca.crt")
 	if err != nil {
 		return "", err
 	}
 	defer tempFile.Close()
-
-	// Change the file permissions to allow read access for all users
-	err = os.Chmod(tempFile.Name(), 0666)
+	err = utils.SetUmask(0022)
 	if err != nil {
 		return "", err
 	}
