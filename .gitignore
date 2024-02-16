@@ -55,6 +55,3 @@ test-reports
 # Ignore the debug_bin
 __debug_bin*
 keploy
-
-#Ignore the go build file
-server
