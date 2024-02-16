@@ -8,9 +8,7 @@ import (
 type Instrumentation interface {
 	// Run is blocking call and will execute until error
 	// if hook is false then application will just be started but not instrumented.
-	Run(cmd string, hook bool) error
-	// Mock is a blocking call and will execute until error
-	// or ctx is done.
+	Run(ctx context.Context, cmd string, hook bool) error
 	Mock(ctx context.Context, frames []models.Frame) error
 }
 
