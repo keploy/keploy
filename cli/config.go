@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"go.keploy.io/server/config"
 	"path/filepath"
 
 	"go.keploy.io/server/pkg/service/generateConfig"
@@ -10,43 +12,29 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewCmdGenerateConfig(logger *zap.Logger) *GenerateConfig {
-	generatorConfig := generateConfig.NewGeneratorConfig(logger)
-	return &GenerateConfig{
-		generatorConfig: generatorConfig,
-		logger:          logger,
-	}
-}
-
-type GenerateConfig struct {
-	generatorConfig generateConfig.GeneratorConfig
-	logger          *zap.Logger
-}
-
-func (g *GenerateConfig) GetCmd() *cobra.Command {
-	// create keploy configuration file
-	var generateConfigCmd = &cobra.Command{
-		Use:     "generate-config",
-		Short:   "generate the keploy configuration file",
-		Example: "keploy generate-config --path /path/to/localdir",
+func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
+	var cmd = &cobra.Command{
+		Use:     "config",
+		Short:   "manage keploy configuration file",
+		Example: "keploy config --generate --path /path/to/localdir",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// override root command's persistent pre run
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			configPath, err := cmd.Flags().GetString("path")
+			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				g.logger.Error("failed to read the config path")
+				logger.Error("failed to read the config path")
 				return err
 			}
 
-			filePath := filepath.Join(configPath, "keploy-config.yaml")
+			filePath := filepath.Join(path, "keploy.yml")
 
 			if utils.CheckFileExists(filePath) {
 				override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
 				if err != nil {
-					g.logger.Fatal("Failed to ask for confirmation", zap.Error(err))
+					logger.Fatal("Failed to ask for confirmation", zap.Error(err))
 					return err
 				}
 				if !override {
@@ -54,12 +42,8 @@ func (g *GenerateConfig) GetCmd() *cobra.Command {
 				}
 			}
 
-			g.generatorConfig.GenerateConfig(filePath, generateConfig.GenerateConfigOptions{})
+			generatorConfig.GenerateConfig(filePath, generateConfig.GenerateConfigOptions{})
 			return nil
 		},
 	}
-	generateConfigCmd.Flags().BoolP("generate", "g", false, "Generate the keploy configuration file")
-	generateConfigCmd.Flags().StringP("path", "p", ".", "Path to the local directory where keploy configuration file will be stored")
-
-	return generateConfigCmd
 }
