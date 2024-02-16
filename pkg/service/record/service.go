@@ -7,7 +7,8 @@ import (
 
 type Instrumentation interface {
 	// Run is blocking call and will execute until error
-	Run(cmd string) error
+	// if hook is false then application will just be started but not instrumented.
+	Run(ctx context.Context, cmd string, hook bool) error
 	GetIncoming(ctx context.Context) (chan models.Frame, error)
 	GetOutgoing(ctx context.Context) (chan models.Frame, error)
 }
