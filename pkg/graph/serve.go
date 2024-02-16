@@ -105,6 +105,11 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 		return
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := loadedHooks.SendDnsPort(ps.DnsPort); err != nil {
+		return
+	}
+
 	g.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
 	passThroughPorts = append(passThroughPorts, 36320)
 	// filter the required destination ports

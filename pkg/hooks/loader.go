@@ -45,6 +45,7 @@ type Hook struct {
 	appPidMap        *ebpf.Map
 	keployServerPort *ebpf.Map
 	passthroughPorts *ebpf.Map
+	DnsPort          *ebpf.Map
 
 	platform.TestCaseDB
 
@@ -265,6 +266,18 @@ func (h *Hook) SendPassThroughPorts(filterPorts []uint) error {
 			h.logger.Error("failed to send the passthrough ports to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
 			return err
 		}
+	}
+	return nil
+}
+
+// SendDnsPort sends the dns server port to the eBPF program.
+func (h *Hook) SendDnsPort(port uint32) error {
+	h.logger.Debug("sending dns server port", zap.Any("port", port))
+	key := 0
+	err := h.DnsPort.Update(uint32(key), &port, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send dns server port to the epbf program", zap.Any("dns server port", port), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
 	}
 	return nil
 }
@@ -559,6 +572,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 	h.appPidMap = objs.AppNsPidMap
 	h.keployServerPort = objs.KeployServerPort
 	h.passthroughPorts = objs.PassThroughPorts
+	h.DnsPort = objs.DnsPortMap
 
 	h.stopper = stopper
 	h.objects = objs
