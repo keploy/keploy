@@ -100,8 +100,8 @@ func (tel *Telemetry) Testrun(success int, failure int) {
 	tel.SendTelemetry("TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
 }
 
-// func (tel *Telemetry) UnitTestRun(cmd string, success int, failure int) {
-// 	tel.SendTelemetry("UnitTestRun", map[string]interface{}{"Cmd": cmd, "Passed-UnitTests": success, "Failed-UnitTests": failure})
+// func (tel *Telemetry) UnitTestRun(cli string, success int, failure int) {
+// 	tel.SendTelemetry("UnitTestRun", map[string]interface{}{"Cmd": cli, "Passed-UnitTests": success, "Failed-UnitTests": failure})
 // }
 
 // Telemetry event for the Mocking feature test run

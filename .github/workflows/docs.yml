@@ -25,7 +25,7 @@ jobs:
         uses: stefanbuck/github-issue-parser@v3
         id: issue-parser
         with:
-          template-path: .github/ISSUE_TEMPLATE/--documentation-update.yaml
+          template-path: .github/ISSUE_TEMPLATE/--documentation-tools.yaml
           
       - name: Set labels based on repository field
         uses: redhat-plumbers-in-action/advanced-issue-labeler@v2

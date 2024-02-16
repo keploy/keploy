@@ -257,7 +257,7 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 	return release, nil
 }
 
-// It checks if the cmd is related to docker or not, it also returns if its a docker compose file
+// It checks if the cli is related to docker or not, it also returns if its a docker compose file
 func IsDockerRelatedCmd(cmd string) bool {
 	// Check for Docker command patterns
 	dockerCommandPatterns := []string{

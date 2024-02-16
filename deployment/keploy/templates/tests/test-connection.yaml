@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: "{{ include "verification-server.fullname" . }}-regression-connection"
+  name: "{{ include "verification-server.fullname" . }}-regression-conn"
   labels:
     {{- include "verification-server.labels" . | nindent 4 }}
   annotations:

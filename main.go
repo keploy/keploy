@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	sentry "github.com/getsentry/sentry-go"
-	"go.keploy.io/server/cmd"
-	updateSvc "go.keploy.io/server/pkg/service/update"
+	"go.keploy.io/server/cli"
+	updateSvc "go.keploy.io/server/pkg/service/tools"
 	"go.keploy.io/server/utils"
 	"go.keploy.io/server/utils/log"
 	"go.uber.org/zap"
@@ -60,9 +60,9 @@ func start(ctx context.Context) {
 	utils.SentryInit(logger, dsn)
 	defer utils.HandlePanic(logger)
 
-	svc := cmd.NewServices(updateSvc.NewUpdater(logger))
+	svc := cli.NewServices(updateSvc.NewUpdater(logger))
 
-	rootCmd := cmd.Root(ctx, logger, svc)
+	rootCmd := cli.Root(ctx, logger, svc)
 	if err := rootCmd.Execute(); err != nil {
 		logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
 		os.Exit(1)
