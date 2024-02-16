@@ -6,7 +6,7 @@ labels: [Documentation]
 body:
   - type: markdown
     attributes:
-      value: Thank you for taking the time to file a Documentation update.
+      value: Thank you for taking the time to file a Documentation tools.
   - type: textarea
     attributes:
       label: What do you want to add to the docs? (please state reasons if any)

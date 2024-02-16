@@ -339,7 +339,7 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 		ys.Logger.Debug("failed to get mocksTotal from context")
 	}
 	(*mocksTotal)[string(mock.Kind)]++
-	if ctx.Value("cmd") == "mockrecord" {
+	if ctx.Value("cli") == "mockrecord" {
 		if ys.tele != nil {
 			ys.tele.RecordedMock(string(mock.Kind))
 		}
@@ -508,7 +508,7 @@ func (ys *Yaml) update(path, fileName string, docRead platform.KindSpecifier) er
 
 	_, err = file.Write(d)
 	if err != nil {
-		ys.Logger.Error("failed to update the yaml document", zap.Error(err), zap.Any("yaml file name", fileName))
+		ys.Logger.Error("failed to tools the yaml document", zap.Error(err), zap.Any("yaml file name", fileName))
 		return err
 	}
 	defer file.Close()
@@ -530,10 +530,10 @@ func (ys *Yaml) UpdateTestCase(tcRead platform.KindSpecifier, path, tcsName stri
 
 	yamlTc.Name = tcsName
 
-	// update testcase yaml
+	// tools testcase yaml
 	err = ys.update(path, tcsName, yamlTc)
 	if err != nil {
-		ys.Logger.Error("failed to update testcase yaml file", zap.Error(err))
+		ys.Logger.Error("failed to tools testcase yaml file", zap.Error(err))
 		return err
 	}
 	ys.Logger.Info("🔄 Keploy has updated the test case for the user's application.", zap.String("path", path), zap.String("testcase name", tcsName))

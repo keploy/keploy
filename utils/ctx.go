@@ -33,6 +33,9 @@ func NewCtx() context.Context {
 	return ctx
 }
 
+// Stop requires a reason to stop the server.
+// this is to ensure that the server is not stopped accidentally.
+// and to trace back the stopper
 func Stop(logger *zap.Logger, reason string) error {
 	// Stop the server.
 	if logger == nil {
@@ -40,13 +43,13 @@ func Stop(logger *zap.Logger, reason string) error {
 	}
 	if cancel == nil {
 		err := errors.New("cancel function is not set")
-		logger.Error("cancel function is not set", zap.Error(err))
+		logger.Error("failed stopping keploy", zap.Error(err))
 		return err
 	}
 
 	if reason == "" {
-		err := errors.New("reason is not set")
-		logger.Error("reason is not set", zap.Error(err))
+		err := errors.New("cannot stop keploy without a reason")
+		logger.Error("failed stopping keploy", zap.Error(err))
 		return err
 	}
 

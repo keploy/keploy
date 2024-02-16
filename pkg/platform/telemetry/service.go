@@ -1,6 +1,6 @@
 package telemetry
 
-type FS interface {
+type TeleDB interface {
 	Get(bool) (string, error)
 	Set(string) error
 }
