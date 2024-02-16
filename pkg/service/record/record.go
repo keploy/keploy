@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -49,6 +50,9 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
+	// Remove the container on program exit
+	removeContainer := !strings.Contains(appCmd, "docker start")
+
 	models.SetMode(models.MODE_RECORD)
 	tele.Ping(false)
 
@@ -81,7 +85,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(true, removeContainer)
 		return
 	default:
 		// start the BootProxy
@@ -106,7 +110,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true)
+		loadedHooks.Stop(true, removeContainer)
 		ps.StopProxyServer()
 		return
 	default:
@@ -142,7 +146,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
-				loadedHooks.Stop(!stopApplication)
+				loadedHooks.Stop(!stopApplication, removeContainer)
 				//stop listening for proxy server
 				ps.StopProxyServer()
 				exitCmd <- true
@@ -155,7 +159,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	select {
 	case <-stopper:
 		abortStopHooksForcefully = true
-		loadedHooks.Stop(false)
+		loadedHooks.Stop(false, removeContainer)
 		if testsTotal != 0 {
 			tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
 		}

@@ -140,7 +140,7 @@ func (idc *internalDockerClient) ConnectContainerToNetworksByNames(containerName
 }
 
 // Stop and Remove the docker container
-func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
+func (idc *internalDockerClient) StopDockerContainer(removeContainer bool) error {
 	dockerClient := idc
 	containerID := idc.containerID
 
@@ -156,17 +156,21 @@ func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
 		}
 	}
 
-	removeOptions := types.ContainerRemoveOptions{
-		RemoveVolumes: true,
-		Force:         true,
-	}
+	idc.logger.Debug("Docker Container stopped successfully.")
 
-	err = dockerClient.ContainerRemove(context.Background(), containerID, removeOptions)
-	if err != nil {
-		return fmt.Errorf("failed to remove the docker container: %w", err)
-	}
+	if removeContainer {
+		removeOptions := types.ContainerRemoveOptions{
+			RemoveVolumes: true,
+			Force:         true,
+		}
 
-	idc.logger.Debug("Docker Container stopped and removed successfully.")
+		err = dockerClient.ContainerRemove(context.Background(), containerID, removeOptions)
+		if err != nil {
+			return fmt.Errorf("failed to remove the docker container: %w", err)
+		}
+
+		idc.logger.Debug("Docker Container removed successfully.")
+	}
 
 	return nil
 }

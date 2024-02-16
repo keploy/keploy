@@ -202,6 +202,42 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				}
 
 				h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork), zap.Any("appCmd", appCmd))
+			} else if cmd == "docker-start" {
+				var err error
+
+				// extracting container name from app command
+				pattern := `start\s+(\w+)`
+
+				re := regexp.MustCompile(pattern)
+				matches := re.FindStringSubmatch(appCmd)
+				if len(matches) < 2 {
+					h.logger.Error("container name not found in command")
+				}
+
+				containerID := matches[1]
+
+				cont, net, err := GetContainerInfo(containerID, appNetwork)
+
+				h.logger.Info("", zap.String("Parsed container name", cont))
+				h.logger.Info("", zap.String("Parsed docker network", net))
+
+				if err != nil {
+					h.logger.Error("failed to parse container and network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+					return err
+				}
+
+				if len(appContainer) != 0 && appContainer != cont {
+					h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
+				}
+
+				appContainer = cont
+
+				//injecting appNetwork to keploy.
+				err = h.injectNetworkToKeploy(appNetwork)
+				if err != nil {
+					h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
+					return err
+				} 
 			} else if cmd == "docker" {
 				var err error
 				cont, net, err := parseDockerCommand(appCmd)
@@ -279,9 +315,11 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			defer h.Recover(pkg.GenerateRandomID())
 
 			err := h.runApp(appCmd, true)
-			h.logger.Debug("Application stopped with the error", zap.Error(err))
-			if !stopApplicationErrors {
-				appErrCh <- err
+			if err != nil {
+				h.logger.Debug("Application stopped with the error", zap.Error(err))
+				if !stopApplicationErrors {
+					appErrCh <- err
+				}
 			}
 		}()
 	}
@@ -305,6 +343,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 		eventFilter := filters.NewArgs()
 		eventFilter.Add("type", "container")
 		eventFilter.Add("event", "create")
+		eventFilter.Add("event", "start")
 
 		messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{
 			Filters: eventFilter,
@@ -338,7 +377,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			case <-logTicker.C:
 				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
-				if e.Type == events.ContainerEventType && e.Action == "create" {
+				if e.Type == events.ContainerEventType && (e.Action == "create" || e.Action == "start") {
 					// Set Docker Container ID
 					h.idc.SetContainerID(e.ID)
 
@@ -546,9 +585,9 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 		}
 		h.logger.Error("userApplication failed to run with the following error. Please check application logs", zap.Error(err))
 		return ErrCommandError
-	} else {
-		return ErrUnExpected
-	}
+	} 
+
+	return nil
 }
 
 // injectNetworkToKeploy attaches the given network to the keploy container and also sends the keploy container ip of the new network interface to the kernel space

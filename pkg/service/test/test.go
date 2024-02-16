@@ -124,6 +124,10 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
+
+	// Remove the container on program exit
+	removeContainer := !strings.Contains(cfg.AppCmd, "docker start")
+
 	models.SetMode(models.MODE_TEST)
 
 	returnVal.TestReportFS = cfg.TestReport
@@ -148,7 +152,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 
 	select {
 	case <-stopper:
-		returnVal.LoadedHooks.Stop(true)
+		returnVal.LoadedHooks.Stop(true, removeContainer)
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// start the proxy
@@ -181,7 +185,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		select {
 		case <-stopper:
 			returnVal.AbortStopHooksForcefully = true
-			returnVal.LoadedHooks.Stop(false)
+			returnVal.LoadedHooks.Stop(false, removeContainer)
 			//Call the telemetry events.
 			if resultForTele[0] != 0 || resultForTele[1] != 0 {
 				cfg.Tele.Testrun(resultForTele[0], resultForTele[1])
@@ -332,10 +336,14 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		}
 	}
 
+
+	// Remove the container on program exit
+	removeContainer := !strings.Contains(appCmd, "docker start")
+
 	if !initialisedValues.AbortStopHooksForcefully {
 		initialisedValues.AbortStopHooksInterrupt <- true
 		// stop listening for the eBPF events
-		initialisedValues.LoadedHooks.Stop(true)
+		initialisedValues.LoadedHooks.Stop(true, removeContainer)
 		//stop listening for proxy server
 		initialisedValues.ProxySet.StopProxyServer()
 		return true
@@ -663,7 +671,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 		} else {
 			// stop the user application
 			if !isApplicationStopped && !serveTest {
-				initialisedValues.LoadedHooks.StopUserApplication()
+				initialisedValues.LoadedHooks.StopUserApplication(true)
 			}
 		}
 	}()
