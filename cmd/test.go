@@ -397,17 +397,17 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			if generateTestReport {
 				testReportPath = path + "/testReports"
-	
+
 				testReportPath, err = pkg.GetNextTestReportDir(testReportPath, models.TestRunTemplateName)
-					t.logger.Info("", zap.Any("keploy testReport path", testReportPath))
-					if err != nil {
-						t.logger.Error("failed to get the next test report directory", zap.Error(err))
-						return err
-					}
+				t.logger.Info("", zap.Any("keploy testReport path", testReportPath))
+				if err != nil {
+					t.logger.Error("failed to get the next test report directory", zap.Error(err))
+					return err
+				}
 			} else {
 				t.logger.Info("Test Reports are not being generated since generateTestReport flag is set false")
 			}
-			
+
 			var hasContainerName bool
 			if isDockerCmd {
 				if strings.Contains(appCmd, "--name") {
@@ -448,12 +448,14 @@ func (t *Test) GetCmd() *cobra.Command {
 					IgnoreOrdering:     ignoreOrdering,
 					PassthroughHosts:   passThroughHosts,
 				}, enableTele)
-
-				cmd := exec.Command("sudo", "chmod", "-R", "777", path)
-				err = cmd.Run()
-				if err != nil {
-					t.logger.Error("failed to set the permission of keploy directory", zap.Error(err))
-					return err
+				_, err := os.Stat(path)
+				if !os.IsNotExist(err) {
+					cmd := exec.Command("sudo", "chmod", "-R", "777", path)
+					err = cmd.Run()
+					if err != nil {
+						t.logger.Error("failed to run command", zap.Error(err))
+						return err
+					}
 				}
 
 			}
