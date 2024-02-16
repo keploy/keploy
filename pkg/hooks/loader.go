@@ -52,6 +52,7 @@ type Hook struct {
 	proxyPort                uint32
 	tcsMocks                 *treeDb
 	configMocks              *treeDb
+	matchedMocks             []string
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
@@ -182,6 +183,7 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) {
 
 func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool {
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
+	h.matchedMocks = append(h.matchedMocks, newMock.Name)
 	return isUpdated
 }
 
@@ -225,12 +227,22 @@ func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 
 func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 	isDeleted := h.tcsMocks.delete(mock.TestModeInfo)
+	h.matchedMocks = append(h.matchedMocks, mock.Name)
 	return isDeleted
 }
 
 func (h *Hook) DeleteConfigMock(mock *models.Mock) bool {
 	isDeleted := h.configMocks.delete(mock.TestModeInfo)
+	h.matchedMocks = append(h.matchedMocks, mock.Name)
 	return isDeleted
+}
+
+func (h *Hook) GetMatchedMocks() []string {
+	return h.matchedMocks
+}
+
+func (h *Hook) ResetMatchedMocks() {
+	h.matchedMocks = []string{}
 }
 
 func (h *Hook) ResetDeps() int {
