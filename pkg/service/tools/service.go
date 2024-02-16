@@ -2,7 +2,6 @@ package tools
 
 import "context"
 
-// Updater defines the contract for updating keploy.
-type Tools interface {
+type Service interface {
 	Update(ctx context.Context) error
 }

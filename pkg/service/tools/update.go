@@ -14,22 +14,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// NewUpdater initializes a new updater instance.
-func NewUpdater(logger *zap.Logger) Tools {
-	return &tools{
+func NewTools(logger *zap.Logger) Service {
+	return &Tools{
 		logger: logger,
 	}
 }
 
-// updater manages the updating process of Keploy .
-type tools struct {
+type Tools struct {
 	logger *zap.Logger
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 // Update initiates the tools process for the Keploy binary file.
-func (t *tools) Update(ctx context.Context) error {
+func (t *Tools) Update(ctx context.Context) error {
 	currentVersion := utils.Version
 
 	isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
@@ -93,7 +91,7 @@ func (t *tools) Update(ctx context.Context) error {
 	return nil
 }
 
-func (t *tools) downloadAndUpdate(downloadUrl string) error {
+func (t *Tools) downloadAndUpdate(downloadUrl string) error {
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
 		return errors.New("curl command not found on the system")

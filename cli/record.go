@@ -17,7 +17,7 @@ func init() {
 
 func Record(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
 	// record the keploy testcases/mocks for the user application
-	var recordCmd = &cobra.Command{
+	var cmd = &cobra.Command{
 		Use:     "record",
 		Short:   "record the keploy testcases from the API calls",
 		Example: `keploy record -c "/path/to/user/app"`,
@@ -28,8 +28,8 @@ func Record(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Se
 		},
 	}
 
-	recordCmd.SilenceUsage = true
-	recordCmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
 
-	return recordCmd
+	return cmd
 }

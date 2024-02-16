@@ -88,7 +88,7 @@ func Test(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Serv
 		},
 	}
 
-	var testV2 = testCmd.Flags().StringSliceP("testsets", "t", utils.Keys(conf.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
+	testCmd.Flags().StringSliceP("testsets", "t", utils.Keys(conf.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 
 	testCmd.Flags().Uint64P("delay", "d", conf.Test.Delay, "User provided time to run its application")
 
