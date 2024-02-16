@@ -7,7 +7,7 @@ import (
 
 type Instrumentation interface {
 	// Run is blocking call and will execute until error
-	Run(string) error
+	Run(cmd string) error
 	GetIncoming(ctx context.Context) (chan models.Frame, error)
 	GetOutgoing(ctx context.Context) (chan models.Frame, error)
 }
