@@ -63,6 +63,11 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 		return
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := loadedHooks.SendDnsPort(ps.DnsPort); err != nil {
+		return
+	}
+
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
