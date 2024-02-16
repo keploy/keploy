@@ -121,8 +121,8 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise,
 		},
 		HostResult: models.StringResult{
 			Normal:   false,
-			Expected: tcs1.HttpReq.Host,
-			Actual:   tcs2.HttpReq.Host,
+			Expected: tcs1.HttpReq.Header["Host"],
+			Actual:   tcs2.HttpReq.Header["Host"],
 		},
 	}
 
@@ -197,13 +197,26 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise,
 		pass = false
 	} else {
 		if bodyType1 == models.BodyTypeJSON {
-			cleanExp, cleanAct, match, _, err := Match(tcs1.HttpReq.Body, tcs2.HttpReq.Body, reqBodyNoise, logger, false)
-			if err != nil || !match {
+			cleanExp, cleanAct := tcs1.HttpReq.Body, tcs2.HttpReq.Body
+			validatedJSON, err := ValidateAndMarshalJson(logger, &cleanExp, &cleanAct)
+			var jsonComparisonResult jsonComparisonResult
+			if err != nil {
 				logger.Debug("test case http req body is not equal", zap.Any("tcs1HttpReqBody", tcs1.HttpReq.Body), zap.Any("tcs2HttpReqBody", tcs2.HttpReq.Body))
 				pass = false
-			} else {
-				reqResult.BodyResult.Normal = true
 			}
+			if validatedJSON.isIdentical {
+				jsonComparisonResult, err = JsonDiffWithNoiseControl(logger, validatedJSON, reqBodyNoise, false)
+				pass = jsonComparisonResult.isExact
+				if err != nil || !jsonComparisonResult.matches {
+					logger.Debug("test case http req body is not equal", zap.Any("tcs1HttpReqBody", tcs1.HttpReq.Body), zap.Any("tcs2HttpReqBody", tcs2.HttpReq.Body))
+					pass = false
+				} else {
+					reqResult.BodyResult.Normal = true
+				}
+			} else {
+				pass = false
+			}
+
 			logger.Debug("ExpReq", zap.Any("", cleanExp))
 			logger.Debug("ActReq", zap.Any("", cleanAct))
 		} else {
@@ -217,10 +230,10 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise,
 	}
 
 	//compare host
-	if tcs1.HttpReq.Host == tcs2.HttpReq.Host {
+	if tcs1.HttpReq.Header["Host"] == tcs2.HttpReq.Header["Host"] {
 		reqResult.HostResult.Normal = true
 	} else {
-		logger.Debug("test case http req host is not equal", zap.Any("tcs1HttpReqHost", tcs1.HttpReq.Host), zap.Any("tcs2HttpReqHost", tcs2.HttpReq.Host))
+		logger.Debug("test case http req host is not equal", zap.Any("tcs1HttpReqHost", tcs1.HttpReq.Header["Host"]), zap.Any("tcs2HttpReqHost", tcs2.HttpReq.Header["Host"]))
 		pass = false
 	}
 
@@ -310,17 +323,29 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		pass = false
 	} else {
 		if !Contains(MapToArray(noise), "body") && bodyType1 == models.BodyTypeJSON {
-			cleanExp, cleanAct, match, isSame, err :=
-				Match(tcs1.HttpResp.Body, tcs2.HttpResp.Body, bodyNoise, logger, true)
-			if err != nil || !match {
-				logger.Debug("test case http resp body is not equal", zap.Any("tcs1HttpRespBody", tcs1.HttpResp.Body), zap.Any("tcs2HttpRespBody", tcs2.HttpResp.Body))
+			cleanExp, cleanAct := tcs1.HttpResp.Body, tcs2.HttpResp.Body
+			var jsonComparisonResult jsonComparisonResult
+			validatedJSON, err := ValidateAndMarshalJson(logger, &cleanExp, &cleanAct)
+			if err != nil {
+				logger.Debug("test case http resp body is not equal", zap.Any("tcs1HttpReqBody", tcs1.HttpReq.Body), zap.Any("tcs2HttpReqBody", tcs2.HttpReq.Body))
 				pass = false
-			} else {
-				respResult.BodyResult.Normal = true
 			}
+			if validatedJSON.isIdentical {
+				jsonComparisonResult, err = JsonDiffWithNoiseControl(logger, validatedJSON, bodyNoise, false)
+				pass = jsonComparisonResult.isExact
+				if err != nil || !jsonComparisonResult.matches {
+					logger.Debug("test case http resp body is not equal", zap.Any("tcs1HttpRespBody", tcs1.HttpResp.Body), zap.Any("tcs2HttpRespBody", tcs2.HttpResp.Body))
+					pass = false
+				} else {
+					respResult.BodyResult.Normal = true
+				}
+			} else {
+				pass = false
+			}
+
 			logger.Debug("ExpResp", zap.Any("", cleanExp))
 			logger.Debug("ActResp", zap.Any("", cleanAct))
-			logger.Debug("SameOrder", zap.Any("", isSame))
+			logger.Debug("SameOrder", zap.Any("", jsonComparisonResult.isExact))
 		} else {
 			if !Contains(MapToArray(noise), "body") && tcs1.HttpResp.Body != tcs2.HttpResp.Body {
 				logger.Debug("test case http resp body is not equal", zap.Any("tcs1HttpRespBody", tcs1.HttpResp.Body), zap.Any("tcs2HttpRespBody", tcs2.HttpResp.Body))

@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -160,6 +161,11 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		return returnVal, err
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := returnVal.LoadedHooks.SendDnsPort(returnVal.ProxySet.DnsPort); err != nil {
+		return returnVal, err
+	}
+
 	// filter the required destination ports
 	if err := returnVal.LoadedHooks.SendPassThroughPorts(cfg.PassThroughPorts); err != nil {
 		return returnVal, err
@@ -195,7 +201,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
+func (t *tester) Test(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
 
 	testRes := false
 	result := true
@@ -205,6 +211,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		Path:               path,
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
+		GenerateTestReport: generateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
@@ -244,7 +251,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -273,7 +280,25 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		testSuiteNames = append(testSuiteNames, testSuiteName)
 	}
 
-	sort.Strings(testSuiteNames)
+	sort.SliceStable(testSuiteNames, func(i, j int) bool {
+
+		testSuitePartsI := strings.Split(testSuiteNames[i], "-")
+		testSuitePartsJ := strings.Split(testSuiteNames[j], "-")
+
+		if len(testSuitePartsI) < 3 || len(testSuitePartsJ) < 3 {
+			return testSuiteNames[i] < testSuiteNames[j]
+		}
+
+		testSuiteIDNumberI, err1 := strconv.Atoi(testSuitePartsI[2])
+		testSuiteIDNumberJ, err2 := strconv.Atoi(testSuitePartsJ[2])
+
+		if err1 != nil || err2 != nil {
+			return false
+		}
+
+		return testSuiteIDNumberI < testSuiteIDNumberJ
+
+	})
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
@@ -320,12 +345,12 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	return false
 }
 
-func (t *tester) StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) StartTest(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool {
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
-	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage)
+	return t.Test(path, testReportPath, generateTestReport, appCmd, options, tele, reportStorage, mockStorage)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -425,11 +450,16 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 	}
 
 	// starts the testrun
-	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
-	if err != nil {
-		t.logger.Error(err.Error())
-		returnVal.InitialStatus = models.TestRunStatusFailed
-		return returnVal
+	if cfg.GenerateTestReport {
+		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, returnVal.TestReport)
+		if err != nil {
+			t.logger.Error(err.Error())
+			returnVal.InitialStatus = models.TestRunStatusFailed
+			return returnVal
+		}
+	} else {
+		index := strings.Split(cfg.TestSet, "-")[2]
+		returnVal.TestReport.Name = fmt.Sprintf("report-%v", index)
 	}
 
 	//if running keploy-tests along with unit tests
@@ -500,12 +530,14 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		}
 
 		cfg.TestReportFS.SetResult(cfg.TestReport.Name, &models.TestResult{
-			Kind:       models.HTTP,
-			Name:       cfg.TestReport.Name,
-			Status:     testStatus,
-			Started:    started.Unix(),
-			Completed:  time.Now().UTC().Unix(),
-			TestCaseID: cfg.Tc.Name,
+			Kind:         models.HTTP,
+			Name:         cfg.TestReport.Name,
+			Status:       testStatus,
+			Started:      started.Unix(),
+			Completed:    time.Now().UTC().Unix(),
+			TestCasePath: cfg.Path + "/" + cfg.TestSet,
+			MockPath:     cfg.Path + "/" + cfg.TestSet + "/mocks.yaml",
+			TestCaseID:   cfg.Tc.Name,
 			Req: models.HttpReq{
 				Method:     cfg.Tc.HttpReq.Method,
 				ProtoMajor: cfg.Tc.HttpReq.ProtoMajor,
@@ -514,6 +546,9 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 				URLParams:  cfg.Tc.HttpReq.URLParams,
 				Header:     cfg.Tc.HttpReq.Header,
 				Body:       cfg.Tc.HttpReq.Body,
+				Binary:     cfg.Tc.HttpReq.Binary,
+				Form:       cfg.Tc.HttpReq.Form,
+				Timestamp:  cfg.Tc.HttpReq.Timestamp,
 			},
 			Res: models.HttpResp{
 				StatusCode:    cfg.Tc.HttpResp.StatusCode,
@@ -522,12 +557,9 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 				StatusMessage: cfg.Tc.HttpResp.StatusMessage,
 				ProtoMajor:    cfg.Tc.HttpResp.ProtoMajor,
 				ProtoMinor:    cfg.Tc.HttpResp.ProtoMinor,
+				Binary:        cfg.Tc.HttpResp.Binary,
+				Timestamp:     cfg.Tc.HttpResp.Timestamp,
 			},
-			// Mocks:        httpSpec.Mocks,
-			// TestCasePath: tcsPath,
-			TestCasePath: cfg.Path + "/" + cfg.TestSet,
-			// MockPath:     mockPath,
-			// Noise:        httpSpec.Assertions["noise"],
 			Noise:  cfg.Tc.Noise,
 			Result: *testResult,
 		})
@@ -564,9 +596,10 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	(*resultForTele)[0] += *cfg.Success
 	(*resultForTele)[1] += *cfg.Failure
 
-	err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
-
-	t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
+	if cfg.GenerateTestReport {
+		err = cfg.TestReportFS.Write(context.Background(), cfg.TestReportPath, cfg.TestReport)
+		t.logger.Info("test report for "+cfg.TestSet+": ", zap.Any("name: ", cfg.TestReport.Name), zap.Any("path: ", cfg.Path+"/"+cfg.TestReport.Name))
+	}
 
 	if *cfg.Status == models.TestRunStatusFailed {
 		pp.SetColorScheme(models.FailingColorScheme)
@@ -594,25 +627,26 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 	return *cfg.Status
 }
 
-// testSet, path, testReportPath, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
+// testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
+func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestReport bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
-		TestSet:        testSet,
-		Path:           path,
-		TestReportPath: testReportPath,
-		AppCmd:         appCmd,
-		AppContainer:   appContainer,
-		AppNetwork:     appNetwork,
-		Delay:          delay,
-		BuildDelay:     buildDelay,
-		Pid:            pid,
-		Storage:        initialisedValues.Storage,
-		LoadedHooks:    initialisedValues.LoadedHooks,
-		TestReportFS:   initialisedValues.TestReportFS,
-		TestRunChan:    testRunChan,
-		ApiTimeout:     apiTimeout,
-		Ctx:            initialisedValues.Ctx,
-		ServeTest:      serveTest,
+		TestSet:            testSet,
+		Path:               path,
+		TestReportPath:     testReportPath,
+		GenerateTestReport: generateTestReport,
+		AppCmd:             appCmd,
+		AppContainer:       appContainer,
+		AppNetwork:         appNetwork,
+		Delay:              delay,
+		BuildDelay:         buildDelay,
+		Pid:                pid,
+		Storage:            initialisedValues.Storage,
+		LoadedHooks:        initialisedValues.LoadedHooks,
+		TestReportFS:       initialisedValues.TestReportFS,
+		TestRunChan:        testRunChan,
+		ApiTimeout:         apiTimeout,
+		Ctx:                initialisedValues.Ctx,
+		ServeTest:          serveTest,
 	}
 
 	initialisedTestSets := t.InitialiseRunTestSet(cfg)
@@ -742,15 +776,16 @@ func (t *tester) RunTestSet(testSet, path, testReportPath, appCmd, appContainer,
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
 	resultsCfg := &FetchTestResultsConfig{
-		TestReportFS:   initialisedValues.TestReportFS,
-		TestReport:     initialisedTestSets.TestReport,
-		Status:         &status,
-		TestSet:        testSet,
-		Success:        &success,
-		Failure:        &failure,
-		Ctx:            initialisedValues.Ctx,
-		TestReportPath: testReportPath,
-		Path:           path,
+		TestReportFS:       initialisedValues.TestReportFS,
+		TestReport:         initialisedTestSets.TestReport,
+		Status:             &status,
+		TestSet:            testSet,
+		Success:            &success,
+		Failure:            &failure,
+		Ctx:                initialisedValues.Ctx,
+		TestReportPath:     testReportPath,
+		GenerateTestReport: generateTestReport,
+		Path:               path,
 	}
 	status = t.FetchTestResults(resultsCfg)
 	return status
@@ -803,14 +838,24 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	}
 
 	// stores the json body after removing the noise
-	cleanExp, cleanAct := "", ""
-	var err error
-	isSame := false
+	cleanExp, cleanAct := tc.HttpResp.Body, actualResponse.Body
+	var jsonComparisonResult jsonComparisonResult
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
+		//validate the stored json
+		validatedJSON, err := ValidateAndMarshalJson(t.logger, &cleanExp, &cleanAct)
 		if err != nil {
 			return false, res
 		}
+		if validatedJSON.isIdentical {
+			jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
+			pass = jsonComparisonResult.isExact
+			if err != nil {
+				return false, res
+			}
+		} else {
+			pass = false
+		}
+
 		// debug log for cleanExp and cleanAct
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
@@ -881,9 +926,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					if isSame {
+					if jsonComparisonResult.matches {
 						logDiffs.hasarrayIndexMismatch = true
-						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
+						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 
