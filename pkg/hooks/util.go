@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 
 	"github.com/docker/docker/client"
@@ -55,5 +54,5 @@ func GetContainerInfo(containerID string, networkName string) (string, string, e
 		}
     }	
 	
-    return "", "", fmt.Errorf("network not found")
+    return containerName, networkInfo, nil
 }

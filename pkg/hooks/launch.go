@@ -230,7 +230,11 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 					h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
 				}
 
-				appContainer = cont
+				if len(appNetwork) != 0 && appNetwork != net {
+					h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", appNetwork, net))
+				}
+
+				appContainer, appNetwork = cont, net
 
 				//injecting appNetwork to keploy.
 				err = h.injectNetworkToKeploy(appNetwork)
