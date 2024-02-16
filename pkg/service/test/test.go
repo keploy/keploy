@@ -266,23 +266,25 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		}
 	}
 
-	// Sorting completeTestReport map according to testSuiteName (Keys)
-	testSuiteNames := make([]string, 0, len(completeTestReport))
+	if totalTestPassed > 0 {
+		// Sorting completeTestReport map according to testSuiteName (Keys)
+		testSuiteNames := make([]string, 0, len(completeTestReport))
 
-	for testSuiteName := range completeTestReport {
-		testSuiteNames = append(testSuiteNames, testSuiteName)
+		for testSuiteName := range completeTestReport {
+			testSuiteNames = append(testSuiteNames, testSuiteName)
+		}
+
+		sort.Strings(testSuiteNames)
+
+		pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
+
+		pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
+		for _, testSuiteName := range testSuiteNames {
+			pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
+		}
+
+		pp.Printf("\n<=========================================> \n\n")
 	}
-
-	sort.Strings(testSuiteNames)
-
-	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
-
-	pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
-	for _, testSuiteName := range testSuiteNames {
-		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
-	}
-
-	pp.Printf("\n<=========================================> \n\n")
 
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 	// log the overall code coverage for the test run of go binaries
