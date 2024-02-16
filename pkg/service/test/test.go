@@ -273,41 +273,44 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		}
 	}
 
-	// Sorting completeTestReport map according to testSuiteName (Keys)
-	testSuiteNames := make([]string, 0, len(completeTestReport))
+	if totalTests > 0 {
+		// Sorting completeTestReport map according to testSuiteName (Keys)
+		testSuiteNames := make([]string, 0, len(completeTestReport))
 
-	for testSuiteName := range completeTestReport {
-		testSuiteNames = append(testSuiteNames, testSuiteName)
-	}
-
-	sort.SliceStable(testSuiteNames, func(i, j int) bool {
-
-		testSuitePartsI := strings.Split(testSuiteNames[i], "-")
-		testSuitePartsJ := strings.Split(testSuiteNames[j], "-")
-
-		if len(testSuitePartsI) < 3 || len(testSuitePartsJ) < 3 {
-			return testSuiteNames[i] < testSuiteNames[j]
+		for testSuiteName := range completeTestReport {
+			testSuiteNames = append(testSuiteNames, testSuiteName)
 		}
 
-		testSuiteIDNumberI, err1 := strconv.Atoi(testSuitePartsI[2])
-		testSuiteIDNumberJ, err2 := strconv.Atoi(testSuitePartsJ[2])
+		sort.SliceStable(testSuiteNames, func(i, j int) bool {
 
-		if err1 != nil || err2 != nil {
-			return false
+			testSuitePartsI := strings.Split(testSuiteNames[i], "-")
+			testSuitePartsJ := strings.Split(testSuiteNames[j], "-")
+
+			if len(testSuitePartsI) < 3 || len(testSuitePartsJ) < 3 {
+				return testSuiteNames[i] < testSuiteNames[j]
+			}
+
+			testSuiteIDNumberI, err1 := strconv.Atoi(testSuitePartsI[2])
+			testSuiteIDNumberJ, err2 := strconv.Atoi(testSuitePartsJ[2])
+
+			if err1 != nil || err2 != nil {
+				return false
+			}
+
+			return testSuiteIDNumberI < testSuiteIDNumberJ
+
+		})
+
+		pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
+
+		pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
+		for _, testSuiteName := range testSuiteNames {
+			pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
 		}
 
-		return testSuiteIDNumberI < testSuiteIDNumberJ
+		pp.Printf("\n<=========================================> \n\n")
 
-	})
-
-	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
-
-	pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
-	for _, testSuiteName := range testSuiteNames {
-		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
 	}
-
-	pp.Printf("\n<=========================================> \n\n")
 
 	t.logger.Info("test run completed", zap.Bool("passed overall", result))
 	// log the overall code coverage for the test run of go binaries
