@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -161,6 +162,11 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		return returnVal, err
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := returnVal.LoadedHooks.SendDnsPort(returnVal.ProxySet.DnsPort); err != nil {
+		return returnVal, err
+	}
+
 	// filter the required destination ports
 	if err := returnVal.LoadedHooks.SendPassThroughPorts(cfg.PassThroughPorts); err != nil {
 		return returnVal, err
@@ -275,7 +281,25 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		testSuiteNames = append(testSuiteNames, testSuiteName)
 	}
 
-	sort.Strings(testSuiteNames)
+	sort.SliceStable(testSuiteNames, func(i, j int) bool {
+
+		testSuitePartsI := strings.Split(testSuiteNames[i], "-")
+		testSuitePartsJ := strings.Split(testSuiteNames[j], "-")
+
+		if len(testSuitePartsI) < 3 || len(testSuitePartsJ) < 3 {
+			return testSuiteNames[i] < testSuiteNames[j]
+		}
+
+		testSuiteIDNumberI, err1 := strconv.Atoi(testSuitePartsI[2])
+		testSuiteIDNumberJ, err2 := strconv.Atoi(testSuitePartsJ[2])
+
+		if err1 != nil || err2 != nil {
+			return false
+		}
+
+		return testSuiteIDNumberI < testSuiteIDNumberJ
+
+	})
 
 	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
@@ -507,12 +531,14 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		}
 
 		cfg.TestReportFS.SetResult(cfg.TestReport.Name, &models.TestResult{
-			Kind:       models.HTTP,
-			Name:       cfg.TestReport.Name,
-			Status:     testStatus,
-			Started:    started.Unix(),
-			Completed:  time.Now().UTC().Unix(),
-			TestCaseID: cfg.Tc.Name,
+			Kind:         models.HTTP,
+			Name:         cfg.TestReport.Name,
+			Status:       testStatus,
+			Started:      started.Unix(),
+			Completed:    time.Now().UTC().Unix(),
+			TestCasePath: cfg.Path + "/" + cfg.TestSet,
+			MockPath:     cfg.Path + "/" + cfg.TestSet + "/mocks.yaml",
+			TestCaseID:   cfg.Tc.Name,
 			Req: models.HttpReq{
 				Method:     cfg.Tc.HttpReq.Method,
 				ProtoMajor: cfg.Tc.HttpReq.ProtoMajor,
@@ -521,6 +547,9 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 				URLParams:  cfg.Tc.HttpReq.URLParams,
 				Header:     cfg.Tc.HttpReq.Header,
 				Body:       cfg.Tc.HttpReq.Body,
+				Binary:     cfg.Tc.HttpReq.Binary,
+				Form:       cfg.Tc.HttpReq.Form,
+				Timestamp:  cfg.Tc.HttpReq.Timestamp,
 			},
 			Res: models.HttpResp{
 				StatusCode:    cfg.Tc.HttpResp.StatusCode,
@@ -529,12 +558,9 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 				StatusMessage: cfg.Tc.HttpResp.StatusMessage,
 				ProtoMajor:    cfg.Tc.HttpResp.ProtoMajor,
 				ProtoMinor:    cfg.Tc.HttpResp.ProtoMinor,
+				Binary:        cfg.Tc.HttpResp.Binary,
+				Timestamp:     cfg.Tc.HttpResp.Timestamp,
 			},
-			// Mocks:        httpSpec.Mocks,
-			// TestCasePath: tcsPath,
-			TestCasePath: cfg.Path + "/" + cfg.TestSet,
-			// MockPath:     mockPath,
-			// Noise:        httpSpec.Assertions["noise"],
 			Noise:  cfg.Tc.Noise,
 			Result: *testResult,
 		})
@@ -815,14 +841,24 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	}
 
 	// stores the json body after removing the noise
-	cleanExp, cleanAct := "", ""
-	var err error
-	isSame := false
+	cleanExp, cleanAct := tc.HttpResp.Body, actualResponse.Body
+	var jsonComparisonResult jsonComparisonResult
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
+		//validate the stored json
+		validatedJSON, err := ValidateAndMarshalJson(t.logger, &cleanExp, &cleanAct)
 		if err != nil {
 			return false, res
 		}
+		if validatedJSON.isIdentical {
+			jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
+			pass = jsonComparisonResult.isExact
+			if err != nil {
+				return false, res
+			}
+		} else {
+			pass = false
+		}
+
 		// debug log for cleanExp and cleanAct
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
@@ -895,9 +931,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					if isSame {
+					if jsonComparisonResult.matches {
 						logDiffs.hasarrayIndexMismatch = true
-						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
+						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 

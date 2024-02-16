@@ -22,8 +22,8 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/utils"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 )
 
 const (
@@ -595,7 +595,6 @@ func (h *Hook) injectNetworkToKeploy(appNetwork string) error {
 	h.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", KeployContainerName), zap.Any("appNetwork", appNetwork))
 	return nil
 }
-
 
 func parseDockerCommand(dockerCmd string) (string, string, error) {
 	// Regular expression patterns
