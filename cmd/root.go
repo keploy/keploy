@@ -287,7 +287,7 @@ func (r *Root) execute() {
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Run in debug mode")
 	rootCmd.PersistentFlags().BoolVar(&EnableANSIColor, "enableANSIColor", true, "Enable ANSI color codes")
 
-	// Manually parse flags to determine debug mode
+	// Manually parse flags to determine debug mode and color mode early
 	debugMode = checkForDebugFlag(os.Args[1:])
 	EnableANSIColor = checkForEnableANSIColorFlag(os.Args[1:])
 	//Set the version template for version command

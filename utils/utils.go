@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -356,17 +355,6 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 		return
 	}
 
-}
-
-// RemoveANSIEscapeCodes removes ANSI escape codes from a string
-func RemoveANSIEscapeCodes(input string) string {
-	// Regular expression to match ANSI escape codes
-	regex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-
-	// Replace ANSI escape codes with empty string
-	cleaned := regex.ReplaceAllString(input, "")
-
-	return cleaned
 }
 
 var WarningSign = "\U000026A0"

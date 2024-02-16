@@ -942,6 +942,14 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
 			}
 		}
+		t.mutex.Lock()
+		logger.Printf(logs)
+		err := logDiffs.Render()
+		if err != nil {
+			t.logger.Error("failed to render the diffs", zap.Error(err))
+		}
+
+		t.mutex.Unlock()
 
 	} else {
 		logger := pp.New()
