@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"go.keploy.io/server/config"
+	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
 )
@@ -91,15 +94,15 @@ Docker
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
 `
 
-func Example() *cobra.Command {
+func Example(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
 	var customSetup bool
-	var exampleCmd = &cobra.Command{
+	var cmd = &cobra.Command{
 		Use:   "example",
 		Short: "Example to record and test via keploy",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			customSetup, err := cmd.Flags().GetBool("customSetup")
 			if err != nil {
-				e.logger.Error("failed to read the customSetup flag")
+				logger.Error("failed to read the customSetup flag")
 				return err
 			}
 			if customSetup {
@@ -111,9 +114,9 @@ func Example() *cobra.Command {
 			return nil
 		},
 	}
-	exampleCmd.SetHelpTemplate(customHelpTemplate)
+	cmd.SetHelpTemplate(customHelpTemplate)
 
-	exampleCmd.Flags().Bool("customSetup", customSetup, "Check if the user is using one click install")
+	cmd.Flags().Bool("customSetup", customSetup, "Check if the user is using one click install")
 
-	return exampleCmd
+	return cmd
 }

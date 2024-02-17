@@ -12,6 +12,10 @@ import (
 	"go.uber.org/zap"
 )
 
+func init() {
+	Register("config", Config)
+}
+
 func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "config",
@@ -46,4 +50,5 @@ func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Se
 			return nil
 		},
 	}
+	return cmd
 }
