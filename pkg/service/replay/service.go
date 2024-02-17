@@ -7,8 +7,10 @@ import (
 
 type Instrumentation interface {
 	// Run is blocking call and will execute until error
-	// if hook is false then application will just be started but not instrumented.
-	Run(ctx context.Context, cmd string, hook bool) error
+	Run(ctx context.Context, cmd string) error
+	// if pid==0, we use parent pid. i.e keploy pid
+	//Hook will load hooks and start the proxy server.
+	Hook(ctx context.Context, pid uint32, opt models.InstOptions) error
 	Mock(ctx context.Context, frames []models.Frame) error
 }
 
