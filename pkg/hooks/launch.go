@@ -305,6 +305,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 		eventFilter := filters.NewArgs()
 		eventFilter.Add("type", "container")
 		eventFilter.Add("event", "create")
+		eventFilter.Add("event", "start")
 
 		messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{
 			Filters: eventFilter,
@@ -338,7 +339,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			case <-logTicker.C:
 				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
-				if e.Type == events.ContainerEventType && e.Action == "create" {
+				if e.Type == events.ContainerEventType && (e.Action == "create" || e.Action == "start") {
 					// Set Docker Container ID
 					h.idc.SetContainerID(e.ID)
 
