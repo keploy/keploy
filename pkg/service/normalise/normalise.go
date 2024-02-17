@@ -1,7 +1,6 @@
 package Normalise
 
 import (
-	"fmt"
 	"io/ioutil"
 	"path/filepath"
 	"sort"
@@ -44,7 +43,7 @@ func (n *normaliser) Normalise(path string) {
 		}
 	}
 	lastRunFolderPath := filepath.Join(testReportPath, lastRunFolder)
-	n.logger.Info("Latest Test Run", zap.String("folder", lastRunFolderPath))
+	n.logger.Info("Test Run Folder", zap.String("folder", lastRunFolderPath))
 
 	// Get list of YAML files in the last run folder
 	files, err := ioutil.ReadDir(lastRunFolderPath)
@@ -76,8 +75,6 @@ func (n *normaliser) Normalise(path string) {
 			// Iterate over tests in the TestReport
 			for _, test := range testReport.Tests {
 				if test.Status == models.TestStatusFailed {
-					fmt.Println(test.TestCaseID)
-					fmt.Println(test.TestCasePath)
 
 					// Read the contents of the testcase file
 					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
@@ -89,16 +86,14 @@ func (n *normaliser) Normalise(path string) {
 					}
 
 					// Unmarshal YAML into TestCase
-					var testCase models.TestCase
+					var testCase TestCaseFile
 					err = yaml.Unmarshal(testCaseContent, &testCase)
 					if err != nil {
 						n.logger.Error("Failed to unmarshal YAML", zap.Error(err))
 						continue
 					}
-					fmt.Println(testCase)
-
-					// Update the HttpResp.Body field
-					testCase.HttpResp.Body = test.Result.BodyResult[0].Actual
+					n.logger.Info("Updating Response body from :" + testCase.Spec.Resp.Body + " to :" + test.Result.BodyResult[0].Actual)
+					testCase.Spec.Resp.Body = test.Result.BodyResult[0].Actual
 
 					// Marshal TestCase back to YAML
 					updatedYAML, err := yaml.Marshal(&testCase)
