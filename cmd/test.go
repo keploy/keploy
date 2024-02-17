@@ -448,8 +448,9 @@ func (t *Test) GetCmd() *cobra.Command {
 					IgnoreOrdering:     ignoreOrdering,
 					PassthroughHosts:   passThroughHosts,
 				}, enableTele)
-				_, err := os.Stat(path)
-				if !os.IsNotExist(err) {
+
+				fileExist := utils.CheckFileExists(path)
+				if fileExist {
 					cmd := exec.Command("sudo", "chmod", "-R", "777", path)
 					err = cmd.Run()
 					if err != nil {
