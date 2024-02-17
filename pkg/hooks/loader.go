@@ -426,7 +426,7 @@ func (h *Hook) StopUserApplication(removeContainer bool) {
 	h.SetUserAppTerminateInitiated(true)
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
 		h.logger.Debug("the process state for the user process", zap.String("state", h.userAppCmd.ProcessState.String()), zap.Any("processState", h.userAppCmd.ProcessState))
-		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() && !strings.Contains(h.userAppCmd.String(), "docker start") {
+		if h.userAppCmd.ProcessState != nil && h.userAppCmd.ProcessState.Exited() && !strings.Contains(h.userAppCmd.String(), "docker") {
 			return
 		}
 
