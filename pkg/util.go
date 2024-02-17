@@ -10,13 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/araddon/dateparse"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
@@ -221,6 +222,12 @@ func GetNextTestReportDir(testReportPath, subDirPrefix string) (string, error) {
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
+	err := utils.SetUmask(0)
+	if err != nil {
+		Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
+		return indices, err
+	}
+	defer utils.SetUmask(0022)
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))

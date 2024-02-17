@@ -158,21 +158,11 @@ func isJavaInstalled() bool {
 
 // to extract ca certificate to temp
 func ExtractCertToTemp() (string, error) {
-	// Set the umask to allow access to the file for all users
-	err := utils.SetUmask(0)
-	if err != nil {
-		return "", err
-	}
 	tempFile, err := ioutil.TempFile("", "ca.crt")
 	if err != nil {
 		return "", err
 	}
 	defer tempFile.Close()
-	err = utils.SetUmask(0022)
-	if err != nil {
-		return "", err
-	}
-
 	// Write to the file
 	_, err = tempFile.Write(caCrt)
 	if err != nil {
