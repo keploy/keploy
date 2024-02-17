@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 	normalise "go.keploy.io/server/pkg/service/normalise"
 	"go.uber.org/zap"
@@ -29,9 +31,18 @@ func (n *Normalise) GetCmd() *cobra.Command {
 		Example: "keploy normalise",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Logic to normalise testcases
-			n.normaliser.Normalise()
+
+			path, err := cmd.Flags().GetString("path")
+			if err != nil {
+				n.logger.Error("Error in getting path", zap.Error(err))
+				return err
+			}
+			fmt.Println("Normalising testcases at path:", path)
+			n.normaliser.Normalise(path)
 			return nil
 		},
 	}
+
+	normaliseCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
 	return normaliseCmd
 }

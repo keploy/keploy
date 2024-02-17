@@ -17,7 +17,7 @@ type normaliser struct {
 	logger *zap.Logger
 }
 
-func (n *normaliser) Normalise() {
-	fmt.Println("Normalising testcases")
-	// Logic to normalise testcases
+func (n *normaliser) Normalise(path string) {
+	fmt.Println("Normalising testcases at path:", path)
+
 }
