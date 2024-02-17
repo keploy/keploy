@@ -30,7 +30,7 @@ func (n *normaliser) Normalise(path string) {
 	// Get a list of directories in the testReportPath
 	dirs, err := getDirectories(testReportPath)
 	if err != nil {
-		n.logger.Error("Failed to get directories", zap.Error(err))
+		n.logger.Error("Failed to get TestReports", zap.Error(err))
 		return
 	}
 
@@ -76,14 +76,45 @@ func (n *normaliser) Normalise(path string) {
 			// Iterate over tests in the TestReport
 			for _, test := range testReport.Tests {
 				if test.Status == models.TestStatusFailed {
-					// Process failing test case here
-					fmt.Println("test.Result.Bodyresult is  ")
-					fmt.Println(test.Result.BodyResult)
-					for _, Result := range test.Result.BodyResult {
-						fmt.Println(Result.Expected)
-						fmt.Println(Result.Actual)
+					fmt.Println(test.TestCaseID)
+					fmt.Println(test.TestCasePath)
+
+					// Read the contents of the testcase file
+					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
+					n.logger.Info("Updating testcase file", zap.String("filePath", testCaseFilePath))
+					testCaseContent, err := ioutil.ReadFile(testCaseFilePath)
+					if err != nil {
+						n.logger.Error("Failed to read testcase file", zap.Error(err))
+						continue
 					}
 
+					// Unmarshal YAML into TestCase
+					var testCase models.TestCase
+					err = yaml.Unmarshal(testCaseContent, &testCase)
+					if err != nil {
+						n.logger.Error("Failed to unmarshal YAML", zap.Error(err))
+						continue
+					}
+					fmt.Println(testCase)
+
+					// Update the HttpResp.Body field
+					testCase.HttpResp.Body = test.Result.BodyResult[0].Actual
+
+					// Marshal TestCase back to YAML
+					updatedYAML, err := yaml.Marshal(&testCase)
+					if err != nil {
+						n.logger.Error("Failed to marshal YAML", zap.Error(err))
+						continue
+					}
+
+					// Write the updated YAML content back to the file
+					err = ioutil.WriteFile(testCaseFilePath, updatedYAML, 0644)
+					if err != nil {
+						n.logger.Error("Failed to write updated YAML to file", zap.Error(err))
+						continue
+					}
+
+					n.logger.Info("Updated testcase file successfully", zap.String("testCaseFilePath", testCaseFilePath))
 				}
 			}
 		}

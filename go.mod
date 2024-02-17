@@ -76,12 +76,12 @@ require (
 	github.com/charmbracelet/glamour v0.6.0
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.17.0
-	github.com/hashicorp/go-memdb v1.3.4
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/vektah/gqlparser/v2 v2.5.8
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (
@@ -93,8 +93,6 @@ require (
 	github.com/dlclark/regexp2 v1.4.0 // indirect
 	github.com/gorilla/css v1.0.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
-	github.com/hashicorp/go-immutable-radix v1.3.0 // indirect
-	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.3 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.21 // indirect
