@@ -6,9 +6,9 @@ import (
 	"runtime"
 	"time"
 
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/fs"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/fs"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 

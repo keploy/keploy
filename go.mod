@@ -1,4 +1,4 @@
-module go.keploy.io/server
+module go.keploy.io/server/v2
 
 go 1.20
 

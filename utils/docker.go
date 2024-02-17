@@ -2,7 +2,7 @@ package utils
 
 import (
 	"fmt"
-	"go.keploy.io/server/config"
+	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
 	"os"
 	"os/exec"

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/araddon/dateparse"
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 

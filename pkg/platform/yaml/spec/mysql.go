@@ -1,7 +1,7 @@
 package spec
 
 import (
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 	"gopkg.in/yaml.v3"
 )
 

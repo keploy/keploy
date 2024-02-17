@@ -12,11 +12,11 @@ import (
 
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/ringbuf"
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks/conn"
-	"go.keploy.io/server/pkg/hooks/settings"
-	"go.keploy.io/server/pkg/hooks/structs"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/hooks/conn"
+	"go.keploy.io/server/v2/pkg/hooks/settings"
+	"go.keploy.io/server/v2/pkg/hooks/structs"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	_ "golang.org/x/sys/unix"
 )

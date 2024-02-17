@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	docker2 "go.keploy.io/server/pkg/platform/docker"
+	docker2 "go.keploy.io/server/v2/pkg/core/app/docker"
 	"log"
 	"os"
 	"os/exec"
@@ -24,13 +24,13 @@ import (
 
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks/conn"
-	"go.keploy.io/server/pkg/hooks/settings"
-	"go.keploy.io/server/pkg/hooks/structs"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/hooks/conn"
+	"go.keploy.io/server/v2/pkg/hooks/settings"
+	"go.keploy.io/server/v2/pkg/hooks/structs"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform"
+	"go.keploy.io/server/v2/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"

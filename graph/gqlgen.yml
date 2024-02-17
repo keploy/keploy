@@ -66,7 +66,7 @@ resolver:
 # gqlgen will search for any type names in the schema in these go packages
 # if they match it will use them, otherwise it will generate them.
 autobind:
-#  - "go.keploy.io/server/pkg/service/serve/graph/model"
+#  - "go.keploy.io/server/v2/pkg/service/serve/graph/model"
 
 # This section declares type mapping between the GraphQL and go type systems
 #

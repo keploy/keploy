@@ -22,7 +22,7 @@ import (
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
-	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/v2/pkg/platform/fs"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )

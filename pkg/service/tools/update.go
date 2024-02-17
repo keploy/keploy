@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 

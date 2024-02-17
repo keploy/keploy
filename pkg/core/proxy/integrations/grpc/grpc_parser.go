@@ -13,10 +13,10 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 )
 
 type GrpcParser struct {

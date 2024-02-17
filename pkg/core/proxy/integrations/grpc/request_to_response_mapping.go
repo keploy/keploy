@@ -3,8 +3,8 @@ package grpc
 import (
 	"fmt"
 
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 const (

@@ -9,6 +9,8 @@ import (
 	"crypto/x509"
 	"embed"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"io"
 	"io/ioutil"
 	"log"
@@ -19,10 +21,10 @@ import (
 	"strings"
 	"sync"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/proxy/integrations/grpc"
-	postgresparser "go.keploy.io/server/pkg/proxy/integrations/postgres"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/proxy/integrations/grpc"
+	postgresparser "go.keploy.io/server/v2/pkg/proxy/integrations/postgres"
+	"go.keploy.io/server/v2/utils"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -34,26 +36,27 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
-	genericparser "go.keploy.io/server/pkg/proxy/integrations/generic"
-	"go.keploy.io/server/pkg/proxy/integrations/http"
-	"go.keploy.io/server/pkg/proxy/integrations/mongo"
-	"go.keploy.io/server/pkg/proxy/integrations/mysql"
-	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/models"
+	genericparser "go.keploy.io/server/v2/pkg/proxy/integrations/generic"
+	"go.keploy.io/server/v2/pkg/proxy/integrations/http"
+	"go.keploy.io/server/v2/pkg/proxy/integrations/mongo"
+	"go.keploy.io/server/v2/pkg/proxy/integrations/mysql"
+	"go.keploy.io/server/v2/pkg/proxy/util"
 	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
 
-type DependencyHandler interface {
-	OutgoingType(buffer []byte) bool
-	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context)
+func NewProxy() *Proxy {
+	// initialize the integrations
+
+	return &Proxy{}
 }
 
-var ParsersMap = make(map[string]DependencyHandler)
+var ParsersMap = make(map[string])
 
-type ProxySet struct {
+type Proxy struct {
 	IP4               uint32
 	IP6               [4]uint32
 	Port              uint32
@@ -68,6 +71,38 @@ type ProxySet struct {
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
 	MongoPassword     string // password to mock the mongo conn and pass the authentication requests
+}
+
+func (p Proxy) InitIntegrations(opts core.ProxyOptions) error{
+	// initialize the integrations
+	for _, parser := range integrations.Registered {
+		parser(p.logger,opts)
+	}
+
+
+	return nil
+}
+
+func (p Proxy) Record(ctx context.Context, mocks chan models.Frame, opts core.ProxyOptions) error {
+
+	panic("implement me")
+}
+
+func (p Proxy) Mock(ctx context.Context, mocks []models.Frame, opts core.ProxyOptions) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (p Proxy) SetMocks(ctx context.Context, mocks []models.Frame) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func New(logger *zap.Logger ) *Proxy {
+
+	return &Proxy{}
+}
+
 }
 
 type CustomConn struct {
@@ -301,9 +336,7 @@ func containsJava(input string) bool {
 	return strings.Contains(inputLower, searchTermLower)
 }
 
-func Register(parserName string, parser DependencyHandler) {
-	ParsersMap[parserName] = parser
-}
+
 
 // BootProxy starts proxy server on the idle local port, Default:16789
 func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context, delay uint64) *ProxySet {

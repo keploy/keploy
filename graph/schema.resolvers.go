@@ -7,12 +7,12 @@ package graph
 import (
 	"context"
 	"fmt"
-	"go.keploy.io/server/graph/model"
+	"go.keploy.io/server/v2/graph/model"
 	"time"
 
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/service/test"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service/test"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 

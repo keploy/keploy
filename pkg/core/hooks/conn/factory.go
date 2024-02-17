@@ -10,10 +10,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks/structs"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/hooks/structs"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"

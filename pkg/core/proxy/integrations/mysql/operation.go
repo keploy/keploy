@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net"
 
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 

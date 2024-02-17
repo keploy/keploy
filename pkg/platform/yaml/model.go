@@ -6,9 +6,9 @@ import (
 
 	"strings"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/yaml/spec"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml/spec"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"

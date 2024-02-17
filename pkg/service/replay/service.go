@@ -2,16 +2,16 @@ package replay
 
 import (
 	"context"
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 type Instrumentation interface {
+	//Hook will load hooks and start the proxy server.
+	Hook(ctx context.Context, opt models.HookOptions) error
+	MockOutgoing(ctx context.Context, mocks []models.Frame, opts models.IncomingOptions) error
+	SetMocks(ctx context.Context, mocks []models.Frame) error
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, cmd string) error
-	// if pid==0, we use parent pid. i.e keploy pid
-	//Hook will load hooks and start the proxy server.
-	Hook(ctx context.Context, pid uint32, opt models.InstOptions) error
-	Mock(ctx context.Context, frames []models.Frame) error
 }
 
 type Service interface {

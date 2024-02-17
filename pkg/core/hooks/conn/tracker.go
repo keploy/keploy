@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	structs2 "go.keploy.io/server/pkg/hooks/structs"
-	"go.keploy.io/server/pkg/models"
+	structs2 "go.keploy.io/server/v2/pkg/hooks/structs"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	// "log"
 )
