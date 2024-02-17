@@ -1,7 +1,8 @@
 package cmd
 
 import (
-	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	normalise "go.keploy.io/server/pkg/service/normalise"
@@ -30,14 +31,28 @@ func (n *Normalise) GetCmd() *cobra.Command {
 		Short:   "Normalise Keploy",
 		Example: "keploy normalise",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Logic to normalise testcases
-
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				n.logger.Error("Error in getting path", zap.Error(err))
 				return err
 			}
-			fmt.Println("Normalising testcases at path:", path)
+			//if user provides relative path
+			if len(path) > 0 && path[0] != '/' {
+				absPath, err := filepath.Abs(path)
+				if err != nil {
+					n.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
+				}
+				path = absPath
+			} else if len(path) == 0 { // if user doesn't provide any path
+				cdirPath, err := os.Getwd()
+				if err != nil {
+					n.logger.Error("failed to get the path of current directory", zap.Error(err))
+				}
+				path = cdirPath
+			} else {
+				// user provided the absolute path
+			}
+			path += "/keploy"
 			n.normaliser.Normalise(path)
 			return nil
 		},
