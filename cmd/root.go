@@ -93,6 +93,7 @@ func setupLogger() *zap.Logger {
 		log.Println(Emoji, "failed to set umask", err)
 		return nil
 	}
+
 	// Check if keploy-log.txt exists, if not create it.
 	_, err = os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
