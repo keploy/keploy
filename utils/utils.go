@@ -39,7 +39,7 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 		viper.SetEnvPrefix("KEPLOY")
 		viperKey := viperKeyPrefix + "." + flag.Name
 		envVarName := strings.ToUpper(viperKeyPrefix + "_" + flag.Name)
-		envVarName = strings.ReplaceAll(envVarName, ".", "_")
+		envVarName = strings.ReplaceAll(envVarName, ".", "_") // Why do we need this?
 
 		// Bind the flag to Viper with the constructed key
 		err := viper.BindPFlag(viperKey, flag)
