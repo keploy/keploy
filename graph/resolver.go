@@ -1,9 +1,9 @@
 package graph
 
 import (
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/service/test"
+	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/platform"
+	"go.keploy.io/server/v2/pkg/service/test"
 	"go.uber.org/zap"
 )
 

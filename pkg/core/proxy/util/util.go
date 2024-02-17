@@ -16,8 +16,8 @@ import (
 	"strconv"
 	"strings"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"

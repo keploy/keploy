@@ -2,11 +2,11 @@ package cli
 
 import (
 	"context"
-	"go.keploy.io/server/config"
+	"go.keploy.io/server/v2/config"
 	"path/filepath"
 
-	"go.keploy.io/server/pkg/service/generateConfig"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg/service/generateConfig"
+	"go.keploy.io/server/v2/utils"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"

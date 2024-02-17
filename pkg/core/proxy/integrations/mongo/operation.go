@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"

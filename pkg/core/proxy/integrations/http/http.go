@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"io"
 	"io/ioutil"
 	"net"
@@ -18,21 +20,25 @@ import (
 	"time"
 
 	"github.com/cloudflare/cfssl/log"
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/proxy/util"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/proxy/util"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-type HttpParser struct {
+type Http struct {
 	logger *zap.Logger
-	hooks  *hooks.Hook
+	opts   core.ProxyOptions
+}
+
+func init() {
+	integrations.Register("http", NewHttpParser)
 }
 
 // ProcessOutgoing implements proxy.DepInterface.
-func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
+func (http *Http) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx)
@@ -49,16 +55,16 @@ func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net
 
 }
 
-func NewHttpParser(logger *zap.Logger, h *hooks.Hook) *HttpParser {
-	return &HttpParser{
+func NewHttpParser(logger *zap.Logger, opts core.ProxyOptions) integrations.Integrations {
+	return &Http{
 		logger: logger,
-		hooks:  h,
+		opts:   opts,
 	}
 }
 
 // IsOutgoingHTTP function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
-func (h *HttpParser) OutgoingType(buffer []byte) bool {
+func (h *Http) OutgoingType(buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buffer[:], []byte("GET ")) ||
 		bytes.HasPrefix(buffer[:], []byte("POST ")) ||

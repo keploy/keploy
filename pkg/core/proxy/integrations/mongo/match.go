@@ -3,8 +3,8 @@ package mongo
 import (
 	"fmt"
 
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 )

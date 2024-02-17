@@ -3,10 +3,10 @@ package cli
 import (
 	"context"
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/config"
-	"go.keploy.io/server/pkg/service/record"
-	"go.keploy.io/server/pkg/service/replay"
-	"go.keploy.io/server/pkg/service/tools"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service/record"
+	"go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.uber.org/zap"
 )
 

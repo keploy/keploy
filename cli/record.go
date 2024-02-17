@@ -3,8 +3,8 @@ package cli
 import (
 	"context"
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/config"
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 

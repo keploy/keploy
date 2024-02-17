@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"os"
 
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )

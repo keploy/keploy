@@ -1,4 +1,4 @@
-package genericparser
+package generic
 
 import (
 	"context"
@@ -12,13 +12,17 @@ import (
 	"syscall"
 	"time"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/proxy/util"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/proxy/util"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
+
+func init() {
+	Register("generic", New)
+}
 
 func ProcessGeneric(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
 	switch models.GetMode() {

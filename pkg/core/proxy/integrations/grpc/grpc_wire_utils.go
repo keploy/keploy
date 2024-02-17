@@ -6,7 +6,7 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefixedMessage {

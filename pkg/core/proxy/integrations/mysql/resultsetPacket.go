@@ -9,7 +9,7 @@ import (
 	"math"
 	"time"
 
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 type ResultSet struct {

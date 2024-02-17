@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"go.keploy.io/server/config"
+	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"

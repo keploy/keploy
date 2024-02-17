@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 type HandshakeResponseOk struct {

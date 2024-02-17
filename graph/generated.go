@@ -8,7 +8,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/graph/model"
+	"go.keploy.io/server/v2/graph/model"
 	"strconv"
 	"sync"
 	"sync/atomic"

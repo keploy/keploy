@@ -21,9 +21,9 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 )
 
 const (

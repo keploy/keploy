@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 type HandshakeV10Packet struct {
