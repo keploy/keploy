@@ -9,7 +9,7 @@ import (
 
 func init() {
 	// Register the command hook
-	Register("mock", Update)
+	Register("mock", Mock)
 }
 
 func Mock(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
@@ -30,8 +30,8 @@ func Mock(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Serv
 	cmd.Flags().BoolP("replay", "p", true, "Intercept all outgoing network traffic and replay the recorded traffic")
 	cmd.Flags().Lookup("replay").NoOptDefVal = "true"
 
-	cmd.Flags().StringP("mockName", "m", "", "User provided test suite")
-	cmd.MarkFlagRequired("mockName")
+	cmd.Flags().StringP("name", "-n", "", "Name of the mock")
+	cmd.MarkFlagRequired("name")
 
 	return cmd
 }
