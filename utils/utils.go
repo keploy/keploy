@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -119,7 +119,7 @@ func attachLogFileToSentry(logFilePath string) {
 	}
 	defer file.Close()
 
-	content, _ := ioutil.ReadAll(file)
+	content, _ := io.ReadAll(file)
 
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetExtra("logfile", string(content))

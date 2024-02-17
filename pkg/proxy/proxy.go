@@ -10,7 +10,6 @@ import (
 	"embed"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -158,7 +157,7 @@ func isJavaInstalled() bool {
 
 // to extract ca certificate to temp
 func ExtractCertToTemp() (string, error) {
-	tempFile, err := ioutil.TempFile("", "ca.crt")
+	tempFile, err := os.CreateTemp("", "ca.crt")
 	if err != nil {
 		return "", err
 	}
