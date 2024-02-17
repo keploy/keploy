@@ -30,6 +30,9 @@ Navigate to `launch.json` to begin crafting JSON objects.
                 "-c",
                 "<path_to_executable>"
             ],
+            "env": {
+                "PATH": "<path to Go binary>"
+            }
         },
         {
             "name": "Test",
@@ -42,8 +45,11 @@ Navigate to `launch.json` to begin crafting JSON objects.
             "args": [
                 "test",
                 "-c",
-                "<path_to_executable>", // We can also put docker run command here.
+                "<path_to_executable>", // We can also use docker commands here
             ],
+            "env": {
+                "PATH": "<path to Go binary>"
+            }
         }
     ]
 }
@@ -69,8 +75,11 @@ You can either add more objects in the "configurations" array or modify the "arg
     "args": [
         "test",
         "-c",
-        "/home/coding/open-source/keploy/samples-go/gin-mongo/test-app-url-shortener",
+        "<path_to_executable>",
     ],
+    "env": {
+        "PATH": "<path to Go binary>"
+    }
 },
 {
     "name": "Test-debug",
@@ -83,9 +92,12 @@ You can either add more objects in the "configurations" array or modify the "arg
     "args": [
         "test",
         "-c",
-        "/home/coding/open-source/keploy/samples-go/gin-mongo/test-app-url-shortener",
+        "<path_to_executable>",
         "--debug"
     ],
+    "env": {
+        "PATH": "<path to Go binary>"
+    }
 }
 ```
 
