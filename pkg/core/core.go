@@ -63,10 +63,10 @@ const (
 )
 
 type NetworkAddress struct {
-	Version  IPVersion
-	IPv4Addr string
-	IPv6Addr string
-	Port     uint32
+	Version IPVersion
+	IPv4    string
+	IPv6    string
+	Port    uint32
 }
 
 // Init will initialize: hooks and proxy

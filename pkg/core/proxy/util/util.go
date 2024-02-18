@@ -2,10 +2,14 @@ package util
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"sync/atomic"
 	"time"
 
@@ -48,7 +52,7 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 	return nil
 }
 
-func Passthrough(clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int), logger *zap.Logger) ([]byte, error) {
+func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int)) ([]byte, error) {
 
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination conn")
@@ -328,6 +332,53 @@ func IsDockerRelatedCommand(cmd string) (bool, string) {
 	return false, ""
 }
 
+func IsDirectoryExists(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return info.IsDir()
+}
+
+func IsJava(input string) bool {
+	// Convert the input string and the search term "java" to lowercase for a case-insensitive comparison.
+	inputLower := strings.ToLower(input)
+	searchTerm := "java"
+	searchTermLower := strings.ToLower(searchTerm)
+
+	// Use strings.Contains to check if the lowercase input contains the lowercase search term.
+	return strings.Contains(inputLower, searchTermLower)
+}
+
+// IsJavaInstalled checks if java is installed on the system
+func IsJavaInstalled() bool {
+	_, err := exec.LookPath("java")
+	return err == nil
+}
+
+// GetJavaHome returns the JAVA_HOME path
+func GetJavaHome() (string, error) {
+	cmd := exec.Command("java", "-XshowSettings:properties", "-version")
+	var out bytes.Buffer
+	cmd.Stderr = &out // The output we need is printed to STDERR
+
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "java.home") {
+			parts := strings.Split(line, "=")
+			if len(parts) > 1 {
+				return strings.TrimSpace(parts[1]), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("java.home not found in command output")
+}
+
+// Functions related to fuzzy matching
 func AdaptiveK(length, kMin, kMax, N int) int {
 	k := length / N
 	if k < kMin {
