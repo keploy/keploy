@@ -392,6 +392,13 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			path += "/keploy"
 			t.logger.Info("", zap.Any("keploy test and mock path", path))
+			//check if the path exists
+			fileExist := utils.CheckFileExists(path)
+			keployRecordString := models.HighlightGrayString("Keploy Record")
+			if !fileExist {
+				t.logger.Info("Test Cases Not Found. Run " + keployRecordString + " to generate test cases")
+				return nil
+			}
 
 			testReportPath := ""
 
