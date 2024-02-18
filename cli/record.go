@@ -23,7 +23,7 @@ func Record(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Se
 		Example: `keploy record -c "/path/to/user/app"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough)
+			recorder.record()
 			return nil
 		},
 	}
