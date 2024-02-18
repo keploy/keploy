@@ -82,6 +82,26 @@ func match(req *http.Request, reqBody []byte, reqURL *url.URL, isReqBodyJSON boo
 
 }
 
+func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
+	if len(map1) != len(map2) {
+		return false
+	}
+
+	for key := range map1 {
+		if _, exists := map2[key]; !exists {
+			return false
+		}
+	}
+
+	for key := range map2 {
+		if _, exists := map1[key]; !exists {
+			return false
+		}
+	}
+
+	return true
+}
+
 func findStringMatch(req string, mockString []string) int {
 	minDist := int(^uint(0) >> 1) // Initialize with max int value
 	bestMatch := -1
@@ -146,6 +166,7 @@ func HttpEncoder(buffer []byte) string {
 	encoded := string(buffer)
 	return encoded
 }
+
 func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *models.Mock) {
 	com := HttpEncoder(reqBuff)
 	for _, mock := range tcsMocks {

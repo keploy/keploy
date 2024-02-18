@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/docker/docker/daemon/logger"
 	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"io"
 	"io/ioutil"
@@ -21,7 +23,6 @@ import (
 
 	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/hooks"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/proxy/util"
 	"go.keploy.io/server/v2/utils"
@@ -37,24 +38,6 @@ func init() {
 	integrations.Register("http", NewHttpParser)
 }
 
-// ProcessOutgoing implements proxy.DepInterface.
-func (http *Http) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
-	switch models.GetMode() {
-	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx)
-		if err != nil {
-			http.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
-			return
-		}
-
-	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger)
-	default:
-		http.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
-	}
-
-}
-
 func NewHttpParser(logger *zap.Logger, opts core.ProxyOptions) integrations.Integrations {
 	return &Http{
 		logger: logger,
@@ -64,7 +47,7 @@ func NewHttpParser(logger *zap.Logger, opts core.ProxyOptions) integrations.Inte
 
 // IsOutgoingHTTP function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
-func (h *Http) OutgoingType(buffer []byte) bool {
+func (h *Http) OutgoingType(ctx context.Context, buffer []byte) bool {
 	return bytes.HasPrefix(buffer[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buffer[:], []byte("GET ")) ||
 		bytes.HasPrefix(buffer[:], []byte("POST ")) ||
@@ -80,27 +63,7 @@ func isJSON(body []byte) bool {
 	return json.Unmarshal(body, &js) == nil
 }
 
-func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
-	if len(map1) != len(map2) {
-		return false
-	}
-
-	for key := range map1 {
-		if _, exists := map2[key]; !exists {
-			return false
-		}
-	}
-
-	for key := range map2 {
-		if _, exists := map1[key]; !exists {
-			return false
-		}
-	}
-
-	return true
-}
-
-func ProcessOutgoingHttp(request []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) {
+func ProcessOutgoing(ctx context.Context, buffer []byte, conn net.Conn, dst net.Conn) error {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
 		err := encodeOutgoingHttp(request, clientConn, destConn, logger, h, ctx)

@@ -12,8 +12,8 @@ type Initializer func(logger *zap.Logger, opts core.ProxyOptions) Integrations
 var Registered = make(map[string]Initializer)
 
 type Integrations interface {
-	OutgoingType(buffer []byte) bool
-	ProcessOutgoing(buffer []byte, conn net.Conn, dst net.Conn, ctx context.Context)
+	OutgoingType(ctx context.Context, buffer []byte) bool //Change the name of the function
+	ProcessOutgoing(ctx context.Context, buffer []byte, conn net.Conn, dst net.Conn) error
 }
 
 func Register(name string, i Initializer) {
