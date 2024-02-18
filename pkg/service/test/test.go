@@ -331,8 +331,6 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 				t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
 			}
 		}
-	} else {
-		pp.Printf("\n No testcases are found.\n")
 	}
 
 	if !initialisedValues.AbortStopHooksForcefully {
