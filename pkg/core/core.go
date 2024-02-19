@@ -2,89 +2,94 @@ package core
 
 import (
 	"context"
-	"go.keploy.io/server/v2/pkg/models"
-	"time"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
 
-	"github.com/cloudflare/cfssl/log"
-	"go.keploy.io/server/v2/pkg/hooks"
-	"go.keploy.io/server/v2/pkg/proxy"
+	app "go.keploy.io/server/v2/pkg/core/app"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-type Config struct {
-	Port uint32
+type Core struct {
+	logger *zap.Logger
+	id     utils.AutoInc
+	apps   sync.Map
+	hook   Hooks
 }
 
-type Hooks interface {
-	Load(ctx context.Context, tests chan models.Frame, opts HookOptions) error
-}
-
-type HookOptions struct {
-	Pid uint32
-}
-
-type App interface {
-	Run(ctx context.Context, cmd string, opts AppOptions) error
-}
-
-type AppOptions struct {
-	// canExit disables any error returned if the app exits by itself.
-	CanExit       bool
-	BuildDelay    time.Duration
-	Container     string
-	DockerNetwork string
-}
-
-// Proxy listens on all available interfaces and forwards traffic to the destination
-type Proxy interface {
-	Record(ctx context.Context, mocks chan models.Frame, opts ProxyOptions) error
-	Mock(ctx context.Context, mocks []models.Frame, opts ProxyOptions) error
-	SetMocks(ctx context.Context, mocks []models.Frame) error
-}
-
-type ProxyOptions struct {
-	models.OutgoingOptions
-	// DnsIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
-	DnsIPv4Addr string
-	// DnsIPv6Addr is the proxy IP returned by the DNS server. default is loopback address
-	DnsIPv6Addr string
-}
-
-type DestInfo interface {
-	Get(ctx context.Context, srcPort uint16) (*NetworkAddress, error)
-	Delete(ctx context.Context, srcPort uint16) error
-}
-
-type IPVersion int
-
-const (
-	IPv4 IPVersion = iota // 0
-	IPv6                  // 1
-)
-
-type NetworkAddress struct {
-	Version IPVersion
-	IPv4    string
-	IPv6    string
-	Port    uint32
-}
-
-// Init will initialize: hooks and proxy
-func Init(ctx context.Context, config Config) error {
-	// disable init logs from the cfssl library
-	log.Level = 0
-
-	// Initiate the hooks
-	loadedHooks, err := hooks.NewHook(ys, routineId, s.logger)
+func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (int, error) {
+	id := c.id.Next()
+	a := app.NewApp(c.logger, id, cmd)
+	err := a.Setup(ctx, AppOptions{
+		DockerNetwork: opts.DockerNetwork,
+	})
 	if err != nil {
-		s.logger.Error("error while creating hooks", zap.Error(err))
-		return
+		c.logger.Error("Failed to create app", zap.Error(err))
+		return 0, err
 	}
 
-	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
-		return
+	if a.KeployIPv4Addr() == "" {
+		// TODO implement me
+	}
+	return id, nil
+}
+
+func (c *Core) getApp(id int) (App, error) {
+	a, ok := c.apps.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("app with id:%v not found", id)
 	}
 
-	// start the proxy
-	ps := proxy.Sart(s.logger, proxy.Option{Port: proxyPort}, "", "", pid, "", []uint{}, loadedHooks, ctx, 0)
+	// type assertion on the app
+	h, ok := a.(*app.App)
+	if !ok {
+		return nil, fmt.Errorf("failed to type assert app with id:%v", id)
+	}
+
+	return h, nil
+}
+
+func (c *Core) Hook(ctx context.Context, id int, opts models.HookOptions) error {
+	a, err := c.getApp(id)
+	if err != nil {
+		return err
+	}
+
+	opts.KeployIPv4 = a.KeployIPv4Addr()
+	c.hook.Load(ctx, id, opts)
+}
+
+func (c *Core) Run(ctx context.Context, id int, opts models.RunOptions) error {
+	a, err := c.getApp(id)
+	if err != nil {
+		return err
+	}
+	switch a.Kind(ctx) {
+	case utils.Docker, utils.DockerCompose:
+		// process ebpf hooks
+	case utils.Native:
+		// process native hooks
+	}
+
+	return a.Run(ctx)
+	// TODO: send the docker inode to the hook
+}
+
+// IPv4ToUint32 converts a string representation of an IPv4 address to a 32-bit integer.
+func IPv4ToUint32(ipStr string) (uint32, error) {
+	ipAddr := net.ParseIP(ipStr)
+	if ipAddr != nil {
+		ipAddr = ipAddr.To4()
+		if ipAddr != nil {
+			return binary.BigEndian.Uint32(ipAddr), nil
+		} else {
+			return 0, errors.New("not a valid IPv4 address")
+		}
+	} else {
+		return 0, errors.New("failed to parse IP address")
+	}
 }

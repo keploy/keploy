@@ -7,10 +7,14 @@ import (
 )
 
 type Instrumentation interface {
-	Hook(ctx context.Context, opt models.HookOptions) error
-	GetIncoming(ctx context.Context, opts models.IncomingOptions) (chan models.Frame, chan models.IncomingError)
-	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (chan models.Frame, chan models.OutgoingError)
-	Run(ctx context.Context, cmd string) models.AppError
+	//Setup prepares the environment for the recording
+	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (int, error)
+	//Hook will load hooks and start the proxy server.
+	Hook(ctx context.Context, id int, opts models.HookOptions) error
+	GetIncoming(ctx context.Context, id int, opts models.IncomingOptions) (chan models.Frame, error)
+	GetOutgoing(ctx context.Context, id int, opts models.OutgoingOptions) (chan models.Frame, error)
+	// Run is blocking call and will execute until error
+	Run(ctx context.Context, id int, opts models.RunOptions) error
 }
 
 type Service interface {
