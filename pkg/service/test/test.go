@@ -304,35 +304,36 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 
 	})
 
-	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
+	if totalTests > 0 {
+		pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
-	pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
-	for _, testSuiteName := range testSuiteNames {
-		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
-	}
-
-	pp.Printf("\n<=========================================> \n\n")
-
-	t.logger.Info("test run completed", zap.Bool("passed overall", result))
-	// log the overall code coverage for the test run of go binaries
-	if options.WithCoverage {
-		t.logger.Info("there is a opportunity to get the coverage here")
-		// logs the coverage using covdata
-		coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
-		output, err := coverCmd.Output()
-		if err != nil {
-			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+		pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
+		for _, testSuiteName := range testSuiteNames {
+			pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
 		}
-		t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
 
-		// merges the coverage files into a single txt file which can be merged with the go-test coverage
-		generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-		output, err = generateCovTxtCmd.Output()
-		if err != nil {
-			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
-		}
-		if len(output) > 0 {
-			t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
+		pp.Printf("\n<=========================================> \n\n")
+		t.logger.Info("test run completed", zap.Bool("passed overall", result))
+		// log the overall code coverage for the test run of go binaries
+		if options.WithCoverage {
+			t.logger.Info("there is a opportunity to get the coverage here")
+			// logs the coverage using covdata
+			coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
+			output, err := coverCmd.Output()
+			if err != nil {
+				t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+			}
+			t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
+
+			// merges the coverage files into a single txt file which can be merged with the go-test coverage
+			generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+			output, err = generateCovTxtCmd.Output()
+			if err != nil {
+				t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+			}
+			if len(output) > 0 {
+				t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
+			}
 		}
 	}
 
