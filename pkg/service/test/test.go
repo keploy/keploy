@@ -300,7 +300,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 
 	})
 
-	if totalTests < 0 {
+	if totalTests > 0 {
 		pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
 		pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
