@@ -24,7 +24,6 @@ import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
@@ -346,8 +345,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 }
 
 func (t *tester) StartTest(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool {
-	teleFS := fs.NewTeleFS(t.logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
+	tele := telemetry.NewTelemetry(t.logger, enableTele, false, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
 	return t.Test(path, testReportPath, generateTestReport, appCmd, options, tele, reportStorage, mockStorage)

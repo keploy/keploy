@@ -11,7 +11,6 @@ import (
 
 	"go.keploy.io/server/pkg/graph/model"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
@@ -105,8 +104,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 // TestSetStatus is the resolver for the testSetStatus field.
 func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error) {
 	//Initiate the telemetry.
-	var store = fs.NewTeleFS(r.Logger)
-	var tele = telemetry.NewTelemetry(true, false, store, r.Logger, "", nil)
+	var tele = telemetry.NewTelemetry(r.Logger, true, false, "", nil)
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err

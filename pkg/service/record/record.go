@@ -31,8 +31,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 }
 
 func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters, recordTimer time.Duration) {
-	teleFS := fs.NewTeleFS(r.Logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, r.Logger, "", nil)
+	tele := telemetry.NewTelemetry(r.Logger, enableTele, false, "", nil)
 	tele.Ping(false)
 	dirName, err := fs.NewSessionIndex(path, r.Logger)
 	if err != nil {
