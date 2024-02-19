@@ -258,36 +258,36 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 }
 
 // It checks if the cli is related to docker or not, it also returns if its a docker compose file
-func IsDockerRelatedCmd(cmd string) bool {
+func FindDockerCmd(cmd string) CmdType {
+	// Convert command to lowercase for case-insensitive comparison
+	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
+
+	// Define patterns for Docker and Docker Compose
+	dockerPatterns := []string{"docker", "sudo docker"}
+	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
+
+	// Check for Docker Compose command patterns and file extensions
+	for _, pattern := range dockerComposePatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerCompose
+		}
+	}
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{
-		"docker-compose ",
-		"sudo docker-compose ",
-		"docker compose ",
-		"sudo docker compose ",
-		"docker ",
-		"sudo docker ",
-	}
-
-	for _, pattern := range dockerCommandPatterns {
-		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
-			if strings.Contains(pattern, "compose") {
-				return true, "docker-compose"
-			}
-			return true, "docker"
+	for _, pattern := range dockerPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return Docker
 		}
 	}
-
-	// Check for Docker Compose file extension
-	dockerComposeFileExtensions := []string{".yaml", ".yml"}
-	for _, extension := range dockerComposeFileExtensions {
-		if strings.HasSuffix(strings.ToLower(cmd), extension) {
-			return true, "docker-compose"
-		}
-	}
-
-	return false, ""
+	return Native
 }
+
+type CmdType string
+
+const (
+	Docker        CmdType = "docker"
+	DockerCompose CmdType = "docker-compose"
+	Native        CmdType = "native"
+)
 
 type RecordFlags struct {
 	Path             string

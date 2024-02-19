@@ -44,225 +44,216 @@ var (
 func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, isUnitTestIntegration bool) error {
 	// Supports Native-Linux, Windows (WSL), Lima, Colima
 
-	if appCmd == "" {
-		if len(appContainer) == 0 {
-			return fmt.Errorf(Emoji + "please provide container name when running application container in isolation")
-		}
-		if len(appNetwork) == 0 {
-			return fmt.Errorf(Emoji + "please provide network name when running application container in isolation")
-		}
-	}
+	//if appCmd == "" {
+	//	if len(appContainer) == 0 {
+	//		return fmt.Errorf(Emoji + "please provide container name when running application container in isolation")
+	//	}
+	//	if len(appNetwork) == 0 {
+	//		return fmt.Errorf(Emoji + "please provide network name when running application container in isolation")
+	//	}
+	//}
 
-	if appCmd == "" && len(appContainer) != 0 && len(appNetwork) != 0 {
+	ok, cmd := utils.IsDockerRelatedCmd(appCmd)
+	if ok {
 
-		h.logger.Debug("User Application is running inside docker in isolation", zap.Any("Container", appContainer), zap.Any("Network", appNetwork))
-		//search for the container and process it
-		err := h.processDockerEnv("", appContainer, appNetwork, buildDelay)
-		if err != nil {
-			return err
-		}
-		return nil
-	} else {
-		ok, cmd := utils.IsDockerRelatedCmd(appCmd)
-		if ok {
+		h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
 
-			h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
+		if cmd == "docker-compose" {
+			if len(appContainer) == 0 {
+				h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
+				return fmt.Errorf(Emoji + "container name not found")
+			}
 
-			if cmd == "docker-compose" {
-				if len(appContainer) == 0 {
-					h.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", appCmd))
-					return fmt.Errorf(Emoji + "container name not found")
+			//finding the user docker-compose file in the current directory.
+			dockerComposeFile := findDockerComposeFile()
+
+			if dockerComposeFile == "" {
+				return fmt.Errorf("can't find the docker compose file of user. Are you in the right directory? ")
+			}
+
+			// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
+			newComposeFile := "kdocker-compose.yaml"
+
+			// Check if docker compose file uses relative file names for bind mounts
+			hasRelativeBindMounts := h.idc.CheckBindMounts(dockerComposeFile)
+
+			if hasRelativeBindMounts {
+				err := h.idc.ReplaceRelativePaths(dockerComposeFile, newComposeFile)
+				if err != nil {
+					h.logger.Error("failed to convert relative paths to absolute paths in volume mounts in docker compose file")
+					return err
 				}
+				h.logger.Info("Created kdocker-compose.yml file and Replaced relative file paths in docker compose file.")
+				//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
+				appCmd = modifyDockerComposeCommand(appCmd, newComposeFile)
+				dockerComposeFile = newComposeFile
+			}
 
-				//finding the user docker-compose file in the current directory.
-				dockerComposeFile := findDockerComposeFile()
+			// Checking info about the network and whether its external:true
+			hasNetwork, isExternal, network := h.idc.CheckNetworkInfo(dockerComposeFile)
 
-				if dockerComposeFile == "" {
-					return fmt.Errorf("can't find the docker compose file of user. Are you in the right directory? ")
-				}
-
-				// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
-				newComposeFile := "kdocker-compose.yaml"
-
-				// Check if docker compose file uses relative file names for bind mounts
-				hasRelativeBindMounts := h.idc.CheckBindMounts(dockerComposeFile)
-
-				if hasRelativeBindMounts {
-					err := h.idc.ReplaceRelativePaths(dockerComposeFile, newComposeFile)
+			if hasNetwork {
+				appNetwork = network
+				// if external is true that means the network is present locally.
+				if isExternal {
+					//injecting application network to keploy.
+					err := h.injectNetworkToKeploy(appNetwork)
 					if err != nil {
-						h.logger.Error("failed to convert relative paths to absolute paths in volume mounts in docker compose file")
+						h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
 						return err
-					}
-					h.logger.Info("Created kdocker-compose.yml file and Replaced relative file paths in docker compose file.")
-					//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
-					appCmd = modifyDockerComposeCommand(appCmd, newComposeFile)
-					dockerComposeFile = newComposeFile
-				}
-
-				// Checking info about the network and whether its external:true
-				hasNetwork, isExternal, network := h.idc.CheckNetworkInfo(dockerComposeFile)
-
-				if hasNetwork {
-					appNetwork = network
-					// if external is true that means the network is present locally.
-					if isExternal {
-						//injecting application network to keploy.
-						err := h.injectNetworkToKeploy(appNetwork)
-						if err != nil {
-							h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
-							return err
-						}
-					} else {
-						//make external = true and injecting that network to keploy
-						if len(appNetwork) == 0 {
-							h.logger.Error("couldn't find any network")
-							return fmt.Errorf("unable to find user docker network")
-						}
-
-						h.logger.Info("trying to make your docker network external")
-						//make a new compose file (kdocker-compose.yaml file) having external:true
-						err := h.idc.MakeNetworkExternal(dockerComposeFile, newComposeFile)
-						if err != nil {
-							h.logger.Error("couldn't make your docker network external")
-							return fmt.Errorf("error while updating network to external: %v", err)
-						}
-
-						h.logger.Info("successfully made your docker network external")
-
-						// check if this network exists locally
-						ok, err := h.idc.NetworkExists(appNetwork)
-						if err != nil {
-							h.logger.Error("failed to find user docker network locally", zap.Any("appNetwork", appNetwork))
-							return err
-						}
-
-						// if this network doesn't exist locally then create it
-						if !ok {
-							err := h.idc.CreateCustomNetwork(appNetwork)
-							if err != nil {
-								h.logger.Error("failed to create custom network", zap.Any("appNetwork", appNetwork))
-								return err
-							}
-						}
-
-						//injecting application network to keploy
-						err = h.injectNetworkToKeploy(appNetwork)
-						if err != nil {
-							h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
-							return err
-						}
-
-						oldCmd := appCmd
-						//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
-						appCmd = modifyDockerComposeCommand(appCmd, newComposeFile)
-						h.logger.Debug(fmt.Sprintf("docker compose run command changed from %v to %v", oldCmd, appCmd))
 					}
 				} else {
-					h.logger.Debug("no network found hence adding keploy-network to the user docker compose file")
-					//no network hence injecting keploy-network.
-					ok, err := h.idc.NetworkExists(KeployNetworkName)
+					//make external = true and injecting that network to keploy
+					if len(appNetwork) == 0 {
+						h.logger.Error("couldn't find any network")
+						return fmt.Errorf("unable to find user docker network")
+					}
+
+					h.logger.Info("trying to make your docker network external")
+					//make a new compose file (kdocker-compose.yaml file) having external:true
+					err := h.idc.MakeNetworkExternal(dockerComposeFile, newComposeFile)
 					if err != nil {
-						h.logger.Error("failed to find keploy-network")
+						h.logger.Error("couldn't make your docker network external")
+						return fmt.Errorf("error while updating network to external: %v", err)
+					}
+
+					h.logger.Info("successfully made your docker network external")
+
+					// check if this network exists locally
+					ok, err := h.idc.NetworkExists(appNetwork)
+					if err != nil {
+						h.logger.Error("failed to find user docker network locally", zap.Any("appNetwork", appNetwork))
 						return err
 					}
 
-					//if keploy-network doesn't exist locally then create it
+					// if this network doesn't exist locally then create it
 					if !ok {
-						err := h.idc.CreateCustomNetwork(KeployNetworkName)
+						err := h.idc.CreateCustomNetwork(appNetwork)
 						if err != nil {
-							h.logger.Error("failed to create keploy-network")
+							h.logger.Error("failed to create custom network", zap.Any("appNetwork", appNetwork))
 							return err
 						}
-					}
-
-					// make new a docker-compose file (kdocker-compose.yaml)
-					// to run user docker compose file with this custom keploy-network
-					err = h.idc.AddNetworkToCompose(dockerComposeFile, newComposeFile)
-					if err != nil {
-						h.logger.Error("failed to add external keploy network to the user docker compose file")
-						return err
 					}
 
 					//injecting application network to keploy
-					err = h.injectNetworkToKeploy(KeployNetworkName)
+					err = h.injectNetworkToKeploy(appNetwork)
 					if err != nil {
 						h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
 						return err
 					}
 
-					//set current network as keploy-network
-					appNetwork = KeployNetworkName
-
-					// time.Sleep(5 * time.Second)
 					oldCmd := appCmd
-					path := "./" + newComposeFile
 					//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
-					appCmd = modifyDockerComposeCommand(appCmd, path)
+					appCmd = modifyDockerComposeCommand(appCmd, newComposeFile)
 					h.logger.Debug(fmt.Sprintf("docker compose run command changed from %v to %v", oldCmd, appCmd))
 				}
-
-				h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork), zap.Any("appCmd", appCmd))
-			} else if cmd == "docker" {
-				var err error
-				cont, net, err := parseDockerCommand(appCmd)
-				h.logger.Debug("", zap.String("Parsed container name", cont))
-				h.logger.Debug("", zap.String("Parsed docker network", net))
-
+			} else {
+				h.logger.Debug("no network found hence adding keploy-network to the user docker compose file")
+				//no network hence injecting keploy-network.
+				ok, err := h.idc.NetworkExists(KeployNetworkName)
 				if err != nil {
-					h.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+					h.logger.Error("failed to find keploy-network")
 					return err
 				}
 
+				//if keploy-network doesn't exist locally then create it
+				if !ok {
+					err := h.idc.CreateCustomNetwork(KeployNetworkName)
+					if err != nil {
+						h.logger.Error("failed to create keploy-network")
+						return err
+					}
+				}
+
+				// make new a docker-compose file (kdocker-compose.yaml)
+				// to run user docker compose file with this custom keploy-network
+				err = h.idc.AddNetworkToCompose(dockerComposeFile, newComposeFile)
 				if err != nil {
-					h.logger.Error("failed to parse network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+					h.logger.Error("failed to add external keploy network to the user docker compose file")
 					return err
 				}
 
-				if len(appContainer) != 0 && appContainer != cont {
-					h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
-				}
-
-				if len(appNetwork) != 0 && appNetwork != net {
-					h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", appNetwork, net))
-				}
-
-				appContainer, appNetwork = cont, net
-
-				//injecting appNetwork to keploy.
-				err = h.injectNetworkToKeploy(appNetwork)
+				//injecting application network to keploy
+				err = h.injectNetworkToKeploy(KeployNetworkName)
 				if err != nil {
 					h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
 					return err
 				}
+
+				//set current network as keploy-network
+				appNetwork = KeployNetworkName
+
+				// time.Sleep(5 * time.Second)
+				oldCmd := appCmd
+				path := "./" + newComposeFile
+				//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
+				appCmd = modifyDockerComposeCommand(appCmd, path)
+				h.logger.Debug(fmt.Sprintf("docker compose run command changed from %v to %v", oldCmd, appCmd))
 			}
 
-			err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay)
+			h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork), zap.Any("appCmd", appCmd))
+		} else if cmd == "docker" {
+			var err error
+			cont, net, err := parseDockerCommand(appCmd)
+			h.logger.Debug("", zap.String("Parsed container name", cont))
+			h.logger.Debug("", zap.String("Parsed docker network", net))
+
 			if err != nil {
+				h.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
 				return err
 			}
-		} else { //Supports only linux
-			h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
-			// to notify the kernel hooks that the user application command is running in native linux.
-			key := 0
-			value := false
-			h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
-
-			// Recover from panic and gracefully shutdown
-			defer h.Recover(pkg.GenerateRandomID())
-			err := h.runApp(appCmd, isUnitTestIntegration)
 			if err != nil {
+				h.logger.Error("failed to parse network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+				return err
+			}
+
+			if len(appContainer) != 0 && appContainer != cont {
+				h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
+			}
+
+			if len(appNetwork) != 0 && appNetwork != net {
+				h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", appNetwork, net))
+			}
+
+			appContainer, appNetwork = cont, net
+
+			//injecting appNetwork to keploy.
+			err = h.injectNetworkToKeploy(appNetwork)
+			if err != nil {
+				h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
 				return err
 			}
 		}
-		return nil
+
+		err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay)
+		if err != nil {
+			return err
+		}
+	} else { //Supports only linux
+		h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
+
+		// to notify the kernel hooks that the user application command is running in native linux.
+		key := 0
+		value := false
+		h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
+
+		// Recover from panic and gracefully shutdown
+		defer h.Recover(pkg.GenerateRandomID())
+		err := h.runApp(appCmd, isUnitTestIntegration)
+		if err != nil {
+			return err
+		}
 	}
+	return nil
+
 }
 
 func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration) error {
 	// to notify the kernel hooks that the user application is related to Docker.
 	key := 0
 	value := true
+	// move to core, and pass to core.
 	h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
 
 	stopListenContainer := make(chan bool)

@@ -64,10 +64,12 @@ test:
 `
 
 const InternalConfig = `
-configPath: "."
-test:
- # keploy unit test server port
- port: 6789
+ keployContainer: "keploy-v2"
+ keployNetwork: "keploy-network"
+ configPath: "."
+ test:
+  # keploy unit test server port
+  port: 6789
 `
 
 var config = &Config{}

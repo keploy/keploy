@@ -3,20 +3,22 @@ package config
 import "time"
 
 type Config struct {
-	Path          string        `json:"path" yaml:"path" mapstructure:"path" `
-	Command       string        `json:"command" yaml:"command" mapstructure:"command"`
-	Port          uint32        `json:"port" yaml:"port" mapstructure:"port"`
-	ProxyPort     uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	Debug         bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
-	Telemetry     bool          `json:"telemetry" yaml:"telemetry" mapstructure:"telemetry"`
-	InDocker      bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
-	ContainerName string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName   string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay    time.Duration `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test          Test          `json:"test" yaml:"test" mapstructure:",squash"`
-	Record        Record        `json:"record" yaml:"record" mapstructure:",squash"`
-	ConfigPath    string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
-	BypassRules   []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	Path            string        `json:"path" yaml:"path" mapstructure:"path" `
+	Command         string        `json:"command" yaml:"command" mapstructure:"command"`
+	Port            uint32        `json:"port" yaml:"port" mapstructure:"port"`
+	ProxyPort       uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	Debug           bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
+	Telemetry       bool          `json:"telemetry" yaml:"telemetry" mapstructure:"telemetry"`
+	InDocker        bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
+	ContainerName   string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	NetworkName     string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay      time.Duration `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test            Test          `json:"test" yaml:"test" mapstructure:",squash"`
+	Record          Record        `json:"record" yaml:"record" mapstructure:",squash"`
+	ConfigPath      string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
+	BypassRules     []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	KeployContainer string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork   string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 }
 
 type Record struct {
