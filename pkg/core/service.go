@@ -4,6 +4,7 @@ import (
 	"context"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
+	"sync"
 	"time"
 )
 
@@ -12,12 +13,16 @@ type Config struct {
 }
 
 type Hooks interface {
-	Load(ctx context.Context, tests chan models.Frame, opts HookOptions) error
+	DestInfo
+	Load(ctx context.Context, id uint64, opts HookOptions) error
+	Record(ctx context.Context, id uint64) (<-chan *models.TestCase, <-chan error)
 }
 
 type HookOptions struct {
-	Pid      uint32
-	IsDocker bool
+	AppID      uint64
+	Pid        uint32
+	IsDocker   bool
+	KeployIPV4 string
 }
 
 type App interface {
@@ -43,6 +48,7 @@ type Proxy interface {
 }
 
 type ProxyOptions struct {
+	appID uint64
 	models.OutgoingOptions
 	// DnsIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
 	DnsIPv4Addr string
@@ -55,16 +61,39 @@ type DestInfo interface {
 	Delete(ctx context.Context, srcPort uint16) error
 }
 
-type IPVersion int
-
-const (
-	IPv4 IPVersion = iota // 0
-	IPv6                  // 1
-)
-
 type NetworkAddress struct {
-	Version  IPVersion
-	IPv4Addr string
-	IPv6Addr string
+	Version  uint32
+	IPv4Addr uint32
+	IPv6Addr [4]uint32
 	Port     uint32
+}
+
+type Sessions struct {
+	sessions sync.Map
+}
+
+func NewSessions() *Sessions {
+	return &Sessions{
+		sessions: sync.Map{},
+	}
+}
+
+func (s *Sessions) Get(id uint64) (*Session, bool) {
+	v, ok := s.sessions.Load(id)
+	if !ok {
+		return nil, false
+	}
+	return v.(*Session), true
+}
+
+func (s *Sessions) Set(id uint64, session *Session) {
+	s.sessions.Store(id, session)
+}
+
+type Session struct {
+	id    uint64
+	mode  models.Mode
+	tc    chan models.TestCase
+	mc    chan models.Mock
+	mocks []models.Mock
 }

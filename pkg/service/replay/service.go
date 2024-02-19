@@ -8,13 +8,14 @@ import (
 
 type Instrumentation interface {
 	//Setup prepares the environment for the recording
-	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (int, error)
+	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
 	//Hook will load hooks and start the proxy server.
-	Hook(ctx context.Context, id int, opts models.HookOptions) error
-	MockOutgoing(ctx context.Context, id int, mocks []models.Frame, opts models.IncomingOptions) error
-	SetMocks(ctx context.Context, id int, mocks []models.Frame) error
+	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
+	MockOutgoing(ctx context.Context, id uint64, mocks []models.Frame, opts models.IncomingOptions) <-chan error
+	// SetMocks Allows for setting mocks between test runs for better filtering and matching
+	SetMocks(ctx context.Context, id uint64, mocks []models.Frame) error
 	// Run is blocking call and will execute until error
-	Run(ctx context.Context, id int, opts models.RunOptions) error
+	Run(ctx context.Context, id uint64, opts models.RunOptions) error
 }
 
 type Service interface {

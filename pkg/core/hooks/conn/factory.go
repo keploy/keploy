@@ -11,16 +11,14 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
 
 // Factory is a routine-safe container that holds a trackers with unique ID, and able to create new tracker.
 type Factory struct {
-	connections         map[structs.ConnID]*Tracker
+	connections         map[ConnID]*Tracker
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
 	logger              *zap.Logger
@@ -29,7 +27,7 @@ type Factory struct {
 // NewFactory creates a new instance of the factory.
 func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory {
 	return &Factory{
-		connections:         make(map[structs.ConnID]*Tracker),
+		connections:         make(map[ConnID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
 		logger:              logger,
@@ -38,44 +36,38 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // ProcessActiveTrackers iterates over all conn the trackers and checks if they are complete. If so, it captures the ingress call and
 // deletes the tracker. If the tracker is inactive for a long time, it deletes it.
-func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.TestFilter) {
+func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *models.TestCase) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
-	var trackersToDelete []structs.ConnID
+	var trackersToDelete []ConnID
 	for connID, tracker := range factory.connections {
-		ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
-		if ok {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
+			if ok {
 
-			if len(requestBuf) == 0 || len(responseBuf) == 0 {
-				factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
-				continue
-			}
+				if len(requestBuf) == 0 || len(responseBuf) == 0 {
+					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+					continue
+				}
 
-			parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
-			if err != nil {
-				factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
-				continue
-			}
-			parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
-			if err != nil {
-				factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
-				continue
-			}
+				parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
+				if err != nil {
+					factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
+					continue
+				}
+				parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
+				if err != nil {
+					factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
+					continue
+				}
+				capture(ctx, factory.logger, t, parsedHttpReq, parsedHttpRes, reqTimestampTest, resTimestampTest)
 
-			switch models.GetMode() {
-			case models.MODE_RECORD:
-				// capture the ingress call for record cli
-				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest, filters)
-			case models.MODE_TEST:
-				factory.logger.Debug("skipping tracker in test mode")
-			default:
-				factory.logger.Warn("Keploy mode is not set to record or test. Tracker is being skipped.",
-					zap.Any("current mode", models.GetMode()))
+			} else if tracker.IsInactive(factory.inactivityThreshold) {
+				trackersToDelete = append(trackersToDelete, connID)
 			}
-
-		} else if tracker.IsInactive(factory.inactivityThreshold) {
-			trackersToDelete = append(trackersToDelete, connID)
 		}
 	}
 
@@ -87,7 +79,7 @@ func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx contex
 
 // GetOrCreate returns a tracker that related to the given conn and transaction ids. If there is no such tracker
 // we create a new one.
-func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
+func (factory *Factory) GetOrCreate(connectionID ConnID) *Tracker {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	tracker, ok := factory.connections[connectionID]
@@ -98,7 +90,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.TestFilter) {
+func capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
@@ -111,7 +103,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		logger.Error("failed to read the http response body", zap.Error(err))
 		return
 	}
-	err = db.WriteTestcase(&models.TestCase{
+	t <- &models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
@@ -137,7 +129,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		},
 		Noise: map[string][]string{},
 		// Mocks: mocks,
-	}, ctx, filters)
+	}
 	if err != nil {
 		logger.Error("failed to record the ingress requests", zap.Error(err))
 		return

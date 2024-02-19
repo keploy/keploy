@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	structs2 "go.keploy.io/server/v2/pkg/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	// "log"
@@ -19,8 +18,8 @@ const (
 
 // Tracker is a routine-safe container that holds a conn with unique ID, and able to create new conn.
 type Tracker struct {
-	connID         structs2.ConnID
-	addr           structs2.SockAddrIn
+	connID         ConnID
+	addr           SockAddrIn
 	openTimestamp  uint64
 	closeTimestamp uint64
 
@@ -70,7 +69,7 @@ type Tracker struct {
 	isNewRequest  bool
 }
 
-func NewTracker(connID structs2.ConnID, logger *zap.Logger) *Tracker {
+func NewTracker(connID ConnID, logger *zap.Logger) *Tracker {
 	return &Tracker{
 		connID:          connID,
 		req:             []byte{},
@@ -294,7 +293,7 @@ func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint6
 // 		conn.totalWrittenBytes != conn.respSize
 // }
 
-func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
+func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
@@ -302,7 +301,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
 
 	switch event.Direction {
-	case structs2.EgressTraffic:
+	case EgressTraffic:
 		// Capturing the timestamp of response as the response just started to come.
 		// This is to ensure that we capture the response timestamp for the first chunk of the response.
 		if !conn.isNewRequest {
@@ -313,8 +312,8 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		msgLength := event.MsgSize
 		// If the size of the message exceeds the maximum allowed size,
 		// set msgLength to the maximum allowed size instead
-		if event.MsgSize > structs2.EventBodyMaxSize {
-			msgLength = structs2.EventBodyMaxSize
+		if event.MsgSize > EventBodyMaxSize {
+			msgLength = EventBodyMaxSize
 		}
 		// Append the message (up to msgLength) to the conn's sent buffer
 		conn.resp = append(conn.resp, event.Msg[:msgLength]...)
@@ -335,7 +334,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 			conn.firstRequest = false
 		}
 
-	case structs2.IngressTraffic:
+	case IngressTraffic:
 		// Capturing the timestamp of request as the request just started to come.
 		if conn.isNewRequest {
 			conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
@@ -346,8 +345,8 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 		msgLength := event.MsgSize
 		// If the size of the message exceeds the maximum allowed size,
 		// set msgLength to the maximum allowed size instead
-		if event.MsgSize > structs2.EventBodyMaxSize {
-			msgLength = structs2.EventBodyMaxSize
+		if event.MsgSize > EventBodyMaxSize {
+			msgLength = EventBodyMaxSize
 		}
 		// Append the message (up to msgLength) to the conn's receive buffer
 		conn.req = append(conn.req, event.Msg[:msgLength]...)
@@ -376,7 +375,7 @@ func (conn *Tracker) AddDataEvent(event structs2.SocketDataEvent) {
 	}
 }
 
-func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
+func (conn *Tracker) AddOpenEvent(event SocketOpenEvent) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
@@ -388,7 +387,7 @@ func (conn *Tracker) AddOpenEvent(event structs2.SocketOpenEvent) {
 	conn.openTimestamp = event.TimestampNano
 }
 
-func (conn *Tracker) AddCloseEvent(event structs2.SocketCloseEvent) {
+func (conn *Tracker) AddCloseEvent(event SocketCloseEvent) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()

@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-func NewApp(logger *zap.Logger, id int, cmd string) core.App {
+func NewApp(logger *zap.Logger, id uint64, cmd string) core.App {
 	app := &App{
 		logger: logger,
 		id:     id,
@@ -35,7 +35,7 @@ func NewApp(logger *zap.Logger, id int, cmd string) core.App {
 type App struct {
 	logger           *zap.Logger
 	docker           docker.Client
-	id               int
+	id               uint64
 	cmd              string
 	kind             utils.CmdType
 	containerDelay   time.Duration
