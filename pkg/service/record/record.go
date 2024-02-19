@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -37,6 +40,7 @@ func (r *recorder) Record(ctx context.Context) error {
 	var outgoingFrameChan = make(chan models.Frame)
 	var incomingErrChan = make(chan models.IncomingError)
 	var outgoingErrChan = make(chan models.OutgoingError)
+	var recordErr error
 
 	hookCtx, hookCancel := context.WithCancel(context.Background())
 	runAppCtx, runAppCancel := context.WithCancel(context.Background())
@@ -48,7 +52,22 @@ func (r *recorder) Record(ctx context.Context) error {
 	defer incomingCancel()
 	defer outgoingCancel()
 
-	err := r.instrumentation.Hook(hookCtx, models.HookOptions{})
+	stopReason := "User stopped recording"
+
+	testSetIds, err := r.testDB.GetAllTestSetIds(ctx)
+	if err != nil {
+		stopReason = "failed to get testSetIds"
+		utils.Stop(r.logger, stopReason)
+		return fmt.Errorf(stopReason+": %w", err)
+	}
+	newTestSetId, err := newTestSetId(testSetIds)
+	if err != nil {
+		stopReason = "failed to create new testSetId"
+		utils.Stop(r.logger, stopReason)
+		return fmt.Errorf(stopReason+": %w", err)
+	}
+
+	err = r.instrumentation.Hook(hookCtx, models.HookOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to start the hooks and proxy: %w", err)
 	}
@@ -66,41 +85,55 @@ func (r *recorder) Record(ctx context.Context) error {
 		outgoingFrameChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, models.OutgoingOptions{})
 	}()
 
-	for {
+	loop := true
+	for loop {
 		select {
 		case appErr := <-appErrChan:
 			switch appErr.AppErrorType {
 			case models.ErrCommandError:
-				r.logger.Error("error in running the user application, hence stopping keploy", zap.Error(appErr))
+				stopReason = "error in running the user application, hence stopping keploy"
+				r.logger.Error(stopReason, zap.Error(appErr))
 			case models.ErrUnExpected:
-				r.logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected", zap.Error(appErr))
+				stopReason = "user application terminated unexpectedly hence stopping keploy"
+				r.logger.Warn(stopReason+", please check user application logs if this behaviour is not expected", zap.Error(appErr))
 			default:
-				r.logger.Error("unknown error recieved from application, hence stopping keploy", zap.Error(appErr))
+				stopReason = "unknown error recieved from application, hence stopping keploy"
+				r.logger.Error("unknown error recieved from user application, hence stopping keploy", zap.Error(appErr))
 			}
-			hookCancel()
-			incomingCancel()
-			outgoingCancel()
-			return errors.New("failed to execute record due to error in running the user application")
+			recordErr = errors.New("failed to execute record due to error in running the user application")
+			loop = false
 		case frame := <-incomingFrameChan:
-			r.logger.Info("Incoming frame", zap.Any("frame", frame))
+			err := r.testDB.InsertTestCase(context.Background(), frame, newTestSetId)
+			if err != nil {
+				stopReason = "error while inserting incoming frame into db, hence stopping keploy"
+				r.logger.Error(stopReason, zap.Error(err))
+				recordErr = errors.New("failed to execute record due to error in inserting incoming frame into db")
+				loop = false
+			}
 		case frame := <-outgoingFrameChan:
-			r.logger.Info("Outgoing frame", zap.Any("frame", frame))
+			err := r.mockDB.InsertMock(context.Background(), frame, newTestSetId)
+			if err != nil {
+				stopReason = "error while inserting outgoing frame into db, hence stopping keploy"
+				r.logger.Error(stopReason, zap.Error(err))
+				recordErr = errors.New("failed to execute record due to error in inserting outgoing frame into db")
+				loop = false
+			}
 		case err := <-incomingErrChan:
-			r.logger.Error("error while fetching incoming frame", zap.Error(err))
-			runAppCancel()
-			hookCancel()
-			outgoingCancel()
-			return errors.New("failed to execute record due to error in fetching incoming frame")
+			stopReason = "error while fetching incoming frame, hence stopping keploy"
+			r.logger.Error(stopReason, zap.Error(err))
+			recordErr = errors.New("failed to execute record due to error in fetching incoming frame")
+			loop = false
 		case err := <-outgoingErrChan:
-			r.logger.Error("error while fetching outgoing frame", zap.Error(err))
-			runAppCancel()
-			hookCancel()
-			incomingCancel()
-			return errors.New("failed to execute record due to error in fetching outgoing frame")
+			stopReason = "error while fetching outgoing frame, hence stopping keploy"
+			r.logger.Error(stopReason, zap.Error(err))
+			recordErr = errors.New("failed to execute record due to error in fetching outgoing frame")
+			loop = false
 		case <-ctx.Done():
 			return nil
 		}
 	}
+	utils.Stop(r.logger, stopReason)
+	return recordErr
 }
 
 func (r *recorder) MockRecord(ctx context.Context) error {
@@ -125,7 +158,12 @@ func (r *recorder) MockRecord(ctx context.Context) error {
 	for {
 		select {
 		case frame := <-outgoingFrameChan:
-			r.logger.Info("Outgoing frame", zap.Any("frame", frame))
+			err := r.mockDB.InsertMock(context.Background(), frame, "")
+			if err != nil {
+				r.logger.Error("error while inserting outgoing frame into db", zap.Error(err))
+				hookCancel()
+				return errors.New("failed to execute record due to error in inserting outgoing frame into db")
+			}
 		case err := <-outgoingErrChan:
 			r.logger.Error("error while fetching outgoing frame", zap.Error(err))
 			hookCancel()
@@ -134,5 +172,21 @@ func (r *recorder) MockRecord(ctx context.Context) error {
 			return nil
 		}
 	}
+}
 
+func newTestSetId(testSetIds []string) (string, error) {
+	indx := 0
+	for _, testSetId := range testSetIds {
+		namePackets := strings.Split(testSetId, "-")
+		if len(namePackets) == 3 {
+			testSetIndx, err := strconv.Atoi(namePackets[2])
+			if err != nil {
+				continue
+			}
+			if indx < testSetIndx+1 {
+				indx = testSetIndx + 1
+			}
+		}
+	}
+	return fmt.Sprintf("%s%v", models.TestSetPattern, indx), nil
 }
