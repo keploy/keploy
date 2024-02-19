@@ -21,6 +21,11 @@ installKeploy (){
 
         set_alias 'sudo -E env PATH="$PATH" keploybin'
 
+        check_docker_status_for_linux
+        dockerStatus=$?
+        if [ "$dockerStatus" -eq 0 ]; then
+            return
+        fi
         add_network
     }
 
@@ -39,6 +44,11 @@ installKeploy (){
 
         set_alias 'sudo -E env PATH="$PATH" keploybin'
 
+        check_docker_status_for_linux
+        dockerStatus=$?
+        if [ "$dockerStatus" -eq 0 ]; then
+            return
+        fi
         add_network
     }
 
@@ -100,15 +110,7 @@ installKeploy (){
         fi
     }
 
-    add_network() {
-        if ! which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker and reinstall keploy if you are willing to use applications with docker"
-            return
-        fi
-        if ! docker info &> /dev/null; then
-            echo "Please start Docker and reinstall keploy if you are willing to use applications with docker"
-            return
-        fi
+    check_docker_status_for_linux() {
         check_sudo
         sudoCheck=$?
         network_alias=""
@@ -116,6 +118,31 @@ installKeploy (){
             # Add sudo to docker
             network_alias="sudo"
         fi
+        if ! $network_alias which docker &> /dev/null; then
+            echo -n "Docker not found on device, please install docker and reinstall keploy if you are willing to use applications with docker"
+            return 0
+        fi
+        if ! $network_alias docker info &> /dev/null; then
+            echo "Please start Docker and reinstall keploy if you are willing to use applications with docker"
+            return 0
+        fi
+        return 1
+    }
+
+     check_docker_status_for_Darwin() {
+        if ! which docker &> /dev/null; then
+            echo -n "Docker not found on device, please install docker to use Keploy"
+            return 0
+        fi
+        # Check if docker is running
+        if ! docker info &> /dev/null; then
+            echo "Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again."
+            return 0
+        fi
+        return 1
+    }
+
+    add_network() {
         if ! $network_alias docker network ls | grep -q 'keploy-network'; then
             $network_alias docker network create keploy-network
         fi
@@ -123,6 +150,12 @@ installKeploy (){
 
     install_docker() {
         if [ "$OS_NAME" = "Darwin" ]; then
+            check_docker_status_for_Darwin
+            dockerStatus=$?
+            if [ "$dockerStatus" -eq 0 ]; then
+                return
+            fi
+            add_network
             if ! docker volume inspect debugfs &>/dev/null; then
                 docker volume create --driver local --opt type=debugfs --opt device=debugfs debugfs
             fi
@@ -138,19 +171,8 @@ installKeploy (){
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
-            if ! which docker &> /dev/null; then
-                echo -n "Docker not found on device, please install docker to use Keploy"
-                return
-            fi
-
-            # Check if docker is running
-            if ! docker info &> /dev/null; then
-                echo "Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again."
-                return
-            fi
             install_docker
             return
-
         elif [ "$OS_NAME" = "Linux" ]; then
             if ! sudo mountpoint -q /sys/kernel/debug; then
                 sudo mount -t debugfs debugfs /sys/kernel/debug
