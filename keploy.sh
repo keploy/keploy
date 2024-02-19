@@ -130,12 +130,19 @@ installKeploy (){
     }
 
      check_docker_status_for_Darwin() {
-        if ! which docker &> /dev/null; then
+        check_sudo
+        sudoCheck=$?
+        network_alias=""
+        if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Linux" ]; then
+            # Add sudo to docker
+            network_alias="sudo"
+        fi
+        if ! $network_alias which docker &> /dev/null; then
             echo -n "Docker not found on device, please install docker to use Keploy"
             return 0
         fi
         # Check if docker is running
-        if ! docker info &> /dev/null; then
+        if ! $network_alias docker info &> /dev/null; then
             echo "Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again."
             return 0
         fi
