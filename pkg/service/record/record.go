@@ -34,7 +34,7 @@ func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, ap
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
-	dirName, err := yaml.NewSessionIndex(path, r.Logger)
+	dirName, err := fs.NewSessionIndex(path, r.Logger)
 	if err != nil {
 		r.Logger.Error("Failed to create the session index file", zap.Error(err))
 		return

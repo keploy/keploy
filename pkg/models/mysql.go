@@ -1,5 +1,26 @@
 package models
 
+import "gopkg.in/yaml.v3"
+
+type MySQLSchema struct {
+	Metadata  map[string]string   `json:"metadata" yaml:"metadata"`
+	Requests  []MysqlRequestYaml  `json:"requests" yaml:"requests"`
+	Response  []MysqlResponseYaml `json:"responses" yaml:"responses"`
+	CreatedAt int64               `json:"created" yaml:"created,omitempty"`
+}
+
+type MysqlRequestYaml struct {
+	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header"`
+	Message   yaml.Node          `json:"message,omitempty" yaml:"message"`
+	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
+}
+
+type MysqlResponseYaml struct {
+	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header"`
+	Message   yaml.Node          `json:"message,omitempty" yaml:"message"`
+	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
+}
+
 type MySQLPacketHeader struct {
 	PacketLength uint32 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
 	PacketNumber uint8  `json:"packet_number,omitempty" yaml:"packet_number,omitempty,flow" bson:"packet_number,omitempty"`

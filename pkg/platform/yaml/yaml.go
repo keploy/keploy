@@ -21,12 +21,13 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	yamldecoders "go.keploy.io/server/pkg/platform/yaml/yamlDecoders"
+	yamlencoders "go.keploy.io/server/pkg/platform/yaml/yamlEncoders"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
-
-var Emoji = "\U0001F430" + " Keploy:"
 
 type Yaml struct {
 	TcsPath     string
@@ -93,7 +94,7 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
 func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) error {
 	//
-	doc, _ := docRead.(*NetworkTrafficDoc)
+	doc, _ := docRead.(*models.NetworkTrafficDoc)
 	isFileEmpty, err := util.CreateYamlFile(path, fileName, ys.Logger)
 	if err != nil {
 		return err
@@ -187,7 +188,7 @@ func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string)
 func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context, filtersRead platform.KindSpecifier) error {
 	tc, ok := tcRead.(*models.TestCase)
 	if !ok {
-		return fmt.Errorf("%s failed to read testcase in WriteTestcase", Emoji)
+		return fmt.Errorf("%s failed to read testcase in WriteTestcase", utils.Emoji)
 	}
 	testFilters, ok := filtersRead.(*models.TestFilter)
 
@@ -198,11 +199,11 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 			if err, containsMatch := ContainsMatchingUrl(testFilter.UrlMethods, testFilter.Path, tc.HttpReq.URL, tc.HttpReq.Method); err == nil && containsMatch {
 				bypassTestCase = true
 			} else if err != nil {
-				return fmt.Errorf("%s failed to check matching url, error %s", Emoji, err.Error())
+				return fmt.Errorf("%s failed to check matching url, error %s", utils.Emoji, err.Error())
 			} else if bannerHeaderCheck, hasHeader := HasBannedHeaders(tc.HttpReq.Header, testFilter.Headers); bannerHeaderCheck == nil && hasHeader {
 				bypassTestCase = true
 			} else if bannerHeaderCheck != nil {
-				return fmt.Errorf("%s failed to check banned header, error %s", Emoji, err.Error())
+				return fmt.Errorf("%s failed to check banned header, error %s", utils.Emoji, err.Error())
 			}
 		}
 	}
@@ -236,7 +237,7 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 		}
 
 		// encode the testcase and its mocks into yaml docs
-		yamlTc, err := EncodeTestcase(*tc, ys.Logger)
+		yamlTc, err := yamlencoders.EncodeTestcase(*tc, ys.Logger)
 		if err != nil {
 			return err
 		}
@@ -292,7 +293,7 @@ func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier,
 			return nil, err
 		}
 		// Unmarshal the yaml doc into Testcase
-		tc, err := Decode(yamlTestcase[0], ys.Logger)
+		tc, err := yamldecoders.DecodeTestCase(yamlTestcase[0], ys.Logger)
 		if err != nil {
 			return nil, err
 		}
@@ -310,16 +311,16 @@ func (ys *Yaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier,
 	return tcsRead, nil
 }
 
-func read(path, name string) ([]*NetworkTrafficDoc, error) {
+func read(path, name string) ([]*models.NetworkTrafficDoc, error) {
 	file, err := os.OpenFile(filepath.Join(path, name+".yaml"), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 	decoder := yamlLib.NewDecoder(file)
-	yamlDocs := []*NetworkTrafficDoc{}
+	yamlDocs := []*models.NetworkTrafficDoc{}
 	for {
-		var doc NetworkTrafficDoc
+		var doc models.NetworkTrafficDoc
 		err := decoder.Decode(&doc)
 		if errors.Is(err, io.EOF) {
 			break
@@ -349,7 +350,7 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	}
 
 	mock.Name = fmt.Sprint("mock-", getNextID())
-	mockYaml, err := EncodeMock(mock, ys.Logger)
+	mockYaml, err := yamlencoders.EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
@@ -390,7 +391,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, testSet string) ([]p
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
-		mocks, err := decodeMocks(yamls, ys.Logger)
+		mocks, err := yamldecoders.DecodeMocks(yamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
@@ -469,7 +470,7 @@ func (ys *Yaml) ReadConfigMocks(testSet string) ([]platform.KindSpecifier, error
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
-		mocks, err := decodeMocks(yamls, ys.Logger)
+		mocks, err := yamldecoders.DecodeMocks(yamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
@@ -487,7 +488,7 @@ func (ys *Yaml) ReadConfigMocks(testSet string) ([]platform.KindSpecifier, error
 }
 
 func (ys *Yaml) update(path, fileName string, docRead platform.KindSpecifier) error {
-	doc, _ := docRead.(*NetworkTrafficDoc)
+	doc, _ := docRead.(*models.NetworkTrafficDoc)
 
 	yamlPath, err := util.ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
@@ -519,13 +520,13 @@ func (ys *Yaml) update(path, fileName string, docRead platform.KindSpecifier) er
 func (ys *Yaml) UpdateTestCase(tcRead platform.KindSpecifier, path, tcsName string, ctx context.Context) error {
 	tc, ok := tcRead.(*models.TestCase)
 	if !ok {
-		return fmt.Errorf("%s failed to read testcase in UpdateTest", Emoji)
+		return fmt.Errorf("%s failed to read testcase in UpdateTest", utils.Emoji)
 	}
 
 	// encode the testcase into yaml docs
-	yamlTc, err := EncodeTestcase(*tc, ys.Logger)
+	yamlTc, err := yamlencoders.EncodeTestcase(*tc, ys.Logger)
 	if err != nil {
-		return fmt.Errorf("%s failed to encode the testcase into yamldocs in UpdateTest:%v", Emoji, err)
+		return fmt.Errorf("%s failed to encode the testcase into yamldocs in UpdateTest:%v", utils.Emoji, err)
 	}
 
 	yamlTc.Name = tcsName
