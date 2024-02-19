@@ -1,5 +1,14 @@
 package models
 
+import "time"
+
+type GrpcSchema struct {
+	GrpcReq          GrpcReq   `json:"grpcReq" yaml:"grpcReq"`
+	GrpcResp         GrpcResp  `json:"grpcResp" yaml:"grpcResp"`
+	ReqTimestampMock time.Time `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+}
+
 type GrpcHeaders struct {
 	PseudoHeaders   map[string]string `json:"pseudo_headers" yaml:"pseudo_headers"`
 	OrdinaryHeaders map[string]string `json:"ordinary_headers" yaml:"ordinary_headers"`

@@ -3,9 +3,11 @@ package models
 import (
 	"encoding/json"
 	"errors"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
+	"gopkg.in/yaml.v3"
 )
 
 type MongoOpMessage struct {
@@ -42,6 +44,27 @@ type MongoRequest struct {
 	Header    *MongoHeader `json:"header,omitempty" yaml:"header,omitempty" bson:"header,omitempty"`
 	Message   interface{}  `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
 	ReadDelay int64        `json:"read_delay,omitempty" yaml:"read_delay,omitempty" bson:"read_delay,omitempty"`
+}
+
+type MongoSchema struct {
+	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Requests         []RequestYaml     `json:"requests" yaml:"requests"`
+	Response         []ResponseYaml    `json:"responses" yaml:"responses"`
+	CreatedAt        int64             `json:"created" yaml:"created,omitempty"`
+	ReqTimestampMock time.Time         `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time         `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+}
+
+type RequestYaml struct {
+	Header    *MongoHeader `json:"header,omitempty" yaml:"header"`
+	Message   yaml.Node    `json:"message,omitempty" yaml:"message"`
+	ReadDelay int64        `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
+}
+
+type ResponseYaml struct {
+	Header    *MongoHeader `json:"header,omitempty" yaml:"header"`
+	Message   yaml.Node    `json:"message,omitempty" yaml:"message"`
+	ReadDelay int64        `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
 }
 
 // UnmarshalBSON implements bson.Unmarshaler for mongoRequests because of interface typeof field

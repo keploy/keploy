@@ -1,10 +1,23 @@
 package models
 
 import (
+	"time"
+
 	"github.com/jackc/pgproto3/v2"
 )
 
 const ProtocolVersionNumber uint32 = 196608 // Replace with actual version number if different
+
+type PostgresSchema struct {
+	Metadata map[string]string `json:"metadata" yaml:"metadata"`
+
+	// Objects  []*models.OutputBinary          `json:"objects" yaml:"objects"`
+	PostgresRequests  []Backend  `json:"RequestBin,omitempty"`
+	PostgresResponses []Frontend `json:"ResponseBin,omitempty"`
+
+	ReqTimestampMock time.Time `json:"ReqTimestampMock,omitempty"`
+	ResTimestampMock time.Time `json:"ResTimestampMock,omitempty"`
+}
 
 // PG Request Packet Transcoder
 type Backend struct {
@@ -46,7 +59,7 @@ type Frontend struct {
 	PacketTypes                     []string                                 `json:"header,omitempty" yaml:"header,omitempty,flow"`
 	Identfier                       string                                   `json:"identifier,omitempty" yaml:"identifier,omitempty"`
 	Length                          uint32                                   `json:"length,omitempty" yaml:"length,omitempty"`
-	Payload                         string                               `json:"payload,omitempty" yaml:"payload,omitempty"`
+	Payload                         string                                   `json:"payload,omitempty" yaml:"payload,omitempty"`
 	AuthenticationOk                pgproto3.AuthenticationOk                `json:"authentication_ok,omitempty" yaml:"authentication_ok,omitempty"`
 	AuthenticationCleartextPassword pgproto3.AuthenticationCleartextPassword `json:"authentication_cleartext_password,omitempty" yaml:"authentication_cleartext_password,omitempty"`
 	AuthenticationMD5Password       pgproto3.AuthenticationMD5Password       `json:"authentication_md5_password,omitempty" yaml:"authentication_md5_password,omitempty"`

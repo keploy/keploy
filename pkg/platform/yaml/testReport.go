@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
 	"go.keploy.io/server/pkg/proxy/util"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -47,7 +48,7 @@ func (fe *TestReport) SetResult(runId string, test platform.KindSpecifier) {
 func (fe *TestReport) GetResults(runId string) ([]platform.KindSpecifier, error) {
 	testResults, ok := fe.tests[runId]
 	if !ok {
-		return nil, fmt.Errorf("%s found no test results for test report with id: %s", Emoji, runId)
+		return nil, fmt.Errorf("%s found no test results for test report with id: %s", utils.Emoji, runId)
 	}
 
 	return testResults, nil
@@ -67,7 +68,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Kin
 	var doc models.TestReport
 	err = decoder.Decode(&doc)
 	if err != nil {
-		return &models.TestReport{}, fmt.Errorf("%s failed to decode the yaml file documents. error: %v", Emoji, err.Error())
+		return &models.TestReport{}, fmt.Errorf("%s failed to decode the yaml file documents. error: %v", utils.Emoji, err.Error())
 	}
 	return &doc, nil
 }
@@ -75,7 +76,7 @@ func (fe *TestReport) Read(ctx context.Context, path, name string) (platform.Kin
 func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindSpecifier) error {
 	readDock, ok := doc.(*models.TestReport)
 	if !ok {
-		return fmt.Errorf("%s failed to read test report in yaml file", Emoji)
+		return fmt.Errorf("%s failed to read test report in yaml file", utils.Emoji)
 	}
 	if readDock.Name == "" {
 		lastIndex, err := findLastIndex(path, fe.Logger)
@@ -93,18 +94,18 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 	data := []byte{}
 	d, err := yamlLib.Marshal(&doc)
 	if err != nil {
-		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", Emoji, err.Error())
+		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
 	}
 	data = append(data, d...)
 
 	validatedPath, err := util.ValidatePath(filepath.Join(path, readDock.Name+".yaml"))
-    if err != nil {
-        return fmt.Errorf("%s failed to validate path: %s", Emoji, err.Error())
-    }
-    
-    err = os.WriteFile(validatedPath, data, os.ModePerm)
-    if err != nil {
-        return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
-    }
+	if err != nil {
+		return fmt.Errorf("%s failed to validate path: %s", utils.Emoji, err.Error())
+	}
+
+	err = os.WriteFile(validatedPath, data, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", utils.Emoji, err.Error())
+	}
 	return nil
 }
