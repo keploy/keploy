@@ -7,3 +7,6 @@ type Frame struct {
 	Spec    interface{} `json:"spec" yaml:"spec"`
 	Curl    string      `json:"curl" yaml:"curl,omitempty"`
 }
+
+type Spec struct {
+}
