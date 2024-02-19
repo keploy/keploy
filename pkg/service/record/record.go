@@ -41,6 +41,7 @@ func (r *recorder) Record(ctx context.Context) error {
 	var incomingErrChan = make(chan models.IncomingError)
 	var outgoingErrChan = make(chan models.OutgoingError)
 	var recordErr error
+	var appId int
 
 	hookCtx, hookCancel := context.WithCancel(context.Background())
 	runAppCtx, runAppCancel := context.WithCancel(context.Background())
@@ -60,6 +61,7 @@ func (r *recorder) Record(ctx context.Context) error {
 		utils.Stop(r.logger, stopReason)
 		return fmt.Errorf(stopReason+": %w", err)
 	}
+
 	newTestSetId, err := newTestSetId(testSetIds)
 	if err != nil {
 		stopReason = "failed to create new testSetId"
@@ -67,22 +69,20 @@ func (r *recorder) Record(ctx context.Context) error {
 		return fmt.Errorf(stopReason+": %w", err)
 	}
 
-	err = r.instrumentation.Hook(hookCtx, models.HookOptions{})
+	appId, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+
+	err = r.instrumentation.Hook(hookCtx, appId, models.HookOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to start the hooks and proxy: %w", err)
 	}
 
+	incomingFrameChan, incomingErrChan = r.instrumentation.GetIncoming(incomingCtx, appId, models.IncomingOptions{})
+
+	outgoingFrameChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, appId, models.OutgoingOptions{})
+
 	go func() {
-		runAppError = r.instrumentation.Run(runAppCtx, r.config.Command)
+		runAppError = r.instrumentation.Run(runAppCtx, appId, r.config.Command)
 		appErrChan <- runAppError
-	}()
-
-	go func() {
-		incomingFrameChan, incomingErrChan = r.instrumentation.GetIncoming(incomingCtx, models.IncomingOptions{})
-	}()
-
-	go func() {
-		outgoingFrameChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, models.OutgoingOptions{})
 	}()
 
 	loop := true
@@ -146,13 +146,14 @@ func (r *recorder) MockRecord(ctx context.Context) error {
 	defer hookCancel()
 	defer outgoingCancel()
 
-	err := r.instrumentation.Hook(hookCtx, models.HookOptions{})
+	appId, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	err = r.instrumentation.Hook(hookCtx, appId, models.HookOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to execute mock-record due to error while loading hooks and proxy: %w", err)
 	}
 
 	go func() {
-		outgoingFrameChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, models.OutgoingOptions{})
+		outgoingFrameChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, appId, models.OutgoingOptions{})
 	}()
 
 	for {
