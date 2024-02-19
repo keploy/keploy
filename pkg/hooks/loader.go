@@ -182,6 +182,8 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) {
 }
 
 func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
 	h.matchedMocks = append(h.matchedMocks, newMock.Name)
 	return isUpdated
