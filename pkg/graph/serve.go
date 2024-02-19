@@ -16,7 +16,6 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
@@ -56,8 +55,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	models.SetMode(models.MODE_TEST)
 	tester := test.NewTester(g.logger)
 	testReportFS := yaml.NewTestReportFS(g.logger)
-	teleFS := fs.NewTeleFS(g.logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
+	tele := telemetry.NewTelemetry(g.logger, enableTele, false, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore(path, path, "", "", g.logger, tele)
 	routineId := pkg.GenerateRandomID()

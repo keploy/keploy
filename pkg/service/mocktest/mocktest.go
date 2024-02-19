@@ -12,14 +12,12 @@ import (
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/pkg/platform/yaml"
 	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
-
-var Emoji = "\U0001F430" + " Keploy:"
 
 type mockTester struct {
 	logger *zap.Logger
@@ -36,8 +34,7 @@ func NewMockTester(logger *zap.Logger) MockTester {
 func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName string, enableTele bool) {
 
 	models.SetMode(models.MODE_TEST)
-	teleFS := fs.NewTeleFS(s.logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, s.logger, "", nil)
+	tele := telemetry.NewTelemetry(s.logger, enableTele, false, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore(path, path, "", mockName, s.logger, tele)
 	s.logger.Debug("path of mocks : " + path)
@@ -115,7 +112,7 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Printf(Emoji+"Received signal:%v\n", <-stopper)
+	fmt.Printf(utils.Emoji+"Received signal:%v\n", <-stopper)
 
 	s.logger.Info("Received signal, initiating graceful shutdown...")
 

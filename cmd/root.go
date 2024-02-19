@@ -14,14 +14,12 @@ import (
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/pkg/platform/fs"
+	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
 )
-
-var Emoji = "\U0001F430" + " Keploy:"
 
 var errFileNotFound = errors.New("fileNotFound")
 
@@ -79,7 +77,7 @@ func setupLogger() *zap.Logger {
 
 	logCfg.Encoding = "colorConsole"
 
-	// Customize the encoder config to put the emoji at the beginning.
+	// Customize the encoder config to put the  utils.Emoji at the beginning.
 	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
 	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
@@ -93,7 +91,7 @@ func setupLogger() *zap.Logger {
 	if os.IsNotExist(err) {
 		_, err := os.Create("keploy-logs.txt")
 		if err != nil {
-			log.Println(Emoji, "failed to create log file", err)
+			log.Println(utils.Emoji, "failed to create log file", err)
 			return nil
 		}
 	}
@@ -101,14 +99,14 @@ func setupLogger() *zap.Logger {
 	// Check if the permission of the log file is 777, if not set it to 777.
 	fileInfo, err := os.Stat("keploy-logs.txt")
 	if err != nil {
-		log.Println(Emoji, "failed to get the log file info", err)
+		log.Println(utils.Emoji, "failed to get the log file info", err)
 		return nil
 	}
 	if fileInfo.Mode().Perm() != 0777 {
 		// Set the permissions of the log file to 777.
 		err = os.Chmod("keploy-logs.txt", 0777)
 		if err != nil {
-			log.Println(Emoji, "failed to set permissions of log file", err)
+			log.Println(utils.Emoji, "failed to set permissions of log file", err)
 			return nil
 		}
 	}
@@ -129,7 +127,7 @@ func setupLogger() *zap.Logger {
 
 	logger, err := logCfg.Build()
 	if err != nil {
-		log.Panic(Emoji, "failed to start the logger for the CLI", err)
+		log.Panic(utils.Emoji, "failed to start the logger for the CLI", err)
 		return nil
 	}
 	return logger
@@ -164,12 +162,13 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		}
 	}
 	arch := runtime.GOARCH
-	installationID, err := fs.NewTeleFS(log).Get(false)
+	tele := telemetry.NewTelemetry(log, true, false, "", nil)
+	err = tele.ExtractInstallationId(false)
 	if err != nil {
 		log.Debug("failed to get installationID", zap.Error(err))
 	}
-	if installationID == "" {
-		installationID, err = fs.NewTeleFS(log).Get(true)
+	if tele.InstallationID == "" {
+		err = tele.ExtractInstallationId(true)
 		if err != nil {
 			log.Debug("failed to get installationID for new user.", zap.Error(err))
 		}
@@ -178,15 +177,14 @@ func modifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		scope.SetTag("Keploy Version", utils.Version)
 		scope.SetTag("Linux Kernel Version", kernelVersion)
 		scope.SetTag("Architecture", arch)
-		scope.SetTag("Installation ID", installationID)
+		scope.SetTag("Installation ID", tele.InstallationID)
 		// Add more context as needed
 	})
 	return log
 }
 
 func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-	emoji := "\U0001F430" + " Keploy:"
-	enc.AppendString(emoji + " " + t.Format(time.RFC3339) + " ")
+	enc.AppendString(utils.Emoji + " " + t.Format(time.RFC3339) + " ")
 }
 
 func newRoot() *Root {

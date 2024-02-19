@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -255,7 +255,7 @@ func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
 	if generateTestReport {
 		return
 	}
-	
+
 	_, err := os.Stat("keploy/testReports")
 	if os.IsNotExist(err) {
 		return
