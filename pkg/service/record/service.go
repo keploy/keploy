@@ -11,10 +11,10 @@ type Instrumentation interface {
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (int, error)
 	//Hook will load hooks and start the proxy server.
 	Hook(ctx context.Context, id int, opts models.HookOptions) error
-	GetIncoming(ctx context.Context, id int, opts models.IncomingOptions) (chan models.Frame, error)
-	GetOutgoing(ctx context.Context, id int, opts models.OutgoingOptions) (chan models.Frame, error)
+	GetIncoming(ctx context.Context, id int, opts models.IncomingOptions) (chan models.Frame, chan models.IncomingError)
+	GetOutgoing(ctx context.Context, id int, opts models.OutgoingOptions) (chan models.Frame, chan models.OutgoingError)
 	// Run is blocking call and will execute until error
-	Run(ctx context.Context, id int, opts models.RunOptions) error
+	Run(ctx context.Context, id int, opts models.RunOptions) models.AppError
 }
 
 type Service interface {

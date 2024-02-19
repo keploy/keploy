@@ -1,5 +1,11 @@
 package models
 
+import (
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform"
+	"go.keploy.io/server/v2/pkg/core/hooks"
+)
+
 type TestReport struct {
 	Version Version      `json:"version" yaml:"version"`
 	Name    string       `json:"name" yaml:"name"`
@@ -29,6 +35,24 @@ type TestResult struct {
 	Res          HttpResp   `json:"resp" yaml:"resp,omitempty"`
 	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
 	Result       Result     `json:"result" yaml:"result"`
+}
+
+type SimulateRequestConfig struct {
+	Tc             *models.TestCase
+	LoadedHooks    *hooks.Hook
+	AppCmd         string
+	UserIP         string
+	TestSet        string
+	ApiTimeout     uint64
+	Success        *int
+	Failure        *int
+	Status         *models.TestRunStatus
+	TestReportFS   platform.TestReportDB
+	TestReport     *models.TestReport
+	Path           string
+	DockerID       bool
+	NoiseConfig    models.GlobalNoise
+	IgnoreOrdering bool
 }
 
 func (tr *TestResult) GetKind() string {

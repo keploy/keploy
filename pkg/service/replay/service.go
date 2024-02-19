@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -17,17 +18,22 @@ type Instrumentation interface {
 }
 
 type Service interface {
+	Replay(ctx context.Context) error
+	SimulateTestCase(ctx context.Context, cfg models.SimulateRequestConfig) error
 }
 
-// TestDB will only be readonly
 type TestDB interface {
+	GetAllTestSetIds(ctx context.Context) ([]string, error)
+	GetTestCases(ctx context.Context, testSetId string) ([]models.Frame, error)
 }
 
-// MockDB will only be readonly
 type MockDB interface {
+	GetMocks(ctx context.Context, testSetId string) ([]models.Frame, error)
 }
 
 type ReportDB interface {
+	GetReport(ctx context.Context, testRunId string, testSetId string) (models.TestReport, error)
+	InsertReport(ctx context.Context, testRunId string, testSetId string, testReport models.TestReport) error
 }
 
 type Telemetry interface {
