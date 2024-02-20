@@ -1,12 +1,10 @@
 package Normalise
 
 import (
+	"fmt"
 	"os"
-
-	"gopkg.in/yaml.v2"
 )
 
-// getDirectories returns a list of directories in the given path.
 func getDirectories(path string) ([]string, error) {
 	var dirs []string
 
@@ -15,7 +13,13 @@ func getDirectories(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() {
+		if cerr := dir.Close(); cerr != nil {
+			// If there is an error during close, log it or handle it appropriately
+			// In this case, you could log the error
+			fmt.Printf("Error closing directory: %v", cerr)
+		}
+	}()
 
 	// Read the directory entries
 	fileInfos, err := dir.Readdir(-1)
@@ -33,31 +37,6 @@ func getDirectories(path string) ([]string, error) {
 	return dirs, nil
 }
 
-// mergeYAML merges the existing YAML content with the updated content.
-func mergeYAML(existingYAML, updatedYAML []byte) []byte {
-	var existingData map[string]interface{}
-	if err := yaml.Unmarshal(existingYAML, &existingData); err != nil {
-		panic(err)
-	}
-
-	var updatedData map[string]interface{}
-	if err := yaml.Unmarshal(updatedYAML, &updatedData); err != nil {
-		panic(err)
-	}
-
-	// Merge the updated data with the existing data
-	for key, value := range updatedData {
-		existingData[key] = value
-	}
-
-	// Marshal the merged data back to YAML
-	mergedYAML, err := yaml.Marshal(existingData)
-	if err != nil {
-		panic(err)
-	}
-
-	return mergedYAML
-}
 func contains(list []string, item string) bool {
 	for _, value := range list {
 		if value == item {

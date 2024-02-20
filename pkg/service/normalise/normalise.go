@@ -1,7 +1,8 @@
 package Normalise
 
 import (
-	"io/ioutil"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -46,7 +47,7 @@ func (n *normaliser) Normalise(path string, testSet string, testCases string) {
 	n.logger.Info("Test Run Folder", zap.String("folder", lastRunFolderPath))
 
 	// Get list of YAML files in the last run folder
-	files, err := ioutil.ReadDir(lastRunFolderPath)
+	files, err := fs.ReadDir(os.DirFS(lastRunFolderPath), ".")
 	if err != nil {
 		n.logger.Error("Failed to read directory", zap.Error(err))
 		return
@@ -58,7 +59,7 @@ func (n *normaliser) Normalise(path string, testSet string, testCases string) {
 			filePath := filepath.Join(lastRunFolderPath, file.Name())
 
 			// Read the YAML file
-			yamlData, err := ioutil.ReadFile(filePath)
+			yamlData, err := fs.ReadFile(os.DirFS(lastRunFolderPath), filePath)
 			if err != nil {
 				n.logger.Error("Failed to read YAML file", zap.Error(err))
 				continue
@@ -80,7 +81,7 @@ func (n *normaliser) Normalise(path string, testSet string, testCases string) {
 					// Read the contents of the testcase file
 					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
 					n.logger.Info("Updating testcase file", zap.String("filePath", testCaseFilePath))
-					testCaseContent, err := ioutil.ReadFile(testCaseFilePath)
+					testCaseContent, err := fs.ReadFile(os.DirFS(testCaseFilePath), testCaseFilePath)
 					if err != nil {
 						n.logger.Error("Failed to read testcase file", zap.Error(err))
 						continue
@@ -104,7 +105,7 @@ func (n *normaliser) Normalise(path string, testSet string, testCases string) {
 					}
 
 					// Write the updated YAML content back to the file
-					err = ioutil.WriteFile(testCaseFilePath, updatedYAML, 0644)
+					err = os.WriteFile(testCaseFilePath, updatedYAML, 0644)
 					if err != nil {
 						n.logger.Error("Failed to write updated YAML to file", zap.Error(err))
 						continue
