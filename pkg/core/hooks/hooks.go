@@ -75,7 +75,14 @@ func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*core.NetworkAddress, 
 	if err != nil {
 		return nil, err
 	}
+	// TODO : need to implement eBPF code to differentiate between different apps
+	s, ok := h.sess.Get(0)
+	if !ok {
+		return nil, fmt.Errorf("session not found")
+	}
+
 	return &core.NetworkAddress{
+		AppID:    s.ID,
 		Version:  d.IpVersion,
 		IPv4Addr: d.DestIp4,
 		IPv6Addr: d.DestIp6,
@@ -88,6 +95,11 @@ func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookOptions) error {
+
+	h.sess.Set(id, &core.Session{
+		ID: id,
+	})
+
 	err := h.load(ctx, opts)
 	if err != nil {
 		return err
@@ -445,6 +457,9 @@ func (h *Hooks) SetKeployModeInKernel(mode uint32) {
 }
 
 func (h *Hooks) Record(ctx context.Context, id uint64) (<-chan *models.TestCase, <-chan error) {
+	// TODO use the session to get the app id
+	// and then use the app id to get the test cases chan
+	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents)
 }
 

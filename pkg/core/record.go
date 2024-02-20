@@ -14,6 +14,15 @@ func (r *Record) GetIncoming(ctx context.Context, id uint64, opts models.Incomin
 }
 
 func (r *Record) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, <-chan error) {
-	//TODO implement me
-	panic("implement me")
+	//make a new channel for the errors
+	errCh := make(chan error, 10) // Buffered channel to prevent blocking
+	m := make(chan *models.Mock, 500)
+
+	err := r.proxy.Record(ctx, id, m, opts)
+	if err != nil {
+		errCh <- err
+		return nil, errCh
+	}
+
+	return m, errCh
 }

@@ -1,83 +1,83 @@
 package http
 
 import (
-	"fmt"
-	"net"
+	"context"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"net/http"
 	"net/url"
 	"unicode"
 
 	"github.com/agnivade/levenshtein"
 	"github.com/cloudflare/cfssl/log"
-	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.uber.org/zap"
 )
 
-func match(req *http.Request, reqBody []byte, reqURL *url.URL, isReqBodyJSON bool, h *hooks.Hook, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer []byte, recover func(id int)) (bool, *models.Mock, error) {
+func match(ctx context.Context, logger *zap.Logger, req *http.Request, reqURL *url.URL, requestBuffer []byte, jsonBody bool, tcsMocks []*models.Mock) (bool, *models.Mock, error) {
 	for {
-		tcsMocks, err := h.GetTcsMocks()
-		if err != nil {
-			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
-		}
-
-		var eligibleMock []*models.Mock
-
-		for _, mock := range tcsMocks {
-			if mock.Kind == models.HTTP {
-				isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
-
-				//the body of mock and request aren't of same type
-				if isMockBodyJSON != isReqBodyJSON {
-					continue
-				}
-
-				//parse request body url
-				parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
-				if err != nil {
-					logger.Error("failed to parse mock url", zap.Error(err))
-					continue
-				}
-
-				//Check if the path matches
-				if parsedURL.Path != reqURL.Path {
-					//If it is not the same, continue
-					continue
-				}
-
-				//Check if the method matches
-				if mock.Spec.HttpReq.Method != models.Method(req.Method) {
-					//If it is not the same, continue
-					continue
-				}
-
-				// Check if the header keys match
-				if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
-					// Different headers, so not a match
-					continue
-				}
-
-				if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
-					// Different query params, so not a match
-					continue
-				}
-				eligibleMock = append(eligibleMock, mock)
-			}
-		}
-
-		if len(eligibleMock) == 0 {
+		select {
+		case <-ctx.Done():
 			return false, nil, nil
-		}
+		default:
 
-		isMatched, bestMatch := Fuzzymatch(eligibleMock, requestBuffer, h)
-		if isMatched {
-			isDeleted := h.DeleteTcsMock(bestMatch)
-			if !isDeleted {
-				continue
+			var eligibleMocks []*models.Mock
+
+			for _, mock := range tcsMocks {
+				if mock.Kind == models.HTTP {
+					isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
+
+					//the body of mock and request aren't of same type
+					if isMockBodyJSON != jsonBody {
+						continue
+					}
+
+					//parse request body url
+					parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
+					if err != nil {
+						logger.Error("failed to parse mock url", zap.Error(err))
+						continue
+					}
+
+					//Check if the path matches
+					if parsedURL.Path != reqURL.Path {
+						//If it is not the same, continue
+						continue
+					}
+
+					//Check if the method matches
+					if mock.Spec.HttpReq.Method != models.Method(req.Method) {
+						//If it is not the same, continue
+						continue
+					}
+
+					// Check if the header keys match
+					if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, req.Header) {
+						// Different headers, so not a match
+						continue
+					}
+
+					if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, req.URL.Query()) {
+						// Different query params, so not a match
+						continue
+					}
+					eligibleMocks = append(eligibleMocks, mock)
+				}
 			}
+
+			if len(eligibleMocks) == 0 {
+				return false, nil, nil
+			}
+
+			isMatched, bestMatch := Fuzzymatch(eligibleMocks, requestBuffer)
+			if isMatched {
+				//isDeleted := h.DeleteTcsMock(bestMatch)
+				//if !isDeleted {
+				//	continue
+				//}
+				//
+			}
+			return isMatched, bestMatch, nil
 		}
-		return isMatched, bestMatch, nil
 	}
 
 }
@@ -130,7 +130,7 @@ func HttpDecoder(encoded string) ([]byte, error) {
 	return data, nil
 }
 
-func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) int {
+func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte) int {
 
 	mxSim := -1.0
 	mxIdx := -1
@@ -167,7 +167,7 @@ func HttpEncoder(buffer []byte) string {
 	return encoded
 }
 
-func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *models.Mock) {
+func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	com := HttpEncoder(reqBuff)
 	for _, mock := range tcsMocks {
 		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
@@ -187,7 +187,7 @@ func Fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte, h *hooks.Hook) (bool, *
 			return true, tcsMocks[idx]
 		}
 	}
-	idx := findBinaryMatch(tcsMocks, reqBuff, h)
+	idx := findBinaryMatch(tcsMocks, reqBuff)
 	if idx != -1 {
 		return true, tcsMocks[idx]
 	}

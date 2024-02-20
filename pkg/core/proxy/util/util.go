@@ -19,12 +19,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
-
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/utils"
 )
-
-var Emoji = "\U0001F430" + " Keploy:"
 
 var sendLogs = true
 
@@ -35,21 +30,25 @@ func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
-func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan error, logger *zap.Logger) error {
+func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) error {
 	for {
-		if conn == nil {
-			logger.Debug("the conn is nil")
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			if conn == nil {
+				logger.Debug("the conn is nil")
+			}
+			buffer, err := ReadBytes(conn)
+			if err != nil {
+				logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
+				errChannel <- err
+				return err
+			}
+			bufferChannel <- buffer
+			break
 		}
-		buffer, err := ReadBytes(conn)
-		if err != nil {
-			logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
-			errChannel <- err
-			return err
-		}
-		bufferChannel <- buffer
-		break
 	}
-	return nil
 }
 
 func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int)) ([]byte, error) {
@@ -57,6 +56,7 @@ func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination conn")
 	}
+
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	for _, v := range requestBuffer {
 		_, err := destConn.Write(v)
@@ -72,10 +72,7 @@ func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	errChannel := make(chan error)
 
 	go func() {
-		// Recover from panic and gracefully shutdown
-		defer recover(pkg.GenerateRandomID())
-		defer utils.HandlePanic()
-		ReadBuffConn(destConn, destBufferChannel, errChannel, logger)
+		ReadBuffConn(ctx, logger, destConn, destBufferChannel, errChannel)
 	}()
 
 	select {
@@ -332,7 +329,7 @@ func IsDockerRelatedCommand(cmd string) (bool, string) {
 	return false, ""
 }
 
-func IsDirectoryExists(path string) bool {
+func IsDirectoryExist(path string) bool {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return false
@@ -376,41 +373,4 @@ func GetJavaHome() (string, error) {
 	}
 
 	return "", fmt.Errorf("java.home not found in command output")
-}
-
-// Functions related to fuzzy matching
-func AdaptiveK(length, kMin, kMax, N int) int {
-	k := length / N
-	if k < kMin {
-		return kMin
-	} else if k > kMax {
-		return kMax
-	}
-	return k
-}
-
-func CreateShingles(data []byte, k int) map[string]struct{} {
-	shingles := make(map[string]struct{})
-	for i := 0; i < len(data)-k+1; i++ {
-		shingle := string(data[i : i+k])
-		shingles[shingle] = struct{}{}
-	}
-	return shingles
-}
-
-// JaccardSimilarity computes the Jaccard similarity between two sets of shingles.
-func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
-	intersectionSize := 0
-	for k := range setA {
-		if _, exists := setB[k]; exists {
-			intersectionSize++
-		}
-	}
-
-	unionSize := len(setA) + len(setB) - intersectionSize
-
-	if unionSize == 0 {
-		return 0.0
-	}
-	return float64(intersectionSize) / float64(unionSize)
 }

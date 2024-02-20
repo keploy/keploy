@@ -12,7 +12,7 @@ type Instrumentation interface {
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
 	//Hook will load hooks and start the proxy server.
 	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
-	MockOutgoing(ctx context.Context, id uint64, opts models.IncomingOptions) <-chan error
+	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) <-chan error
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// Run is blocking call and will execute until error
