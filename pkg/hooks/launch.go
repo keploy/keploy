@@ -202,72 +202,35 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				}
 
 				h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork), zap.Any("appCmd", appCmd))
-			} else if cmd == "docker-start" {
+			} else if cmd == "docker" || cmd == "docker-start"{
 				var err error
 
-				// extracting container name from app command
-				pattern := `start\s+(\w+)`
+				if cmd == "docker" {
+					cont, net, err := parseDockerCommand(appCmd)
+					h.logger.Debug("", zap.String("Parsed container name", cont))
+					h.logger.Debug("", zap.String("Parsed docker network", net))
 
-				re := regexp.MustCompile(pattern)
-				matches := re.FindStringSubmatch(appCmd)
-				if len(matches) < 2 {
-					h.logger.Error("container name not found in command")
+					if err != nil {
+						h.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+						return err
+					}
+
+					if err != nil {
+						h.logger.Error("failed to parse network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
+						return err
+					}
+
+					if len(appContainer) != 0 && appContainer != cont {
+						h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
+					}
+
+					if len(appNetwork) != 0 && appNetwork != net {
+						h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", appNetwork, net))
+					}
+
+					appContainer, appNetwork = cont, net
 				}
-
-				containerID := matches[1]
-
-				cont, net, err := GetContainerInfo(containerID, appNetwork)
-
-				h.logger.Info("", zap.String("Parsed container name", cont))
-				h.logger.Info("", zap.String("Parsed docker network", net))
-
-				if err != nil {
-					h.logger.Error("failed to parse container and network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
-					return err
-				}
-
-				if len(appContainer) != 0 && appContainer != cont {
-					h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
-				}
-
-				if len(appNetwork) != 0 && appNetwork != net {
-					h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", appNetwork, net))
-				}
-
-				appContainer, appNetwork = cont, net
-
-				//injecting appNetwork to keploy.
-				err = h.injectNetworkToKeploy(appNetwork)
-				if err != nil {
-					h.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", appNetwork))
-					return err
-				} 
-			} else if cmd == "docker" {
-				var err error
-				cont, net, err := parseDockerCommand(appCmd)
-				h.logger.Debug("", zap.String("Parsed container name", cont))
-				h.logger.Debug("", zap.String("Parsed docker network", net))
-
-				if err != nil {
-					h.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
-					return err
-				}
-
-				if err != nil {
-					h.logger.Error("failed to parse network name from given docker command", zap.Error(err), zap.Any("AppCmd", appCmd))
-					return err
-				}
-
-				if len(appContainer) != 0 && appContainer != cont {
-					h.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", appContainer, cont))
-				}
-
-				if len(appNetwork) != 0 && appNetwork != net {
-					h.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", appNetwork, net))
-				}
-
-				appContainer, appNetwork = cont, net
-
+				
 				//injecting appNetwork to keploy.
 				err = h.injectNetworkToKeploy(appNetwork)
 				if err != nil {
