@@ -35,12 +35,12 @@ func NewRecorder(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Tel
 func (r *recorder) Record(ctx context.Context) error {
 	var runAppError models.AppError
 	var appErrChan = make(chan models.AppError)
-	var incomingFrameChan = make(chan models.Frame)
-	var outgoingFrameChan = make(chan models.Frame)
-	var incomingErrChan = make(chan models.IncomingError)
-	var outgoingErrChan = make(chan models.OutgoingError)
+	var incomingChan <-chan *models.TestCase
+	var outgoingChan <-chan *models.Mock
+	var incomingErrChan <-chan error
+	var outgoingErrChan <-chan error
 	var recordErr error
-	var appId int
+	var appId uint64
 
 	hookCtx, hookCancel := context.WithCancel(context.Background())
 	runAppCtx, runAppCancel := context.WithCancel(context.Background())
@@ -73,12 +73,12 @@ func (r *recorder) Record(ctx context.Context) error {
 		return fmt.Errorf("failed to start the hooks and proxy: %w", err)
 	}
 
-	incomingFrameChan, incomingErrChan = r.instrumentation.GetIncoming(incomingCtx, appId, models.IncomingOptions{})
+	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(incomingCtx, appId, models.IncomingOptions{})
 
-	outgoingFrameChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, appId, models.OutgoingOptions{})
+	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, appId, models.OutgoingOptions{})
 
 	go func() {
-		runAppError = r.instrumentation.Run(runAppCtx, appId, r.config.Command)
+		runAppError = r.instrumentation.Run(runAppCtx, appId, models.RunOptions{})
 		appErrChan <- runAppError
 	}()
 
@@ -99,16 +99,16 @@ func (r *recorder) Record(ctx context.Context) error {
 			}
 			recordErr = errors.New("failed to execute record due to error in running the user application")
 			loop = false
-		case frame := <-incomingFrameChan:
-			err := r.testDB.InsertTestCase(context.Background(), frame, newTestSetId)
+		case testCase := <-incomingChan:
+			err := r.testDB.InsertTestCase(context.Background(), testCase, newTestSetId)
 			if err != nil {
 				stopReason = "error while inserting incoming frame into db, hence stopping keploy"
 				r.logger.Error(stopReason, zap.Error(err))
 				recordErr = errors.New("failed to execute record due to error in inserting incoming frame into db")
 				loop = false
 			}
-		case frame := <-outgoingFrameChan:
-			err := r.mockDB.InsertMock(context.Background(), frame, newTestSetId)
+		case mock := <-outgoingChan:
+			err := r.mockDB.InsertMock(context.Background(), mock, newTestSetId)
 			if err != nil {
 				stopReason = "error while inserting outgoing frame into db, hence stopping keploy"
 				r.logger.Error(stopReason, zap.Error(err))
@@ -134,8 +134,8 @@ func (r *recorder) Record(ctx context.Context) error {
 }
 
 func (r *recorder) MockRecord(ctx context.Context) error {
-	var outgoingFrameChan = make(chan models.Frame)
-	var outgoingErrChan = make(chan models.OutgoingError)
+	var outgoingChan <-chan *models.Mock
+	var outgoingErrChan <-chan error
 
 	hookCtx, hookCancel := context.WithCancel(context.Background())
 	outgoingCtx, outgoingCancel := context.WithCancel(context.Background())
@@ -150,13 +150,13 @@ func (r *recorder) MockRecord(ctx context.Context) error {
 	}
 
 	go func() {
-		outgoingFrameChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, appId, models.OutgoingOptions{})
+		outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(outgoingCtx, appId, models.OutgoingOptions{})
 	}()
 
 	for {
 		select {
-		case frame := <-outgoingFrameChan:
-			err := r.mockDB.InsertMock(context.Background(), frame, "")
+		case mock := <-outgoingChan:
+			err := r.mockDB.InsertMock(context.Background(), mock, "")
 			if err != nil {
 				r.logger.Error("error while inserting outgoing frame into db", zap.Error(err))
 				hookCancel()

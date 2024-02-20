@@ -14,7 +14,7 @@ type Instrumentation interface {
 	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, <-chan error)
 	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, <-chan error)
 	// Run is blocking call and will execute until error
-	Run(ctx context.Context, id uint64, opts models.RunOptions) error
+	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 }
 
 type Service interface {
@@ -23,12 +23,12 @@ type Service interface {
 }
 
 type TestDB interface {
-	GetAllTestSetIds(ctx context.Context, appId int) ([]string, error)
-	InsertTestCase(ctx context.Context, tc models.Frame, testSetId string) error
+	GetAllTestSetIds(ctx context.Context) ([]string, error)
+	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetId string) error
 }
 
 type MockDB interface {
-	InsertMock(ctx context.Context, mock models.Frame, testSetId string) error
+	InsertMock(ctx context.Context, mock *models.Mock, testSetId string) error
 }
 
 type Telemetry interface {

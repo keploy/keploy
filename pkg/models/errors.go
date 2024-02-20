@@ -1,23 +1,6 @@
 package models
 
 import "fmt"
-
-type IncomingError struct {
-	Err error
-}
-
-func (e IncomingError) Error() string {
-	return fmt.Sprintf("incoming error: %v", e.Err)
-}
-
-type OutgoingError struct {
-	Err error
-}
-
-func (e OutgoingError) Error() string {
-	return fmt.Sprintf("outgoing error: %v", e.Err)
-}
-
 type AppError struct {
 	AppErrorType AppErrorType
 	Err          error
