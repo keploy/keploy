@@ -53,7 +53,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 }
 
 func (r *replayer) Replay(ctx context.Context) error {
-	var stopReason = "User stopped replay"
+	var stopReason string
 	testRunId, appId, err := r.BootReplay(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
@@ -158,8 +158,8 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, error) {
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to get all test run ids: %w", err)
 	}
-	testRunId := pkg.NewId(testRunIds, models.TestRunTemplateName)
 
+	newTestRunId := pkg.NewId(testRunIds, models.TestRunTemplateName)
 	appId, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to setup instrumentation: %w", err)
@@ -170,7 +170,7 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, error) {
 		return "", 0, fmt.Errorf("failed to start the hooks and proxy: %w", err)
 	}
 
-	return testRunId, appId, nil
+	return newTestRunId, appId, nil
 }
 
 func (r *replayer) GetAllTestSetIds(ctx context.Context) ([]string, error) {

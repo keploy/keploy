@@ -9,7 +9,6 @@ import (
 )
 
 type Instrumentation interface {
-	// TODO why is appId unint64
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
 	//Hook will load hooks and start the proxy server.
@@ -26,27 +25,27 @@ type Service interface {
 	BootReplay(ctx context.Context) (string, uint64, error)
 	GetAllTestSetIds(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64) (models.TestRunStatus, error)
-	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (model.TestSetStatus, error) // check if the testset is still running or it passed/ failed
+	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (model.TestSetStatus, error)
 }
 
 type TestDB interface {
 	GetAllTestSetIds(ctx context.Context) ([]string, error)
-	GetTestCases(ctx context.Context, testSetId string) ([]models.Frame, error)
+	GetTestCases(ctx context.Context, testSetId string) ([]*models.TestCase, error)
 }
 
 type MockDB interface {
-	GetFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]models.Frame, error)
+	GetFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	// TODO timestamps are added as in unfiltered also we filtering and put the filtered in unfiltered, need to discuss on this
 	// TODO Need to decide who will do sorting
 	// TODO define ctx
-	GetUnFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]models.Frame, error)
+	GetUnFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 }
 
 type ReportDB interface {
 	GetAllTestRunIds(ctx context.Context) ([]string, error)
-	GetTestCaseResults(ctx context.Context, testRunId string, testSetId string) ([]models.TestResult, error)
-	InsertTestCaseResult(ctx context.Context, testRunId string, testSetId string, testCaseId string, result models.TestResult) error
-	InsertReport(ctx context.Context, testRunId string, testSetId string, testReport models.TestReport) error
+	GetTestCaseResults(ctx context.Context, testRunId string, testSetId string) ([]*models.TestResult, error)
+	InsertTestCaseResult(ctx context.Context, testRunId string, testSetId string, testCaseId string, result *models.TestResult) error
+	InsertReport(ctx context.Context, testRunId string, testSetId string, testReport *models.TestReport) error
 }
 
 type Telemetry interface {
