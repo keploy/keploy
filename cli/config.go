@@ -2,10 +2,11 @@ package cli
 
 import (
 	"context"
-	"go.keploy.io/server/v2/config"
 	"path/filepath"
 
-	"go.keploy.io/server/v2/pkg/service/generateConfig"
+	"go.keploy.io/server/v2/config"
+
+	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 
 	"github.com/spf13/cobra"
@@ -46,7 +47,7 @@ func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Se
 				}
 			}
 
-			generatorConfig.GenerateConfig(filePath, generateConfig.GenerateConfigOptions{})
+			tools.GenerateConfig(filePath, tools.GenerateConfigOptions{})
 			return nil
 		},
 	}

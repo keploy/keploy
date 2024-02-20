@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/fs"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -19,7 +18,7 @@ type Telemetry struct {
 	OffMode        bool
 	logger         *zap.Logger
 	InstallationID string
-	store          FS
+	store          FST
 	KeployVersion  string
 	GlobalMap      map[string]interface{}
 	client         *http.Client

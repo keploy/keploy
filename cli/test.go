@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/graph"
+	"go.keploy.io/server/v2/graph"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"

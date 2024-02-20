@@ -5,8 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"io"
 	"log"
 	"net"
@@ -14,22 +12,26 @@ import (
 	"strings"
 	"sync"
 
+	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/proxy/integrations/grpc"
-	postgresparser "go.keploy.io/server/v2/pkg/proxy/integrations/postgres"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/grpc"
+	postgresparser "go.keploy.io/server/v2/pkg/core/proxy/integrations/postgres"
 	"go.keploy.io/server/v2/utils"
 
-	"github.com/cloudflare/cfssl/helpers"
 	"time"
 
+	"github.com/cloudflare/cfssl/helpers"
+
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v2/pkg/core/hooks"
+	genericparser "go.keploy.io/server/v2/pkg/core/proxy/integrations/generic"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mongo"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
-	"go.keploy.io/server/v2/pkg/hooks"
 	"go.keploy.io/server/v2/pkg/models"
-	genericparser "go.keploy.io/server/v2/pkg/proxy/integrations/generic"
-	"go.keploy.io/server/v2/pkg/proxy/integrations/http"
-	"go.keploy.io/server/v2/pkg/proxy/integrations/mongo"
-	"go.keploy.io/server/v2/pkg/proxy/integrations/mysql"
 	"go.uber.org/zap"
 )
 

@@ -16,9 +16,9 @@ import (
 
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/proxy/util"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 
-	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/utils"

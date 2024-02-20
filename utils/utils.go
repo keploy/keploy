@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -20,9 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
+
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
-	"go.keploy.io/server/v2/pkg/platform/fs"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -85,12 +85,12 @@ func ModifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		}
 	}
 	arch := runtime.GOARCH
-	installationID, err := fs.NewTeleFS(log).Get(false)
+	installationID, err := fst.NewTeleFS(log).Get(false)
 	if err != nil {
 		log.Debug("failed to get installationID", zap.Error(err))
 	}
 	if installationID == "" {
-		installationID, err = fs.NewTeleFS(log).Get(true)
+		installationID, err = fst.NewTeleFS(log).Get(true)
 		if err != nil {
 			log.Debug("failed to get installationID for new user.", zap.Error(err))
 		}
@@ -438,3 +438,4 @@ func GetUniqueReportDir(testReportPath, subDirPrefix string) (string, error) {
 	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
 	return newTestReportPath, nil
 }
+

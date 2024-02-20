@@ -1,9 +1,9 @@
 package graph
 
 import (
-	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/platform"
-	"go.keploy.io/server/v2/pkg/service/test"
+	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
 
@@ -13,7 +13,7 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type Resolver struct {
-	Tester         test.Tester
+	Tester         replay.Tester
 	TestReportFS   platform.TestReportDB
 	Storage        platform.TestCaseDB
 	LoadedHooks    *hooks.Hook

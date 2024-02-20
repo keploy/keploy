@@ -9,7 +9,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform"
-	"go.keploy.io/server/v2/pkg/proxy/util"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
