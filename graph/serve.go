@@ -13,14 +13,12 @@ import (
 
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/hooks"
+\	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/core/hooks"
+	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/fs"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
-	"go.keploy.io/server/v2/pkg/proxy"
-	"go.keploy.io/server/v2/pkg/service/test"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -53,9 +51,9 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 
 	models.SetMode(models.MODE_TEST)
-	tester := test.NewTester(g.logger)
+	tester := replay.NewTester(g.logger)
 	testReportFS := yaml.NewTestReportFS(g.logger)
-	teleFS := fs.NewTeleFS(g.logger)
+	teleFS := fst.NewTeleFS(g.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
 	tele.Ping(false)
 	ys := yaml.NewYamlStore(path, path, "", "", g.logger, tele)

@@ -8,7 +8,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 
-	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/core/hooks"
 )
 
 type transcoder struct {

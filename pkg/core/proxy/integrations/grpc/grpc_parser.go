@@ -14,7 +14,7 @@ import (
 	"golang.org/x/net/http2/hpack"
 
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 )

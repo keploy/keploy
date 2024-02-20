@@ -8,9 +8,9 @@ import (
 	// "fmt"
 	"unicode"
 
-	"go.keploy.io/server/v2/pkg/hooks"
+	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/proxy/util"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 )
 
 func PostgresDecoder(encoded string) ([]byte, error) {

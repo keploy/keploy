@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/test"
+	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -57,7 +57,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
-	initialisedValues := test.TestEnvironmentSetup{
+	initialisedValues := replay.TestEnvironmentSetup{
 		Ctx:            ctx,
 		LoadedHooks:    loadedHooks,
 		TestReportFS:   testReportFS,
