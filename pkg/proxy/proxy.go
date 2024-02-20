@@ -10,7 +10,6 @@ import (
 	"embed"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -58,13 +57,15 @@ type ProxySet struct {
 	IP4               uint32
 	IP6               [4]uint32
 	Port              uint32
+	DnsPort           uint32
 	hook              *hooks.Hook
 	logger            *zap.Logger
 	FilterPid         bool
 	clientConnections []net.Conn
 	connMutex         *sync.Mutex
 	Listener          net.Listener
-	DnsServer         *dns.Server
+	UdpDnsServer      *dns.Server
+	TcpDnsServer      *dns.Server
 	DnsServerTimeout  time.Duration
 	dockerAppCmd      bool
 	PassThroughPorts  []uint
@@ -156,7 +157,7 @@ func isJavaInstalled() bool {
 
 // to extract ca certificate to temp
 func ExtractCertToTemp() (string, error) {
-	tempFile, err := ioutil.TempFile("", "ca.crt")
+	tempFile, err := os.CreateTemp("", "ca.crt")
 	if err != nil {
 		return "", err
 	}
@@ -426,14 +427,26 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 			defer utils.HandlePanic()
 			proxySet.startProxy(ctx)
 		}()
+
+		//TODO: Need to make it configurable
+		proxySet.DnsPort = 26789
+
+		// Start the TCP DNS server
+		proxySet.logger.Debug("Running Tcp Dns Server for handling Dns queries over TCP")
+		go func() {
+			defer h.Recover(pkg.GenerateRandomID())
+			defer utils.HandlePanic()
+			proxySet.startTcpDnsServer()
+		}()
+
 		// Resolve DNS queries only in case of test mode.
 		if models.GetMode() == models.MODE_TEST {
-			proxySet.logger.Debug("Running Dns Server in Test mode...")
+			proxySet.logger.Debug("Running Udp Dns Server in Test mode...")
 			proxySet.logger.Info("Keploy has hijacked the DNS resolution mechanism, your application may misbehave in keploy test mode if you have provided wrong domain name in your application code.")
 			go func() {
 				defer h.Recover(pkg.GenerateRandomID())
 				defer utils.HandlePanic()
-				proxySet.startDnsServer()
+				proxySet.startUdpDnsServer()
 			}()
 		}
 	} else {
@@ -582,25 +595,42 @@ func (ps *ProxySet) startProxy(ctx context.Context) {
 	}
 }
 
-func (ps *ProxySet) startDnsServer() {
-
-	dnsServerAddr := fmt.Sprintf(":%v", ps.Port)
-	//TODO: Need to make it configurable
-	ps.DnsServerTimeout = 1 * time.Second
+func (ps *ProxySet) startTcpDnsServer() {
+	addr := fmt.Sprintf(":%v", ps.DnsPort)
 
 	handler := ps
 	server := &dns.Server{
-		Addr:      dnsServerAddr,
+		Addr:      addr,
+		Net:       "tcp",
+		Handler:   handler,
+		ReusePort: true,
+	}
+
+	ps.TcpDnsServer = server
+
+	ps.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
+	err := server.ListenAndServe()
+	if err != nil {
+		ps.logger.Error("failed to start tcp dns server", zap.Any("addr", server.Addr), zap.Error(err))
+	}
+}
+
+func (ps *ProxySet) startUdpDnsServer() {
+
+	addr := fmt.Sprintf(":%v", ps.DnsPort)
+
+	handler := ps
+	server := &dns.Server{
+		Addr:      addr,
 		Net:       "udp",
 		Handler:   handler,
-		UDPSize:   65535,
 		ReusePort: true,
 		// DisableBackground: true,
 	}
 
-	ps.DnsServer = server
+	ps.UdpDnsServer = server
 
-	ps.logger.Info(fmt.Sprintf("starting DNS server at addr %v", server.Addr))
+	ps.logger.Info(fmt.Sprintf("starting UDP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
 		ps.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
@@ -635,8 +665,10 @@ func (ps *ProxySet) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		cache.RUnlock()
 
 		if !found {
-			// If not found in cache, resolve the DNS query
-			// answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
+			// If not found in cache, resolve the DNS query only in case of record mode
+			if models.GetMode() == models.MODE_RECORD {
+				answers = resolveDNSQuery(question.Name, ps.logger, ps.DnsServerTimeout)
+			}
 
 			if answers == nil || len(answers) == 0 {
 				// If the resolution failed, return a default A record with Proxy IP
@@ -686,15 +718,11 @@ func resolveDNSQuery(domain string, logger *zap.Logger, timeout time.Duration) [
 	// Remove the last dot from the domain name if it exists
 	domain = strings.TrimSuffix(domain, ".")
 
-	// Create a context with a timeout
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
 	// Use the default system resolver
 	resolver := net.DefaultResolver
 
 	// Perform the lookup with the context
-	ips, err := resolver.LookupIPAddr(ctx, domain)
+	ips, err := resolver.LookupIPAddr(context.Background(), domain)
 	if err != nil {
 		logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
 		return nil
@@ -1019,13 +1047,23 @@ func (ps *ProxySet) StopProxyServer() {
 		}
 	}
 
-	// stop dns server only in case of test mode.
-	if ps.DnsServer != nil {
-		err := ps.DnsServer.Shutdown()
+	// stop udp dns server & tcp dns server
+	if ps.UdpDnsServer != nil {
+		err := ps.UdpDnsServer.Shutdown()
 		if err != nil {
-			ps.logger.Error("failed to stop dns server", zap.Error(err))
+			ps.logger.Error("failed to stop udp dns server", zap.Error(err))
 		}
-		ps.logger.Info("Dns server stopped")
+		ps.logger.Info("Udp Dns server stopped")
 	}
+
+	// stop tcp dns server & tcp dns server
+	if ps.TcpDnsServer != nil {
+		err := ps.TcpDnsServer.Shutdown()
+		if err != nil {
+			ps.logger.Error("failed to stop tcp dns server", zap.Error(err))
+		}
+		ps.logger.Info("Tcp Dns server stopped")
+	}
+
 	ps.logger.Info("proxy stopped...")
 }

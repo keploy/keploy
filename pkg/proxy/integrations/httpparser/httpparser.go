@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -470,7 +469,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			return
 		}
 
-		reqBody, err := ioutil.ReadAll(req.Body)
+		reqBody, err := io.ReadAll(req.Body)
 		if err != nil {
 			logger.Error("failed to read from request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 			return
@@ -875,7 +874,6 @@ func ParseFinalHttp(finalReq []byte, finalResp []byte, reqTimestampMock, resTime
 						Header:     pkg.ToYamlHttpHeader(req.Header),
 						Body:       string(reqBody),
 						URLParams:  pkg.UrlParams(req),
-						Host:       req.Host,
 					},
 					HttpResp: &models.HttpResp{
 						StatusCode: respParsed.StatusCode,
