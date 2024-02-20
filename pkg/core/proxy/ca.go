@@ -86,7 +86,7 @@ func getCaPaths() ([]string, error) {
 }
 
 // to extract ca certificate to temp
-func ExtractCertToTemp() (string, error) {
+func extractCertToTemp() (string, error) {
 	tempFile, err := ioutil.TempFile("", "ca.crt")
 	if err != nil {
 		return "", err
@@ -113,8 +113,8 @@ func ExtractCertToTemp() (string, error) {
 	return tempFile.Name(), nil
 }
 
-// IsJavaCAExists checks if the CA is already installed in the specified Java keystore
-func IsJavaCAExists(alias, storepass, cacertsPath string) bool {
+// isJavaCAExist checks if the CA is already installed in the specified Java keystore
+func isJavaCAExist(alias, storepass, cacertsPath string) bool {
 	cmd := exec.Command("keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 
 	err := cmd.Run()
@@ -122,8 +122,8 @@ func IsJavaCAExists(alias, storepass, cacertsPath string) bool {
 	return err == nil
 }
 
-// InstallJavaCA installs the CA in the Java keystore
-func InstallJavaCA(logger *zap.Logger, caPath string) error {
+// installJavaCA installs the CA in the Java keystore
+func installJavaCA(logger *zap.Logger, caPath string) error {
 	// check if java is installed
 	if util.IsJavaInstalled() {
 		logger.Debug("checking java path from default java home")
@@ -142,7 +142,7 @@ func InstallJavaCA(logger *zap.Logger, caPath string) error {
 
 		logger.Debug("", zap.Any("java_home", javaHome), zap.Any("caCertsPath", cacertsPath), zap.Any("caPath", caPath))
 
-		if IsJavaCAExists(alias, storePass, cacertsPath) {
+		if isJavaCAExist(alias, storePass, cacertsPath) {
 			logger.Info("Java detected and CA already exists", zap.String("path", cacertsPath))
 			return nil
 		}
@@ -164,8 +164,8 @@ func InstallJavaCA(logger *zap.Logger, caPath string) error {
 	return nil
 }
 
-// SetupCA setups custom certificate authority to handle TLS connections
-func SetupCA(logger *zap.Logger) error {
+// setupCA setups custom certificate authority to handle TLS connections
+func setupCA(logger *zap.Logger) error {
 	caPaths, err := getCaPaths()
 	if err != nil {
 		logger.Error("Failed to find the CA store path", zap.Error(err))
@@ -188,7 +188,7 @@ func SetupCA(logger *zap.Logger) error {
 		}
 
 		// install CA in the java keystore if java is installed
-		err = InstallJavaCA(logger, caPath)
+		err = installJavaCA(logger, caPath)
 		if err != nil {
 			logger.Error("failed to install CA in the java keystore", zap.Error(err))
 			return err
@@ -202,7 +202,7 @@ func SetupCA(logger *zap.Logger) error {
 		return err
 	}
 
-	tempCertPath, err := ExtractCertToTemp()
+	tempCertPath, err := extractCertToTemp()
 	if err != nil {
 		logger.Error("Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
 		return err
@@ -225,14 +225,14 @@ func SetupCA(logger *zap.Logger) error {
 }
 
 var (
-	caPrivKey      interface{}
-	caCertParsed   *x509.Certificate
-	destinationUrl string
+	caPrivKey    interface{}
+	caCertParsed *x509.Certificate
+	dstUrl       string
 )
 
 func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
-	destinationUrl = clientHello.ServerName
+	dstUrl = clientHello.ServerName
 
 	cfsslLog.Level = cfsslLog.LevelError
 

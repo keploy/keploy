@@ -16,6 +16,7 @@ type Core struct {
 	id     utils.AutoInc
 	apps   sync.Map
 	hook   Hooks
+	proxy  Proxy
 }
 
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {

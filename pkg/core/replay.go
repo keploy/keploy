@@ -9,7 +9,7 @@ type Replay struct {
 	Core
 }
 
-func (r *Replay) MockOutgoing(ctx context.Context, id uint64, mocks []models.Frame, opts models.IncomingOptions) <-chan error {
+func (r *Replay) MockOutgoing(ctx context.Context, id uint64, mocks []models.Frame, opts models.OutgoingOptions) <-chan error {
 	//TODO implement me
 	panic("implement me")
 }

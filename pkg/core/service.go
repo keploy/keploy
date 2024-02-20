@@ -42,9 +42,9 @@ type AppOptions struct {
 
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
-	Record(ctx context.Context, mocks chan models.Frame, opts ProxyOptions) error
-	Mock(ctx context.Context, mocks []models.Frame, opts ProxyOptions) error
-	SetMocks(ctx context.Context, mocks []models.Frame) error
+	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
+	Mock(ctx context.Context, id uint64, mocks []*models.Mock, opts models.OutgoingOptions) error
+	SetMocks(ctx context.Context, id uint64, mocks []*models.Mock) error
 }
 
 type ProxyOptions struct {
@@ -62,6 +62,7 @@ type DestInfo interface {
 }
 
 type NetworkAddress struct {
+	AppID    uint64
 	Version  uint32
 	IPv4Addr uint32
 	IPv6Addr [4]uint32
@@ -91,9 +92,11 @@ func (s *Sessions) Set(id uint64, session *Session) {
 }
 
 type Session struct {
-	id    uint64
-	mode  models.Mode
-	tc    chan models.TestCase
-	mc    chan models.Mock
-	mocks []models.Mock
+	ID    uint64
+	Mode  models.Mode
+	TC    chan<- *models.TestCase
+	MC    chan<- *models.Mock
+	Mocks []*models.Mock
+	//TODO: replace mocks with unfilteredMocks and filteredMocks
+	models.OutgoingOptions
 }
