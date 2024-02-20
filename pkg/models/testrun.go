@@ -1,9 +1,11 @@
 package models
 
 import (
+	"errors"
+
+	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform"
-	"go.keploy.io/server/v2/pkg/core/hooks"
 )
 
 type TestReport struct {
@@ -59,16 +61,35 @@ func (tr *TestResult) GetKind() string {
 	return string(tr.Kind)
 }
 
-type TestRunStatus string
+type TestSetStatus string
 
 const (
-	TestRunStatusRunning      TestRunStatus = "RUNNING"
-	TestRunStatusFailed       TestRunStatus = "FAILED"
-	TestRunStatusPassed       TestRunStatus = "PASSED"
-	TestRunStatusAppHalted    TestRunStatus = "APP_HALTED"
-	TestRunStatusUserAbort    TestRunStatus = "USER_ABORT"
-	TestRunStatusFaultUserApp TestRunStatus = "APP_FAULT"
+	TestSetStatusRunning      TestSetStatus = "RUNNING"
+	TestSetStatusFailed       TestSetStatus = "FAILED"
+	TestSetStatusPassed       TestSetStatus = "PASSED"
+	TestSetStatusAppHalted    TestSetStatus = "APP_HALTED"
+	TestSetStatusUserAbort    TestSetStatus = "USER_ABORT"
+	TestSetStatusFaultUserApp TestSetStatus = "APP_FAULT"
 )
+
+func StringToTestSetStatus(s string) (TestSetStatus, error) {
+	switch s {
+	case "RUNNING":
+		return TestSetStatusRunning, nil
+	case "FAILED":
+		return TestSetStatusFailed, nil
+	case "PASSED":
+		return TestSetStatusPassed, nil
+	case "APP_HALTED":
+		return TestSetStatusAppHalted, nil
+	case "USER_ABORT":
+		return TestSetStatusUserAbort, nil
+	case "APP_FAULT":
+		return TestSetStatusFaultUserApp, nil
+	default:
+		return "", errors.New("invalid TestSetStatus value")
+	}
+}
 
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`

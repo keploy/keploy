@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"go.keploy.io/server/v2/graph/model"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -15,7 +14,7 @@ type Instrumentation interface {
 	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	MockOutgoing(ctx context.Context, id uint64, opts models.IncomingOptions) <-chan error
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
-	SetMocks(ctx context.Context, id uint64, filtered []models.Frame, unFiltered []models.Frame) error
+	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 }
@@ -24,8 +23,8 @@ type Service interface {
 	Replay(ctx context.Context) error
 	BootReplay(ctx context.Context) (string, uint64, error)
 	GetAllTestSetIds(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64) (models.TestRunStatus, error)
-	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (model.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64) (models.TestSetStatus, error)
+	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (models.TestSetStatus, error)
 }
 
 type TestDB interface {
@@ -43,7 +42,8 @@ type MockDB interface {
 
 type ReportDB interface {
 	GetAllTestRunIds(ctx context.Context) ([]string, error)
-	GetTestCaseResults(ctx context.Context, testRunId string, testSetId string) ([]*models.TestResult, error)
+	GetTestCaseResults(ctx context.Context, testRunId string, testSetId string) ([]models.TestResult, error)
+	GetReport(ctx context.Context, testRunId string, testSetId string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunId string, testSetId string, testCaseId string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunId string, testSetId string, testReport *models.TestReport) error
 }
