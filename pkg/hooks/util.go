@@ -1,12 +1,9 @@
 package hooks
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"net"
-
-	"github.com/docker/docker/client"
 )
 
 const mockTable string = "mock"
@@ -29,30 +26,4 @@ func ConvertIPToUint32(ipStr string) (uint32, error) {
 	} else {
 		return 0, errors.New("failed to parse IP address")
 	}
-}
-
-// GetContainerInfo returns the containerName and networkName from containerId
-func GetContainerInfo(containerID string, networkName string) (string, string, error) {
-
-    dockerClient, err := client.NewClientWithOpts(client.FromEnv)
-    if err != nil {
-        return "", "", err
-    }
-
-    containerInfo, err := dockerClient.ContainerInspect(context.Background(), containerID)
-    if err != nil {
-        return "", "", err
-    }
-
-    containerName := containerInfo.Name[1:]
-
-    // Extract network as given by the user
-	networkInfo := ""
-    for networkInfo, _ = range containerInfo.NetworkSettings.Networks {
-        if networkInfo == networkName {
-			return containerName, networkName, nil
-		}
-    }	
-	
-    return containerName, networkInfo, nil
 }
