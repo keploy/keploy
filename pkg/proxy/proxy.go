@@ -747,13 +747,23 @@ func (ps *ProxySet) WrapTLSConnection(requestBuffer []byte, clientConn, destConn
 		return nil, nil, err
 	}
 
-	time.Sleep(1 * time.Second)
 	var value structs.MasterSecretEvent
+	// Polling loop
+	for {
+		err = ps.hook.MastersecretMap.Lookup(&clientTLSConn.ClientRandom, &value)
+		if err != nil {
+			logger.Error("failed to retrieve SSL key log", zap.Error(err))
+			return nil, nil, err
+		}
 
-	err = ps.hook.MastersecretMap.Lookup(&clientTLSConn.ClientRandom, &value)
-	if err != nil {
-		logger.Error("failed to retrieve SSL key log", zap.Error(err))
-		return nil, nil, err
+		isClientAppTrafficSecretNonZero := bytes.Compare(value.ClientAppTrafficSecret[:], make([]byte, 64)) != 0
+		isServerAppTrafficSecretNonZero := bytes.Compare(value.ServerAppTrafficSecret[:], make([]byte, 64)) != 0
+
+		if isClientAppTrafficSecretNonZero && isServerAppTrafficSecretNonZero {
+			break // Exit loop when both secrets are non-zero
+		}
+
+		time.Sleep(100 * time.Millisecond) // Wait for a short duration before checking again
 	}
 
 	if clientTLSConn.Vers == tlsHandler.VersionTLS13 {
