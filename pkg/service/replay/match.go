@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"bytes"
@@ -13,11 +16,201 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/fatih/color"
+	"github.com/k0kubun/pp/v3"
 	"github.com/olekukonko/tablewriter"
+	"github.com/wI2L/jsondiff"
 	"github.com/yudai/gojsondiff"
 	"github.com/yudai/gojsondiff/formatter"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 )
+
+type validatedJSON struct {
+	expected    interface{} // The expected JSON
+	actual      interface{} // The actual JSON
+	isIdentical bool
+}
+
+type jsonComparisonResult struct {
+	matches     bool     // Indicates if the JSON strings match according to the criteria
+	isExact     bool     // Indicates if the match is exact, considering ordering and noise
+	differences []string // Lists the keys or indices of values that are not the same
+}
+
+func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
+	bodyType := models.BodyTypePlain
+	if json.Valid([]byte(actualResponse.Body)) {
+		bodyType = models.BodyTypeJSON
+	}
+	pass := true
+	hRes := &[]models.HeaderResult{}
+
+	res := &models.Result{
+		StatusCode: models.IntResult{
+			Normal:   false,
+			Expected: tc.HttpResp.StatusCode,
+			Actual:   actualResponse.StatusCode,
+		},
+		BodyResult: []models.BodyResult{{
+			Normal:   false,
+			Type:     bodyType,
+			Expected: tc.HttpResp.Body,
+			Actual:   actualResponse.Body,
+		}},
+	}
+	noise := tc.Noise
+
+	var (
+		bodyNoise   = noiseConfig["body"]
+		headerNoise = noiseConfig["header"]
+	)
+
+	if bodyNoise == nil {
+		bodyNoise = map[string][]string{}
+	}
+	if headerNoise == nil {
+		headerNoise = map[string][]string{}
+	}
+
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise[x] = regexArr
+		} else if a[0] == "header" {
+			headerNoise[a[len(a)-1]] = regexArr
+		}
+	}
+
+	// stores the json body after removing the noise
+	cleanExp, cleanAct := tc.HttpResp.Body, actualResponse.Body
+	var jsonComparisonResult jsonComparisonResult
+	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
+		//validate the stored json
+		validatedJSON, err := ValidateAndMarshalJson(logger, &cleanExp, &cleanAct)
+		if err != nil {
+			return false, res
+		}
+		if validatedJSON.isIdentical {
+			jsonComparisonResult, err = JsonDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			pass = jsonComparisonResult.isExact
+			if err != nil {
+				return false, res
+			}
+		} else {
+			pass = false
+		}
+
+		// debug log for cleanExp and cleanAct
+		logger.Debug("cleanExp", zap.Any("", cleanExp))
+		logger.Debug("cleanAct", zap.Any("", cleanAct))
+	} else {
+		if !Contains(MapToArray(noise), "body") && tc.HttpResp.Body != actualResponse.Body {
+			pass = false
+		}
+	}
+
+	res.BodyResult[0].Normal = pass
+
+	if !CompareHeaders(pkg.ToHttpHeader(tc.HttpResp.Header), pkg.ToHttpHeader(actualResponse.Header), hRes, headerNoise) {
+
+		pass = false
+	}
+
+	res.HeadersResult = *hRes
+	if tc.HttpResp.StatusCode == actualResponse.StatusCode {
+		res.StatusCode.Normal = true
+	} else {
+
+		pass = false
+	}
+
+	if !pass {
+		logDiffs := NewDiffsPrinter(tc.Name)
+
+		newLogger := pp.New()
+		newLogger.WithLineInfo = false
+		newLogger.SetColorScheme(models.FailingColorScheme)
+		var logs = ""
+
+		logs = logs + newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+
+		// ------------ DIFFS RELATED CODE -----------
+		if !res.StatusCode.Normal {
+			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
+		}
+
+		var (
+			actualHeader   = map[string][]string{}
+			expectedHeader = map[string][]string{}
+			unmatched      = true
+		)
+
+		for _, j := range res.HeadersResult {
+			if !j.Normal {
+				unmatched = false
+				actualHeader[j.Actual.Key] = j.Actual.Value
+				expectedHeader[j.Expected.Key] = j.Expected.Value
+			}
+		}
+
+		if !unmatched {
+			for i, j := range expectedHeader {
+				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
+			}
+		}
+
+		if !res.BodyResult[0].Normal {
+			if json.Valid([]byte(actualResponse.Body)) {
+				patch, err := jsondiff.Compare(tc.HttpResp.Body, actualResponse.Body)
+				if err != nil {
+					logger.Warn("failed to compute json diff", zap.Error(err))
+				}
+				for _, op := range patch {
+					keyStr := op.Path
+					if len(keyStr) > 1 && keyStr[0] == '/' {
+						keyStr = keyStr[1:]
+					}
+					if jsonComparisonResult.matches {
+						logDiffs.hasarrayIndexMismatch = true
+						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
+					}
+					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+
+				}
+			} else {
+				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
+			}
+		}
+		newLogger.Printf(logs)
+		err := logDiffs.Render()
+		if err != nil {
+			logger.Error("failed to render the diffs", zap.Error(err))
+		}
+	} else {
+		logger := pp.New()
+		logger.WithLineInfo = false
+		logger.SetColorScheme(models.PassingColorScheme)
+		var log2 = ""
+		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+		logger.Printf(log2)
+
+	}
+	return pass, res
+}
+
+func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
+	m := map[string][]string{}
+	for k, v := range h {
+		m["header."+k] = []string{strings.Join(v, "")}
+	}
+	err := AddHttpBodyToMap(body, m)
+	if err != nil {
+		return m, err
+	}
+	return m, nil
+}
 
 // unmarshallJson returns unmarshalled JSON object.
 func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
@@ -556,4 +749,250 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
+}
+
+func Contains(elems []string, v string) bool {
+	for _, s := range elems {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func checkKey(res *[]models.HeaderResult, key string) bool {
+	for _, v := range *res {
+		if key == v.Expected.Key {
+			return false
+		}
+	}
+	return true
+}
+
+func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string][]string) bool {
+	if res == nil {
+		return false
+	}
+	match := true
+	_, isHeaderNoisy := noise["header"]
+	for k, v := range h1 {
+		regexArr, isNoisy := CheckStringExist(k, noise)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
+		}
+		isNoisy = isNoisy || isHeaderNoisy
+		val, ok := h2[k]
+		if !isNoisy {
+			if !ok {
+				if checkKey(res, k) {
+					*res = append(*res, models.HeaderResult{
+						Normal: false,
+						Expected: models.Header{
+							Key:   k,
+							Value: v,
+						},
+						Actual: models.Header{
+							Key:   k,
+							Value: nil,
+						},
+					})
+				}
+
+				match = false
+				continue
+			}
+			if len(v) != len(val) {
+				if checkKey(res, k) {
+					*res = append(*res, models.HeaderResult{
+						Normal: false,
+						Expected: models.Header{
+							Key:   k,
+							Value: v,
+						},
+						Actual: models.Header{
+							Key:   k,
+							Value: val,
+						},
+					})
+				}
+				match = false
+				continue
+			}
+			for i, e := range v {
+				if val[i] != e {
+					if checkKey(res, k) {
+						*res = append(*res, models.HeaderResult{
+							Normal: false,
+							Expected: models.Header{
+								Key:   k,
+								Value: v,
+							},
+							Actual: models.Header{
+								Key:   k,
+								Value: val,
+							},
+						})
+					}
+					match = false
+					continue
+				}
+			}
+		}
+		if checkKey(res, k) {
+			*res = append(*res, models.HeaderResult{
+				Normal: true,
+				Expected: models.Header{
+					Key:   k,
+					Value: v,
+				},
+				Actual: models.Header{
+					Key:   k,
+					Value: val,
+				},
+			})
+		}
+	}
+	for k, v := range h2 {
+		regexArr, isNoisy := CheckStringExist(k, noise)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
+		}
+		isNoisy = isNoisy || isHeaderNoisy
+		val, ok := h1[k]
+		if isNoisy && checkKey(res, k) {
+			*res = append(*res, models.HeaderResult{
+				Normal: true,
+				Expected: models.Header{
+					Key:   k,
+					Value: val,
+				},
+				Actual: models.Header{
+					Key:   k,
+					Value: v,
+				},
+			})
+			continue
+		}
+		if !ok {
+			if checkKey(res, k) {
+				*res = append(*res, models.HeaderResult{
+					Normal: false,
+					Expected: models.Header{
+						Key:   k,
+						Value: nil,
+					},
+					Actual: models.Header{
+						Key:   k,
+						Value: v,
+					},
+				})
+			}
+
+			match = false
+		}
+	}
+	return match
+}
+
+func MapToArray(mp map[string][]string) []string {
+	var result []string
+	for k := range mp {
+		result = append(result, k)
+	}
+	return result
+}
+
+func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
+	if val, ok := mp[s]; ok {
+		return val, ok
+	}
+	ok, val := MatchesAnyRegex(s, MapToArray(mp))
+	if ok {
+		return mp[val], ok
+	}
+	return []string{}, false
+}
+
+func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
+	for _, pattern := range regexArray {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(str) {
+			return true, pattern
+		}
+	}
+	return false, ""
+}
+
+func AddHttpBodyToMap(body string, m map[string][]string) error {
+	// add body
+	if json.Valid([]byte(body)) {
+		var result interface{}
+
+		err := json.Unmarshal([]byte(body), &result)
+		if err != nil {
+			return err
+		}
+		j := Flatten(result)
+		for k, v := range j {
+			nk := "body"
+			if k != "" {
+				nk = nk + "." + k
+			}
+			m[nk] = v
+		}
+	} else {
+		// add it as raw text
+		m["body"] = []string{body}
+	}
+	return nil
+}
+
+// Flatten takes a map and returns a new one where nested maps are replaced
+// by dot-delimited keys.
+// examples of valid jsons - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse#examples
+func Flatten(j interface{}) map[string][]string {
+	if j == nil {
+		return map[string][]string{"": {""}}
+	}
+	o := make(map[string][]string)
+	x := reflect.ValueOf(j)
+	switch x.Kind() {
+	case reflect.Map:
+		m, ok := j.(map[string]interface{})
+		if !ok {
+			return map[string][]string{}
+		}
+		for k, v := range m {
+			nm := Flatten(v)
+			for nk, nv := range nm {
+				fk := k
+				if nk != "" {
+					fk = fk + "." + nk
+				}
+				o[fk] = nv
+			}
+		}
+	case reflect.Bool:
+		o[""] = []string{strconv.FormatBool(x.Bool())}
+	case reflect.Float64:
+		o[""] = []string{strconv.FormatFloat(x.Float(), 'E', -1, 64)}
+	case reflect.String:
+		o[""] = []string{x.String()}
+	case reflect.Slice:
+		child, ok := j.([]interface{})
+		if !ok {
+			return map[string][]string{}
+		}
+		for _, av := range child {
+			nm := Flatten(av)
+			for nk, nv := range nm {
+				if ov, exists := o[nk]; exists {
+					o[nk] = append(ov, nv...)
+				} else {
+					o[nk] = nv
+				}
+			}
+		}
+	}
+	return o
 }
