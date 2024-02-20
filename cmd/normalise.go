@@ -53,11 +53,24 @@ func (n *Normalise) GetCmd() *cobra.Command {
 				// user provided the absolute path
 			}
 			path += "/keploy"
-			n.normaliser.Normalise(path)
+			testSet, err := cmd.Flags().GetString("test-set")
+			if err != nil || len(testSet) == 0 {
+				n.logger.Error("Please enter the testset to be normalised", zap.Error(err))
+				return err
+			}
+			testCases, err := cmd.Flags().GetString("test-cases")
+			if err != nil || len(testCases) == 0 {
+				n.logger.Error("Please enter the testcases to be normalised", zap.Error(err))
+				return err
+			}
+			n.normaliser.Normalise(path, testSet, testCases)
 			return nil
 		},
 	}
 
 	normaliseCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
+	normaliseCmd.Flags().String("test-set", "", "Test Set to be normalised")
+	normaliseCmd.Flags().String("test-cases", "", "Test Cases to be normalised")
+
 	return normaliseCmd
 }

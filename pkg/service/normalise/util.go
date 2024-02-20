@@ -58,6 +58,14 @@ func mergeYAML(existingYAML, updatedYAML []byte) []byte {
 
 	return mergedYAML
 }
+func contains(list []string, item string) bool {
+	for _, value := range list {
+		if value == item {
+			return true
+		}
+	}
+	return false
+}
 
 type TestCaseFile struct {
 	Version string `yaml:"version"`

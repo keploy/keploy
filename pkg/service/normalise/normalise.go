@@ -22,7 +22,7 @@ type normaliser struct {
 	logger *zap.Logger
 }
 
-func (n *normaliser) Normalise(path string) {
+func (n *normaliser) Normalise(path string, testSet string, testCases string) {
 	n.logger.Info("Test cases and Mock Path", zap.String("path", path))
 	testReportPath := filepath.Join(path, "testReports")
 
@@ -71,10 +71,11 @@ func (n *normaliser) Normalise(path string) {
 				n.logger.Error("Failed to unmarshal YAML", zap.Error(err))
 				continue
 			}
-
+			testCasesArr := strings.Split(testCases, " ")
 			// Iterate over tests in the TestReport
 			for _, test := range testReport.Tests {
-				if test.Status == models.TestStatusFailed {
+				testCasePath := filepath.Join(path, testSet)
+				if test.Status == models.TestStatusFailed && test.TestCasePath == testCasePath && contains(testCasesArr, test.TestCaseID) {
 
 					// Read the contents of the testcase file
 					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
