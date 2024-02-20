@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -22,7 +23,7 @@ type recorder struct {
 	config          config.Config
 }
 
-func NewRecorder(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) *recorder {
+func NewRecorder(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
 	return &recorder{
 		logger:          logger,
 		testDB:          testDB,
@@ -62,14 +63,12 @@ func (r *recorder) Record(ctx context.Context) error {
 		return fmt.Errorf(stopReason+": %w", err)
 	}
 
-	newTestSetId, err := newTestSetId(testSetIds)
-	if err != nil {
-		stopReason = "failed to create new testSetId"
-		utils.Stop(r.logger, stopReason)
-		return fmt.Errorf(stopReason+": %w", err)
-	}
+	newTestSetId := pkg.NewId(testSetIds, models.TestSetPattern)
 
 	appId, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to execute record due to error while setting up the environment: %w", err)
+	}
 
 	err = r.instrumentation.Hook(hookCtx, appId, models.HookOptions{})
 	if err != nil {
@@ -173,21 +172,4 @@ func (r *recorder) MockRecord(ctx context.Context) error {
 			return nil
 		}
 	}
-}
-
-func newTestSetId(testSetIds []string) (string, error) {
-	indx := 0
-	for _, testSetId := range testSetIds {
-		namePackets := strings.Split(testSetId, "-")
-		if len(namePackets) == 3 {
-			testSetIndx, err := strconv.Atoi(namePackets[2])
-			if err != nil {
-				continue
-			}
-			if indx < testSetIndx+1 {
-				indx = testSetIndx + 1
-			}
-		}
-	}
-	return fmt.Sprintf("%s%v", models.TestSetPattern, indx), nil
 }

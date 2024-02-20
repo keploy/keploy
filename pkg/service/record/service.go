@@ -23,7 +23,7 @@ type Service interface {
 }
 
 type TestDB interface {
-	GetAllTestSetIds(ctx context.Context) ([]string, error)
+	GetAllTestSetIds(ctx context.Context, appId int) ([]string, error)
 	InsertTestCase(ctx context.Context, tc models.Frame, testSetId string) error
 }
 

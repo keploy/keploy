@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -213,4 +214,21 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 		}
 	}
 	return indices, nil
+}
+
+func NewId(Ids []string, identifier string) string {
+	latestIndx := 0
+	for _, Id := range Ids {
+		namePackets := strings.Split(Id, "-")
+		if len(namePackets) == 3 {
+			Indx, err := strconv.Atoi(namePackets[2])
+			if err != nil {
+				continue
+			}
+			if latestIndx < Indx+1 {
+				latestIndx = Indx + 1
+			}
+		}
+	}
+	return fmt.Sprintf("%s%v", identifier, latestIndx)
 }
