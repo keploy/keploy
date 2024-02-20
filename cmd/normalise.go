@@ -49,8 +49,6 @@ func (n *Normalise) GetCmd() *cobra.Command {
 					n.logger.Error("failed to get the path of current directory", zap.Error(err))
 				}
 				path = cdirPath
-			} else {
-				// user provided the absolute path
 			}
 			path += "/keploy"
 			testSet, err := cmd.Flags().GetString("test-set")

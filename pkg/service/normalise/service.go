@@ -1,4 +1,4 @@
-package Normalise
+package normalise
 
 // Normaliser is an interface for normalising testcases.
 type Normaliser interface {

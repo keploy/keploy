@@ -1,4 +1,5 @@
-package Normalise
+// Package normalise provides functionality for normalising test cases.
+package normalise
 
 import (
 	"io/fs"
@@ -12,7 +13,7 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// newNormaliser initializes a new normaliser instance.
+// NewNormaliser initializes a new normaliser instance.
 func NewNormaliser(logger *zap.Logger) Normaliser {
 	return &normaliser{
 		logger: logger,

@@ -1,4 +1,4 @@
-package Normalise
+package normalise
 
 import (
 	"fmt"
