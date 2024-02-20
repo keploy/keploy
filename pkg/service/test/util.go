@@ -43,6 +43,7 @@ type TestEnvironmentSetup struct {
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 	IgnoreOrdering           bool
+	RemoveUnusedMocks        bool
 }
 
 type TestConfig struct {
@@ -65,6 +66,7 @@ type TestConfig struct {
 	Tele               *telemetry.Telemetry
 	PassThroughHosts   []models.Filters
 	IgnoreOrdering     bool
+	RemoveUnusedMocks  bool
 }
 
 type RunTestSetConfig struct {

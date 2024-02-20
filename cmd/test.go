@@ -240,6 +240,12 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
+			removeUnusedMocks, err := cmd.Flags().GetBool("removeUnusedMocks")
+			if err != nil {
+				t.logger.Error("failed to read the remove unused mocks flag")
+				return err
+			}
+
 			tests := map[string][]string{}
 
 			testsets, err := cmd.Flags().GetStringSlice("testsets")
@@ -446,6 +452,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					WithCoverage:       withCoverage,
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
+					RemoveUnusedMocks:  removeUnusedMocks,
 					PassthroughHosts:   passThroughHosts,
 				}, enableTele)
 
@@ -498,6 +505,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 
 	testCmd.Flags().Bool("ignoreOrdering", true, "Ignore ordering of array in response")
+
+	testCmd.Flags().Bool("removeUnusedMocks", false, "Removes unused mocks from mock file")
 
 	testCmd.Flags().MarkHidden("enableTele")
 

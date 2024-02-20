@@ -91,7 +91,7 @@ func findLastIndex(path string, Logger *zap.Logger) (int, error) {
 }
 
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
-func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) error {
+func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier, truncate bool) error {
 	//
 	doc, _ := docRead.(*NetworkTrafficDoc)
 	isFileEmpty, err := util.CreateYamlFile(path, fileName, ys.Logger)
@@ -103,8 +103,12 @@ func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) err
 	if err != nil {
 		return err
 	}
-
-	file, err := os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+	var file *os.File
+	if truncate {
+		file, err = os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	} else {
+		file, err = os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+	}
 	if err != nil {
 		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName))
 		return err
@@ -243,7 +247,7 @@ func (ys *Yaml) WriteTestcase(tcRead platform.KindSpecifier, ctx context.Context
 
 		// write testcase yaml
 		yamlTc.Name = tcsName
-		err = ys.Write(ys.TcsPath, tcsName, yamlTc)
+		err = ys.Write(ys.TcsPath, tcsName, yamlTc, false)
 		if err != nil {
 			ys.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 			return err
@@ -358,11 +362,30 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	// 	mock.Name = "mocks"
 	// }
 
-	err = ys.Write(ys.MockPath, "mocks", mockYaml)
+	err = ys.Write(ys.MockPath, "mocks", mockYaml, false)
 	if err != nil {
 		return err
 	}
 
+	return nil
+}
+
+func (ys *Yaml) RewriteMocks(mocks []*models.Mock, testSet string) error {
+	ys.MockPath = filepath.Join(ys.MockPath, testSet)
+	for i, mock := range mocks {
+		mockYaml, err := EncodeMock(mock, ys.Logger)
+		if err != nil {
+			return err
+		}
+		if i == 0 {
+			err = ys.Write(ys.MockPath, "mocks", mockYaml, true)
+		} else {
+			err = ys.Write(ys.MockPath, "mocks", mockYaml, false)
+		}
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

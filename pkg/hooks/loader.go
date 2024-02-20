@@ -53,6 +53,7 @@ type Hook struct {
 	tcsMocks                 *treeDb
 	configMocks              *treeDb
 	matchedMocks             []string
+	persistentMatchedMocks   map[*models.Mock]bool
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
@@ -124,14 +125,15 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 	tcsMocks := NewTreeDb(customComparator)
 
 	return &Hook{
-		logger:        logger,
-		TestCaseDB:    db,
-		configMocks:   configMocks,
-		tcsMocks:      tcsMocks,
-		mu:            &sync.Mutex{},
-		userIpAddress: make(chan string),
-		idc:           idc,
-		mainRoutineId: mainRoutineId,
+		logger:                 logger,
+		TestCaseDB:             db,
+		configMocks:            configMocks,
+		tcsMocks:               tcsMocks,
+		persistentMatchedMocks: make(map[*models.Mock]bool),
+		mu:                     &sync.Mutex{},
+		userIpAddress:          make(chan string),
+		idc:                    idc,
+		mainRoutineId:          mainRoutineId,
 	}, nil
 }
 
@@ -163,6 +165,18 @@ func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	return nil
 }
 
+func (h *Hook) RemoveUnusedMocks(testSet string) error {
+	mocks, err := h.GetUsedMocks()
+	if err != nil {
+		return err
+	}
+	err = h.TestCaseDB.RewriteMocks(mocks, testSet)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.tcsMocks.deleteAll()
 	for index, mock := range m {
@@ -186,6 +200,7 @@ func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool
 	defer h.mutex.Unlock()
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
 	h.matchedMocks = append(h.matchedMocks, newMock.Name)
+	h.persistentMatchedMocks[newMock] = true
 	return isUpdated
 }
 
@@ -230,17 +245,27 @@ func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 	isDeleted := h.tcsMocks.delete(mock.TestModeInfo)
 	h.matchedMocks = append(h.matchedMocks, mock.Name)
+	h.persistentMatchedMocks[mock] = true
 	return isDeleted
 }
 
 func (h *Hook) DeleteConfigMock(mock *models.Mock) bool {
 	isDeleted := h.configMocks.delete(mock.TestModeInfo)
 	h.matchedMocks = append(h.matchedMocks, mock.Name)
+	h.persistentMatchedMocks[mock] = true
 	return isDeleted
 }
 
 func (h *Hook) GetMatchedMocks() []string {
 	return h.matchedMocks
+}
+
+func (h *Hook) GetUsedMocks() ([]*models.Mock, error) {
+	var matchedMocks []*models.Mock
+	for matchedMock := range h.persistentMatchedMocks {
+		matchedMocks = append(matchedMocks, matchedMock)
+	}
+	return matchedMocks, nil
 }
 
 func (h *Hook) ResetMatchedMocks() {

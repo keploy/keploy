@@ -53,6 +53,7 @@ type TestOptions struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	IgnoreOrdering     bool
+	RemoveUnusedMocks  bool
 	PassthroughHosts   []models.Filters
 }
 
@@ -192,6 +193,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		}
 	}()
 	returnVal.IgnoreOrdering = cfg.IgnoreOrdering
+	returnVal.RemoveUnusedMocks = cfg.RemoveUnusedMocks
 
 	return returnVal, nil
 }
@@ -222,6 +224,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		Storage:            tcsStorage,
 		PassThroughHosts:   options.PassthroughHosts,
 		IgnoreOrdering:     options.IgnoreOrdering,
+		RemoveUnusedMocks:  options.RemoveUnusedMocks,
 	}
 	sessions, err := cfg.Storage.ReadTestSessionIndices()
 	if err != nil {
@@ -771,6 +774,13 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 	}
 	if len(nonKeployTcs) > 0 {
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
+	}
+	if initialisedValues.RemoveUnusedMocks {
+		err := cfg.LoadedHooks.RemoveUnusedMocks(testSet)
+		if err != nil {
+			t.logger.Error("failed to remove unmatched mocks", zap.Error(err))
+		}
+		t.logger.Info("removed unused mocks from mock file", zap.Any("test-set", testSet))
 	}
 	resultsCfg := &FetchTestResultsConfig{
 		TestReportFS:       initialisedValues.TestReportFS,
