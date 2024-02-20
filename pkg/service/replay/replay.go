@@ -409,3 +409,30 @@ func (r *replayer) printSummary(testRunResult bool) {
 		}
 	}
 }
+
+func (r *replayer) MockReplay(ctx context.Context) error {
+	var stopReason string
+
+	filteredMocks, err := r.mockDB.GetFilteredMocks(ctx, "", time.Time{}, time.Now())
+	if err != nil {
+		return fmt.Errorf("failed to get filtered mocks: %w", err)
+	}
+	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(ctx, "", time.Time{}, time.Now())
+	if err != nil {
+		return fmt.Errorf("failed to get unfiltered mocks: %w", err)
+	}
+
+	_, appId, err := r.BootReplay(ctx)
+	if err != nil {
+		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
+		r.logger.Error(stopReason, zap.Error(err))
+		return errors.New("failed to execute replay due to error in booting replay")
+	}
+
+	err = r.instrumentation.SetMocks(ctx, appId, filteredMocks, unfilteredMocks)
+	if err != nil {
+		return fmt.Errorf("failed to set mocks: %w", err)
+	}
+	<-ctx.Done()
+	return nil
+}
