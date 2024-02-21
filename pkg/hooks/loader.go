@@ -201,7 +201,9 @@ func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool
 	defer h.mutex.Unlock()
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
 	h.matchedMocks = append(h.matchedMocks, newMock.Name)
-	h.DeletePersistentMock(oldMock.Name)
+	if isUpdated {
+		h.DeletePersistentMock(oldMock.Name)
+	}
 	h.persistentMatchedMocks[newMock.Name] = newMock
 	return isUpdated
 }
