@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"regexp"
 	"strings"
 	"time"
 
@@ -233,20 +232,11 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	}
 
 	for _, v := range files {
-		// Define the regular expression pattern
-		pattern := fmt.Sprintf(`^%s\d{1,}$`, models.TestSetPattern)
-
-		// Compile the regular expression
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			return indices, err
-		}
-
-		// Check if the string matches the pattern
-		if regex.MatchString(v.Name()) {
+		if v.Name() != "testReports" {
 			indices = append(indices, v.Name())
 		}
 	}
+
 	return indices, nil
 }
 
@@ -255,7 +245,7 @@ func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
 	if generateTestReport {
 		return
 	}
-	
+
 	_, err := os.Stat("keploy/testReports")
 	if os.IsNotExist(err) {
 		return
