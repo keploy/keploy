@@ -51,6 +51,28 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 	}
 }
 
+func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
+	readErr := errors.New("failed to read the initial request buffer")
+
+	initialBuf, err := ReadBytes(conn)
+	if err != nil && err != io.EOF {
+		logger.Error("failed to read the request message in proxy", zap.Error(err))
+		return nil, readErr
+	}
+
+	if err == io.EOF && len(initialBuf) == 0 {
+		logger.Debug("received EOF, closing conn", zap.Error(err))
+		return nil, readErr
+	}
+
+	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
+	if err != nil {
+		logger.Error("failed to read the request message in proxy", zap.Error(err))
+		return nil, readErr
+	}
+	return initialBuf, nil
+}
+
 func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int)) ([]byte, error) {
 
 	if destConn == nil {

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -197,7 +198,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
 	}
 
-	//checking for the destination port of mysql
+	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {
 		var dstConn net.Conn
 		if rule.Mode != models.MODE_TEST {
@@ -207,7 +208,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 				return
 			}
 			// Record the outgoing message into a mock
-			err := p.Integrations["mysql"].RecordOutgoing(ctx, []byte{}, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations["mysql"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				p.logger.Error("failed to record the outgoing message", zap.Error(err))
 				return
@@ -222,7 +223,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations["mysql"].MockOutgoing(ctx, []byte{}, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		err := p.Integrations["mysql"].MockOutgoing(ctx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
 			p.logger.Error("failed to mock the outgoing message", zap.Error(err))
 			return
@@ -243,9 +244,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		return
 	}
 
+	multiReader := io.MultiReader(reader, srcConn)
 	srcConn = &Conn{
 		Conn:   srcConn,
-		r:      reader,
+		r:      multiReader,
 		logger: p.logger,
 	}
 
@@ -259,22 +261,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	}
 
 	// attempt to read the conn until buffer is either filled or conn is closed
-	var initialBuf []byte
-	initialBuf, err = util.ReadBytes(srcConn)
-	if err != nil && err != io.EOF {
-		p.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", p.Port))
-		return
-	}
-
-	if err == io.EOF && len(initialBuf) == 0 {
-		p.logger.Debug("received EOF, closing conn", zap.Error(err), zap.Any("connectionID", clientConnId))
-		return
-	}
-
-	p.logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf), zap.Any("connectionID", clientConnId))
+	initialBuf, err := util.ReadInitialBuf(ctx, p.logger, srcConn)
 	if err != nil {
-		p.logger.Error("failed to read the request message in proxy", zap.Error(err), zap.Any("proxy port", p.Port))
+		p.logger.Error("failed to read the initial buffer", zap.Error(err))
 		return
+	}
+
+	//update the src connection to have the initial buffer
+	srcConn = &Conn{
+		Conn:   srcConn,
+		r:      io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+		logger: p.logger,
 	}
 
 	// dstConn stores the conn with actual destination for the outgoing network call
@@ -316,6 +313,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		dstCfg.Addr = dstAddr
 	}
 
+	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.AppID)
 	if !ok {
 		p.logger.Error("failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
@@ -327,13 +325,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	for _, parser := range p.Integrations {
 		if parser.OutgoingType(ctx, initialBuf) {
 			if rule.Mode == models.MODE_RECORD {
-				err := parser.RecordOutgoing(ctx, initialBuf, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+				err := parser.RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 				if err != nil {
 					logger.Error("failed to record the outgoing message", zap.Error(err))
 					return
 				}
 			} else {
-				err := parser.MockOutgoing(ctx, initialBuf, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+				err := parser.MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 				if err != nil {
 					logger.Error("failed to mock the outgoing message", zap.Error(err))
 					return
@@ -346,13 +344,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations["generic"].RecordOutgoing(ctx, initialBuf, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations["generic"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				logger.Error("failed to record the outgoing message", zap.Error(err))
 				return
 			}
 		} else {
-			err := p.Integrations["generic"].MockOutgoing(ctx, initialBuf, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			err := p.Integrations["generic"].MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
 				logger.Error("failed to mock the outgoing message", zap.Error(err))
 				return
