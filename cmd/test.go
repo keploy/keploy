@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters, EnableANSIColor *bool) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -84,7 +84,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	*withCoverage = *withCoverage || confTest.WithCoverage
 	*generateTestReport = *generateTestReport || confTest.GenerateTestReport
 	if *apiTimeout == 5 {
-		*apiTimeout = confTest.ApiTimeout
+		*apiTimeout = confTest.APITimeout
 	}
 	*globalNoise = confTest.GlobalNoise.Global
 	*testSetNoise = confTest.GlobalNoise.Testsets
@@ -263,7 +263,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 			passThroughHosts := []models.Filters{}
 
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts, &EnableANSIColor)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("Keploy config not found, continuing without configuration")
@@ -367,7 +367,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					NetworkName:        networkName,
 					Delay:              delay,
 					BuildDelay:         buildDelay,
-					ApiTimeout:         apiTimeout,
+					APITimeout:         apiTimeout,
 					PassThroughPorts:   ports,
 					ConfigPath:         configPath,
 					MongoPassword:      mongoPassword,
@@ -446,7 +446,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					Delay:              delay,
 					BuildDelay:         buildDelay,
 					PassThroughPorts:   ports,
-					ApiTimeout:         apiTimeout,
+					APITimeout:         apiTimeout,
 					ProxyPort:          proxyPort,
 					GlobalNoise:        globalNoise,
 					TestsetNoise:       testsetNoise,

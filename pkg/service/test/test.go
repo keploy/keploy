@@ -43,7 +43,7 @@ type TestOptions struct {
 	Delay              uint64
 	BuildDelay         time.Duration
 	PassThroughPorts   []uint
-	ApiTimeout         uint64
+	APITimeout         uint64
 	Tests              map[string][]string
 	AppContainer       string
 	AppNetwork         string
@@ -219,7 +219,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		Delay:              options.Delay,
 		BuildDelay:         options.BuildDelay,
 		PassThroughPorts:   options.PassThroughPorts,
-		ApiTimeout:         options.ApiTimeout,
+		APITimeout:         options.APITimeout,
 		MongoPassword:      options.MongoPassword,
 		WithCoverage:       options.WithCoverage,
 		CoverageReportPath: options.CoverageReportPath,
@@ -252,7 +252,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, EnableANSIColor, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.APITimeout, testcases, noiseConfig, false, EnableANSIColor, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -505,7 +505,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Debug("", zap.Any("replaced URL in case of docker env", cfg.Tc.HttpReq.URL))
 		}
 		t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", cfg.Tc.HttpReq.URL))
-		resp, err := pkg.SimulateHttp(*cfg.Tc, cfg.TestSet, t.logger, cfg.ApiTimeout)
+		resp, err := pkg.SimulateHttp(*cfg.Tc, cfg.TestSet, t.logger, cfg.APITimeout)
 		t.logger.Debug("After simulating the request", zap.Any("test case id", cfg.Tc.Name))
 		t.logger.Debug("After GetResp of the request", zap.Any("test case id", cfg.Tc.Name))
 
@@ -513,7 +513,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, &cfg.EnableANSIColor)
+		testPass, testResult := t.testHTTP(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, &cfg.EnableANSIColor)
 
 		if !testPass {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
@@ -646,7 +646,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 		LoadedHooks:        initialisedValues.LoadedHooks,
 		TestReportFS:       initialisedValues.TestReportFS,
 		TestRunChan:        testRunChan,
-		ApiTimeout:         apiTimeout,
+		APITimeout:         apiTimeout,
 		Ctx:                initialisedValues.Ctx,
 		ServeTest:          serveTest,
 	}
@@ -758,7 +758,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 			AppCmd:          appCmd,
 			UserIP:          userIp,
 			TestSet:         testSet,
-			ApiTimeout:      apiTimeout,
+			APITimeout:      apiTimeout,
 			Success:         &success,
 			Failure:         &failure,
 			Status:          &status,
@@ -795,7 +795,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 	return status
 }
 
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool, EnableANSIColor *bool) (bool, *models.Result) {
+func (t *tester) testHTTP(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool, EnableANSIColor *bool) (bool, *models.Result) {
 
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {

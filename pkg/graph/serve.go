@@ -129,7 +129,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 			GenerateTestReport: generateTestReport,
 			Delay:              Delay,
 			AppPid:             pid,
-			ApiTimeout:         apiTimeout,
+			APITimeout:         apiTimeout,
 			ServeTest:          len(appCmd) != 0,
 		},
 	}))

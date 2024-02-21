@@ -23,6 +23,6 @@ type Resolver struct {
 	GenerateTestReport bool
 	Delay              uint64
 	AppPid             uint32
-	ApiTimeout         uint64
+	APITimeout         uint64
 	ServeTest          bool
 }

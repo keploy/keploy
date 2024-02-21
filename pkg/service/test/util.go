@@ -69,7 +69,7 @@ type TestConfig struct {
 	Delay              uint64
 	BuildDelay         time.Duration
 	PassThroughPorts   []uint
-	ApiTimeout         uint64
+	APITimeout         uint64
 	WithCoverage       bool
 	CoverageReportPath string
 	TestReport         platform.TestReportDB
@@ -94,7 +94,7 @@ type RunTestSetConfig struct {
 	LoadedHooks        *hooks.Hook
 	TestReportFS       platform.TestReportDB
 	TestRunChan        chan string
-	ApiTimeout         uint64
+	APITimeout         uint64
 	Ctx                context.Context
 	ServeTest          bool
 }
@@ -105,7 +105,7 @@ type SimulateRequestConfig struct {
 	AppCmd          string
 	UserIP          string
 	TestSet         string
-	ApiTimeout      uint64
+	APITimeout      uint64
 	Success         *int
 	Failure         *int
 	Status          *models.TestRunStatus
@@ -119,17 +119,17 @@ type SimulateRequestConfig struct {
 }
 
 type FetchTestResultsConfig struct {
-	TestReportFS        platform.TestReportDB
-	TestReport          *models.TestReport
-	Status              *models.TestRunStatus
-	TestSet             string
-	Success             *int
-	Failure             *int
-	Ctx                 context.Context
-	TestReportPath      string
-	GenerateTestReport  bool
-	Path                string
-	EnableANSIColor     *bool
+	TestReportFS       platform.TestReportDB
+	TestReport         *models.TestReport
+	Status             *models.TestRunStatus
+	TestSet            string
+	Success            *int
+	Failure            *int
+	Ctx                context.Context
+	TestReportPath     string
+	GenerateTestReport bool
+	Path               string
+	EnableANSIColor    *bool
 }
 
 type TestReportVerdict struct {

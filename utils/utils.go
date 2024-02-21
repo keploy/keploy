@@ -225,7 +225,7 @@ type TestFlags struct {
 	NetworkName        string
 	Delay              uint64
 	BuildDelay         time.Duration
-	ApiTimeout         uint64
+	APITimeout         uint64
 	PassThroughPorts   []uint
 	ConfigPath         string
 	MongoPassword      string
@@ -340,7 +340,7 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 		if len(testFlags.Path) > 0 {
 			keployAlias = keployAlias + " --path " + testFlags.Path
 		}
-		addtionalFlags := appendFlags("containerName", testFlags.ContainerName) + appendFlags("buildDelay", testFlags.BuildDelay.String()) + appendFlags("delay", fmt.Sprintf("%d", testFlags.Delay)) + appendFlags("networkName", testFlags.NetworkName) + appendFlags("enableTele=", fmt.Sprintf("%v", testFlags.EnableTele)) + appendFlags("apiTimeout", fmt.Sprintf("%d", testFlags.ApiTimeout)) + appendFlags("mongoPassword", testFlags.MongoPassword) + appendFlags("coverageReportPath", testFlags.CoverageReportPath) + appendFlags("withCoverage=", fmt.Sprintf("%v", testFlags.WithCoverage)) + appendFlags("proxyport", fmt.Sprintf("%d", testFlags.Proxyport))
+		addtionalFlags := appendFlags("containerName", testFlags.ContainerName) + appendFlags("buildDelay", testFlags.BuildDelay.String()) + appendFlags("delay", fmt.Sprintf("%d", testFlags.Delay)) + appendFlags("networkName", testFlags.NetworkName) + appendFlags("enableTele=", fmt.Sprintf("%v", testFlags.EnableTele)) + appendFlags("apiTimeout", fmt.Sprintf("%d", testFlags.APITimeout)) + appendFlags("mongoPassword", testFlags.MongoPassword) + appendFlags("coverageReportPath", testFlags.CoverageReportPath) + appendFlags("withCoverage=", fmt.Sprintf("%v", testFlags.WithCoverage)) + appendFlags("proxyport", fmt.Sprintf("%d", testFlags.Proxyport))
 		keployAlias = keployAlias + addtionalFlags
 		cmd = exec.Command("sh", "-c", keployAlias)
 	}
