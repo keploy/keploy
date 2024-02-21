@@ -465,6 +465,16 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 	return filteredMocks, unFilteredMocks
 }
 
+func GetMatchedMocks(persistentMocks map[string]bool) []string {
+	var matchedMocks []string
+	for k, v := range persistentMocks {
+		if v {
+			matchedMocks = append(matchedMocks, k)
+		}
+	}
+	return matchedMocks
+}
+
 // creates a directory if not exists with all user access
 func makeDirectory(path string) error {
 	oldUmask := syscall.Umask(0)

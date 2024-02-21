@@ -52,7 +52,8 @@ type Hook struct {
 	proxyPort                uint32
 	tcsMocks                 *treeDb
 	configMocks              *treeDb
-	matchedMocks             []string
+	// here key represents mock name and value is true only when 
+	// it is not a config mock or it is not being used by any test case yet.
 	persistentMatchedMocks   map[string]bool
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
@@ -189,7 +190,7 @@ func (h *Hook) SetTcsMocks(m []*models.Mock) {
 func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.configMocks.deleteAll()
 	for index, mock := range m {
-		h.persistentMatchedMocks[mock.Name] = true
+		h.persistentMatchedMocks[mock.Name] = false
 		mock.TestModeInfo.SortOrder = index
 		mock.TestModeInfo.Id = index
 		h.configMocks.insert(mock.TestModeInfo, mock)
@@ -200,11 +201,10 @@ func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
-	h.matchedMocks = append(h.matchedMocks, newMock.Name)
 	if isUpdated {
 		h.DeletePersistentMock(oldMock.Name)
 	}
-	h.persistentMatchedMocks[newMock.Name] = true
+	h.persistentMatchedMocks[newMock.Name] = false
 	return isUpdated
 }
 
@@ -249,7 +249,6 @@ func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 	isDeleted := h.tcsMocks.delete(mock.TestModeInfo)
 	if isDeleted {
-		h.matchedMocks = append(h.matchedMocks, mock.Name)
 		h.persistentMatchedMocks[mock.Name] = true
 	}
 	return isDeleted
@@ -258,14 +257,9 @@ func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 func (h *Hook) DeleteConfigMock(mock *models.Mock) bool {
 	isDeleted := h.configMocks.delete(mock.TestModeInfo)
 	if isDeleted {
-		h.matchedMocks = append(h.matchedMocks, mock.Name)
-		h.persistentMatchedMocks[mock.Name] = true
+		h.persistentMatchedMocks[mock.Name] = false
 	}
 	return isDeleted
-}
-
-func (h *Hook) GetMatchedMocks() []string {
-	return h.matchedMocks
 }
 
 func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
@@ -303,16 +297,16 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 	return matchedMocks, nil
 }
 
+func (h *Hook) GetPersistentMock() map[string]bool {
+	return h.persistentMatchedMocks
+}
+ 
 func (h *Hook) DeletePersistentMock(mockName string) bool {
 	if _, ok := h.persistentMatchedMocks[mockName]; ok {
 		delete(h.persistentMatchedMocks, mockName)
 		return true
 	}
 	return false
-}
-
-func (h *Hook) ResetMatchedMocks() {
-	h.matchedMocks = []string{}
 }
 
 func (h *Hook) ResetDeps() int {
