@@ -226,7 +226,11 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 		Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 		return indices, err
 	}
-	defer utils.SetUmask(0022)
+	defer func() {
+		if err := utils.SetUmask(0022); err != nil {
+			Logger.Error("failed to reset the permission", zap.Error(err))
+		}
+	}()
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
