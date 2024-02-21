@@ -29,7 +29,10 @@ type Proxy struct {
 
 	DestInfo     core.DestInfo
 	Integrations map[string]integrations.Integrations
-	sessions     *core.Sessions
+
+	MockManagers sync.Map
+
+	sessions *core.Sessions
 
 	connMutex *sync.Mutex
 
@@ -43,18 +46,19 @@ type Proxy struct {
 
 func New(logger *zap.Logger, info core.DestInfo, sess *core.Sessions, opt config.Config) *Proxy {
 	return &Proxy{
-		logger:    logger,
-		Port:      opt.Port,   // default
-		DnsPort:   26789,      // default
-		IP4:       2130706433, // 127.0.0.1
-		IP6:       [4]uint32{0000, 0000, 0000, 0001},
-		connMutex: &sync.Mutex{},
-		DestInfo:  info,
-		sessions:  sess,
+		logger:       logger,
+		Port:         opt.Port,   // default
+		DnsPort:      26789,      // default
+		IP4:          2130706433, // 127.0.0.1
+		IP6:          [4]uint32{0000, 0000, 0000, 0001},
+		connMutex:    &sync.Mutex{},
+		DestInfo:     info,
+		sessions:     sess,
+		MockManagers: sync.Map{},
 	}
 }
 
-func (p Proxy) InitIntegrations(ctx context.Context) error {
+func (p *Proxy) InitIntegrations(ctx context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
 		prs := parser(p.logger)
@@ -63,7 +67,7 @@ func (p Proxy) InitIntegrations(ctx context.Context) error {
 	return nil
 }
 
-func (p Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
+func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
 	if err != nil {
@@ -107,7 +111,7 @@ func (p Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 }
 
 // start function starts the proxy server on the idle local port
-func (p Proxy) start(ctx context.Context) {
+func (p *Proxy) start(ctx context.Context) {
 
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
@@ -145,7 +149,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	start := time.Now()
 
 	defer func(start time.Time, srcConn net.Conn) {
-		srcConn.Close()
+		err := srcConn.Close()
+		if err != nil {
+			p.logger.Error("failed to close the source connection", zap.Error(err))
+			return
+		}
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 	}(start, srcConn)
@@ -199,12 +207,26 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 				return
 			}
 			// Record the outgoing message into a mock
-			p.Integrations["mysql"].RecordOutgoing(ctx, []byte{}, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations["mysql"].RecordOutgoing(ctx, []byte{}, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			if err != nil {
+				p.logger.Error("failed to record the outgoing message", zap.Error(err))
+				return
+			}
+			return
+		}
+
+		m, ok := p.MockManagers.Load(destInfo.AppID)
+		if !ok {
+			p.logger.Error("failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
 			return
 		}
 
 		//mock the outgoing message
-		p.Integrations["mysql"].MockOutgoing(ctx, []byte{}, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, rule.Mocks, rule.OutgoingOptions)
+		err := p.Integrations["mysql"].MockOutgoing(ctx, []byte{}, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		if err != nil {
+			p.logger.Error("failed to mock the outgoing message", zap.Error(err))
+			return
+		}
 		return
 	}
 
@@ -221,14 +243,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		return
 	}
 
-	isTLS := isTLSHandshake(testBuffer)
-	multiReader := io.MultiReader(reader, srcConn)
-	srcConn = &TLSConn{
+	srcConn = &Conn{
 		Conn:   srcConn,
-		r:      multiReader,
+		r:      reader,
 		logger: p.logger,
 	}
 
+	isTLS := isTLSHandshake(testBuffer)
 	if isTLS {
 		srcConn, err = p.handleTLSConnection(srcConn)
 		if err != nil {
@@ -271,19 +292,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	//make new connection to the destination server
 	if isTLS {
 		logger.Debug("", zap.Any("isTLS connection", isTLS))
-		config := &tls.Config{
+		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstUrl,
 		}
 
 		addr := fmt.Sprintf("%v:%v", dstUrl, destInfo.Port)
-		dstConn, err = tls.Dial("tcp", addr, config)
+		dstConn, err = tls.Dial("tcp", addr, cfg)
 		if err != nil {
 			logger.Error("failed to dial the conn to destination server", zap.Error(err), zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 			return
 		}
 
-		dstCfg.TlsCfg = config
+		dstCfg.TlsCfg = cfg
 		dstCfg.Addr = addr
 
 	} else {
@@ -295,8 +316,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		dstCfg.Addr = dstAddr
 	}
 
-	generic := true
+	m, ok := p.MockManagers.Load(destInfo.AppID)
+	if !ok {
+		p.logger.Error("failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+		return
+	}
 
+	generic := true
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.OutgoingType(ctx, initialBuf) {
@@ -307,7 +333,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 					return
 				}
 			} else {
-				err := parser.MockOutgoing(ctx, initialBuf, srcConn, dstCfg, rule.Mocks, rule.OutgoingOptions)
+				err := parser.MockOutgoing(ctx, initialBuf, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 				if err != nil {
 					logger.Error("failed to mock the outgoing message", zap.Error(err))
 					return
@@ -326,7 +352,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 				return
 			}
 		} else {
-			err := p.Integrations["generic"].MockOutgoing(ctx, initialBuf, srcConn, dstCfg, rule.Mocks, rule.OutgoingOptions)
+			err := p.Integrations["generic"].MockOutgoing(ctx, initialBuf, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
 				logger.Error("failed to mock the outgoing message", zap.Error(err))
 				return
@@ -370,21 +396,28 @@ func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock
 	return nil
 }
 
-func (p *Proxy) Mock(ctx context.Context, id uint64, mocks []*models.Mock, opts models.OutgoingOptions) error {
+func (p *Proxy) Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_TEST,
-		Mocks:           mocks,
 		OutgoingOptions: opts,
 	})
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
+
 	return nil
 }
 
-func (p *Proxy) SetMocks(ctx context.Context, id uint64, mocks []*models.Mock) error {
-	session, ok := p.sessions.Get(id)
-	if !ok {
-		return fmt.Errorf("session not found")
+func (p *Proxy) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	//session, ok := p.sessions.Get(id)
+	//if !ok {
+	//	return fmt.Errorf("session not found")
+	//}
+
+	m, ok := p.MockManagers.Load(id)
+	if ok {
+		m.(*MockManager).SetFilteredMocks(filtered)
+		m.(*MockManager).SetUnFilteredMocks(unFiltered)
 	}
-	session.Mocks = mocks
+
 	return nil
 }

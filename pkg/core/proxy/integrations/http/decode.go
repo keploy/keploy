@@ -29,7 +29,7 @@ type matchParams struct {
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mocks []*models.Mock, opts models.OutgoingOptions) error {
+func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -53,7 +53,7 @@ func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, 
 				reqBuf = append(reqBuf, newRequest...)
 			}
 
-			err := handleChunkedRequests(&reqBuf, clientConn, nil, logger)
+			err := handleChunkedRequests(ctx, logger, &reqBuf, clientConn, nil)
 			if err != nil {
 				logger.Error("failed to handle chunk request", zap.Error(err))
 				return err
@@ -84,7 +84,7 @@ func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, 
 			//check if reqBuf body is a json
 			reqBodyIsJson := isJSON(reqBody)
 
-			match, stub, err := match(ctx, logger, request, reqURL, reqBuf, reqBodyIsJson, mocks)
+			match, stub, err := match(ctx, logger, request, reqURL, reqBuf, reqBodyIsJson, mockDb)
 			if err != nil {
 				logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
 			}

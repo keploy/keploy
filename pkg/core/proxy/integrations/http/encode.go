@@ -15,7 +15,12 @@ import (
 // encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
 func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	//closing the destination conn
-	defer destConn.Close()
+	defer func(destConn net.Conn) {
+		err := destConn.Close()
+		if err != nil {
+			logger.Error("failed to close the destination connection", zap.Error(err))
+		}
+	}(destConn)
 
 	var resp []byte
 	var finalResp []byte
@@ -85,7 +90,7 @@ func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, cli
 		// Capture the request timestamp
 		reqTimestampMock := time.Now()
 
-		err := handleChunkedRequests(&finalReq, clientConn, destConn, logger)
+		err := handleChunkedRequests(ctx, logger, &finalReq, clientConn, destConn)
 		if err != nil {
 			logger.Error("failed to handle chunk request", zap.Error(err))
 			return err
@@ -142,7 +147,7 @@ func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, cli
 		finalResp = append(finalResp, resp...)
 		logger.Debug("This is the initial response: " + string(resp))
 
-		err = handleChunkedResponses(&finalResp, clientConn, destConn, logger, resp)
+		err = handleChunkedResponses(ctx, logger, &finalResp, clientConn, destConn, resp)
 		if err != nil {
 			if err == io.EOF {
 				logger.Debug("conn closed by the server", zap.Error(err))
