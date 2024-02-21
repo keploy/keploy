@@ -62,8 +62,8 @@ func (h *Http) RecordOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, 
 	return nil
 }
 
-func (h *Http) MockOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mocks []*models.Mock, opts models.OutgoingOptions) error {
-	err := decodeOutgoingHttp(ctx, h.logger, reqBuf, src, dstCfg, mocks, opts)
+func (h *Http) MockOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+	err := decodeOutgoingHttp(ctx, h.logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		h.logger.Error("failed to decode the http message from the yaml", zap.Error(err))
 		return errors.New("failed to mock the outgoing http call")

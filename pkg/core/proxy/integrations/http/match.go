@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"errors"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"net/http"
 	"net/url"
@@ -13,13 +15,18 @@ import (
 	"go.uber.org/zap"
 )
 
-func match(ctx context.Context, logger *zap.Logger, req *http.Request, reqURL *url.URL, requestBuffer []byte, jsonBody bool, tcsMocks []*models.Mock) (bool, *models.Mock, error) {
+func match(ctx context.Context, logger *zap.Logger, req *http.Request, reqURL *url.URL, requestBuffer []byte, jsonBody bool, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return false, nil, nil
 		default:
+			tcsMocks, err := mockDb.GetFilteredMocks()
 
+			if err != nil {
+				logger.Error("failed to get tcs mocks", zap.Error(err))
+				return false, nil, errors.New("error while matching the request with the mocks")
+			}
 			var eligibleMocks []*models.Mock
 
 			for _, mock := range tcsMocks {
@@ -70,11 +77,10 @@ func match(ctx context.Context, logger *zap.Logger, req *http.Request, reqURL *u
 
 			isMatched, bestMatch := Fuzzymatch(eligibleMocks, requestBuffer)
 			if isMatched {
-				//isDeleted := h.DeleteTcsMock(bestMatch)
-				//if !isDeleted {
-				//	continue
-				//}
-				//
+				isDeleted := mockDb.DeleteFilteredMock(bestMatch)
+				if !isDeleted {
+					continue
+				}
 			}
 			return isMatched, bestMatch, nil
 		}
