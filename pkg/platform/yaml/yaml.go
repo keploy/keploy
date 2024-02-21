@@ -370,7 +370,7 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	return nil
 }
 
-func (ys *Yaml) RewriteMocks(mocks []*models.Mock, testSet string) error {
+func (ys *Yaml) UpdateMocks(mocks []*models.Mock, testSet string) error {
 	ys.MockPath = filepath.Join(ys.MockPath, testSet)
 	for i, mock := range mocks {
 		mockYaml, err := EncodeMock(mock, ys.Logger)

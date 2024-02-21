@@ -170,7 +170,7 @@ func (h *Hook) RemoveUnusedMocks(testSet string) error {
 	if err != nil {
 		return err
 	}
-	err = h.TestCaseDB.RewriteMocks(mocks, testSet)
+	err = h.TestCaseDB.UpdateMocks(mocks, testSet)
 	if err != nil {
 		return err
 	}
