@@ -119,11 +119,11 @@ installKeploy (){
             network_alias="sudo"
         fi
         if ! $network_alias which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker and reinstall keploy if you are willing to use applications with docker"
+            echo -n "Docker not found on device, please install docker and reinstall keploy if you have applications running on docker"
             return 0
         fi
         if ! $network_alias docker info &> /dev/null; then
-            echo "Please start Docker and reinstall keploy if you are willing to use applications with docker"
+            echo "Please start Docker and reinstall keploy if you have applications running on docker"
             return 0
         fi
         return 1
@@ -133,7 +133,7 @@ installKeploy (){
         check_sudo
         sudoCheck=$?
         network_alias=""
-        if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Linux" ]; then
+        if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Darwin" ]; then
             # Add sudo to docker
             network_alias="sudo"
         fi
