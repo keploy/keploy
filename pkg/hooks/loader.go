@@ -201,6 +201,7 @@ func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool
 	defer h.mutex.Unlock()
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
 	h.matchedMocks = append(h.matchedMocks, newMock.Name)
+	h.DeletePersistentMock(oldMock.Name)
 	h.persistentMatchedMocks[newMock.Name] = newMock
 	return isUpdated
 }
@@ -271,6 +272,14 @@ func (h *Hook) GetUsedMocks() ([]*models.Mock, error) {
 		matchedMocks = append(matchedMocks, matchedMock)
 	}
 	return matchedMocks, nil
+}
+
+func (h *Hook) DeletePersistentMock(mockName string) bool {
+	if _, ok := h.persistentMatchedMocks[mockName]; ok {
+		delete(h.persistentMatchedMocks, mockName)
+		return true
+	}
+	return false
 }
 
 func (h *Hook) ResetMatchedMocks() {
