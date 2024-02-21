@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"io"
 	"net"
 	"net/http"
@@ -53,8 +54,14 @@ func (h *Http) OutgoingType(ctx context.Context, buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 }
 
-func (h *Http) RecordOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	err := encodeOutgoingHttp(ctx, h.logger, reqBuf, src, dst, mocks, opts)
+func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	reqBuf, err := util.ReadInitialBuf(ctx, h.logger, src)
+	if err != nil {
+		h.logger.Error("failed to read the initial http message", zap.Error(err))
+		return errors.New("failed to record the outgoing http call")
+	}
+
+	err = encodeOutgoingHttp(ctx, h.logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		h.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 		return errors.New("failed to record the outgoing http call")
@@ -62,8 +69,14 @@ func (h *Http) RecordOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, 
 	return nil
 }
 
-func (h *Http) MockOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	err := decodeOutgoingHttp(ctx, h.logger, reqBuf, src, dstCfg, mockDb, opts)
+func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+	reqBuf, err := util.ReadInitialBuf(ctx, h.logger, src)
+	if err != nil {
+		h.logger.Error("failed to read the initial http message", zap.Error(err))
+		return errors.New("failed to mock the outgoing http call")
+	}
+
+	err = decodeOutgoingHttp(ctx, h.logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		h.logger.Error("failed to decode the http message from the yaml", zap.Error(err))
 		return errors.New("failed to mock the outgoing http call")

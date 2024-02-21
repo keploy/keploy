@@ -22,8 +22,8 @@ type ConditionalDstCfg struct {
 
 type Integrations interface {
 	OutgoingType(ctx context.Context, reqBuf []byte) bool
-	RecordOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
-	MockOutgoing(ctx context.Context, reqBuf []byte, src net.Conn, dstCfg *ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
+	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
+	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }
 
 func Register(name string, i Initializer) {
