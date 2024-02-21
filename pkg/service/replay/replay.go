@@ -131,7 +131,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	var testSetStatus models.TestSetStatus
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
-	var simulateCtx, simulateCtxCancel = context.WithCancel(context.Background())
+	var testLoopCtx, testLoopCtxCancel = context.WithCancel(context.Background())
 
 	testCases, err := r.testDB.GetTestCases(ctx, testSetId)
 	if err != nil {
@@ -197,12 +197,13 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 			testSetStatusByErrChan = models.TestSetStatusUserAbort
 		}
 		exitLoop = true
-		simulateCtxCancel()
+		testLoopCtxCancel()
 	}()
 
 	for _, testCase := range testCases {
 
 		if exitLoop {
+			testSetStatus = testSetStatusByErrChan
 			break
 		}
 
@@ -223,7 +224,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 			return models.TestSetStatusFailed, fmt.Errorf("failed to set mocks: %w", err)
 		}
 		started := time.Now().UTC()
-		resp, err := r.SimulateRequest(simulateCtx, testCase, testSetId)
+		resp, err := r.SimulateRequest(testLoopCtx, testCase, testSetId)
 		if err != nil && resp == nil {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetId)), zap.Any("passed", models.HighlightFailingString("false")))
 		} else {
@@ -274,18 +275,20 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 			Noise:  testCase.Noise,
 			Result: *testResult,
 		}
-		err = r.reportDB.InsertTestCaseResult(ctx, testRunId, testSetId, testCase.Name, testCaseResult)
+		err = r.reportDB.InsertTestCaseResult(testLoopCtx, testRunId, testSetId, testCase.Name, testCaseResult)
 		if err != nil {
 			return models.TestSetStatusFailed, fmt.Errorf("failed to insert test case result: %w", err)
 		}
-		if !testPass {
+		if !testPass{
 			testSetStatus = models.TestSetStatusFailed
 		}
 	}
+
 	testCaseResults, err := r.reportDB.GetTestCaseResults(ctx, testRunId, testSetId)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test case results: %w", err)
 	}
+
 	testReport = &models.TestReport{
 		TestSet: testSetId,
 		Status:  string(testSetStatus),
@@ -312,10 +315,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
-
-	if testSetStatusByErrChan != models.TestSetStatusRunning {
-		return testSetStatusByErrChan, nil
-	}
 
 	return testSetStatus, nil
 }
