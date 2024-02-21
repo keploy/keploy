@@ -512,7 +512,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering)
 
 		if !testPass {
-			t.logger.Debug("", zap.Any("matched mocks", cfg.LoadedHooks.GetMatchedMocks()))
+			t.logger.Info("", zap.Any("matched mocks", cfg.LoadedHooks.GetMatchedMocks()))
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
 		} else {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightPassingString(cfg.TestSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
