@@ -202,7 +202,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				}
 
 				h.logger.Debug("", zap.Any("appContainer", appContainer), zap.Any("appNetwork", appNetwork), zap.Any("appCmd", appCmd))
-			} else if (cmd == "docker" || cmd == "docker-start"){
+			} else if cmd == "docker" || cmd == "docker-start" {
 				var err error
 
 				if cmd == "docker" {
