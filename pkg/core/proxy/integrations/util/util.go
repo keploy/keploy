@@ -1,5 +1,28 @@
 package util
 
+import (
+	"encoding/base64"
+	"unicode"
+)
+
+func IsAsciiPrintable(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func DecodeBase64(encoded string) ([]byte, error) {
+	// Decode the base64 encoded string to buffer
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
 // Functions related to fuzzy matching
 func AdaptiveK(length, kMin, kMax, N int) int {
 	k := length / N

@@ -1,31 +1,17 @@
-package genericparser
+package generic
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"math"
 
-	// "fmt"
-	"unicode"
-
 	"go.keploy.io/server/v2/pkg/core/hooks"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
 )
 
-func PostgresDecoder(encoded string) ([]byte, error) {
-	// decode the base 64 encoded string to buffer ..
-
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		// fmt.Println(hooks.Emoji+"failed to decode the data", err)
-		return nil, err
-	}
-	// println("Decoded data is :", string(data))
-	return data, nil
-}
-
-func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
+func fuzzymatch(ctx context.Context, reqBuff [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
 	for {
 		tcsMocks, err := h.GetConfigMocks()
 		if err != nil {
@@ -45,13 +31,13 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 
 		index := -1
 		for idx, mock := range filteredMocks {
-			if len(mock.Spec.GenericRequests) == len(requestBuffers) {
+			if len(mock.Spec.GenericRequests) == len(reqBuff) {
 				matched := true // Flag to track if all requests match
 
-				for requestIndex, reqBuff := range requestBuffers {
+				for requestIndex, reqBuff := range reqBuff {
 
 					bufStr := string(reqBuff)
-					if !IsAsciiPrintable(string(reqBuff)) {
+					if !util.IsAsciiPrintable(string(reqBuff)) {
 						bufStr = base64.StdEncoding.EncodeToString(reqBuff)
 					}
 
@@ -82,7 +68,7 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 		}
 
 		if index == -1 {
-			index = findBinaryMatch(filteredMocks, requestBuffers, h)
+			index = findBinaryMatch(filteredMocks, reqBuff)
 		}
 
 		if index != -1 {
@@ -99,7 +85,7 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 		}
 
 		if index == -1 {
-			index = findBinaryMatch(unfilteredMocks, requestBuffers, h)
+			index = findBinaryMatch(unfilteredMocks, requestBuffers)
 		}
 
 		if index != -1 {
@@ -112,20 +98,15 @@ func fuzzymatch(requestBuffers [][]byte, h *hooks.Hook) (bool, []models.GenericP
 	return false, nil, nil
 }
 
-func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.Hook) int {
-
+func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxSim := 0.5
 	mxIdx := -1
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(requestBuffers) {
-			for requestIndex, reqBuff := range requestBuffers {
-
-				// bufStr := string(reqBuff)
-				// if !IsAsciiPrintable(bufStr) {
+		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
+			for requestIndex, reqBuff := range reqBuffs {
 				_ = base64.StdEncoding.EncodeToString(reqBuff)
-				// }
-				encoded, _ := PostgresDecoder(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				encoded, _ := util.DecodeBase64(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
 				k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 				shingles1 := util.CreateShingles(encoded, k)
@@ -140,14 +121,4 @@ func findBinaryMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, h *hooks.
 		}
 	}
 	return mxIdx
-}
-
-// checks if s is ascii and printable, aka doesn't include tab, backspace, etc.
-func IsAsciiPrintable(s string) bool {
-	for _, r := range s {
-		if r > unicode.MaxASCII || (!unicode.IsPrint(r) && r != '\r' && r != '\n') {
-			return false
-		}
-	}
-	return true
 }
