@@ -774,7 +774,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 	if len(nonKeployTcs) > 0 {
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
-	if initialisedValues.RemoveUnusedMocks {
+	if initialisedValues.RemoveUnusedMocks && status == models.TestRunStatusPassed {
 		err := cfg.LoadedHooks.RemoveUnusedMocks(testSet)
 		if err != nil {
 			t.logger.Error("failed to remove unmatched mocks", zap.Error(err))
