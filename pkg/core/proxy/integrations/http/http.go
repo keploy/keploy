@@ -41,9 +41,9 @@ type finalHttp struct {
 	resTimestampMock time.Time
 }
 
-// OutgoingType function determines if the outgoing network call is HTTP by comparing the
+// MatchType function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
-func (h *Http) OutgoingType(ctx context.Context, buf []byte) bool {
+func (h *Http) MatchType(ctx context.Context, buf []byte) bool {
 	return bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buf[:], []byte("GET ")) ||
 		bytes.HasPrefix(buf[:], []byte("POST ")) ||

@@ -15,16 +15,16 @@ type Generic struct {
 }
 
 func init() {
-	integrations.Register("generic", NewGenericParser)
+	integrations.Register("generic", NewGeneric)
 }
 
-func NewGenericParser(logger *zap.Logger) integrations.Integrations {
+func NewGeneric(logger *zap.Logger) integrations.Integrations {
 	return &Generic{
 		logger: logger,
 	}
 }
 
-func (g *Generic) OutgoingType(ctx context.Context, buffer []byte) bool {
+func (g *Generic) MatchType(ctx context.Context, buffer []byte) bool {
 	// generic is checked explicitly in the proxy
 	return false
 }

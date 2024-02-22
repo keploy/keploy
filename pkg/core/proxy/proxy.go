@@ -323,7 +323,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	generic := true
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
-		if parser.OutgoingType(ctx, initialBuf) {
+		if parser.MatchType(ctx, initialBuf) {
 			if rule.Mode == models.MODE_RECORD {
 				err := parser.RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 				if err != nil {

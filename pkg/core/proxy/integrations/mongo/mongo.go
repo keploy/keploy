@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"io"
 	"math/rand"
 	"net"
@@ -14,8 +15,8 @@ import (
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/hooks"
-	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -26,22 +27,20 @@ var Emoji = "\U0001F430" + " Keploy:"
 var configRequests = []string{""}
 var password string
 
-type MongoParser struct {
+type Mongo struct {
 	logger *zap.Logger
-	hooks  *hooks.Hook
 }
 
-func NewMongoParser(logger *zap.Logger, h *hooks.Hook, authPassword string) *MongoParser {
+func NewMongoParser(logger *zap.Logger, authPassword string) integrations.Integrations {
 	password = authPassword
-	return &MongoParser{
+	return &Mongo{
 		logger: logger,
-		hooks:  h,
 	}
 }
 
-// IsOutgoingMongo function determines if the outgoing network call is Mongo by comparing the
+// MatchType determines if the outgoing network call is Mongo by comparing the
 // message format with that of a mongo wire message.
-func (m *MongoParser) OutgoingType(buffer []byte) bool {
+func (m *MongoParser) MatchType(buffer []byte) bool {
 	if len(buffer) < 4 {
 		return false
 	}
