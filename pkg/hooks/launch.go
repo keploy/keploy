@@ -230,7 +230,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 					appContainer, appNetwork = cont, net
 				}
-				
+
 				//injecting appNetwork to keploy.
 				err = h.injectNetworkToKeploy(appNetwork)
 				if err != nil {
