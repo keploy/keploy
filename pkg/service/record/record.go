@@ -49,7 +49,6 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
 
-
 	models.SetMode(models.MODE_RECORD)
 	tele.Ping(false)
 
