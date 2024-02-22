@@ -114,7 +114,7 @@ installKeploy (){
         check_sudo
         sudoCheck=$?
         network_alias=""
-        if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Linux" ]; then
+        if [ "$sudoCheck" -eq 0 ]; then
             # Add sudo to docker
             network_alias="sudo"
         fi
@@ -133,7 +133,7 @@ installKeploy (){
         check_sudo
         sudoCheck=$?
         network_alias=""
-        if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Darwin" ]; then
+        if [ "$sudoCheck" -eq 0 ]; then
             # Add sudo to docker
             network_alias="sudo"
         fi
