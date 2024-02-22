@@ -2,7 +2,6 @@ module go.keploy.io/server/v2
 
 go 1.21
 
-toolchain go1.21.6
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.2
 
