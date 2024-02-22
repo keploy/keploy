@@ -366,8 +366,8 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 }
 
 func (ys *Yaml) UpdateMocks(mocks []*models.Mock, testSet string) error {
-	ys.MockPath = filepath.Join(ys.MockPath, testSet)
-	mockFilePath, err := util.ValidatePath(filepath.Join(ys.MockPath, "mocks.yaml"))
+	mockPath := filepath.Join(ys.MockPath, testSet)
+	mockFilePath, err := util.ValidatePath(filepath.Join(mockPath, "mocks.yaml"))
 	if err != nil {
 		return err
 	}
@@ -380,7 +380,7 @@ func (ys *Yaml) UpdateMocks(mocks []*models.Mock, testSet string) error {
 		if err != nil {
 			return err
 		}
-		err = ys.Write(ys.MockPath, "mocks", mockYaml)
+		err = ys.Write(mockPath, "mocks", mockYaml)
 		if err != nil {
 			return err
 		}
