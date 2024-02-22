@@ -133,12 +133,12 @@ func HttpDecoder(encoded string) ([]byte, error) {
 	return data, nil
 }
 
-func findBinaryMatch(configMocks []*models.Mock, reqBuff []byte) int {
+func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 
 	mxSim := -1.0
 	mxIdx := -1
 	// find the fuzzy hash of the mocks
-	for idx, mock := range configMocks {
+	for idx, mock := range mocks {
 		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)

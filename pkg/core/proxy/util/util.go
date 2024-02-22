@@ -153,7 +153,9 @@ func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]b
 	}
 }
 
-func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int)) ([]byte, error) {
+// Passthrough function is used to pass the network traffic to the destination connection.
+// It closes the destination connection if the function returns an error.
+func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte) ([]byte, error) {
 
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination conn")
