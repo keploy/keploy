@@ -303,7 +303,7 @@ func (h *Hook) UpdatePersistentMatchedMock(mockName string, isTcsUnused bool) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	h.persistentMatchedMocks[mockName] = isTcsUnused
-} 
+}
 
 func (h *Hook) DeletePersistentMock(mockName string) bool {
 	h.mutex.Lock()
