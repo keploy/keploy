@@ -25,6 +25,7 @@ type Service interface {
 	GetAllTestSetIds(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (models.TestSetStatus, error)
+	RunApplication(ctx context.Context, appId uint64, opts models.RunOptions) (models.AppError, error)
 }
 
 type TestDB interface {

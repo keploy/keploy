@@ -14,6 +14,7 @@ import (
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 \	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/models"
@@ -39,90 +40,20 @@ func New(logger *zap.Logger) graphInterface {
 const defaultPort = 6789
 
 // Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool) {
+func (g *graph) Serve(ctx context.Context) {
 	if port == 0 {
 		port = defaultPort
 	}
+	replayer := replay.NewReplayer(g.logger)
 
-	var ps *proxy.ProxySet
+	// BootReplay will be called in the unit test.
 
-	// Listen for the interrupt signal
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
-
-	models.SetMode(models.MODE_TEST)
-	tester := replay.NewTester(g.logger)
-	testReportFS := yaml.NewTestReportFS(g.logger)
-	teleFS := fst.NewTeleFS(g.logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
-	tele.Ping(false)
-	ys := yaml.NewYamlStore(path, path, "", "", g.logger, tele)
-	routineId := pkg.GenerateRandomID()
-	// Initiate the hooks
-	loadedHooks, err := hooks.NewHook(ys, routineId, g.logger)
-	if err != nil {
-		g.logger.Error("error while creating hooks", zap.Error(err))
-		return
-	}
-
-	// Recover from panic and gracefully shutdown
-	defer loadedHooks.Recover(routineId)
-
-	ctx := context.Background()
-
-	// load the ebpf hooks into the kernel
-
-	select {
-	case <-stopper:
-		return
-	default:
-		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
-			return
-		}
-	}
-
-	//sending this graphql server port to be filterd in the eBPF program
-	if err := loadedHooks.SendKeployServerPort(port); err != nil {
-		return
-	}
-
-	select {
-	case <-stopper:
-		loadedHooks.Stop(false)
-		return
-	default:
-		// start the proxy
-		ps = proxy.BootProxy(g.logger, proxy.Option{Port: proxyPort, MongoPassword: mongopassword}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
-
-	}
-
-	// proxy tools its state in the ProxyPorts map
-	// Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
-		return
-	}
-
-	g.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
-	passThroughPorts = append(passThroughPorts, 36320)
-	// filter the required destination ports
-	if err := loadedHooks.SendPassThroughPorts(passThroughPorts); err != nil {
-		return
-	}
-
+	// Starting the test command
 	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
 		Resolvers: &Resolver{
-			Tester:         tester,
-			TestReportFS:   testReportFS,
-			Storage:        ys,
-			LoadedHooks:    loadedHooks,
+			Tester:         replayer,
 			Logger:         g.logger,
-			Path:           path,
-			TestReportPath: testReportPath,
-			Delay:          Delay,
-			AppPid:         pid,
-			ApiTimeout:     apiTimeout,
-			ServeTest:      len(appCmd) != 0,
+			ServeTest:      true,
 		},
 	}))
 
@@ -135,13 +66,10 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 		Handler: nil, // Use the default http.DefaultServeMux
 	}
 
-	// Create a shutdown channel
-
-	// Start your server in a goroutine
+	// Start the graphql server
 	go func() {
 		// Recover from panic and gracefully shutdown
-		defer loadedHooks.Recover(pkg.GenerateRandomID())
-		defer utils.HandlePanic()
+		defer utils.HandlePanic(g.logger)
 		log.Printf(Emoji+"connect to http://localhost:%d/ for GraphQL playground", port)
 		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf(Emoji+"listen: %s\n", err)
@@ -151,54 +79,11 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 
 	defer g.stopGraphqlServer(httpSrv)
 
-	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	exitCmd := make(chan bool)                 // channel to exit this command
-
-	// Block until we receive one
-	abortStopHooksForcefully := false
-	select {
-	case <-stopper:
-		loadedHooks.Stop(false)
-		ps.StopProxyServer()
-		return
-	default:
-		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, 30*time.Second, true); err != nil {
-				switch err {
-				case hooks.ErrInterrupted:
-					g.logger.Info("keploy terminated user application")
-					return
-				case hooks.ErrFailedUnitTest:
-					g.logger.Debug("unit tests failed hence stopping keploy")
-				case hooks.ErrUnExpected:
-					g.logger.Debug("unit tests ran successfully hence stopping keploy")
-				default:
-					g.logger.Error("unknown error recieved from application", zap.Error(err))
-				}
-			}
-			if !abortStopHooksForcefully {
-				abortStopHooksInterrupt <- true
-				// stop listening for the eBPF events
-				loadedHooks.Stop(false)
-				ps.StopProxyServer()
-				exitCmd <- true
-				//stop listening for proxy server
-			} else {
-				return
-			}
-
-		}()
-	}
-	select {
-	case <-stopper:
-		abortStopHooksForcefully = true
-		loadedHooks.Stop(true)
-		ps.StopProxyServer()
-		return
-	case <-abortStopHooksInterrupt:
-		//telemetry event can be added here
-	}
-	<-exitCmd
+	// Start the testing framework. This will run until all the testsets are complete.
+	go func(){
+		defer utils.HandlePanic(g.logger)
+		replayer.RunApplication(ctx, pid, models.RunOptions{})
+	}()
 }
 
 // Gracefully shut down the HTTP server with a timeout
