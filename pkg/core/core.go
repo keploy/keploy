@@ -68,6 +68,9 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 }
 
 func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) error {
+	if opts.ServeTest {
+		return nil
+	}
 	a, err := c.getApp(id)
 	if err != nil {
 		return err

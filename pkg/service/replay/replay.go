@@ -122,7 +122,7 @@ func (r *replayer) GetAllTestSetIds(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIds(ctx)
 }
 
-func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64) (models.TestSetStatus, error) {
+func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64, serveTest bool) (models.TestSetStatus, error) {
 	var mockErrChan <-chan error
 	var appErrChan = make(chan models.AppError)
 	var appErr models.AppError
@@ -169,7 +169,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 		return models.TestSetStatusFailed, fmt.Errorf("failed to mock outgoing: %w", err)
 	}
 	go func() {
-		appErr = r.instrumentation.Run(ctx, appId, models.RunOptions{})
+		appErr = r.RunApplication(ctx, appId, models.RunOptions{ServeTest: serveTest})
 		appErrChan <- appErr
 	}()
 
@@ -279,7 +279,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 		if err != nil {
 			return models.TestSetStatusFailed, fmt.Errorf("failed to insert test case result: %w", err)
 		}
-		if !testPass{
+		if !testPass {
 			testSetStatus = models.TestSetStatusFailed
 		}
 	}
@@ -407,6 +407,10 @@ func (r *replayer) printSummary(testRunResult bool) {
 			}
 		}
 	}
+}
+
+func (r *replayer) RunApplication(ctx context.Context, appId uint64, opts models.RunOptions) models.AppError {
+	return r.instrumentation.Run(ctx, appId, opts)
 }
 
 func (r *replayer) MockReplay(ctx context.Context) error {
