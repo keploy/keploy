@@ -303,6 +303,10 @@ func SortMocksByName(mocks []*models.Mock) {
 		mockNamePartsI := strings.Split(mocks[i].Name, "-")
 		mockNamePartsJ := strings.Split(mocks[j].Name, "-")
 
+		if len(mockNamePartsI) < 2 || len(mockNamePartsJ) < 2 {
+			return false
+		}
+
 		mockNumberI, err1 := strconv.Atoi(mockNamePartsI[1])
 		mockNumberJ, err2 := strconv.Atoi(mockNamePartsJ[1])
 
