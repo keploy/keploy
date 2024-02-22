@@ -13,12 +13,13 @@ type Initializer func(logger *zap.Logger) Integrations
 type integrationType string
 
 const (
-	HTTP     integrationType = "http"
-	GRPC     integrationType = "grpc"
-	GENERIC  integrationType = "generic"
-	MYSQL    integrationType = "mysql"
-	POSTGRES integrationType = "postgres"
-	MONGO    integrationType = "mongo"
+	HTTP        integrationType = "http"
+	GRPC        integrationType = "grpc"
+	GENERIC     integrationType = "generic"
+	MYSQL       integrationType = "mysql"
+	POSTGRES_V1 integrationType = "postgres_v1"
+	POSTGRES_V2 integrationType = "postgres_v2"
+	MONGO       integrationType = "mongo"
 )
 
 // TODO: it should be a map of enum to Initializer
@@ -34,7 +35,7 @@ type ConditionalDstCfg struct {
 }
 
 type Integrations interface {
-	OutgoingType(ctx context.Context, reqBuf []byte) bool
+	MatchType(ctx context.Context, reqBuf []byte) bool
 	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }

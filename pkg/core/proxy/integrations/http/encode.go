@@ -13,7 +13,7 @@ import (
 )
 
 // encodeHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeHttp(ctx context.Context, logger *zap.Logger, req []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
@@ -31,14 +31,14 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, req []byte, clientConn,
 	destPort := uint(remoteAddr.Port)
 
 	//Writing the request to the server.
-	_, err = destConn.Write(req)
+	_, err = destConn.Write(reqBuf)
 	if err != nil {
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
 
-	logger.Debug("This is the initial request: " + string(req))
-	finalReq = append(finalReq, req...)
+	logger.Debug("This is the initial request: " + string(reqBuf))
+	finalReq = append(finalReq, reqBuf...)
 
 	//for keeping the conn alive
 	for {
@@ -73,18 +73,18 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, req []byte, clientConn,
 				return err
 			}
 			//Reading the request buffer again
-			req, err = util.ReadBytes(ctx, clientConn)
+			reqBuf, err = util.ReadBytes(ctx, clientConn)
 			if err != nil {
 				logger.Error("failed to read the request message from the user client", zap.Error(err))
 				return err
 			}
 			// write the request message to the actual destination server
-			_, err = destConn.Write(req)
+			_, err = destConn.Write(reqBuf)
 			if err != nil {
 				logger.Error("failed to write request message to the destination server", zap.Error(err))
 				return err
 			}
-			finalReq = append(finalReq, req...)
+			finalReq = append(finalReq, reqBuf...)
 		}
 
 		// Capture the request timestamp

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
@@ -23,10 +23,10 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 
 	genericRequests := []models.GenericPayload{}
 
-	bufStr := string(req)
+	bufStr := string(reqBuf)
 	dataType := models.String
-	if !util.IsAsciiPrintable(string(req)) {
-		bufStr = util.EncodeBase64(req)
+	if !util.IsAsciiPrintable(string(reqBuf)) {
+		bufStr = util.EncodeBase64(reqBuf)
 		dataType = "binary"
 	}
 
@@ -41,7 +41,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 			},
 		})
 	}
-	_, err := destConn.Write(req)
+	_, err := destConn.Write(reqBuf)
 	if err != nil {
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
@@ -56,7 +56,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 	go func() {
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 	}()
-	// read response from destination
+	// read responses from destination
 	go func() {
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 	}()
