@@ -133,6 +133,7 @@ func HttpDecoder(encoded string) ([]byte, error) {
 	return data, nil
 }
 
+// TODO: generalize the function to work with any type of integration
 func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 
 	mxSim := -1.0
