@@ -47,14 +47,16 @@ func (p *PostgresV1) MatchType(ctx context.Context, reqBuf []byte) bool {
 }
 
 func (p *PostgresV1) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	reqBuf, err := util.ReadInitialBuf(ctx, p.logger, src)
+	logger := p.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		p.logger.Error("failed to read the initial postgres message", zap.Error(err))
+		logger.Error("failed to read the initial postgres message", zap.Error(err))
 		return errors.New("failed to record the outgoing postgres call")
 	}
-	err = encodePostgres(ctx, p.logger, reqBuf, src, dst, mocks, opts)
+	err = encodePostgres(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
-		p.logger.Error("failed to encode the postgres message into the yaml", zap.Error(err))
+		logger.Error("failed to encode the postgres message into the yaml", zap.Error(err))
 		return errors.New("failed to record the outgoing postgres call")
 	}
 	return nil
@@ -62,15 +64,17 @@ func (p *PostgresV1) RecordOutgoing(ctx context.Context, src net.Conn, dst net.C
 }
 
 func (p *PostgresV1) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	reqBuf, err := util.ReadInitialBuf(ctx, p.logger, src)
+	logger := p.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		p.logger.Error("failed to read the initial postgres message", zap.Error(err))
+		logger.Error("failed to read the initial postgres message", zap.Error(err))
 		return errors.New("failed to mock the outgoing postgres call")
 	}
 
-	err = decodePostgres(ctx, p.logger, reqBuf, src, dstCfg, mockDb, opts)
+	err = decodePostgres(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		p.logger.Error("failed to decode the postgres message from the yaml", zap.Error(err))
+		logger.Error("failed to decode the postgres message from the yaml", zap.Error(err))
 		return errors.New("failed to mock the outgoing postgres call")
 	}
 	return nil

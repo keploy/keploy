@@ -36,18 +36,22 @@ func (m *MySql) MatchType(ctx context.Context, reqBuf []byte) bool {
 }
 
 func (m *MySql) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	err := encodeMySql(ctx, m.logger, src, dst, mocks, opts)
+	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	err := encodeMySql(ctx, logger, src, dst, mocks, opts)
 	if err != nil {
-		m.logger.Error("failed to encode the mysql message into the yaml", zap.Error(err))
+		logger.Error("failed to encode the mysql message into the yaml", zap.Error(err))
 		return errors.New("failed to record the outgoing mysql call")
 	}
 	return nil
 }
 
 func (m *MySql) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	err := decodeMySql(ctx, m.logger, src, dstCfg, mockDb, opts)
+	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	err := decodeMySql(ctx, logger, src, dstCfg, mockDb, opts)
 	if err != nil {
-		m.logger.Error("failed to decode the mysql message from the yaml", zap.Error(err))
+		logger.Error("failed to decode the mysql message from the yaml", zap.Error(err))
 		return errors.New("failed to mock the outgoing mysql call")
 	}
 	return nil

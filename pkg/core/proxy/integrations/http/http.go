@@ -55,30 +55,34 @@ func (h *Http) MatchType(ctx context.Context, buf []byte) bool {
 }
 
 func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	reqBuf, err := util.ReadInitialBuf(ctx, h.logger, src)
+	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		h.logger.Error("failed to read the initial http message", zap.Error(err))
+		logger.Error("failed to read the initial http message", zap.Error(err))
 		return errors.New("failed to record the outgoing http call")
 	}
 
-	err = encodeHttp(ctx, h.logger, reqBuf, src, dst, mocks, opts)
+	err = encodeHttp(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
-		h.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
+		logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 		return errors.New("failed to record the outgoing http call")
 	}
 	return nil
 }
 
 func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	reqBuf, err := util.ReadInitialBuf(ctx, h.logger, src)
+	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		h.logger.Error("failed to read the initial http message", zap.Error(err))
+		logger.Error("failed to read the initial http message", zap.Error(err))
 		return errors.New("failed to mock the outgoing http call")
 	}
 
-	err = decodeHttp(ctx, h.logger, reqBuf, src, dstCfg, mockDb, opts)
+	err = decodeHttp(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		h.logger.Error("failed to decode the http message from the yaml", zap.Error(err))
+		logger.Error("failed to decode the http message from the yaml", zap.Error(err))
 		return errors.New("failed to mock the outgoing http call")
 	}
 	return nil
