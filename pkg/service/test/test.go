@@ -54,6 +54,7 @@ type TestOptions struct {
 	CoverageReportPath string
 	IgnoreOrdering     bool
 	PassthroughHosts   []models.Filters
+	GenerateTestReport bool
 }
 
 var (
@@ -197,21 +198,20 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		}
 	}()
 	returnVal.IgnoreOrdering = cfg.IgnoreOrdering
-
+	returnVal.GenerateTestReport = cfg.GenerateTestReport
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
 
 	testRes := false
 	result := true
 	exitLoop := false
-
 	cfg := &TestConfig{
 		Path:               path,
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: options.GenerateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
@@ -251,7 +251,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -346,12 +346,13 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 	return false
 }
 
-func (t *tester) StartTest(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
+
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
-	return t.Test(path, testReportPath, generateTestReport, appCmd, options, tele, reportStorage, mockStorage)
+	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -459,8 +460,12 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 			return returnVal
 		}
 	} else {
-		index := strings.Split(cfg.TestSet, "-")[2]
-		returnVal.TestReport.Name = fmt.Sprintf("report-%v", index)
+		index := cfg.TestSet
+		fileName := strings.Split(cfg.TestSet, "-")
+		if len(fileName) > 2 {
+			index = fileName[2]
+		}
+		returnVal.TestReport.Name = "report-" + index
 	}
 
 	//if running keploy-tests along with unit tests
@@ -629,12 +634,12 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestReport bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:            testSet,
 		Path:               path,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: initialisedValues.GenerateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       appContainer,
 		AppNetwork:         appNetwork,
@@ -785,7 +790,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 		Failure:            &failure,
 		Ctx:                initialisedValues.Ctx,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: initialisedValues.GenerateTestReport,
 		Path:               path,
 	}
 	status = t.FetchTestResults(resultsCfg)
