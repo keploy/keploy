@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
@@ -24,7 +25,7 @@ import (
 // RunTestSet is the resolver for the runTestSet field.
 func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*model.RunTestSetResponse, error) {
 	// time.Sleep(10 * time.Second)
-	
+
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err
@@ -109,19 +110,16 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
 	r.Logger.Info("logging the pid in the graph handler", zap.Any("pid", r.AppPid))
 
-	// // load the ebpf hooks into the kernel
-	// select {
-	// case <-stopper:
-	// 	return nil, fmt.Errorf("test stopped during execution")
-	// default:
 	// load the ebpf hooks into the kernel
-	// // go func() error {
-	if err := r.LoadedHooks.LoadHooks("", "", r.AppPid, context.Background(), nil); err != nil {
-		// return err
-		return nil, err
+	select {
+	case <-stopper:
+		return nil, fmt.Errorf("test stopped during execution")
+	default:
+		if err := r.LoadedHooks.LoadHooks("", "", r.AppPid, context.Background(), nil); err != nil {
+			return nil, err
+		}
+
 	}
-	// // return nil
-	// }
 
 	//sending this graphql server port to be filterd in the eBPF program
 	if err := r.LoadedHooks.SendKeployServerPort(r.KeployServerPort); err != nil {
@@ -129,17 +127,25 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 		// return err
 	}
 
+	select {
+	case <-stopper:
+		r.LoadedHooks.Stop(true)
+		return nil, fmt.Errorf("test stopped during execution")
+	default:
+		// start the proxy
+		r.ProxySet = proxy.BootProxy(r.Logger, proxy.Option{Port: r.ProxyPort, MongoPassword: r.MongoPassword}, "", "", r.AppPid, r.Lang, r.PassThroughPorts, r.LoadedHooks, ctx, 0)
+
+	}
+
 	// proxy update its state in the ProxyPorts map
 	// Sending Proxy Ip & Port to the ebpf program
 	if err := r.LoadedHooks.SendProxyInfo(r.ProxySet.IP4, r.ProxySet.Port, r.ProxySet.IP6); err != nil {
 		return nil, err
-		// return err
 	}
 
 	// Sending the Dns Port to the ebpf program
 	if err := r.LoadedHooks.SendDnsPort(r.ProxySet.DnsPort); err != nil {
 		return nil, err
-		// return err
 	}
 
 	r.Logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
@@ -147,17 +153,12 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	// filter the required destination ports
 	if err := r.LoadedHooks.SendPassThroughPorts(r.PassThroughPorts); err != nil {
 		return nil, err
-		// return err
 	}
 
 	err = r.LoadedHooks.SendCmdType(false)
 	if err != nil {
 		return nil, err
-		// return err
 	}
-	// // return nil
-	// // }()
-	// time.Sleep(10 * time.Second)
 	return testSets, nil
 }
 
@@ -197,6 +198,9 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 func (r *Resolver) StopTest(ctx context.Context) (bool, error) {
 	r.Logger.Debug("stopping test...")
 	r.LoadedHooks.Stop(true)
+
+	// stop the proxy set
+	r.ProxySet.StopProxyServer()
 	return true, nil
 }
 

@@ -21,6 +21,9 @@ type Resolver struct {
 	ProxySet           *proxy.ProxySet
 	KeployServerPort   uint32
 	PassThroughPorts   []uint
+	ProxyPort          uint32
+	Lang               string
+	MongoPassword      string
 	Logger             *zap.Logger
 	Path               string
 	TestReportPath     string

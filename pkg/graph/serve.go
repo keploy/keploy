@@ -71,62 +71,17 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	// Recover from panic and gracefully shutdown
 	defer loadedHooks.Recover(routineId)
 
-	ctx := context.Background()
-
-	// // load the ebpf hooks into the kernel
-	// select {
-	// case <-stopper:
-	// 	return
-	// default:
-	// 	g.logger.Info("logging the pid in the serve", zap.Any("pid", pid))
-	// 	// load the ebpf hooks into the kernel
-	// 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
-	// 		return
-	// 	}
-	// }
-
-	// //sending this graphql server port to be filterd in the eBPF program
-	// if err := loadedHooks.SendKeployServerPort(port); err != nil {
-	// 	return
-	// }
-
-	select {
-	case <-stopper:
-		loadedHooks.Stop(true)
-		return
-	default:
-		// start the proxy
-		ps = proxy.BootProxy(g.logger, proxy.Option{Port: proxyPort, MongoPassword: mongopassword}, "", "", pid, lang, passThroughPorts, loadedHooks, ctx, 0)
-
-	}
-
-	// // proxy update its state in the ProxyPorts map
-	// // Sending Proxy Ip & Port to the ebpf program
-	// if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
-	// 	return
-	// }
-
-	// // Sending the Dns Port to the ebpf program
-	// if err := loadedHooks.SendDnsPort(ps.DnsPort); err != nil {
-	// 	return
-	// }
-
-	// g.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
-	// passThroughPorts = append(passThroughPorts, 36320)
-	// // filter the required destination ports
-	// if err := loadedHooks.SendPassThroughPorts(passThroughPorts); err != nil {
-	// 	return
-	// }
-
 	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
 		Resolvers: &Resolver{
 			Tester:             tester,
 			TestReportFS:       testReportFS,
 			Storage:            ys,
 			LoadedHooks:        loadedHooks,
-			ProxySet:           ps,
 			KeployServerPort:   port,
 			PassThroughPorts:   passThroughPorts,
+			Lang:               lang,
+			MongoPassword:      mongopassword,
+			ProxyPort:          proxyPort,
 			Logger:             g.logger,
 			Path:               path,
 			TestReportPath:     testReportPath,
@@ -171,7 +126,9 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	select {
 	case <-stopper:
 		loadedHooks.Stop(true)
-		ps.StopProxyServer()
+		if ps != nil {
+			ps.StopProxyServer()
+		}
 		return
 	default:
 		go func() {
@@ -192,7 +149,9 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
 				loadedHooks.Stop(true)
-				ps.StopProxyServer()
+				if ps != nil {
+					ps.StopProxyServer()
+				}
 				exitCmd <- true
 				//stop listening for proxy server
 			} else {
@@ -205,7 +164,9 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	case <-stopper:
 		abortStopHooksForcefully = true
 		loadedHooks.Stop(false)
-		ps.StopProxyServer()
+		if ps != nil {
+			ps.StopProxyServer()
+		}
 		return
 	case <-abortStopHooksInterrupt:
 		//telemetry event can be added here
