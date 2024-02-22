@@ -43,15 +43,15 @@ type finalHttp struct {
 
 // OutgoingType function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
-func (h *Http) OutgoingType(ctx context.Context, buffer []byte) bool {
-	return bytes.HasPrefix(buffer[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buffer[:], []byte("GET ")) ||
-		bytes.HasPrefix(buffer[:], []byte("POST ")) ||
-		bytes.HasPrefix(buffer[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buffer[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buffer[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buffer[:], []byte("HEAD "))
+func (h *Http) OutgoingType(ctx context.Context, buf []byte) bool {
+	return bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
+		bytes.HasPrefix(buf[:], []byte("GET ")) ||
+		bytes.HasPrefix(buf[:], []byte("POST ")) ||
+		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
+		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
+		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
+		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
+		bytes.HasPrefix(buf[:], []byte("HEAD "))
 }
 
 func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
@@ -61,7 +61,7 @@ func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 		return errors.New("failed to record the outgoing http call")
 	}
 
-	err = encodeOutgoingHttp(ctx, h.logger, reqBuf, src, dst, mocks, opts)
+	err = encodeHttp(ctx, h.logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		h.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 		return errors.New("failed to record the outgoing http call")
@@ -76,7 +76,7 @@ func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrati
 		return errors.New("failed to mock the outgoing http call")
 	}
 
-	err = decodeOutgoingHttp(ctx, h.logger, reqBuf, src, dstCfg, mockDb, opts)
+	err = decodeHttp(ctx, h.logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		h.logger.Error("failed to decode the http message from the yaml", zap.Error(err))
 		return errors.New("failed to mock the outgoing http call")
@@ -94,16 +94,15 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 		return err
 	}
 
-	if req.Body == nil {
-		logger.Debug("The request body is empty", zap.Any("metadata", getReqMeta(req)))
-		return nil
-	}
-
-	reqBody, err := io.ReadAll(req.Body)
-	if err != nil {
-		// TODO right way to log errors
-		logger.Error("failed to read the http request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-		return err
+	var reqBody []byte
+	if req.Body != nil { // Read
+		var err error
+		reqBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			// TODO right way to log errors
+			logger.Error("failed to read the http request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			return err
+		}
 	}
 
 	// converts the response message buffer to http response
@@ -113,34 +112,33 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 		return err
 	}
 
-	if respParsed.Body == nil {
-		logger.Debug("The response body is empty", zap.Any("metadata", getReqMeta(req)))
-		return nil
-	}
-
-	if respParsed.Header.Get("Content-Encoding") == "gzip" {
-		check := respParsed.Body
-		ok, reader := isGZipped(check, logger)
-		logger.Debug("The body is gzip? " + strconv.FormatBool(ok))
-		logger.Debug("", zap.Any("isGzipped", ok))
-		if ok {
-			gzipReader, err := gzip.NewReader(reader)
-			if err != nil {
-				logger.Error("failed to create a gzip reader", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-				return err
+	//Add the content length to the headers.
+	var respBody []byte
+	//Checking if the body of the response is empty or does not exist.
+	if respParsed.Body != nil { // Read
+		if respParsed.Header.Get("Content-Encoding") == "gzip" {
+			check := respParsed.Body
+			ok, reader := isGZipped(check, logger)
+			logger.Debug("The body is gzip? " + strconv.FormatBool(ok))
+			logger.Debug("", zap.Any("isGzipped", ok))
+			if ok {
+				gzipReader, err := gzip.NewReader(reader)
+				if err != nil {
+					logger.Error("failed to create a gzip reader", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+					return err
+				}
+				respParsed.Body = gzipReader
 			}
-			respParsed.Body = gzipReader
 		}
+		respBody, err = io.ReadAll(respParsed.Body)
+		if err != nil {
+			logger.Error("failed to read the the http response body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			return err
+		}
+		logger.Debug("This is the response body: " + string(respBody))
+		//Set the content length to the headers.
+		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 	}
-
-	respBody, err := io.ReadAll(respParsed.Body)
-	if err != nil {
-		logger.Error("failed to read the the http response body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
-		return err
-	}
-	logger.Debug("This is the response body: " + string(respBody))
-	//Set the content length to the headers.
-	respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 
 	// store the request and responses as mocks
 	meta := map[string]string{

@@ -14,22 +14,17 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 )
 
 type matchParams struct {
-	reqBody       []byte
-	reqURL        *url.URL
-	isReqBodyJSON bool
-	clientConn    net.Conn
-	destConn      net.Conn
-	requestBuffer []byte
-	recover       func(id int)
+	req           *http.Request
+	reqBodyIsJson bool
+	reqBuf        []byte
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -44,7 +39,7 @@ func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, 
 					return err
 				}
 				//Read the request buffer again
-				newRequest, err := util.ReadBytes(clientConn)
+				newRequest, err := util.ReadBytes(ctx, clientConn)
 				if err != nil {
 					logger.Error("failed to read the request buffer from the user application", zap.Error(err))
 					return err
@@ -74,17 +69,14 @@ func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, 
 				return err
 			}
 
-			//parse request url
-			reqURL, err := url.Parse(request.URL.String())
-			if err != nil {
-				logger.Error("failed to parse request url", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
-				return err
-			}
-
 			//check if reqBuf body is a json
-			reqBodyIsJson := isJSON(reqBody)
 
-			match, stub, err := match(ctx, logger, request, reqURL, reqBuf, reqBodyIsJson, mockDb)
+			param := &matchParams{
+				req:           request,
+				reqBodyIsJson: isJSON(reqBody),
+				reqBuf:        reqBuf,
+			}
+			match, stub, err := match(ctx, logger, param, mockDb)
 			if err != nil {
 				logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
 			}
@@ -99,14 +91,14 @@ func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, 
 					logger.Error("failed to dial the destination server", zap.Error(err))
 					return err
 				}
-				_, err = util.Passthrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf}, nil)
+				_, err = util.Passthrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf})
 				if err != nil {
 					logger.Error("failed to passthrough http request", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
 					return err
 				}
 			}
 
-			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(int(stub.Spec.HttpResp.StatusCode)))
+			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(stub.Spec.HttpResp.StatusCode))
 
 			body := stub.Spec.HttpResp.Body
 			var respBody string
@@ -157,7 +149,7 @@ func decodeOutgoingHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, 
 				return err
 			}
 
-			reqBuf, err = util.ReadBytes(clientConn)
+			reqBuf, err = util.ReadBytes(ctx, clientConn)
 			if err != nil {
 				logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				logger.Debug("This was the last response from the server:\n" + string(responseString))
