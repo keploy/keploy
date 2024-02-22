@@ -190,7 +190,7 @@ func (h *Hook) SetTcsMocks(m []*models.Mock) {
 func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.configMocks.deleteAll()
 	for index, mock := range m {
-		h.persistentMatchedMocks[mock.Name] = false
+		h.UpdatePersistentMatchedMock(mock.Name, false)
 		mock.TestModeInfo.SortOrder = index
 		mock.TestModeInfo.Id = index
 		h.configMocks.insert(mock.TestModeInfo, mock)
