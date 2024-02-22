@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,8 +49,6 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 		port = defaultPort
 	}
 
-	// Remove the container on program exit
-	removeContainer := !strings.Contains(appCmd, "docker start")
 
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
@@ -95,7 +92,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, removeContainer)
+		loadedHooks.Stop(true)
 		return
 	default:
 		// start the proxy
@@ -170,7 +167,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	abortStopHooksForcefully := false
 	select {
 	case <-stopper:
-		loadedHooks.Stop(true, removeContainer)
+		loadedHooks.Stop(true)
 		ps.StopProxyServer()
 		return
 	default:
@@ -191,7 +188,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 			if !abortStopHooksForcefully {
 				abortStopHooksInterrupt <- true
 				// stop listening for the eBPF events
-				loadedHooks.Stop(true, removeContainer)
+				loadedHooks.Stop(true)
 				ps.StopProxyServer()
 				exitCmd <- true
 				//stop listening for proxy server
@@ -204,7 +201,7 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 	select {
 	case <-stopper:
 		abortStopHooksForcefully = true
-		loadedHooks.Stop(false, removeContainer)
+		loadedHooks.Stop(false)
 		ps.StopProxyServer()
 		return
 	case <-abortStopHooksInterrupt:

@@ -421,7 +421,7 @@ func (h *Hook) findAndCollectChildProcesses(parentPID string, pids *[]int) {
 }
 
 // StopUserApplication stops the user application
-func (h *Hook) StopUserApplication(removeContainer bool) {
+func (h *Hook) StopUserApplication() {
 	h.logger.Info("keploy has initiated the shutdown of the user application.")
 	h.SetUserAppTerminateInitiated(true)
 	if h.userAppCmd != nil && h.userAppCmd.Process != nil {
@@ -433,7 +433,8 @@ func (h *Hook) StopUserApplication(removeContainer bool) {
 		// Stop Docker Container and Remove it if Keploy ran using docker.
 		containerID := h.idc.GetContainerID()
 		if len(containerID) != 0 {
-			err := h.idc.StopDockerContainer(removeContainer)
+			skipRemove := strings.Contains(h.userAppCmd.String(), "docker start")
+			err := h.idc.StopAndRemoveDockerContainer(skipRemove)
 			if err != nil {
 				h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerID), zap.Error(err))
 			}
@@ -450,9 +451,9 @@ func (h *Hook) Recover(id int) {
 		stackTrace := debug.Stack()
 
 		h.logger.Debug("Recover from panic in go routine", zap.Any("current routine id", id), zap.Any("main routine id", h.mainRoutineId), zap.Any("stack trace", string(stackTrace)))
-		h.Stop(true, true)
+		h.Stop(true)
 		// stop the user application cmd
-		h.StopUserApplication(true)
+		h.StopUserApplication()
 		if id != h.mainRoutineId {
 			log.Panic(r)
 			os.Exit(1)
@@ -475,10 +476,10 @@ func deleteFileIfExists(filename string, logger *zap.Logger) error {
 	return nil
 }
 
-func (h *Hook) Stop(forceStop bool, removeContainer bool) {
-	if !forceStop && !h.IsUserAppTerminateInitiated() { 
+func (h *Hook) Stop(forceStop bool) {
+	if !forceStop && !h.IsUserAppTerminateInitiated() {
 		h.logger.Info("Received signal to exit keploy program..")
-		h.StopUserApplication(removeContainer)
+		h.StopUserApplication()
 	} else {
 		h.logger.Info("Exiting keploy program gracefully.")
 	}

@@ -81,6 +81,6 @@ func (s *mockRecorder) MockRecord(path string, proxyPort uint32, pid uint32, moc
 	}
 
 	// Shutdown other resources
-	loadedHooks.Stop(true, true)
+	loadedHooks.Stop(true)
 	ps.StopProxyServer()
 }
