@@ -49,7 +49,6 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 		port = defaultPort
 	}
 
-
 	// Listen for the interrupt signal
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
