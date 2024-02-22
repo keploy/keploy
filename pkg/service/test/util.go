@@ -55,6 +55,7 @@ type TestEnvironmentSetup struct {
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 	IgnoreOrdering           bool
+	GenerateTestReport       bool
 }
 
 type TestConfig struct {

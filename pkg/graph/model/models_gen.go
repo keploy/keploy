@@ -2,6 +2,12 @@
 
 package model
 
+type Mutation struct {
+}
+
+type Query struct {
+}
+
 type RunTestSetResponse struct {
 	Success   bool    `json:"success"`
 	TestRunID string  `json:"testRunId"`
