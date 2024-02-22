@@ -198,12 +198,10 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) {
 }
 
 func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
 	if isUpdated {
 		h.DeletePersistentMock(oldMock.Name)
-		h.persistentMatchedMocks[newMock.Name] = false
+		h.UpdatePersistentMatchedMock(newMock.Name, false)
 	}
 	return isUpdated
 }
@@ -249,7 +247,7 @@ func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 	isDeleted := h.tcsMocks.delete(mock.TestModeInfo)
 	if isDeleted {
-		h.persistentMatchedMocks[mock.Name] = true
+		h.UpdatePersistentMatchedMock(mock.Name, true)
 	}
 	return isDeleted
 }
@@ -257,7 +255,7 @@ func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 func (h *Hook) DeleteConfigMock(mock *models.Mock) bool {
 	isDeleted := h.configMocks.delete(mock.TestModeInfo)
 	if isDeleted {
-		h.persistentMatchedMocks[mock.Name] = false
+		h.UpdatePersistentMatchedMock(mock.Name, false)
 	}
 	return isDeleted
 }
@@ -300,6 +298,12 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 func (h *Hook) GetPersistentMock() map[string]bool {
 	return h.persistentMatchedMocks
 }
+
+func (h *Hook) UpdatePersistentMatchedMock(mockName string, isTcsUnused bool) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.persistentMatchedMocks[mockName] = isTcsUnused
+} 
 
 func (h *Hook) DeletePersistentMock(mockName string) bool {
 	h.mutex.Lock()
