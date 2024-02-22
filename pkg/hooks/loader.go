@@ -57,6 +57,7 @@ type Hook struct {
 	// here key represents mock name and value is true only when
 	// it is not a config mock or it is not being used by any test case yet.
 	persistentMatchedMocks   map[string]bool
+	isAllMocksMatched        bool
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
@@ -133,6 +134,7 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 		configMocks:            configMocks,
 		tcsMocks:               tcsMocks,
 		persistentMatchedMocks: make(map[string]bool),
+		isAllMocksMatched:      false,
 		mu:                     &sync.Mutex{},
 		userIpAddress:          make(chan string),
 		idc:                    idc,
@@ -285,10 +287,18 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 		ConfigMocks = append(ConfigMocks, configMock)
 	}
 	mocks := append(TcsMocks, ConfigMocks...)
+	totalMatches := 0
 	for _, mock := range mocks {
 		if _, ok := h.persistentMatchedMocks[mock.Name]; ok {
+			totalMatches++
 			matchedMocks = append(matchedMocks, mock)
 		}
+	}
+	if len(mocks) == totalMatches {
+		// this means all mocks have matched
+		h.isAllMocksMatched = true
+	} else {
+		h.isAllMocksMatched = false
 	}
 	SortMocksByName(matchedMocks)
 	return matchedMocks, nil
@@ -313,6 +323,10 @@ func SortMocksByName(mocks []*models.Mock) {
 
 		return mockNumberI < mockNumberJ
 	})
+}
+
+func (h *Hook) GetIsAllMocksMatched() bool {
+	return h.isAllMocksMatched
 }
 
 func (h *Hook) GetPersistentMock() map[string]bool {
