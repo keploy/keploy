@@ -256,7 +256,6 @@ func (t *Test) GetCmd() *cobra.Command {
 			testsetNoise := make(models.TestsetNoise)
 
 			passThroughHosts := []models.Filters{}
-
 			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
@@ -431,7 +430,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
 
-				t.tester.StartTest(path, testReportPath, generateTestReport, appCmd, test.TestOptions{
+				t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,
@@ -447,6 +446,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
 					PassthroughHosts:   passThroughHosts,
+					GenerateTestReport: generateTestReport,
 				}, enableTele)
 
 				fileExist := utils.CheckFileExists(path)

@@ -60,16 +60,17 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
 	initialisedValues := test.TestEnvironmentSetup{
-		Ctx:            ctx,
-		LoadedHooks:    loadedHooks,
-		TestReportFS:   testReportFS,
-		Storage:        ys,
-		IgnoreOrdering: false,
+		Ctx:                ctx,
+		LoadedHooks:        loadedHooks,
+		TestReportFS:       testReportFS,
+		Storage:            ys,
+		IgnoreOrdering:     false,
+		GenerateTestReport: true,
 	}
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, true, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, nil, nil, serveTest, initialisedValues)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, nil, nil, serveTest, initialisedValues)
 	}()
 
 	testRunID := <-testRunChan
