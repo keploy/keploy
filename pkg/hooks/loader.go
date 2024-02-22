@@ -302,6 +302,8 @@ func (h *Hook) GetPersistentMock() map[string]bool {
 }
  
 func (h *Hook) DeletePersistentMock(mockName string) bool {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 	if _, ok := h.persistentMatchedMocks[mockName]; ok {
 		delete(h.persistentMatchedMocks, mockName)
 		return true
