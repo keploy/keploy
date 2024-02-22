@@ -43,42 +43,56 @@ func InterfaceToString(val interface{}) string {
 	}
 }
 
-func Match(exp, act string, noise map[string][]string, log *zap.Logger, ignoreOrdering bool) (string, string, bool, bool, error) {
-	expected, err := UnmarshallJson(exp, log)
+func JsonDiffWithNoiseControl(log *zap.Logger, validatedJSON validatedJSON, noise map[string][]string, ignoreOrdering bool) (jsonComparisonResult, error) {
+	var matchJsonComparisonResult jsonComparisonResult
+	matchJsonComparisonResult, err := matchJsonWithNoiseHandling("", validatedJSON.expected, validatedJSON.actual, noise, ignoreOrdering)
 	if err != nil {
-		return exp, act, false, false, err
+		return matchJsonComparisonResult, err
 	}
-	actual, err := UnmarshallJson(act, log)
+
+	return matchJsonComparisonResult, nil
+}
+
+func ValidateAndMarshalJson(log *zap.Logger, exp, act *string) (validatedJSON, error) {
+	var validatedJSON validatedJSON
+	expected, err := UnmarshallJson(*exp, log)
 	if err != nil {
-		return exp, act, false, false, err
+		return validatedJSON, err
 	}
+	actual, err := UnmarshallJson(*act, log)
+	if err != nil {
+		return validatedJSON, err
+	}
+	validatedJSON.expected = expected
+	validatedJSON.actual = actual
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
-		return exp, act, false, false, nil
-	}
-	match, isSame, err := jsonMatch("", expected, actual, noise, ignoreOrdering)
-	if err != nil {
-		return exp, act, false, false, err
+		validatedJSON.isIdentical = false
+		return validatedJSON, nil
 	}
 	cleanExp, err := json.Marshal(expected)
 	if err != nil {
-		return exp, act, false, false, err
+		return validatedJSON, err
 	}
 	cleanAct, err := json.Marshal(actual)
 	if err != nil {
-		return exp, act, false, false, err
+		return validatedJSON, err
 	}
-
-	return string(cleanExp), string(cleanAct), match, isSame, nil
+	*exp = string(cleanExp)
+	*act = string(cleanAct)
+	validatedJSON.isIdentical = true
+	return validatedJSON, nil
 }
 
-// jsonMatch returns true if expected and actual JSON objects matches(are equal).
-func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (bool, bool, error) {
-
+// matchJsonWithNoiseHandling returns strcut if expected and actual JSON objects matches(are equal) and in exact order(isExact).
+func matchJsonWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (jsonComparisonResult, error) {
+	var matchJsonComparisonResult jsonComparisonResult
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
-		return false, false, errors.New("type not matched ")
+		return matchJsonComparisonResult, errors.New("type not matched")
 	}
 	if expected == nil && actual == nil {
-		return true, false, nil
+		matchJsonComparisonResult.isExact = true
+		matchJsonComparisonResult.matches = true
+		return matchJsonComparisonResult, nil
 	}
 	x := reflect.ValueOf(expected)
 	prefix := ""
@@ -92,24 +106,42 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
 		}
 		if expected != actual && !isNoisy {
-			return false, false, nil
+			return matchJsonComparisonResult, nil
 		}
 
 	case reflect.Map:
 		expMap := expected.(map[string]interface{})
 		actMap := actual.(map[string]interface{})
+		copiedExpMap := make(map[string]interface{})
+		copiedActMap := make(map[string]interface{})
+
+		// Copy each key-value pair from expMap to copiedExpMap
+		for key, value := range expMap {
+			copiedExpMap[key] = value
+		}
+
+		// Repeat the same process for actual map
+		for key, value := range actMap {
+			copiedActMap[key] = value
+		}
+		isExact := true
+		differences := []string{}
 		for k, v := range expMap {
 			val, ok := actMap[k]
 			if !ok {
-				return false, false, nil
+				return matchJsonComparisonResult, nil
 			}
-			if x, _, er := jsonMatch(prefix+k, v, val, noiseMap, ignoreOrdering); !x || er != nil {
-				return false, false, nil
+			if valueMatchJsonComparisonResult, er := matchJsonWithNoiseHandling(prefix+k, v, val, noiseMap, ignoreOrdering); !valueMatchJsonComparisonResult.matches || er != nil {
+				return valueMatchJsonComparisonResult, nil
+			} else if !valueMatchJsonComparisonResult.isExact {
+				isExact = false
+				differences = append(differences, k)
+				differences = append(differences, valueMatchJsonComparisonResult.differences...)
 			}
 			// remove the noisy key from both expected and actual JSON.
 			if _, ok := CheckStringExist(prefix+k, noiseMap); ok {
-				delete(expMap, prefix+k)
-				delete(actMap, k)
+				delete(copiedExpMap, prefix+k)
+				delete(copiedActMap, k)
 				continue
 			}
 		}
@@ -117,10 +149,13 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 		for k := range actMap {
 			_, ok := expMap[k]
 			if !ok {
-				return false, false, nil
+				return matchJsonComparisonResult, nil
 			}
 		}
-
+		matchJsonComparisonResult.matches = true
+		matchJsonComparisonResult.isExact = isExact
+		matchJsonComparisonResult.differences = append(matchJsonComparisonResult.differences, differences...)
+		return matchJsonComparisonResult, nil
 	case reflect.Slice:
 		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
 			break
@@ -128,14 +163,20 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
 		if expSlice.Len() != actSlice.Len() {
-			return false, false, nil
+			return matchJsonComparisonResult, nil
 		}
 		isMatched := true
-		isSame := true
+		isExact := true
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
 			for j := 0; j < actSlice.Len(); j++ {
-				if x, _, err := jsonMatch(key, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && x {
+				if valMatchJsonComparisonResult, err := matchJsonWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJsonComparisonResult.matches {
+					if !valMatchJsonComparisonResult.isExact {
+						for _, val := range valMatchJsonComparisonResult.differences {
+							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value
+							matchJsonComparisonResult.differences = append(matchJsonComparisonResult.differences, prefixedVal)
+						}
+					}
 					matched = true
 					break
 				}
@@ -143,25 +184,31 @@ func jsonMatch(key string, expected, actual interface{}, noiseMap map[string][]s
 
 			if !matched {
 				isMatched = false
-				isSame = false
+				isExact = false
 				break
 			}
 		}
 		if !isMatched {
-			return isMatched, isSame, nil
+			matchJsonComparisonResult.matches = isMatched
+			matchJsonComparisonResult.isExact = isExact
+			return matchJsonComparisonResult, nil
 		}
 		if !ignoreOrdering {
 			for i := 0; i < expSlice.Len(); i++ {
-				if x, _, err := jsonMatch(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering); err == nil && !x {
-					isMatched = false
+				if valMatchJsonComparisonResult, er := matchJsonWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering); er != nil || !valMatchJsonComparisonResult.isExact {
+					isExact = false
 					break
 				}
 			}
 		}
-		return isMatched, isSame, nil
-	default:
-		return false, false, errors.New("type not registered for json")
-	}
-	return true, true, nil
+		matchJsonComparisonResult.matches = isMatched
+		matchJsonComparisonResult.isExact = isExact
 
+		return matchJsonComparisonResult, nil
+	default:
+		return matchJsonComparisonResult, errors.New("type not registered for json")
+	}
+	matchJsonComparisonResult.matches = true
+	matchJsonComparisonResult.isExact = true
+	return matchJsonComparisonResult, nil
 }

@@ -55,6 +55,7 @@ type TestOptions struct {
 	IgnoreOrdering     bool
 	RemoveUnusedMocks  bool
 	PassthroughHosts   []models.Filters
+	GenerateTestReport bool
 }
 
 var (
@@ -162,6 +163,11 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		return returnVal, err
 	}
 
+	// Sending the Dns Port to the ebpf program
+	if err := returnVal.LoadedHooks.SendDnsPort(returnVal.ProxySet.DnsPort); err != nil {
+		return returnVal, err
+	}
+
 	// filter the required destination ports
 	if err := returnVal.LoadedHooks.SendPassThroughPorts(cfg.PassThroughPorts); err != nil {
 		return returnVal, err
@@ -194,21 +200,20 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	}()
 	returnVal.IgnoreOrdering = cfg.IgnoreOrdering
 	returnVal.RemoveUnusedMocks = cfg.RemoveUnusedMocks
-
+	returnVal.GenerateTestReport = cfg.GenerateTestReport
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB) bool {
 
 	testRes := false
 	result := true
 	exitLoop := false
-
 	cfg := &TestConfig{
 		Path:               path,
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: options.GenerateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
@@ -249,7 +254,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -298,35 +303,36 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 
 	})
 
-	pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
+	if totalTests > 0 {
+		pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed)
 
-	pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
-	for _, testSuiteName := range testSuiteNames {
-		pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
-	}
-
-	pp.Printf("\n<=========================================> \n\n")
-
-	t.logger.Info("test run completed", zap.Bool("passed overall", result))
-	// log the overall code coverage for the test run of go binaries
-	if options.WithCoverage {
-		t.logger.Info("there is a opportunity to get the coverage here")
-		// logs the coverage using covdata
-		coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
-		output, err := coverCmd.Output()
-		if err != nil {
-			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+		pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n")
+		for _, testSuiteName := range testSuiteNames {
+			pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed)
 		}
-		t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
 
-		// merges the coverage files into a single txt file which can be merged with the go-test coverage
-		generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-		output, err = generateCovTxtCmd.Output()
-		if err != nil {
-			t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
-		}
-		if len(output) > 0 {
-			t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
+		pp.Printf("\n<=========================================> \n\n")
+		t.logger.Info("test run completed", zap.Bool("passed overall", result))
+		// log the overall code coverage for the test run of go binaries
+		if options.WithCoverage {
+			t.logger.Info("there is a opportunity to get the coverage here")
+			// logs the coverage using covdata
+			coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
+			output, err := coverCmd.Output()
+			if err != nil {
+				t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+			}
+			t.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
+
+			// merges the coverage files into a single txt file which can be merged with the go-test coverage
+			generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+			output, err = generateCovTxtCmd.Output()
+			if err != nil {
+				t.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
+			}
+			if len(output) > 0 {
+				t.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
+			}
 		}
 	}
 
@@ -343,12 +349,13 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 	return false
 }
 
-func (t *tester) StartTest(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
+
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
-	return t.Test(path, testReportPath, generateTestReport, appCmd, options, tele, reportStorage, mockStorage)
+	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -456,8 +463,12 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 			return returnVal
 		}
 	} else {
-		index := strings.Split(cfg.TestSet, "-")[2]
-		returnVal.TestReport.Name = fmt.Sprintf("report-%v", index)
+		index := cfg.TestSet
+		fileName := strings.Split(cfg.TestSet, "-")
+		if len(fileName) > 2 {
+			index = fileName[2]
+		}
+		returnVal.TestReport.Name = "report-" + index
 	}
 
 	//if running keploy-tests along with unit tests
@@ -627,12 +638,12 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestReport bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:            testSet,
 		Path:               path,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: initialisedValues.GenerateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       appContainer,
 		AppNetwork:         appNetwork,
@@ -790,7 +801,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 		Failure:            &failure,
 		Ctx:                initialisedValues.Ctx,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: initialisedValues.GenerateTestReport,
 		Path:               path,
 	}
 	status = t.FetchTestResults(resultsCfg)
@@ -844,14 +855,24 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 	}
 
 	// stores the json body after removing the noise
-	cleanExp, cleanAct := "", ""
-	var err error
-	isSame := false
+	cleanExp, cleanAct := tc.HttpResp.Body, actualResponse.Body
+	var jsonComparisonResult jsonComparisonResult
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		cleanExp, cleanAct, pass, isSame, err = Match(tc.HttpResp.Body, actualResponse.Body, bodyNoise, t.logger, ignoreOrdering)
+		//validate the stored json
+		validatedJSON, err := ValidateAndMarshalJson(t.logger, &cleanExp, &cleanAct)
 		if err != nil {
 			return false, res
 		}
+		if validatedJSON.isIdentical {
+			jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
+			pass = jsonComparisonResult.isExact
+			if err != nil {
+				return false, res
+			}
+		} else {
+			pass = false
+		}
+
 		// debug log for cleanExp and cleanAct
 		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
 		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
@@ -922,9 +943,9 @@ func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, n
 					if len(keyStr) > 1 && keyStr[0] == '/' {
 						keyStr = keyStr[1:]
 					}
-					if isSame {
+					if jsonComparisonResult.matches {
 						logDiffs.hasarrayIndexMismatch = true
-						logDiffs.PushFooterDiff(utils.WarningSign + " Expected and actual array of key are in different order but have the same objects")
+						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 

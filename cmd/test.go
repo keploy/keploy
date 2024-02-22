@@ -262,7 +262,6 @@ func (t *Test) GetCmd() *cobra.Command {
 			testsetNoise := make(models.TestsetNoise)
 
 			passThroughHosts := []models.Filters{}
-
 			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
@@ -437,7 +436,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
 			} else {
 
-				t.tester.StartTest(path, testReportPath, generateTestReport, appCmd, test.TestOptions{
+				t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
 					Tests:              tests,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,
@@ -454,13 +453,17 @@ func (t *Test) GetCmd() *cobra.Command {
 					IgnoreOrdering:     ignoreOrdering,
 					RemoveUnusedMocks:  removeUnusedMocks,
 					PassthroughHosts:   passThroughHosts,
+					GenerateTestReport: generateTestReport,
 				}, enableTele)
 
-				cmd := exec.Command("sudo", "chmod", "-R", "777", path)
-				err = cmd.Run()
-				if err != nil {
-					t.logger.Error("failed to set the permission of keploy directory", zap.Error(err))
-					return err
+				fileExist := utils.CheckFileExists(path)
+				if fileExist {
+					cmd := exec.Command("sudo", "chmod", "-R", "777", path)
+					err = cmd.Run()
+					if err != nil {
+						t.logger.Error("failed to run command", zap.Error(err))
+						return err
+					}
 				}
 
 			}

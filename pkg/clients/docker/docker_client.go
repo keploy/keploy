@@ -3,7 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+
 	"os"
 	"path/filepath"
 	"time"
@@ -216,7 +216,7 @@ type Compose struct {
 
 // CheckBindMounts returns information about whether bind mounts if they are being used contain relative file names or not
 func (idc *internalDockerClient) CheckBindMounts(filePath string) bool {
-	data, err := ioutil.ReadFile(filePath)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		idc.logger.Error("error reading file", zap.Any("filePath", filePath), zap.Error(err))
 		return false
@@ -261,7 +261,7 @@ func (idc *internalDockerClient) CheckBindMounts(filePath string) bool {
 
 // CheckNetworkInfo returns information about network name and also about whether the network is external or not in a docker-compose file.
 func (idc *internalDockerClient) CheckNetworkInfo(filePath string) (bool, bool, string) {
-	data, err := ioutil.ReadFile(filePath)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		idc.logger.Error("error reading file", zap.Any("filePath", filePath), zap.Error(err))
 		return false, false, ""
@@ -366,7 +366,7 @@ func (idc *internalDockerClient) GetHostWorkingDirectory() (string, error) {
 
 // ReplaceRelativePaths replaces relative paths in bind mounts with absolute paths
 func (idc *internalDockerClient) ReplaceRelativePaths(dockerComposefilePath, newComposeFile string) error {
-	data, err := ioutil.ReadFile(dockerComposefilePath)
+	data, err := os.ReadFile(dockerComposefilePath)
 	if err != nil {
 		return err
 	}
@@ -426,7 +426,7 @@ func (idc *internalDockerClient) ReplaceRelativePaths(dockerComposefilePath, new
 	}
 
 	newFilePath := filepath.Join(filepath.Dir(dockerComposefilePath), newComposeFile)
-	err = ioutil.WriteFile(newFilePath, newData, 0644)
+	err = os.WriteFile(newFilePath, newData, 0644)
 	if err != nil {
 		return err
 	}
@@ -436,7 +436,7 @@ func (idc *internalDockerClient) ReplaceRelativePaths(dockerComposefilePath, new
 
 // MakeNetworkExternal makes the existing network of the user docker compose file external and save it to a new file
 func (idc *internalDockerClient) MakeNetworkExternal(dockerComposefilePath, newComposeFile string) error {
-	data, err := ioutil.ReadFile(dockerComposefilePath)
+	data, err := os.ReadFile(dockerComposefilePath)
 	if err != nil {
 		return err
 	}
@@ -493,7 +493,7 @@ func (idc *internalDockerClient) MakeNetworkExternal(dockerComposefilePath, newC
 	}
 
 	newFilePath := filepath.Join(filepath.Dir(dockerComposefilePath), newComposeFile)
-	err = ioutil.WriteFile(newFilePath, newData, 0644)
+	err = os.WriteFile(newFilePath, newData, 0644)
 	if err != nil {
 		return err
 	}
@@ -504,7 +504,7 @@ func (idc *internalDockerClient) MakeNetworkExternal(dockerComposefilePath, newC
 // AddNetworkToCompose adds the keploy-network network to the new docker compose file and copy rest of the contents from
 // existing user docker compose file
 func (idc *internalDockerClient) AddNetworkToCompose(dockerComposefilePath, newComposeFile string) error {
-	data, err := ioutil.ReadFile(dockerComposefilePath)
+	data, err := os.ReadFile(dockerComposefilePath)
 	if err != nil {
 		return err
 	}
@@ -579,7 +579,7 @@ func (idc *internalDockerClient) AddNetworkToCompose(dockerComposefilePath, newC
 	}
 
 	newFilePath := filepath.Join(filepath.Dir(dockerComposefilePath), newComposeFile)
-	err = ioutil.WriteFile(newFilePath, newData, 0644)
+	err = os.WriteFile(newFilePath, newData, 0644)
 	if err != nil {
 		return err
 	}
