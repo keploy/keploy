@@ -4,24 +4,24 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"math"
 
-	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func fuzzymatch(ctx context.Context, reqBuff [][]byte, h *hooks.Hook) (bool, []models.GenericPayload, error) {
+func fuzzymatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.GenericPayload, error) {
 	for {
-		tcsMocks, err := h.GetConfigMocks()
+		mocks, err := mockDb.GetUnFilteredMocks()
 		if err != nil {
-			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
+			return false, nil, fmt.Errorf("error while getting unfiltered mocks %v", err)
 		}
 
 		var filteredMocks []*models.Mock
 		var unfilteredMocks []*models.Mock
 
-		for _, mock := range tcsMocks {
+		for _, mock := range mocks {
 			if mock.TestModeInfo.IsFiltered {
 				filteredMocks = append(filteredMocks, mock)
 			} else {
@@ -38,7 +38,7 @@ func fuzzymatch(ctx context.Context, reqBuff [][]byte, h *hooks.Hook) (bool, []m
 
 					bufStr := string(reqBuff)
 					if !util.IsAsciiPrintable(string(reqBuff)) {
-						bufStr = base64.StdEncoding.EncodeToString(reqBuff)
+						bufStr = util.EncodeBase64(reqBuff)
 					}
 
 					// Compare the encoded data
@@ -60,7 +60,7 @@ func fuzzymatch(ctx context.Context, reqBuff [][]byte, h *hooks.Hook) (bool, []m
 			originalFilteredMock := *filteredMocks[index]
 			filteredMocks[index].TestModeInfo.IsFiltered = false
 			filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
-			isUpdated := h.UpdateConfigMock(&originalFilteredMock, filteredMocks[index])
+			isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
 			if !isUpdated {
 				continue
 			}
@@ -77,7 +77,7 @@ func fuzzymatch(ctx context.Context, reqBuff [][]byte, h *hooks.Hook) (bool, []m
 			originalFilteredMock := *filteredMocks[index]
 			filteredMocks[index].TestModeInfo.IsFiltered = false
 			filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
-			isUpdated := h.UpdateConfigMock(&originalFilteredMock, filteredMocks[index])
+			isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
 			if isUpdated {
 				continue
 			}
@@ -85,7 +85,7 @@ func fuzzymatch(ctx context.Context, reqBuff [][]byte, h *hooks.Hook) (bool, []m
 		}
 
 		if index == -1 {
-			index = findBinaryMatch(unfilteredMocks, requestBuffers)
+			index = findBinaryMatch(unfilteredMocks, reqBuff)
 		}
 
 		if index != -1 {
@@ -98,6 +98,7 @@ func fuzzymatch(ctx context.Context, reqBuff [][]byte, h *hooks.Hook) (bool, []m
 	return false, nil, nil
 }
 
+// TODO: need to generalize this function for different types of integrations.
 func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxSim := 0.5

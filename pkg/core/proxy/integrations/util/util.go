@@ -23,6 +23,11 @@ func DecodeBase64(encoded string) ([]byte, error) {
 	return data, nil
 }
 
+func EncodeBase64(decoded []byte) string {
+	// Encode the []byte string to encoded string
+	return base64.StdEncoding.EncodeToString(decoded)
+}
+
 // Functions related to fuzzy matching
 func AdaptiveK(length, kMin, kMax, N int) int {
 	k := length / N

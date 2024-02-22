@@ -8,20 +8,25 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"net"
-	"os"
-	"os/signal"
 	"strconv"
-	"syscall"
 	"time"
 )
 
 func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	//closing the destination conn
+	defer func(destConn net.Conn) {
+		err := destConn.Close()
+		if err != nil {
+			logger.Error("failed to close the destination connection", zap.Error(err))
+		}
+	}(destConn)
+
 	genericRequests := []models.GenericPayload{}
 
 	bufStr := string(req)
 	dataType := models.String
 	if !util.IsAsciiPrintable(string(req)) {
-		bufStr = base64.StdEncoding.EncodeToString(req)
+		bufStr = util.EncodeBase64(req)
 		dataType = "binary"
 	}
 
@@ -63,13 +68,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 	// ticker := time.NewTicker(1 * time.Second)
 	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
 	for {
-
-		// start := time.NewTicker(1*time.Second)
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		select {
-		// case <-start.C:
-		case <-sigChan:
+		case <-ctx.Done():
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
 				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
@@ -78,7 +78,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
-					h.AppendMocks(&models.Mock{
+					// Save the mock
+					mocks <- &models.Mock{
 						Version: models.GetVersion(),
 						Name:    "mocks",
 						Kind:    models.GENERIC,
@@ -89,10 +90,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 							ResTimestampMock: resTimestampMock,
 							Metadata:         metadata,
 						},
-					}, ctx)
+					}
+
 				}(genericRequestsCopy, genericResponseCopy)
-				clientConn.Close()
-				destConn.Close()
 				return nil
 			}
 		case buffer := <-clientBuffChan:
@@ -112,7 +112,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
-					h.AppendMocks(&models.Mock{
+					// Save the mock
+					mocks <- &models.Mock{
 						Version: models.GetVersion(),
 						Name:    "mocks",
 						Kind:    models.GENERIC,
@@ -123,17 +124,18 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 							ResTimestampMock: resTimestampMock,
 							Metadata:         metadata,
 						},
-					}, ctx)
+					}
+
 				}(genericRequestsCopy, genericResponseCopy)
 				genericRequests = []models.GenericPayload{}
 				genericResponses = []models.GenericPayload{}
 			}
 
 			bufStr := string(buffer)
-			buffrDataType := models.String
+			buffDataType := models.String
 			if !util.IsAsciiPrintable(string(buffer)) {
-				bufStr = base64.StdEncoding.EncodeToString(buffer)
-				buffrDataType = "binary"
+				bufStr = util.EncodeBase64(buffer)
+				buffDataType = "binary"
 			}
 
 			if bufStr != "" {
@@ -141,7 +143,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 					Origin: models.FromClient,
 					Message: []models.OutputBinary{
 						{
-							Type: buffrDataType,
+							Type: buffDataType,
 							Data: bufStr,
 						},
 					},
@@ -162,19 +164,18 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 			}
 
 			bufStr := string(buffer)
-			buffrDataType := models.String
+			buffDataType := models.String
 			if !util.IsAsciiPrintable(string(buffer)) {
 				bufStr = base64.StdEncoding.EncodeToString(buffer)
-				buffrDataType = "binary"
+				buffDataType = "binary"
 			}
 
 			if bufStr != "" {
-
 				genericResponses = append(genericResponses, models.GenericPayload{
 					Origin: models.FromServer,
 					Message: []models.OutputBinary{
 						{
-							Type: buffrDataType,
+							Type: buffDataType,
 							Data: bufStr,
 						},
 					},
@@ -184,10 +185,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, req []byte, clientCo
 			resTimestampMock = time.Now()
 
 			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
-			isPreviousChunkRequest = false
-		case err := <-errChannel:
+			prevChunkWasReq = false
+		case err := <-errChan:
 			return err
 		}
-
 	}
 }

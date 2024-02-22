@@ -91,7 +91,7 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					logger.Error("failed to dial the destination server", zap.Error(err))
 					return err
 				}
-				_, err = util.Passthrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf}, nil)
+				_, err = util.Passthrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf})
 				if err != nil {
 					logger.Error("failed to passthrough http request", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
 					return err
