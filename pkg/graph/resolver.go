@@ -3,6 +3,7 @@ package graph
 import (
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/service/test"
 	"go.uber.org/zap"
 )
@@ -17,6 +18,9 @@ type Resolver struct {
 	TestReportFS       platform.TestReportDB
 	Storage            platform.TestCaseDB
 	LoadedHooks        *hooks.Hook
+	ProxySet           *proxy.ProxySet
+	KeployServerPort   uint32
+	PassThroughPorts   []uint
 	Logger             *zap.Logger
 	Path               string
 	TestReportPath     string

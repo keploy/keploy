@@ -73,21 +73,22 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 
 	ctx := context.Background()
 
-	// load the ebpf hooks into the kernel
-	select {
-	case <-stopper:
-		return
-	default:
-		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
-			return
-		}
-	}
+	// // load the ebpf hooks into the kernel
+	// select {
+	// case <-stopper:
+	// 	return
+	// default:
+	// 	g.logger.Info("logging the pid in the serve", zap.Any("pid", pid))
+	// 	// load the ebpf hooks into the kernel
+	// 	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
+	// 		return
+	// 	}
+	// }
 
-	//sending this graphql server port to be filterd in the eBPF program
-	if err := loadedHooks.SendKeployServerPort(port); err != nil {
-		return
-	}
+	// //sending this graphql server port to be filterd in the eBPF program
+	// if err := loadedHooks.SendKeployServerPort(port); err != nil {
+	// 	return
+	// }
 
 	select {
 	case <-stopper:
@@ -99,23 +100,23 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 
 	}
 
-	// proxy update its state in the ProxyPorts map
-	// Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
-		return
-	}
+	// // proxy update its state in the ProxyPorts map
+	// // Sending Proxy Ip & Port to the ebpf program
+	// if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
+	// 	return
+	// }
 
-	// Sending the Dns Port to the ebpf program
-	if err := loadedHooks.SendDnsPort(ps.DnsPort); err != nil {
-		return
-	}
+	// // Sending the Dns Port to the ebpf program
+	// if err := loadedHooks.SendDnsPort(ps.DnsPort); err != nil {
+	// 	return
+	// }
 
-	g.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
-	passThroughPorts = append(passThroughPorts, 36320)
-	// filter the required destination ports
-	if err := loadedHooks.SendPassThroughPorts(passThroughPorts); err != nil {
-		return
-	}
+	// g.logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
+	// passThroughPorts = append(passThroughPorts, 36320)
+	// // filter the required destination ports
+	// if err := loadedHooks.SendPassThroughPorts(passThroughPorts); err != nil {
+	// 	return
+	// }
 
 	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
 		Resolvers: &Resolver{
@@ -123,6 +124,9 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 			TestReportFS:       testReportFS,
 			Storage:            ys,
 			LoadedHooks:        loadedHooks,
+			ProxySet:           ps,
+			KeployServerPort:   port,
+			PassThroughPorts:   passThroughPorts,
 			Logger:             g.logger,
 			Path:               path,
 			TestReportPath:     testReportPath,
