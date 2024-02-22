@@ -287,7 +287,7 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 		}
 		ConfigMocks = append(ConfigMocks, configMock)
 	}
-	mocks := append(ConfigMocks, TcsMocks...)
+	mocks := append(TcsMocks, ConfigMocks...)
 	for _, mock := range mocks {
 		if _, ok := h.persistentMatchedMocks[mock.Name]; ok {
 			matchedMocks = append(matchedMocks, mock)
@@ -299,7 +299,18 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 
 func SortMocksByName(mocks []*models.Mock) {
 	sort.SliceStable(mocks, func(i, j int) bool {
-		return mocks[i].Name < mocks[j].Name
+
+		mockNamePartsI := strings.Split(mocks[i].Name, "-")
+		mockNamePartsJ := strings.Split(mocks[j].Name, "-")
+
+		mockNumberI, err1 := strconv.Atoi(mockNamePartsI[1])
+		mockNumberJ, err2 := strconv.Atoi(mockNamePartsJ[1])
+
+		if err1 != nil || err2 != nil {
+			return false
+		}
+
+		return mockNumberI < mockNumberJ
 	})
 }
 
