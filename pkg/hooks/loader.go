@@ -48,11 +48,11 @@ type Hook struct {
 
 	platform.TestCaseDB
 
-	logger                   *zap.Logger
-	proxyPort                uint32
-	tcsMocks                 *treeDb
-	configMocks              *treeDb
-	// here key represents mock name and value is true only when 
+	logger      *zap.Logger
+	proxyPort   uint32
+	tcsMocks    *treeDb
+	configMocks *treeDb
+	// here key represents mock name and value is true only when
 	// it is not a config mock or it is not being used by any test case yet.
 	persistentMatchedMocks   map[string]bool
 	mu                       *sync.Mutex
@@ -300,7 +300,7 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 func (h *Hook) GetPersistentMock() map[string]bool {
 	return h.persistentMatchedMocks
 }
- 
+
 func (h *Hook) DeletePersistentMock(mockName string) bool {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
