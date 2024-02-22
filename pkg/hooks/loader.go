@@ -239,6 +239,12 @@ func (h *Hook) ResetDeps() int {
 	return 1
 }
 
+func (h *Hook) SendCmdType(isDocker bool) error {
+	// to notify the kernel hooks that the user application command is running in native linux.
+	key := 0
+	return h.objects.DockerCmdMap.Update(uint32(key), &isDocker, ebpf.UpdateAny)
+}
+
 // SendPassThroughPorts sends the destination ports of the server which should not be intercepted by keploy proxy.
 func (h *Hook) SendPassThroughPorts(filterPorts []uint) error {
 	portsSize := len(filterPorts)
@@ -335,7 +341,7 @@ func (h *Hook) PrintRedirectProxyMap() {
 	for itr.Next(&key, &dest) {
 		h.logger.Debug(fmt.Sprintf("Redirect Proxy:  [key:%v] || [value:%v]\n", key, dest))
 	}
-	h.logger.Debug("--------Redirect Proxy Map-------")
+	h.logger.Debug("-------- Proxy Map-------")
 }
 
 // GetDestinationInfo retrieves destination information associated with a source port.
