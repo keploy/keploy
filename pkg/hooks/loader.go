@@ -203,8 +203,8 @@ func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
 	if isUpdated {
 		h.DeletePersistentMock(oldMock.Name)
+		h.persistentMatchedMocks[newMock.Name] = false
 	}
-	h.persistentMatchedMocks[newMock.Name] = false
 	return isUpdated
 }
 
