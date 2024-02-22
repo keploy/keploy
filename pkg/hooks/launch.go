@@ -266,7 +266,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 }
 
 func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration) error {
-	// to notify the kernel hooks that the user application is related to Docker. 
+	// to notify the kernel hooks that the user application is related to Docker.
 	key := 0
 	value := true
 	h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
@@ -555,7 +555,7 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 		}
 		h.logger.Error("userApplication failed to run with the following error. Please check application logs", zap.Error(err))
 		return ErrCommandError
-	} 
+	}
 
 	return nil
 }
