@@ -1,7 +1,6 @@
 package util
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -30,23 +29,23 @@ func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
-func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) error {
+// ReadBuffConn is used to read the buffer from the connection
+func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		default:
 			if conn == nil {
 				logger.Debug("the conn is nil")
 			}
-			buffer, err := ReadBytes(conn)
+			buffer, err := ReadBytes(ctx, conn)
 			if err != nil {
-				logger.Error("failed to read the packet message in proxy for generic dependency", zap.Error(err))
+				logger.Error("failed to read the packet message in proxy", zap.Error(err))
 				errChannel <- err
-				return err
+				return
 			}
 			bufferChannel <- buffer
-			break
 		}
 	}
 }
@@ -54,7 +53,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
 	readErr := errors.New("failed to read the initial request buffer")
 
-	initialBuf, err := ReadBytes(conn)
+	initialBuf, err := ReadBytes(ctx, conn)
 	if err != nil && err != io.EOF {
 		logger.Error("failed to read the request message in proxy", zap.Error(err))
 		return nil, readErr
@@ -73,11 +72,99 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 	return initialBuf, nil
 }
 
+// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
+// It returns the content as a byte array.
+func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
+	var buffer []byte
+	const maxEmptyReads = 5
+	emptyReads := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return buffer, nil
+		default:
+			buf := make([]byte, 1024)
+			n, err := reader.Read(buf)
+
+			if n > 0 {
+				buffer = append(buffer, buf[:n]...)
+				emptyReads = 0 // reset the counter because we got some data
+			}
+
+			if err != nil {
+				if err == io.EOF {
+					emptyReads++
+					if emptyReads >= maxEmptyReads {
+						return buffer, err // multiple EOFs in a row, probably a true EOF
+					}
+					time.Sleep(time.Millisecond * 100) // sleep before trying again
+					continue
+				}
+				return buffer, err
+			}
+
+			if n < len(buf) {
+				return buffer, nil
+			}
+		}
+	}
+}
+
+// ReadRequiredBytes ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
+// It returns the content as a byte array.
+func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]byte, error) {
+	var buffer []byte
+	const maxEmptyReads = 5
+	emptyReads := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return buffer, nil
+		default:
+			buf := make([]byte, numBytes)
+
+			n, err := reader.Read(buf)
+
+			if n == numBytes {
+				buffer = append(buffer, buf...)
+				return buffer, nil
+			}
+
+			if n > 0 {
+				buffer = append(buffer, buf[:n]...)
+				numBytes = numBytes - n
+				emptyReads = 0 // reset the counter because we got some data
+			}
+
+			if err != nil {
+				if err == io.EOF {
+					emptyReads++
+					if emptyReads >= maxEmptyReads {
+						return buffer, err // multiple EOFs in a row, probably a true EOF
+					}
+					time.Sleep(time.Millisecond * 100) // sleep before trying again
+					continue
+				}
+				return buffer, err
+			}
+		}
+	}
+}
+
 func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte, recover func(id int)) ([]byte, error) {
 
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination conn")
 	}
+
+	defer func(destConn net.Conn) {
+		err := destConn.Close()
+		if err != nil {
+			logger.Error("failed to close the destination connection", zap.Error(err))
+		}
+	}(destConn)
 
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	for _, v := range requestBuffer {
@@ -87,7 +174,6 @@ func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 			return nil, err
 		}
 	}
-	// defer destConn.Close()
 
 	// channels for writing messages from proxy to destination or client
 	destBufferChannel := make(chan []byte)
@@ -112,9 +198,10 @@ func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 			return nil, err
 		}
 		return nil, nil
-	}
 
-	// }
+	case <-ctx.Done():
+		return nil, nil
+	}
 
 	return nil, nil
 }
@@ -149,99 +236,6 @@ func ToIPv6AddressStr(ip [4]uint32) string {
 	return ipv6Addr.String()
 }
 
-func PeekBytes(reader *bufio.Reader) ([]byte, error) {
-	var buffer []byte
-
-	buf := make([]byte, 1024)
-
-	// Read bytes from the Reader
-	reader.Peek(1)
-	buf, err := reader.Peek(reader.Buffered())
-	if err != nil && err != io.EOF && err != bufio.ErrBufferFull {
-		return nil, err
-	}
-
-	// Append the bytes to the buffer
-	buffer = append(buffer, buf[:]...)
-
-	return buffer, nil
-}
-
-// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
-// It returns the content as a byte array.
-func ReadBytes(reader io.Reader) ([]byte, error) {
-	var buffer []byte
-	const maxEmptyReads = 5
-	emptyReads := 0
-
-	for {
-		buf := make([]byte, 1024)
-		n, err := reader.Read(buf)
-
-		if n > 0 {
-			buffer = append(buffer, buf[:n]...)
-			emptyReads = 0 // reset the counter because we got some data
-		}
-
-		if err != nil {
-			if err == io.EOF {
-				emptyReads++
-				if emptyReads >= maxEmptyReads {
-					return buffer, err // multiple EOFs in a row, probably a true EOF
-				}
-				time.Sleep(time.Millisecond * 100) // sleep before trying again
-				continue
-			}
-			return buffer, err
-		}
-
-		if n < len(buf) {
-			break
-		}
-	}
-
-	return buffer, nil
-}
-
-// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
-// It returns the content as a byte array.
-func ReadRequiredBytes(reader io.Reader, numBytes int) ([]byte, error) {
-	var buffer []byte
-	const maxEmptyReads = 5
-	emptyReads := 0
-
-	for {
-		buf := make([]byte, numBytes)
-
-		n, err := reader.Read(buf)
-
-		if n == numBytes {
-			buffer = append(buffer, buf...)
-			break
-		}
-
-		if n > 0 {
-			buffer = append(buffer, buf[:n]...)
-			numBytes = numBytes - n
-			emptyReads = 0 // reset the counter because we got some data
-		}
-
-		if err != nil {
-			if err == io.EOF {
-				emptyReads++
-				if emptyReads >= maxEmptyReads {
-					return buffer, err // multiple EOFs in a row, probably a true EOF
-				}
-				time.Sleep(time.Millisecond * 100) // sleep before trying again
-				continue
-			}
-			return buffer, err
-		}
-	}
-
-	return buffer, nil
-}
-
 func GetLocalIPv4() (net.IP, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -265,7 +259,7 @@ func GetLocalIPv4() (net.IP, error) {
 	return nil, fmt.Errorf("No valid IP address found")
 }
 
-func ConvertToIPV4(ip net.IP) (uint32, bool) {
+func ToIPV4(ip net.IP) (uint32, bool) {
 	ipv4 := ip.To4()
 	if ipv4 == nil {
 		return 0, false // Return 0 or handle the error accordingly
@@ -297,7 +291,7 @@ func GetLocalIPv6() (net.IP, error) {
 	return nil, fmt.Errorf("No valid IPv6 address found")
 }
 
-func ConvertIPv6ToUint32Array(ip net.IP) ([4]uint32, error) {
+func IPv6ToUint32Array(ip net.IP) ([4]uint32, error) {
 	ip = ip.To16()
 	if ip == nil {
 		return [4]uint32{}, errors.New("invalid IPv6 address")
@@ -317,38 +311,6 @@ func IPToDotDecimal(ip net.IP) string {
 		ipStr = ip.To4().String()
 	}
 	return ipStr
-}
-
-// It checks if the cli is related to docker or not, it also returns if its a docker compose file
-func IsDockerRelatedCommand(cmd string) (bool, string) {
-	// Check for Docker command patterns
-	dockerCommandPatterns := []string{
-		"docker-compose ",
-		"sudo docker-compose ",
-		"docker compose ",
-		"sudo docker compose ",
-		"docker ",
-		"sudo docker ",
-	}
-
-	for _, pattern := range dockerCommandPatterns {
-		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
-			if strings.Contains(pattern, "compose") {
-				return true, "docker-compose"
-			}
-			return true, "docker"
-		}
-	}
-
-	// Check for Docker Compose file extension
-	dockerComposeFileExtensions := []string{".yaml", ".yml"}
-	for _, extension := range dockerComposeFileExtensions {
-		if strings.HasSuffix(strings.ToLower(cmd), extension) {
-			return true, "docker-compose"
-		}
-	}
-
-	return false, ""
 }
 
 func IsDirectoryExist(path string) bool {
