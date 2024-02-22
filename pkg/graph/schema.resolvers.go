@@ -24,8 +24,6 @@ import (
 
 // RunTestSet is the resolver for the runTestSet field.
 func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*model.RunTestSetResponse, error) {
-	// time.Sleep(10 * time.Second)
-
 	if r.Resolver == nil {
 		err := fmt.Errorf(Emoji + "failed to get Resolver")
 		return nil, err

@@ -244,10 +244,6 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 			h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
 			if !isUnitTestIntegration {
-				// // to notify the kernel hooks that the user application command is running in native linux.
-				// key := 0
-				// value := false
-				// h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
 				err := h.SendCmdType(false)
 				if err != nil {
 					h.logger.Error("failed to send cmd type to kernel", zap.Error(err))
