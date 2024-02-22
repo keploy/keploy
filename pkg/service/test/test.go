@@ -53,6 +53,7 @@ type TestOptions struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	IgnoreOrdering     bool
+	RemoveUnusedMocks  bool
 	PassthroughHosts   []models.Filters
 	GenerateTestReport bool
 }
@@ -198,6 +199,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		}
 	}()
 	returnVal.IgnoreOrdering = cfg.IgnoreOrdering
+	returnVal.RemoveUnusedMocks = cfg.RemoveUnusedMocks
 	returnVal.GenerateTestReport = cfg.GenerateTestReport
 	return returnVal, nil
 }
@@ -227,6 +229,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		Storage:            tcsStorage,
 		PassThroughHosts:   options.PassthroughHosts,
 		IgnoreOrdering:     options.IgnoreOrdering,
+		RemoveUnusedMocks:  options.RemoveUnusedMocks,
 	}
 	sessions, err := cfg.Storage.ReadTestSessionIndices()
 	if err != nil {
@@ -520,6 +523,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering)
 
 		if !testPass {
+			t.logger.Info("", zap.Any("matched mocks", GetMatchedMocks(cfg.LoadedHooks.GetConsumedMocks())))
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
 		} else {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightPassingString(cfg.TestSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
@@ -780,6 +784,14 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appCon
 	}
 	if len(nonKeployTcs) > 0 {
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
+	}
+	if initialisedValues.RemoveUnusedMocks && status == models.TestRunStatusPassed {
+		err := cfg.LoadedHooks.RemoveUnusedMocks(testSet)
+		if err != nil {
+			t.logger.Error("failed to remove unmatched mocks", zap.Error(err))
+		} else if !cfg.LoadedHooks.GetAreAllMocksMatched() {
+			t.logger.Info("removed unused mocks from mock file", zap.Any("test-set", testSet))
+		}
 	}
 	resultsCfg := &FetchTestResultsConfig{
 		TestReportFS:       initialisedValues.TestReportFS,
