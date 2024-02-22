@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -292,7 +293,14 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 			matchedMocks = append(matchedMocks, mock)
 		}
 	}
+	SortMocksByName(matchedMocks)
 	return matchedMocks, nil
+}
+
+func SortMocksByName(mocks []*models.Mock) {
+	sort.SliceStable(mocks, func(i, j int) bool {
+		return mocks[i].Name < mocks[j].Name
+	})
 }
 
 func (h *Hook) GetPersistentMock() map[string]bool {
