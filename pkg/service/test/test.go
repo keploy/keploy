@@ -789,8 +789,9 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appCon
 		err := cfg.LoadedHooks.RemoveUnusedMocks(testSet)
 		if err != nil {
 			t.logger.Error("failed to remove unmatched mocks", zap.Error(err))
+		} else {
+			t.logger.Info("removed unused mocks from mock file", zap.Any("test-set", testSet))
 		}
-		t.logger.Info("removed unused mocks from mock file", zap.Any("test-set", testSet))
 	}
 	resultsCfg := &FetchTestResultsConfig{
 		TestReportFS:       initialisedValues.TestReportFS,
