@@ -286,7 +286,7 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 		}
 		ConfigMocks = append(ConfigMocks, configMock)
 	}
-	mocks := append(TcsMocks, ConfigMocks...)
+	mocks := append(ConfigMocks, TcsMocks...)
 	for _, mock := range mocks {
 		if _, ok := h.persistentMatchedMocks[mock.Name]; ok {
 			matchedMocks = append(matchedMocks, mock)
