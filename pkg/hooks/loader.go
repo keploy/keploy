@@ -56,8 +56,8 @@ type Hook struct {
 	configMocks *treeDb
 	// here key represents mock name and value is true only when
 	// it is not a config mock or it is not being used by any test case yet.
-	persistentMatchedMocks   map[string]bool
-	isAllMocksMatched        bool
+	consumedMocks            map[string]bool
+	areAllMocksMatched       bool
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
@@ -129,16 +129,16 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 	tcsMocks := NewTreeDb(customComparator)
 
 	return &Hook{
-		logger:                 logger,
-		TestCaseDB:             db,
-		configMocks:            configMocks,
-		tcsMocks:               tcsMocks,
-		persistentMatchedMocks: make(map[string]bool),
-		isAllMocksMatched:      false,
-		mu:                     &sync.Mutex{},
-		userIpAddress:          make(chan string),
-		idc:                    idc,
-		mainRoutineId:          mainRoutineId,
+		logger:             logger,
+		TestCaseDB:         db,
+		configMocks:        configMocks,
+		tcsMocks:           tcsMocks,
+		consumedMocks:      make(map[string]bool),
+		areAllMocksMatched: false,
+		mu:                 &sync.Mutex{},
+		userIpAddress:      make(chan string),
+		idc:                idc,
+		mainRoutineId:      mainRoutineId,
 	}, nil
 }
 
@@ -194,7 +194,7 @@ func (h *Hook) SetTcsMocks(m []*models.Mock) {
 func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.configMocks.deleteAll()
 	for index, mock := range m {
-		h.UpdatePersistentMatchedMock(mock.Name, false)
+		h.UpdateConsumedMocks(mock.Name, false)
 		mock.TestModeInfo.SortOrder = index
 		mock.TestModeInfo.Id = index
 		h.configMocks.insert(mock.TestModeInfo, mock)
@@ -247,7 +247,7 @@ func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 	isDeleted := h.tcsMocks.delete(mock.TestModeInfo)
 	if isDeleted {
-		h.UpdatePersistentMatchedMock(mock.Name, true)
+		h.UpdateConsumedMocks(mock.Name, true)
 	}
 	return isDeleted
 }
@@ -255,7 +255,7 @@ func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 func (h *Hook) DeleteConfigMock(mock *models.Mock) bool {
 	isDeleted := h.configMocks.delete(mock.TestModeInfo)
 	if isDeleted {
-		h.UpdatePersistentMatchedMock(mock.Name, false)
+		h.UpdateConsumedMocks(mock.Name, false)
 	}
 	return isDeleted
 }
@@ -289,16 +289,16 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 	mocks := append(TcsMocks, ConfigMocks...)
 	totalMatches := 0
 	for _, mock := range mocks {
-		if _, ok := h.persistentMatchedMocks[mock.Name]; ok {
+		if _, ok := h.consumedMocks[mock.Name]; ok {
 			totalMatches++
 			matchedMocks = append(matchedMocks, mock)
 		}
 	}
 	if len(mocks) == totalMatches {
 		// this means all mocks have matched
-		h.isAllMocksMatched = true
+		h.areAllMocksMatched = true
 	} else {
-		h.isAllMocksMatched = false
+		h.areAllMocksMatched = false
 	}
 	SortMocksByName(matchedMocks)
 	return matchedMocks, nil
@@ -325,28 +325,18 @@ func SortMocksByName(mocks []*models.Mock) {
 	})
 }
 
-func (h *Hook) GetIsAllMocksMatched() bool {
-	return h.isAllMocksMatched
+func (h *Hook) GetAreAllMocksMatched() bool {
+	return h.areAllMocksMatched
 }
 
-func (h *Hook) GetPersistentMock() map[string]bool {
-	return h.persistentMatchedMocks
+func (h *Hook) GetConsumedMocks() map[string]bool {
+	return h.consumedMocks
 }
 
-func (h *Hook) UpdatePersistentMatchedMock(mockName string, isTcsUnused bool) {
+func (h *Hook) UpdateConsumedMocks(mockName string, isTcsUnused bool) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	h.persistentMatchedMocks[mockName] = isTcsUnused
-}
-
-func (h *Hook) DeletePersistentMock(mockName string) bool {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	if _, ok := h.persistentMatchedMocks[mockName]; ok {
-		delete(h.persistentMatchedMocks, mockName)
-		return true
-	}
-	return false
+	h.consumedMocks[mockName] = isTcsUnused
 }
 
 func (h *Hook) ResetDeps() int {

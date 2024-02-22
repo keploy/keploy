@@ -523,7 +523,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering)
 
 		if !testPass {
-			t.logger.Info("", zap.Any("matched mocks", GetMatchedMocks(cfg.LoadedHooks.GetPersistentMock())))
+			t.logger.Info("", zap.Any("matched mocks", GetMatchedMocks(cfg.LoadedHooks.GetConsumedMocks())))
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
 		} else {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightPassingString(cfg.TestSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
@@ -789,7 +789,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appCon
 		err := cfg.LoadedHooks.RemoveUnusedMocks(testSet)
 		if err != nil {
 			t.logger.Error("failed to remove unmatched mocks", zap.Error(err))
-		} else if !cfg.LoadedHooks.GetIsAllMocksMatched() {
+		} else if !cfg.LoadedHooks.GetAreAllMocksMatched() {
 			t.logger.Info("removed unused mocks from mock file", zap.Any("test-set", testSet))
 		}
 	}

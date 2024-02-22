@@ -478,9 +478,9 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 	return filteredMocks, unFilteredMocks
 }
 
-func GetMatchedMocks(persistentMocks map[string]bool) []string {
+func GetMatchedMocks(consumedMocks map[string]bool) []string {
 	var matchedMocks []string
-	for mockName, isTcsUnused := range persistentMocks {
+	for mockName, isTcsUnused := range consumedMocks {
 		if isTcsUnused {
 			matchedMocks = append(matchedMocks, mockName)
 		}
