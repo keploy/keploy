@@ -134,7 +134,6 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 		configMocks:        configMocks,
 		tcsMocks:           tcsMocks,
 		consumedMocks:      make(map[string]bool),
-		areAllMocksMatched: false,
 		mu:                 &sync.Mutex{},
 		userIpAddress:      make(chan string),
 		idc:                idc,
@@ -270,23 +269,14 @@ func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
 	if err != nil {
 		return nil, err
 	}
-	TcsMocks := []*models.Mock{}
-	for _, mock := range tcsMocks {
-		tcsmock, ok := mock.(*models.Mock)
+	mocks := []*models.Mock{}
+	for _, mock := range append(tcsMocks, configMocks...) {
+		m, ok := mock.(*models.Mock)
 		if !ok {
 			continue
 		}
-		TcsMocks = append(TcsMocks, tcsmock)
+		mocks = append(mocks, m)
 	}
-	ConfigMocks := []*models.Mock{}
-	for _, mock := range configMocks {
-		configMock, ok := mock.(*models.Mock)
-		if !ok {
-			continue
-		}
-		ConfigMocks = append(ConfigMocks, configMock)
-	}
-	mocks := append(TcsMocks, ConfigMocks...)
 	totalMatches := 0
 	for _, mock := range mocks {
 		if _, ok := h.consumedMocks[mock.Name]; ok {
