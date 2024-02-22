@@ -26,7 +26,7 @@ func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]
 
 	for !hasCompleteHeaders(*finalReq) {
 		logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
-		reqHeader, err := util.ReadBytes(clientConn)
+		reqHeader, err := util.ReadBytes(ctx, clientConn)
 		if err != nil {
 			logger.Error("failed to read the request message from the client")
 			return err
@@ -96,7 +96,7 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 
 	for !hasCompleteHeaders(resp) {
 		logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
-		respHeader, err := util.ReadBytes(destConn)
+		respHeader, err := util.ReadBytes(ctx, destConn)
 		if err != nil {
 			if err == io.EOF {
 				logger.Debug("received EOF from the server")
@@ -174,8 +174,12 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 // Handled chunked requests when content-length is given.
 func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, clientConn, destConn net.Conn, contentLength int) error {
 	for contentLength > 0 {
-		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		requestChunked, err := util.ReadBytes(clientConn)
+		err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err != nil {
+			logger.Error("failed to set the read deadline for the client conn", zap.Error(err))
+			return err
+		}
+		requestChunked, err := util.ReadBytes(ctx, clientConn)
 		if err != nil {
 			if err == io.EOF {
 				logger.Error("conn closed by the user client")
@@ -212,11 +216,14 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 		case <-ctx.Done():
 			return nil
 		default:
-
 			//TODO: we have to implement a way to read the buffer chunk wise according to the chunk size (chunk size comes in hexadecimal)
 			// because it can happen that some chunks come after 5 seconds.
-			clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			requestChunked, err := util.ReadBytes(clientConn)
+			err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if err != nil {
+				logger.Error("failed to set the read deadline for the client conn", zap.Error(err))
+				return err
+			}
+			requestChunked, err := util.ReadBytes(ctx, clientConn)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					break
@@ -249,8 +256,12 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 	isEOF := false
 	for contentLength > 0 {
 		//Set deadline of 5 seconds
-		destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		resp, err := util.ReadBytes(destConn)
+		err := destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err != nil {
+			logger.Error("failed to set the read deadline for the destination conn", zap.Error(err))
+			return err
+		}
+		resp, err := util.ReadBytes(ctx, destConn)
 		if err != nil {
 			if err == io.EOF {
 				isEOF = true
@@ -293,7 +304,7 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 		case <-ctx.Done():
 			return nil
 		default:
-			resp, err := util.ReadBytes(destConn)
+			resp, err := util.ReadBytes(ctx, destConn)
 			if err != nil {
 				if err != io.EOF {
 					logger.Error("failed to read the response message from the destination server", zap.Error(err))

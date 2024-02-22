@@ -10,6 +10,19 @@ import (
 
 type Initializer func(logger *zap.Logger) Integrations
 
+type integrationType string
+
+const (
+	HTTP     integrationType = "http"
+	GRPC     integrationType = "grpc"
+	GENERIC  integrationType = "generic"
+	MYSQL    integrationType = "mysql"
+	POSTGRES integrationType = "postgres"
+	MONGO    integrationType = "mongo"
+)
+
+// TODO: it should be a map of enum to Initializer
+// replace "http"-> HTTP
 var Registered = make(map[string]Initializer)
 
 // Used to establish destination connection in case of any passthrough.

@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// encodeOutgoingHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+// encodeHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
+func encodeHttp(ctx context.Context, logger *zap.Logger, req []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
@@ -53,7 +53,7 @@ func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, cli
 		}
 		if expectHeader == "100-continue" {
 			//Read if the response from the server is 100-continue
-			resp, err = util.ReadBytes(destConn)
+			resp, err = util.ReadBytes(ctx, destConn)
 			if err != nil {
 				logger.Error("failed to read the response message from the server after 100-continue request", zap.Error(err))
 				return err
@@ -73,7 +73,7 @@ func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, cli
 				return err
 			}
 			//Reading the request buffer again
-			req, err = util.ReadBytes(clientConn)
+			req, err = util.ReadBytes(ctx, clientConn)
 			if err != nil {
 				logger.Error("failed to read the request message from the user client", zap.Error(err))
 				return err
@@ -98,7 +98,7 @@ func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, cli
 
 		logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
 		// read the response from the actual server
-		resp, err = util.ReadBytes(destConn)
+		resp, err = util.ReadBytes(ctx, destConn)
 		if err != nil {
 			if err == io.EOF {
 				logger.Debug("Response complete, exiting the loop.")
@@ -189,7 +189,7 @@ func encodeOutgoingHttp(ctx context.Context, logger *zap.Logger, req []byte, cli
 		finalReq = []byte("")
 		finalResp = []byte("")
 
-		finalReq, err = util.ReadBytes(clientConn)
+		finalReq, err = util.ReadBytes(ctx, clientConn)
 		if err != nil {
 			if err != io.EOF {
 				logger.Debug("failed to read the request message from the user client", zap.Error(err))
