@@ -365,7 +365,15 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 	return nil
 }
 
-func (ys *Yaml) UpdateMocks(mocks []*models.Mock, testSet string) error {
+func (ys *Yaml) UpdateMocks(mockRead []platform.KindSpecifier, testSet string) error {
+	mocks := []*models.Mock{}
+	for _, mock := range mockRead {
+		mockModel, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		mocks = append(mocks, mockModel)
+	}
 	mockPath := filepath.Join(ys.MockPath, testSet)
 	mockFilePath, err := util.ValidatePath(filepath.Join(mockPath, "mocks.yaml"))
 	if err != nil {

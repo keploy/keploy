@@ -129,15 +129,15 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 	tcsMocks := NewTreeDb(customComparator)
 
 	return &Hook{
-		logger:             logger,
-		TestCaseDB:         db,
-		configMocks:        configMocks,
-		tcsMocks:           tcsMocks,
-		consumedMocks:      make(map[string]bool),
-		mu:                 &sync.Mutex{},
-		userIpAddress:      make(chan string),
-		idc:                idc,
-		mainRoutineId:      mainRoutineId,
+		logger:        logger,
+		TestCaseDB:    db,
+		configMocks:   configMocks,
+		tcsMocks:      tcsMocks,
+		consumedMocks: make(map[string]bool),
+		mu:            &sync.Mutex{},
+		userIpAddress: make(chan string),
+		idc:           idc,
+		mainRoutineId: mainRoutineId,
 	}, nil
 }
 
@@ -174,7 +174,11 @@ func (h *Hook) RemoveUnusedMocks(testSet string) error {
 	if err != nil {
 		return err
 	}
-	err = h.TestCaseDB.UpdateMocks(mocks, testSet)
+	kindSpecifiers := make([]platform.KindSpecifier, len(mocks))
+	for i, mock := range mocks {
+		kindSpecifiers[i] = mock
+	}
+	err = h.TestCaseDB.UpdateMocks(kindSpecifiers, testSet)
 	if err != nil {
 		return err
 	}
