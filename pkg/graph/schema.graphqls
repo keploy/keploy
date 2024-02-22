@@ -16,6 +16,7 @@ type RunTestSetResponse {
 type Query {
   testSets: [String!]!
   testSetStatus(testRunId: String!): TestSetStatus!
+  stopTest: Boolean!
 }
 
 type Mutation {
