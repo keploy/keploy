@@ -20,7 +20,6 @@ func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	}
 }
 
-
 func InterfaceToString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
