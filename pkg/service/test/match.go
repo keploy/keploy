@@ -20,13 +20,6 @@ func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	}
 }
 
-func ArrayToMap(arr []string) map[string]bool {
-	res := map[string]bool{}
-	for i := range arr {
-		res[arr[i]] = true
-	}
-	return res
-}
 
 func InterfaceToString(val interface{}) string {
 	switch v := val.(type) {

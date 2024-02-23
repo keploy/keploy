@@ -15,6 +15,7 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 type Resolver struct {
 	Tester             test.Tester
+	TestFilter 		   map[string][]string
 	TestReportFS       platform.TestReportDB
 	Storage            platform.TestCaseDB
 	LoadedHooks        *hooks.Hook
