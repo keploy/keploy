@@ -1,69 +1,75 @@
 package mongo
 
 import (
+	"context"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.mongodb.org/mongo-driver/bson"
 	"reflect"
 	"strings"
 
-	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 )
 
-func match(h *hooks.Hook, mongoRequests []models.MongoRequest, logger *zap.Logger) (bool, *models.Mock, error) {
+func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
 	for {
-		tcsMocks, err := h.GetTcsMocks()
-		if err != nil {
-			return false, nil, fmt.Errorf("error while getting tcs mock: %v", err)
-		}
-		maxMatchScore := 0.0
-		bestMatchIndex := -1
-		for tcsIndx, tcsMock := range tcsMocks {
-			if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
-				for i, req := range tcsMock.Spec.MongoRequests {
-					if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
-						logger.Debug("the recieved request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
-						continue
-					}
-					switch req.Header.Opcode {
-					case wiremessage.OpMsg:
-						if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
-							logger.Debug("the recieved request is not of same flagbit with the tcmocks", zap.Any("at index", tcsIndx))
+		select {
+		case <-ctx.Done():
+			return false, nil, nil
+		default:
+			tcsMocks, err := mockDb.GetFilteredMocks()
+			if err != nil {
+				return false, nil, fmt.Errorf("error while getting tcs mock: %v", err)
+			}
+			maxMatchScore := 0.0
+			bestMatchIndex := -1
+			for tcsIndx, tcsMock := range tcsMocks {
+				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
+					for i, req := range tcsMock.Spec.MongoRequests {
+						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
+							logger.Debug("the recieved request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
 							continue
 						}
-						scoreSum := 0.0
-						for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-							if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
-								score := compareOpMsgSection(section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx], logger)
-								scoreSum += score
+						switch req.Header.Opcode {
+						case wiremessage.OpMsg:
+							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
+								logger.Debug("the recieved request is not of same flagbit with the tcmocks", zap.Any("at index", tcsIndx))
+								continue
 							}
+							scoreSum := 0.0
+							for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
+								if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+									score := compareOpMsgSection(logger, section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx])
+									scoreSum += score
+								}
+							}
+							currentScore := scoreSum / float64(len(mongoRequests))
+							if currentScore > maxMatchScore {
+								maxMatchScore = currentScore
+								bestMatchIndex = tcsIndx
+							}
+						default:
+							logger.Error("the OpCode of the mongo wiremessage is invalid.")
 						}
-						currentScore := scoreSum / float64(len(mongoRequests))
-						if currentScore > maxMatchScore {
-							maxMatchScore = currentScore
-							bestMatchIndex = tcsIndx
-						}
-					default:
-						logger.Error("the OpCode of the mongo wiremessage is invalid.")
 					}
 				}
 			}
+			if bestMatchIndex == -1 {
+				return false, nil, nil
+			}
+			mock := tcsMocks[bestMatchIndex]
+			isDeleted := mockDb.DeleteFilteredMock(mock)
+			if !isDeleted {
+				continue
+			}
+			return true, mock, nil
 		}
-		if bestMatchIndex == -1 {
-			return false, nil, nil
-		}
-		mock := tcsMocks[bestMatchIndex]
-		isDeleted := h.DeleteTcsMock(mock)
-		if !isDeleted {
-			continue
-		}
-		return true, mock, nil
 	}
 }
 
-func compareOpMsgSection(expectedSection, actualSection string, logger *zap.Logger) float64 {
+func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection string) float64 {
 	// check that the sections are of same type. SectionSingle (section[16] is "m") or SectionSequence (section[16] is "i").
 	if (len(expectedSection) < 16 || len(actualSection) < 16) && expectedSection[16] != actualSection[16] {
 		return 0

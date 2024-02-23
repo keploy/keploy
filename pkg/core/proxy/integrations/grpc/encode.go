@@ -10,6 +10,14 @@ import (
 )
 
 func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	//closing the destination conn
+	defer func(destConn net.Conn) {
+		err := destConn.Close()
+		if err != nil {
+			logger.Error("failed to close the destination connection", zap.Error(err))
+		}
+	}(destConn)
+
 	// Send the client preface to the server. This should be the first thing sent from the client.
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
