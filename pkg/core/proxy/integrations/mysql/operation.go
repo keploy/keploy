@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
@@ -131,7 +129,7 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 	}
 }
 
-func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn) (string, MySQLPacketHeader, interface{}, error) {
+func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPacketHeader, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
 	var packetData interface{}

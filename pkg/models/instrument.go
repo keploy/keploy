@@ -12,9 +12,12 @@ type HookOptions struct {
 	KeployIPv4 string
 }
 
+//TODO: Role of SQLDelay should be mentioned in the comments.
+
 type OutgoingOptions struct {
 	Rules         []config.BypassRule
 	MongoPassword string
+	SQLDelay      time.Duration // This is the same as Application delay.
 }
 
 type IncomingOptions struct {
@@ -28,6 +31,6 @@ type SetupOptions struct {
 
 type RunOptions struct {
 	//IgnoreErrors bool
-	ServeTest bool
+	ServeTest   bool
 	DockerDelay time.Duration
 }
