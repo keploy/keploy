@@ -2,29 +2,29 @@ package grpc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
-
-	"go.keploy.io/server/v2/pkg/core/hooks"
 )
 
 type transcoder struct {
 	sic     *StreamInfoCollection
-	hook    *hooks.Hook
+	mockDb  integrations.MockMemDb
 	logger  *zap.Logger
 	framer  *http2.Framer
 	decoder *hpack.Decoder
 }
 
-func NewTranscoder(framer *http2.Framer, logger *zap.Logger, h *hooks.Hook) *transcoder {
+func NewTranscoder(logger *zap.Logger, framer *http2.Framer, mockDb integrations.MockMemDb) *transcoder {
 	return &transcoder{
 		logger:  logger,
 		framer:  framer,
-		hook:    h,
-		sic:     NewStreamInfoCollection(h),
+		mockDb:  mockDb,
+		sic:     NewStreamInfoCollection(),
 		decoder: NewDecoder(),
 	}
 }
@@ -61,7 +61,7 @@ func (srv *transcoder) ProcessPingFrame(pingFrame *http2.PingFrame) error {
 
 }
 
-func (srv *transcoder) ProcessDataFrame(dataFrame *http2.DataFrame) error {
+func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.DataFrame) error {
 	id := dataFrame.Header().StreamID
 	// DATA frame must be associated with a stream
 	if id == 0 {
@@ -78,7 +78,7 @@ func (srv *transcoder) ProcessDataFrame(dataFrame *http2.DataFrame) error {
 	grpcReq := srv.sic.FetchRequestForStream(id)
 
 	// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
-	mock, err := FilterMocksBasedOnGrpcRequest(grpcReq, srv.hook)
+	mock, err := FilterMocksBasedOnGrpcRequest(ctx, srv.logger, grpcReq, srv.mockDb)
 	if err != nil {
 		return fmt.Errorf("failed match mocks: %v", err)
 	}
@@ -129,7 +129,7 @@ func (srv *transcoder) ProcessDataFrame(dataFrame *http2.DataFrame) error {
 		return err
 	}
 
-	payload, err := CreatePayloadFromLengthPrefixedMessage(grpcMockResp.Body)
+	payload, err := createPayloadFromLengthPrefixedMessage(grpcMockResp.Body)
 	if err != nil {
 		srv.logger.Error("could not create grpc payload from mocks", zap.Error(err))
 		return err
@@ -231,9 +231,9 @@ func (srv *transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) err
 		return http2.ConnectionError(http2.ErrCodeProtocol)
 	}
 
-	pseudoHeaders, ordinaryHeaders, err := ExtractHeaders(headersFrame, srv.decoder)
+	pseudoHeaders, ordinaryHeaders, err := extractHeaders(headersFrame, srv.decoder)
 	if err != nil {
-		fmt.Errorf("could not extract headers from frame: %v", err)
+		srv.logger.Error("could not extract headers from frame", zap.Error(err))
 	}
 
 	srv.sic.AddHeadersForRequest(id, pseudoHeaders, true)
@@ -256,14 +256,14 @@ func (srv *transcoder) ProcessContinuationFrame(ContinuationFrame *http2.Continu
 	return fmt.Errorf("continuation frame is unsupported in the current implementation")
 }
 
-func (srv *transcoder) ProcessGenericFrame(frame http2.Frame) error {
+func (srv *transcoder) ProcessGenericFrame(ctx context.Context, frame http2.Frame) error {
 	//PrintFrame(frame)
 	var err error
 	switch frame.(type) {
 	case *http2.PingFrame:
 		err = srv.ProcessPingFrame(frame.(*http2.PingFrame))
 	case *http2.DataFrame:
-		err = srv.ProcessDataFrame(frame.(*http2.DataFrame))
+		err = srv.ProcessDataFrame(ctx, frame.(*http2.DataFrame))
 	case *http2.WindowUpdateFrame:
 		err = srv.ProcessWindowUpdateFrame(frame.(*http2.WindowUpdateFrame))
 	case *http2.RSTStreamFrame:
@@ -288,22 +288,27 @@ func (srv *transcoder) ProcessGenericFrame(frame http2.Frame) error {
 }
 
 // ListenAndServe is a forever blocking call that reads one frame at a time, and responds to them.
-func (srv *transcoder) ListenAndServe() error {
+func (srv *transcoder) ListenAndServe(ctx context.Context) error {
 	err := srv.WriteInitialSettingsFrame()
 	if err != nil {
 		srv.logger.Error("error writing initial settings frame", zap.Error(err))
 		return err
 	}
+
 	for {
-		frame, err := srv.framer.ReadFrame()
-		if err != nil {
-			srv.logger.Error("Failed to read frame", zap.Error(err))
-			return err
-		}
-		err = srv.ProcessGenericFrame(frame)
-		if err != nil {
-			return err
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			frame, err := srv.framer.ReadFrame()
+			if err != nil {
+				srv.logger.Error("Failed to read frame", zap.Error(err))
+				return err
+			}
+			err = srv.ProcessGenericFrame(ctx, frame)
+			if err != nil {
+				return err
+			}
 		}
 	}
-
 }
