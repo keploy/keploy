@@ -361,3 +361,12 @@ func UpdateKeployToDocker(cmdName string, isDockerCompose bool, flags interface{
 }
 
 var WarningSign = "\U000026A0"
+
+// ArrayToMap converts an array of strings to a map[string]bool.
+func ArrayToMap(arr []string) map[string]bool {
+	res := map[string]bool{}
+	for i := range arr {
+		res[arr[i]] = true
+	}
+	return res
+}
