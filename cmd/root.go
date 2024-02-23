@@ -290,7 +290,7 @@ func (r *Root) execute() {
 		rootCmd.AddCommand(sc.GetCmd())
 	}
 
-	if err := rootCmd.Execute(); err != nil {
+	if err := rootCmd.Execute(); err != nil && !(err.Error()[0:15] == "unknown command") {
 		r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
 		os.Exit(1)
 	}
