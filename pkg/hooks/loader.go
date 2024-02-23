@@ -197,7 +197,6 @@ func (h *Hook) SetTcsMocks(m []*models.Mock) {
 func (h *Hook) SetConfigMocks(m []*models.Mock) {
 	h.configMocks.deleteAll()
 	for index, mock := range m {
-		h.UpdateConsumedMocks(mock.Name, false)
 		mock.TestModeInfo.SortOrder = index
 		mock.TestModeInfo.Id = index
 		h.configMocks.insert(mock.TestModeInfo, mock)
@@ -206,6 +205,9 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) {
 
 func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool {
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
+	if isUpdated {
+		h.UpdateConsumedMocks(oldMock.Name, false)
+	}
 	return isUpdated
 }
 
