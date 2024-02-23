@@ -245,7 +245,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 	}
 	for _, sessionIndex := range sessions {
 		// checking whether the provided testset match with a recorded testset.
-		testcases := ArrayToMap(options.Tests[sessionIndex])
+		testcases := utils.ArrayToMap(options.Tests[sessionIndex])
 		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
 			continue
 		}
