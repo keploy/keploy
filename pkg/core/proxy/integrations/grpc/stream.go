@@ -2,10 +2,12 @@ package grpc
 
 import (
 	"context"
+	"encoding/binary"
+	"fmt"
+	"github.com/protocolbuffers/protoscope"
 	"sync"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -13,16 +15,14 @@ import (
 // that happen in a stream for grpc. This includes the headers and data frame for the
 // request and response.
 type StreamInfoCollection struct {
-	hook             *hooks.Hook
 	mutex            sync.Mutex
 	StreamInfo       map[uint32]models.GrpcStream
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
 }
 
-func NewStreamInfoCollection(h *hooks.Hook) *StreamInfoCollection {
+func NewStreamInfoCollection() *StreamInfoCollection {
 	return &StreamInfoCollection{
-		hook:       h,
 		StreamInfo: make(map[uint32]models.GrpcStream),
 	}
 }
@@ -85,7 +85,7 @@ func (sic *StreamInfoCollection) AddPayloadForRequest(streamID uint32, payload [
 	// We cannot modify non pointer values in nested entries in map.
 	// Create a copy and overwrite it.
 	info := sic.StreamInfo[streamID]
-	info.GrpcReq.Body = CreateLengthPrefixedMessageFromPayload(payload)
+	info.GrpcReq.Body = createLengthPrefixedMessageFromPayload(payload)
 	sic.StreamInfo[streamID] = info
 }
 
@@ -99,16 +99,17 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	// We cannot modify non pointer values in nested entries in map.
 	// Create a copy and overwrite it.
 	info := sic.StreamInfo[streamID]
-	info.GrpcResp.Body = CreateLengthPrefixedMessageFromPayload(payload)
+	info.GrpcResp.Body = createLengthPrefixedMessageFromPayload(payload)
 	sic.StreamInfo[streamID] = info
 }
 
-func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32, ctx context.Context) {
+func (sic *StreamInfoCollection) PersistMockForStream(ctx context.Context, streamID uint32, mocks chan<- *models.Mock) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 	grpcReq := sic.StreamInfo[streamID].GrpcReq
 	grpcResp := sic.StreamInfo[streamID].GrpcResp
-	sic.hook.AppendMocks(&models.Mock{
+	// save the mock
+	mocks <- &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
 		Kind:    models.GRPC_EXPORT,
@@ -118,8 +119,7 @@ func (sic *StreamInfoCollection) PersistMockForStream(streamID uint32, ctx conte
 			ReqTimestampMock: sic.ReqTimestampMock,
 			ResTimestampMock: sic.ResTimestampMock,
 		},
-	}, ctx)
-
+	}
 }
 
 func (sic *StreamInfoCollection) FetchRequestForStream(streamID uint32) models.GrpcReq {
@@ -134,4 +134,46 @@ func (sic *StreamInfoCollection) ResetStream(streamID uint32) {
 	defer sic.mutex.Unlock()
 
 	delete(sic.StreamInfo, streamID)
+}
+
+func createLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefixedMessage {
+	msg := models.GrpcLengthPrefixedMessage{}
+
+	// If the body is not length prefixed, we return the default value.
+	if len(data) < 5 {
+		return msg
+	}
+
+	// The first byte is the compression flag.
+	msg.CompressionFlag = uint(data[0])
+
+	// The next 4 bytes are message length.
+	msg.MessageLength = binary.BigEndian.Uint32(data[1:5])
+
+	// The payload could be empty. We only parse it if it is present.
+	if len(data) >= 5 {
+		// Use protoscope to decode the message.
+		msg.DecodedData = protoscope.Write(data[5:], protoscope.WriterOptions{})
+	}
+
+	return msg
+}
+
+func createPayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage) ([]byte, error) {
+	scanner := protoscope.NewScanner(msg.DecodedData)
+	encodedData, err := scanner.Exec()
+	if err != nil {
+		return nil, fmt.Errorf("could not encode grpc msg using protoscope: %v", err)
+	}
+
+	// Note that the encoded length is present in the msg, but it is also equal to the len of encodedData.
+	// We should give the preference to the length of encodedData, since the mocks might have been altered.
+
+	// Reserve 1 byte for compression flag, 4 bytes for length capture.
+	payload := make([]byte, 1+4)
+	payload[0] = uint8(msg.CompressionFlag)
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(encodedData)))
+	payload = append(payload, encodedData...)
+
+	return payload, nil
 }

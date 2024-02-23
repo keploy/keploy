@@ -10,12 +10,12 @@ import (
 	"net"
 )
 
-type Generic struct {
-	logger *zap.Logger
-}
-
 func init() {
 	integrations.Register("generic", NewGeneric)
+}
+
+type Generic struct {
+	logger *zap.Logger
 }
 
 func NewGeneric(logger *zap.Logger) integrations.Integrations {

@@ -19,16 +19,16 @@ import (
 	"go.uber.org/zap"
 )
 
+func init() {
+	integrations.Register("http", NewHttp)
+}
+
 type Http struct {
 	logger *zap.Logger
 	//opts  globalOptions //other global options set by the proxy
 }
 
-func init() {
-	integrations.Register("http", NewHttpParser)
-}
-
-func NewHttpParser(logger *zap.Logger) integrations.Integrations {
+func NewHttp(logger *zap.Logger) integrations.Integrations {
 	return &Http{
 		logger: logger,
 	}
