@@ -74,7 +74,11 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, nil, nil, serveTest, initialisedValues)
+
+		// send filtered testcases to run the test-set
+		testcaseFilter := utils.ArrayToMap(r.TestFilter[testSet])
+		// run the test set with a delay
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, testcaseFilter, nil, serveTest, initialisedValues)
 	}()
 
 	testRunID := <-testRunChan
@@ -158,7 +162,17 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return testSets, nil
+
+	resultTestsets := []string{}
+	// filter the test sets to be run based on cmd flag
+	for _, testset := range testSets {
+		// checking whether the provided testset match with a recorded testset.
+		if _, ok := r.TestFilter[testset]; !ok && len(r.TestFilter) != 0 {
+			continue
+		}
+		resultTestsets = append(resultTestsets, testset)
+	}
+	return resultTestsets, nil
 }
 
 // TestSetStatus is the resolver for the testSetStatus field.
