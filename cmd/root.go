@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/TheZeroSlave/zapsentry"
@@ -290,7 +291,7 @@ func (r *Root) execute() {
 		rootCmd.AddCommand(sc.GetCmd())
 	}
 
-	if err := rootCmd.Execute(); err != nil && !(err.Error()[0:15] == "unknown command") {
+	if err := rootCmd.Execute(); err != nil && !(strings.HasPrefix(err.Error(), "unknown command")) {
 		r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
 		os.Exit(1)
 	}
