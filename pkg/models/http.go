@@ -1,6 +1,8 @@
 package models
 
-import "time"
+import (
+	"time"
+)
 
 type Method string
 
@@ -17,6 +19,17 @@ type HttpReq struct {
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
 	Host       string            `json:"host" yaml:"host"`
+}
+
+type HttpSchema struct {
+	Metadata         map[string]string      `json:"metadata" yaml:"metadata"`
+	Request          HttpReq                `json:"req" yaml:"req"`
+	Response         HttpResp               `json:"resp" yaml:"resp"`
+	Objects          []*OutputBinary        `json:"objects" yaml:"objects"`
+	Assertions       map[string]interface{} `json:"assertions" yaml:"assertions,omitempty"`
+	Created          int64                  `json:"created" yaml:"created,omitempty"`
+	ReqTimestampMock time.Time              `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time              `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
 }
 
 type FormData struct {

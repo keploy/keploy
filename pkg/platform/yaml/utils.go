@@ -1,15 +1,12 @@
 package yaml
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"reflect"
 
 	"strconv"
 	"strings"
@@ -17,104 +14,6 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
-
-func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
-	m := map[string][]string{}
-	for k, v := range h {
-		m["header."+k] = []string{strings.Join(v, "")}
-	}
-	err := AddHttpBodyToMap(body, m)
-	if err != nil {
-		return m, err
-	}
-	return m, nil
-}
-
-// Flatten takes a map and returns a new one where nested maps are replaced
-// by dot-delimited keys.
-// examples of valid jsons - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse#examples
-func Flatten(j interface{}) map[string][]string {
-	if j == nil {
-		return map[string][]string{"": {""}}
-	}
-	o := make(map[string][]string)
-	x := reflect.ValueOf(j)
-	switch x.Kind() {
-	case reflect.Map:
-		m, ok := j.(map[string]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for k, v := range m {
-			nm := Flatten(v)
-			for nk, nv := range nm {
-				fk := k
-				if nk != "" {
-					fk = fk + "." + nk
-				}
-				o[fk] = nv
-			}
-		}
-	case reflect.Bool:
-		o[""] = []string{strconv.FormatBool(x.Bool())}
-	case reflect.Float64:
-		o[""] = []string{strconv.FormatFloat(x.Float(), 'E', -1, 64)}
-	case reflect.String:
-		o[""] = []string{x.String()}
-	case reflect.Slice:
-		child, ok := j.([]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for _, av := range child {
-			nm := Flatten(av)
-			for nk, nv := range nm {
-				if ov, exists := o[nk]; exists {
-					o[nk] = append(ov, nv...)
-				} else {
-					o[nk] = nv
-				}
-			}
-		}
-	default:
-		fmt.Println(Emoji, "found invalid value in json", j, x.Kind())
-	}
-	return o
-}
-
-func AddHttpBodyToMap(body string, m map[string][]string) error {
-	// add body
-	if json.Valid([]byte(body)) {
-		var result interface{}
-
-		err := json.Unmarshal([]byte(body), &result)
-		if err != nil {
-			return err
-		}
-		j := Flatten(result)
-		for k, v := range j {
-			nk := "body"
-			if k != "" {
-				nk = nk + "." + k
-			}
-			m[nk] = v
-		}
-	} else {
-		// add it as raw text
-		m["body"] = []string{body}
-	}
-	return nil
-}
-
-func FindNoisyFields(m map[string][]string, comparator func(string, []string) bool) []string {
-	var noise []string
-	for k, v := range m {
-		if comparator(k, v) {
-			noise = append(noise, k)
-		}
-	}
-	return noise
-}
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
 	if res == nil {
@@ -313,43 +212,40 @@ func ValidatePath(path string) (string, error) {
 	return path, nil
 }
 
-// createYamlFile is used to create the yaml file along with the path directory (if does not exists)
-func createYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
-	// checks id the yaml exists
-	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+// findLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
+func FindLastIndex(path string, Logger *zap.Logger) (int, error) {
+
+	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		return false, err
+		return 1, nil
 	}
-	if _, err := os.Stat(yamlPath); err != nil {
-		// creates the path director if does not exists
-		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
-		if err != nil {
-			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-			return false, err
-		}
 
-		// create the yaml file
-		_, err := os.Create(yamlPath)
-		if err != nil {
-			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
-			return false, err
-		}
-
-		// since, keploy requires root access. The permissions for generated files
-		// should be updated to share it with all users.
-		keployPath := path
-		if strings.Contains(path, "keploy/"+models.TestSetPattern) {
-			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
-		}
-		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
-		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
-		err = cmd.Run()
-		if err != nil {
-			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
-			return false, err
-		}
-
-		return true, nil
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return 1, nil
 	}
-	return false, nil
+
+	lastIndex := 0
+	for _, v := range files {
+		if v.Name() == "mocks.yaml" || v.Name() == "config.yaml" {
+			continue
+		}
+		fileName := filepath.Base(v.Name())
+		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
+		fileNameParts := strings.Split(fileNameWithoutExt, "-")
+		if len(fileNameParts) != 2 || (fileNameParts[0] != "test" && fileNameParts[0] != "report") {
+			continue
+		}
+		indxStr := fileNameParts[1]
+		indx, err := strconv.Atoi(indxStr)
+		if err != nil {
+			continue
+		}
+		if indx > lastIndex {
+			lastIndex = indx
+		}
+	}
+	lastIndex += 1
+
+	return lastIndex, nil
 }
