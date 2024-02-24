@@ -25,24 +25,23 @@ type Telemetry struct {
 }
 
 type Options struct {
-	Enabled   bool
-	Version   string
-	GlobalMap map[string]interface{}
+	Enabled        bool
+	Version        string
+	GlobalMap      map[string]interface{}
+	InstallationID string
 }
 
 func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 	if opt.Version == "" {
 		opt.Version = utils.Version
 	}
-	store := fs.NewTeleFS(logger)
-
 	tele := Telemetry{
-		Enabled:       opt.Enabled,
-		logger:        logger,
-		store:         store,
-		KeployVersion: opt.Version,
-		GlobalMap:     opt.GlobalMap,
-		client:        &http.Client{Timeout: 10 * time.Second},
+		Enabled:        opt.Enabled,
+		logger:         logger,
+		KeployVersion:  opt.Version,
+		GlobalMap:      opt.GlobalMap,
+		client:         &http.Client{Timeout: 10 * time.Second},
+		InstallationID: opt.InstallationID,
 	}
 	return &tele
 }
@@ -53,42 +52,8 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 	}
 
 	go func() {
-		defer utils.HandlePanic()
+		defer utils.HandlePanic(tel.logger)
 		for {
-			var count int64
-			var id string
-
-			id, _ = tel.store.Get(true)
-			count = int64(len(id))
-
-			event := models.TeleEvent{
-				EventType: "Ping",
-				CreatedAt: time.Now().Unix(),
-			}
-
-			if count == 0 {
-				//Check in the old keploy folder.
-				id, _ = tel.store.Get(false)
-				count = int64(len(id))
-				if count == 0 {
-					bin, err := marshalEvent(event, tel.logger)
-					if err != nil {
-						break
-					}
-					resp, err := http.Post(teleUrl, "application/json", bytes.NewBuffer(bin))
-					if err != nil {
-						tel.logger.Debug("failed to send request for analytics", zap.Error(err))
-						break
-					}
-					installation_id, err := unmarshalResp(resp, tel.logger)
-					if err != nil {
-						break
-					}
-					id = installation_id
-				}
-				tel.store.Set(id)
-			}
-			tel.InstallationID = id
 			tel.SendTelemetry("Ping")
 			time.Sleep(5 * time.Minute)
 		}
@@ -143,14 +108,6 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 				event.Meta["global-map"] = tel.GlobalMap
 			}
 
-			if tel.InstallationID == "" {
-				id := ""
-				id, _ = tel.store.Get(true)
-				if id == "" {
-					id, _ = tel.store.Get(false)
-				}
-				tel.InstallationID = id
-			}
 			event.InstallationID = tel.InstallationID
 			event.OS = runtime.GOOS
 			event.KeployVersion = tel.KeployVersion
@@ -169,7 +126,7 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 
 			req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-			defer utils.HandlePanic()
+			defer utils.HandlePanic(tel.logger)
 			resp, err := tel.client.Do(req)
 			if err != nil {
 				tel.logger.Debug("failed to send request for analytics", zap.Error(err))

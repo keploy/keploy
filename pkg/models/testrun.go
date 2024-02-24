@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"go.keploy.io/server/v2/pkg/core/hooks"
-	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform"
 )
 
@@ -40,7 +39,7 @@ type TestResult struct {
 }
 
 type SimulateRequestConfig struct {
-	Tc             *models.TestCase
+	Tc             *TestCase
 	LoadedHooks    *hooks.Hook
 	AppCmd         string
 	UserIP         string
@@ -48,12 +47,12 @@ type SimulateRequestConfig struct {
 	ApiTimeout     uint64
 	Success        *int
 	Failure        *int
-	Status         *models.TestRunStatus
+	Status         *TestRunStatus
 	TestReportFS   platform.TestReportDB
-	TestReport     *models.TestReport
+	TestReport     *TestReport
 	Path           string
 	DockerID       bool
-	NoiseConfig    models.GlobalNoise
+	NoiseConfig    GlobalNoise
 	IgnoreOrdering bool
 }
 
