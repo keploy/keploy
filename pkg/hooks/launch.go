@@ -386,7 +386,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 					if containerFound {
 						h.logger.Debug(fmt.Sprintf("the user application container pid: %v", containerPid))
-						inode := h.getInodeNumber(containerPid)
+						inode := getInodeNumber(h.logger, containerPid)
 						h.logger.Debug("", zap.Any("user inode", inode))
 
 						// send the inode of the container to ebpf hooks to filter the network traffic
@@ -621,12 +621,12 @@ func parseDockerCommand(dockerCmd string) (string, string, error) {
 	return containerName, networkName, nil
 }
 
-func (h *Hook) getInodeNumber(pid int) uint64 {
+func getInodeNumber(logger *zap.Logger, pid int) uint64 {
 	filepath := filepath.Join("/proc", strconv.Itoa(pid), "ns", "pid")
 
 	f, err := os.Stat(filepath)
 	if err != nil {
-		h.logger.Error(fmt.Sprintf("%v failed to get the inode number or namespace Id: %v", Emoji, err))
+		logger.Error(fmt.Sprintf("%v failed to get the inode number or namespace Id: %v", Emoji, err))
 		return 0
 	}
 	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
