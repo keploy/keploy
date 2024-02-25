@@ -291,9 +291,11 @@ func (r *Root) execute() {
 		rootCmd.AddCommand(sc.GetCmd())
 	}
 
-	if err := rootCmd.Execute(); err != nil && !(strings.HasPrefix(err.Error(), "unknown command")) {
-		r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
-		os.Exit(1)
+	if err := rootCmd.Execute(); err != nil {
+		if !strings.HasPrefix(err.Error(), "unknown command") && !strings.HasPrefix(err.Error(), "unknown shorthand") {
+			r.logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
+			os.Exit(1)
+		}
 	}
 }
 
