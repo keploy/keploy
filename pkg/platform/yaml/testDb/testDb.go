@@ -88,7 +88,7 @@ func (ts *TestYaml) GetAllTestSetIds(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ts.TcsPath, ts.Logger)
 }
 
-func (ys *TestYaml) GetTestCases(ctx context.Context, testSet string) ([]platform.KindSpecifier, error) {
+func (ys *TestYaml) GetTestCases(ctx context.Context, testSet string) ([]*models.TestCase, error) {
 	path := ys.TcsPath + "/" + testSet + "/tests"
 	tcs := []*models.TestCase{}
 
@@ -137,9 +137,5 @@ func (ys *TestYaml) GetTestCases(ctx context.Context, testSet string) ([]platfor
 	sort.SliceStable(tcs, func(i, j int) bool {
 		return tcs[i].HttpReq.Timestamp.Before(tcs[j].HttpReq.Timestamp)
 	})
-	tcsRead := make([]platform.KindSpecifier, len(tcs))
-	for i, tc := range tcs {
-		tcsRead[i] = tc
-	}
-	return tcsRead, nil
+	return tcs, nil
 }
