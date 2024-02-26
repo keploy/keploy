@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"io"
 	"net"
@@ -85,12 +86,14 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 
 	// start the proxy server
 	go func() {
+		utils.Recover(p.logger)
 		p.start(ctx)
 	}()
 
 	// start the TCP DNS server
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
 	go func() {
+		utils.Recover(p.logger)
 		p.startTcpDnsServer()
 	}()
 
@@ -99,11 +102,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		// start the UDP DNS server
 		p.logger.Debug("Starting Udp Dns Server in Test mode...")
 		go func() {
+			utils.Recover(p.logger)
 			p.startUdpDnsServer()
 		}()
 	}
 
 	go func() {
+		utils.Recover(p.logger)
 		p.StopProxyServer(ctx)
 	}()
 
@@ -139,6 +144,7 @@ func (p *Proxy) start(ctx context.Context) {
 		p.connMutex.Unlock()
 
 		go func() {
+			utils.Recover(p.logger)
 			p.handleConnection(ctx, conn)
 		}()
 	}

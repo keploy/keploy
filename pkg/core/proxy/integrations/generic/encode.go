@@ -6,6 +6,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"net"
 	"strconv"
@@ -54,10 +55,12 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 	// read requests from client
 	go func() {
+		defer utils.Recover(logger)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 	}()
 	// read responses from destination
 	go func() {
+		defer utils.Recover(logger)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 	}()
 

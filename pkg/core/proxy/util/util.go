@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/v2/utils"
 	"io"
 	"os"
 	"os/exec"
@@ -182,6 +183,7 @@ func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	errChannel := make(chan error)
 
 	go func() {
+		defer utils.Recover(logger)
 		ReadBuffConn(ctx, logger, destConn, destBufferChannel, errChannel)
 	}()
 

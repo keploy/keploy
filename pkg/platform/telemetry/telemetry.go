@@ -52,7 +52,7 @@ func (tel *Telemetry) Ping(isTestMode bool) {
 	}
 
 	go func() {
-		defer utils.HandlePanic(tel.logger)
+		defer utils.Recover(tel.logger)
 		for {
 			tel.SendTelemetry("Ping")
 			time.Sleep(5 * time.Minute)
@@ -93,7 +93,7 @@ func (tel *Telemetry) RecordedMock(mockType string) {
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
 	go func() {
-
+		defer utils.Recover(tel.logger)
 		if tel.Enabled {
 			event := models.TeleEvent{
 				EventType: eventType,

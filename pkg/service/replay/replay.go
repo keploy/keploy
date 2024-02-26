@@ -169,6 +169,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 		return models.TestSetStatusFailed, fmt.Errorf("failed to mock outgoing: %w", err)
 	}
 	go func() {
+		defer utils.Recover(r.logger)
 		appErr = r.RunApplication(ctx, appId, models.RunOptions{ServeTest: serveTest})
 		appErrChan <- appErr
 	}()
@@ -179,6 +180,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 
 	// Checking for errors in the mocking and application
 	go func() {
+		defer utils.Recover(r.logger)
 		select {
 		case err := <-mockErrChan:
 			r.logger.Error("failed to mock outgoing", zap.Error(err))

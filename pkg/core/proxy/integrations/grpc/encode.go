@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"io"
 	"net"
@@ -33,6 +34,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	serverSideDecoder := NewDecoder()
 	wg.Add(1)
 	go func() {
+		defer utils.Recover(logger)
 		defer wg.Done()
 		err := transferFrame(ctx, destConn, clientConn, streamInfoCollection, reqFromClient, serverSideDecoder, mocks)
 		if err != nil {
@@ -49,6 +51,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	clientSideDecoder := NewDecoder()
 	wg.Add(1)
 	go func() {
+		defer utils.Recover(logger)
 		defer wg.Done()
 		err := transferFrame(ctx, clientConn, destConn, streamInfoCollection, !reqFromClient, clientSideDecoder, mocks)
 		if err != nil {
