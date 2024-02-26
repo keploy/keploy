@@ -20,14 +20,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger) Service {
+func NewTools(logger *zap.Logger, telemetry teleDB) Service {
 	return &Tools{
-		logger: logger,
+		logger:    logger,
+		telemetry: telemetry,
 	}
 }
 
 type Tools struct {
-	logger *zap.Logger
+	logger    *zap.Logger
+	telemetry teleDB
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")

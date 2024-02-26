@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"time"
 
+	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -35,15 +36,16 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 	if opt.Version == "" {
 		opt.Version = utils.Version
 	}
-	tele := Telemetry{
-		Enabled:        opt.Enabled,
-		logger:         logger,
-		KeployVersion:  opt.Version,
-		GlobalMap:      opt.GlobalMap,
-		client:         &http.Client{Timeout: 10 * time.Second},
-		InstallationID: opt.InstallationID,
+	store := fs.NewTeleFS(logger)
+
+	return &Telemetry{
+		Enabled:       opt.Enabled,
+		logger:        logger,
+		store:         store,
+		KeployVersion: opt.Version,
+		GlobalMap:     opt.GlobalMap,
+		client:        &http.Client{Timeout: 10 * time.Second},
 	}
-	return &tele
 }
 
 func (tel *Telemetry) Ping(isTestMode bool) {

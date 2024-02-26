@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type HookFunc func(context.Context, *zap.Logger, *config.Config, Services) *cobra.Command
+type HookFunc func(context.Context, *zap.Logger, *config.Config, ServiceFactory, CmdConfigurator) *cobra.Command
 
 // Registered holds the registered command hooks
 var Registered map[string]HookFunc
