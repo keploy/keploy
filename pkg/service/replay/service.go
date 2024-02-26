@@ -23,9 +23,9 @@ type Service interface {
 	Replay(ctx context.Context) error
 	BootReplay(ctx context.Context) (string, uint64, error)
 	GetAllTestSetIds(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64) (models.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (models.TestSetStatus, error)
-	RunApplication(ctx context.Context, appId uint64, opts models.RunOptions) (models.AppError, error)
+	RunApplication(ctx context.Context, appId uint64, opts models.RunOptions) models.AppError
 }
 
 type TestDB interface {

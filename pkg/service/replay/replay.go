@@ -66,7 +66,7 @@ func (r *replayer) Replay(ctx context.Context) error {
 	testRunResult := true
 	abort := false
 	for _, testSetId := range testSetIds {
-		testSetStatus, err := r.RunTestSet(ctx, testSetId, testRunId, appId)
+		testSetStatus, err := r.RunTestSet(ctx, testSetId, testRunId, appId, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			r.logger.Error(stopReason, zap.Error(err))
@@ -92,7 +92,7 @@ func (r *replayer) Replay(ctx context.Context) error {
 		}
 	}
 	if !abort {
-		r.printSummary(testRunResult)
+		r.printSummary(ctx, testRunResult)
 	}
 	utils.Stop(r.logger, "replay completed")
 	return nil
@@ -164,7 +164,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to set mocks: %w", err)
 	}
-	mockErrChan = r.instrumentation.MockOutgoing(ctx, appId, models.IncomingOptions{})
+	mockErrChan = r.instrumentation.MockOutgoing(ctx, appId, models.OutgoingOptions{})
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to mock outgoing: %w", err)
 	}

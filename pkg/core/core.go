@@ -19,6 +19,14 @@ type Core struct {
 	proxy  Proxy
 }
 
+func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
+	return &Core{
+		logger: logger,
+		hook:   hook,
+		proxy:  proxy,
+	}
+}
+
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	id := uint64(c.id.Next())
 	a := app.NewApp(c.logger, id, cmd)

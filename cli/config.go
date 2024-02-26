@@ -17,7 +17,7 @@ func init() {
 	Register("config", Config)
 }
 
-func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
+func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, servicefactory ServiceFactory, cmdConfiguration CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "config",
 		Short:   "manage keploy configuration file",
