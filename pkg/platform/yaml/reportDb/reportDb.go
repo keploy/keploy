@@ -1,4 +1,4 @@
-package reportstore
+package reportdb
 
 import (
 	"context"
@@ -23,7 +23,7 @@ type TestReport struct {
 	Name   string
 }
 
-func NewTestReportFS(logger *zap.Logger) replay.ReportDB {
+func New(logger *zap.Logger) replay.ReportDB {
 	return &TestReport{
 		tests:  make(map[string]map[string][]models.TestResult),
 		m:      sync.Mutex{},
