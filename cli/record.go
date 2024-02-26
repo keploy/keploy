@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
+	recordSvc "go.keploy.io/server/v2/pkg/service/record"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +26,15 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			return cmdConfigurator.ValidateFlags(cmd, cfg)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			recorder.record()
+			svc, err := serviceFactory.GetService(cmd.Name(), *cfg)
+			if err != nil {
+				return err
+			}
+			if record, ok := svc.(recordSvc.Service); !ok {
+				return fmt.Errorf("record is not of type MyInterface")
+			} else {
+				record.Start(ctx)
+			}
 			return nil
 		},
 	}

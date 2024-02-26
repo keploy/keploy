@@ -60,17 +60,12 @@ func (n *serviceProvider) GetCommonServices(config config.Config) *commonInterna
 	}
 }
 
-func (n *serviceProvider) setConfig(config config.Config) {
-	n.Config = config
-}
-
 func (n *serviceProvider) GetService(cmd string, config config.Config) (interface{}, error) {
-	n.setConfig(config)
 	telemetry := n.GetTelemetryService(config)
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, telemetry), nil
-	case "record", "test":
+	case "record", "test", "mock":
 		commonServices := n.GetCommonServices(config)
 		if cmd == "record" {
 			record.NewRecorder(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, telemetry, commonServices.Instrumentation, config)

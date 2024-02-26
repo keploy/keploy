@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"time"
 
-	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -36,7 +35,6 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 	if opt.Version == "" {
 		opt.Version = utils.Version
 	}
-	store := fs.NewTeleFS(logger)
 
 	return &Telemetry{
 		Enabled:       opt.Enabled,

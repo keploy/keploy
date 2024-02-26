@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -63,13 +64,36 @@ func NewCmdConfigurator(logger *zap.Logger) *cmdConfigurator {
 }
 
 func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error {
-	var configPath string
 	var err error
 	switch cmd.Name() {
-	case "update", "config":
+	case "update":
 		return nil
+	case "config":
+		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated config is stored")
+		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
+		err = viper.BindPFlags(cmd.Flags())
+		if err != nil {
+			errMsg := "failed to bind flags to config"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
+	case "mock":
+		cmd.Flags().Bool("telemetry", cfg.Telemetry, "Run in telemetry mode")
+		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().Uint32("pid", 0, "Process id of your application.")
+		cmd.MarkFlagRequired("pid")
+		cmd.Flags().Bool("record", false, "Record all outgoing network traffic")
+		cmd.Flags().Lookup("record").NoOptDefVal = "true"
+		cmd.Flags().Bool("replay", true, "Intercept all outgoing network traffic and replay the recorded traffic")
+		cmd.Flags().Lookup("replay").NoOptDefVal = "true"
+		cmd.Flags().StringP("name", "n", "mocks", "Name of the mock")
+		err = viper.BindPFlags(cmd.Flags())
+		if err != nil {
+			errMsg := "failed to bind flags to config"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
 	case "record", "test":
-		cmd.Flags().Bool("debug", cfg.Debug, "Run in debug mode")
 		cmd.Flags().Bool("telemetry", cfg.Telemetry, "Run in telemetry mode")
 		cmd.Flags().String("configPath", cfg.ConfigPath, "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated testcases/mocks are stored")
@@ -80,11 +104,6 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		cmd.Flags().String("containerName", cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("bypassPorts", config.GetByPassPorts(cfg), "Ports to bypass the proxy server and ignore the traffic")
-		configPath, err = cmd.Flags().GetString("config-path")
-		if err != nil {
-			c.logger.Error("failed to read the config path")
-			return err
-		}
 		err = cmd.Flags().MarkHidden("telemetry")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -121,21 +140,6 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 	default:
 		return errors.New("unknown command name")
 	}
-	if cmd.Name() != "keploy" && configPath != "" {
-		viper.SetConfigName("keploy-config")
-		viper.SetConfigType("yaml")
-		viper.AddConfigPath(configPath)
-		if err := viper.ReadInConfig(); err != nil {
-			errMsg := "failed to read config file"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
-		if err := viper.Unmarshal(&cfg); err != nil {
-			errMsg := "failed to unmarshal the config"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
-	}
 	return nil
 }
 
@@ -151,10 +155,29 @@ func (c *cmdConfigurator) GetVersionTemplate() string {
 	return versionTemplate
 }
 
-func (c cmdConfigurator) ValidateFlags(cmd *cobra.Command, cfg *config.Config) error {
+func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
+	configPath, err := cmd.Flags().GetString("config-path")
+	if err != nil {
+		c.logger.Error("failed to read the config path")
+		return err
+	}
+	if cmd.Name() != "keploy" && configPath != "" {
+		viper.SetConfigName("keploy-config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(configPath)
+		if err := viper.ReadInConfig(); err != nil {
+			errMsg := "failed to read config file"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
+		if err := viper.Unmarshal(&cfg); err != nil {
+			errMsg := "failed to unmarshal the config"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
+	}
 	switch cmd.Name() {
 	case "record", "test":
-
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
 		if err != nil {
 			c.logger.Error("failed to read the ports of outgoing calls to be ignored")
@@ -210,7 +233,7 @@ func (c cmdConfigurator) ValidateFlags(cmd *cobra.Command, cfg *config.Config) e
 
 		}
 
-		err = utils.StartInDocker(c.logger, cfg)
+		err = utils.StartInDocker(ctx, c.logger, cfg)
 		if err != nil {
 			return err
 		}

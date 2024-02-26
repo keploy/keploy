@@ -18,8 +18,8 @@ type Instrumentation interface {
 }
 
 type Service interface {
-	Record(ctx context.Context) error
-	MockRecord(ctx context.Context) error
+	Start(ctx context.Context) error
+	StartMock(ctx context.Context) error
 }
 
 type TestDB interface {
