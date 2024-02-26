@@ -8,6 +8,7 @@ import (
 	"errors"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/utils"
 	"io"
 	"net"
 	"net/http"
@@ -158,6 +159,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 	}
 
 	go func() {
+		defer utils.Recover(logger)
 		mocks <- &models.Mock{
 			Version: models.GetVersion(),
 			Name:    "mocks",

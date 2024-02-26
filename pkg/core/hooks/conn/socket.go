@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"os"
 	_ "strings"
 	"time"
@@ -33,6 +34,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	}
 	c := NewFactory(time.Minute, l)
 	go func() {
+		defer utils.Recover(l)
 		for {
 			select {
 			case <-ctx.Done():
@@ -52,6 +54,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 }
 
 func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh chan error) {
+	defer utils.Recover(l)
 	defer close(errCh) // Close the channel when the function exits
 
 	r, err := perf.NewReader(m, os.Getpagesize())
@@ -95,6 +98,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 }
 
 func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh chan error) {
+	defer utils.Recover(l)
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		l.Error("failed to create ring buffer of socketDataEvent", zap.Error(err))
@@ -147,6 +151,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 }
 
 func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh chan error) {
+	defer utils.Recover(l)
 	r, err := perf.NewReader(m, os.Getpagesize())
 	if err != nil {
 		l.Error("failed to create perf event reader of socketCloseEvent", zap.Error(err))

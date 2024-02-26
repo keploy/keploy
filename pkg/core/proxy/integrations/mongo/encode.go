@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"io"
 	"math/rand"
@@ -177,6 +178,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				for i := 0; ; i++ {
 					if i == 0 && isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 						go func() {
+							defer utils.Recover(logger)
 							recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 						}()
 					}
@@ -228,6 +230,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 
 			go func() {
+				defer utils.Recover(logger)
 				recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 			}()
 			reqBuf = []byte("read form client conn")

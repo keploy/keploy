@@ -211,15 +211,22 @@ func attachLogFileToSentry(logFilePath string) {
 	sentry.Flush(time.Second * 5)
 }
 
-func HandlePanic(logger *zap.Logger) {
+// Recover recovers from a panic and logs the stack trace to Sentry.
+// It also stops the global context.
+func Recover(logger *zap.Logger) {
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
 		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 		// Get the stack trace
 		stackTrace := debug.Stack()
-
 		logger.Error(Emoji+"Recovered from:", zap.String("stack trace", string(stackTrace)))
+		//stopping the global context
+		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+		if err != nil {
+			logger.Error("Failed to stop the global context", zap.Error(err))
+			//return
+		}
 		sentry.Flush(time.Second * 2)
 	}
 }
