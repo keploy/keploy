@@ -1,4 +1,4 @@
-package teststore
+package testdb
 
 import (
 	"context"
@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"go.keploy.io/server/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform"
+	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.uber.org/zap"
@@ -21,17 +21,17 @@ type TestYaml struct {
 	TcsPath     string
 	TcsName     string
 	Logger      *zap.Logger
-	tele        telemetry.Telemetry
+	tele        *telemetry.Telemetry
 	nameCounter int
 	mutex       sync.RWMutex
 }
 
-func NewYamlStore(Logger *zap.Logger, tcsPath, TcsName string, tele telemetry.Telemetry) record.TestDB {
+func New(Logger *zap.Logger, tcsPath, TcsName string, tele telemetry.Telemetry) record.TestDB {
 	return &TestYaml{
 		TcsPath:     tcsPath,
 		TcsName:     TcsName,
 		Logger:      Logger,
-		tele:        tele,
+		tele:        &tele,
 		nameCounter: 0,
 		mutex:       sync.RWMutex{},
 	}
@@ -49,7 +49,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 		}
 		ts.mutex.Unlock()
 	}
-	tcsPath := filepath.Join(tc.TcsPath, testSetId)
+	tcsPath := filepath.Join(ts.TcsPath, testSetId)
 
 	var tcsName string
 	if ts.TcsName == "" {
