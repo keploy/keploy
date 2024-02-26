@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, tests *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testFilters *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, passThroughHosts *[]models.Filters) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -61,8 +61,8 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 		*appCmd = confTest.Command
 	}
 	for testset, testcases := range confTest.SelectedTests {
-		if _, ok := (*tests)[testset]; !ok {
-			(*tests)[testset] = testcases
+		if _, ok := (*testFilters)[testset]; !ok {
+			(*testFilters)[testset] = testcases
 		}
 	}
 	if *appContainer == "" {
@@ -240,7 +240,13 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
-			tests := map[string][]string{}
+			removeUnusedMocks, err := cmd.Flags().GetBool("removeUnusedMocks")
+			if err != nil {
+				t.logger.Error("failed to read the remove unused mocks flag")
+				return err
+			}
+
+			testFilters := map[string][]string{}
 
 			testsets, err := cmd.Flags().GetStringSlice("testsets")
 			if err != nil {
@@ -249,15 +255,14 @@ func (t *Test) GetCmd() *cobra.Command {
 			}
 
 			for _, testset := range testsets {
-				tests[testset] = []string{}
+				testFilters[testset] = []string{}
 			}
 
 			globalNoise := make(models.GlobalNoise)
 			testsetNoise := make(models.TestsetNoise)
 
 			passThroughHosts := []models.Filters{}
-
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &tests, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testFilters, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("Keploy config not found, continuing without configuration")
@@ -435,11 +440,11 @@ func (t *Test) GetCmd() *cobra.Command {
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele, testFilters)
 			} else {
 
-				t.tester.StartTest(path, testReportPath, generateTestReport, appCmd, test.TestOptions{
-					Tests:              tests,
+				t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
+					Tests:              testFilters,
 					AppContainer:       appContainer,
 					AppNetwork:         networkName,
 					MongoPassword:      mongoPassword,
@@ -453,7 +458,9 @@ func (t *Test) GetCmd() *cobra.Command {
 					WithCoverage:       withCoverage,
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
+					RemoveUnusedMocks:  removeUnusedMocks,
 					PassthroughHosts:   passThroughHosts,
+					GenerateTestReport: generateTestReport,
 				}, enableTele)
 
 				fileExist := utils.CheckFileExists(path)
@@ -508,6 +515,8 @@ func (t *Test) GetCmd() *cobra.Command {
 	testCmd.Flags().Bool("enableTele", true, "Switch for telemetry")
 
 	testCmd.Flags().Bool("ignoreOrdering", true, "Ignore ordering of array in response")
+
+	testCmd.Flags().Bool("removeUnusedMocks", false, "Removes unused mocks from mock file")
 
 	testCmd.Flags().MarkHidden("enableTele")
 
