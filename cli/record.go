@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -11,25 +12,25 @@ import (
 var filters = models.TestFilter{}
 
 func init() {
-	// register the record command
 	Register("record", Record)
 }
 
-func Record(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
-	// record the keploy testcases/mocks for the user application
+func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "record",
 		Short:   "record the keploy testcases from the API calls",
 		Example: `keploy record -c "/path/to/user/app"`,
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return cmdConfigurator.ValidateFlags(cmd, cfg)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-
 			recorder.record()
 			return nil
 		},
 	}
 
+	cmdConfigurator.AddFlags(cmd, cfg)
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
-
 	return cmd
 }

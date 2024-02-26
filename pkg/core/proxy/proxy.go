@@ -46,7 +46,7 @@ type Proxy struct {
 	TcpDnsServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, sess *core.Sessions, opt config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opt config.Config) *Proxy {
 	return &Proxy{
 		logger:       logger,
 		Port:         opt.Port,   // default
