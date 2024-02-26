@@ -19,7 +19,7 @@ type generatorConfig struct {
 }
 
 type GenerateConfigOptions struct {
-  ConfigStr string
+	ConfigStr string
 }
 
 func NewGeneratorConfig(logger *zap.Logger) GeneratorConfig {
@@ -33,9 +33,9 @@ func (g *generatorConfig) GenerateConfig(filePath string, options GenerateConfig
 	var node yaml.Node
 	data := []byte(models.DefaultConfig)
 
-  if options.ConfigStr != ""{
-    data = []byte(options.ConfigStr)
-  }
+	if options.ConfigStr != "" {
+		data = []byte(options.ConfigStr)
+	}
 
 	if err := yaml.Unmarshal(data, &node); err != nil {
 		g.logger.Fatal("Unmarshalling failed %s", zap.Error(err))

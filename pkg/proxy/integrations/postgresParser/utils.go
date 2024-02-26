@@ -2,11 +2,11 @@ package postgresparser
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"math"
 
 	"errors"
 	"fmt"
+
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -307,7 +307,7 @@ func PostgresEncoder(buffer []byte) string {
 	return encoded
 }
 
-func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, isSorted bool) int {
+func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, isSorted bool) int {
 
 	mxSim := -1.0
 	mxIdx := -1
@@ -409,34 +409,6 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 	h.SetTcsMocks(tcsMocks)
 }
 
-func IfBeginOnlyQuery(reqBuff []byte, logger *zap.Logger, expectedPgReq *models.Backend, h *hooks.Hook) (*models.Backend, bool) {
-	actualreq := decodePgRequest(reqBuff, logger, h)
-	if actualreq == nil {
-		return nil, false
-	}
-	actualPgReq := *actualreq
-
-	if len(actualPgReq.Parses) > 0 && len(expectedPgReq.Parses) > 0 && len(expectedPgReq.Parses) == len(actualPgReq.Parses) {
-
-		if expectedPgReq.Parses[0].Query == "BEGIN READ ONLY" || expectedPgReq.Parses[0].Query == "BEGIN" {
-			expectedPgReq.Parses = expectedPgReq.Parses[1:]
-			if expectedPgReq.PacketTypes[0] == "P" {
-				expectedPgReq.PacketTypes = expectedPgReq.PacketTypes[1:]
-			}
-		}
-
-		if actualPgReq.Parses[0].Query == "BEGIN READ ONLY" || actualPgReq.Parses[0].Query == "BEGIN" {
-			actualPgReq.Parses = actualPgReq.Parses[1:]
-			if actualPgReq.PacketTypes[0] == "P" {
-				actualPgReq.PacketTypes = actualPgReq.PacketTypes[1:]
-			}
-		}
-		return &actualPgReq, true
-	}
-
-	return nil, false
-}
-
 func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) (bool, []models.Frontend, error) {
 	for {
 		tcsMocks, err := h.GetConfigMocks()
@@ -454,7 +426,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			}
 
 			if sortFlag {
-				if mock.TestModeInfo.IsFiltered == false {
+				if !mock.TestModeInfo.IsFiltered {
 					sortFlag = false
 				} else {
 					sortedTcsMocks = append(sortedTcsMocks, mock)
@@ -556,7 +528,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			// give more priority to sorted like if you find more than 0.5 in sorted then return that
 			if len(sortedTcsMocks) > 0 {
 				isSorted = true
-				idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted)
+				idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, isSorted)
 				if idx != -1 {
 					isMatched = true
 					matchedMock = tcsMocks[idx]
@@ -566,7 +538,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 
 		if !isMatched {
 			isSorted = false
-			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
+			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, isSorted)
 			if idx != -1 {
 				isMatched = true
 				matchedMock = tcsMocks[idx]
@@ -590,85 +562,6 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 		break
 	}
 	return false, nil, nil
-}
-
-func decodePgRequest(buffer []byte, logger *zap.Logger, h *hooks.Hook) *models.Backend {
-
-	pg := NewBackend()
-
-	if !isStartupPacket(buffer) && len(buffer) > 5 {
-		bufferCopy := buffer
-		for i := 0; i < len(bufferCopy)-5; {
-			logger.Debug("Inside the if condition")
-			pg.BackendWrapper.MsgType = buffer[i]
-			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
-			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-				logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
-				break
-			}
-			msg, err := pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
-			if err != nil && buffer[i] != 112 {
-				logger.Error("failed to translate the request message to readable", zap.Error(err))
-			}
-			if pg.BackendWrapper.MsgType == 'p' {
-				pg.BackendWrapper.PasswordMessage = *msg.(*pgproto3.PasswordMessage)
-			}
-
-			if pg.BackendWrapper.MsgType == 'P' {
-				pg.BackendWrapper.Parse = *msg.(*pgproto3.Parse)
-				pg.BackendWrapper.Parses = append(pg.BackendWrapper.Parses, pg.BackendWrapper.Parse)
-			}
-
-			if pg.BackendWrapper.MsgType == 'B' {
-				pg.BackendWrapper.Bind = *msg.(*pgproto3.Bind)
-				pg.BackendWrapper.Binds = append(pg.BackendWrapper.Binds, pg.BackendWrapper.Bind)
-			}
-
-			if pg.BackendWrapper.MsgType == 'E' {
-				pg.BackendWrapper.Execute = *msg.(*pgproto3.Execute)
-				pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
-			}
-
-			pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
-
-			i += (5 + pg.BackendWrapper.BodyLen)
-		}
-
-		pg_mock := &models.Backend{
-			PacketTypes: pg.BackendWrapper.PacketTypes,
-			Identfier:   "ClientRequest",
-			Length:      uint32(len(buffer)),
-			// Payload:             bufStr,
-			Bind:                pg.BackendWrapper.Bind,
-			Binds:               pg.BackendWrapper.Binds,
-			PasswordMessage:     pg.BackendWrapper.PasswordMessage,
-			CancelRequest:       pg.BackendWrapper.CancelRequest,
-			Close:               pg.BackendWrapper.Close,
-			CopyData:            pg.BackendWrapper.CopyData,
-			CopyDone:            pg.BackendWrapper.CopyDone,
-			CopyFail:            pg.BackendWrapper.CopyFail,
-			Describe:            pg.BackendWrapper.Describe,
-			Execute:             pg.BackendWrapper.Execute,
-			Executes:            pg.BackendWrapper.Executes,
-			Flush:               pg.BackendWrapper.Flush,
-			FunctionCall:        pg.BackendWrapper.FunctionCall,
-			GssEncRequest:       pg.BackendWrapper.GssEncRequest,
-			Parse:               pg.BackendWrapper.Parse,
-			Parses:              pg.BackendWrapper.Parses,
-			Query:               pg.BackendWrapper.Query,
-			SSlRequest:          pg.BackendWrapper.SSlRequest,
-			StartupMessage:      pg.BackendWrapper.StartupMessage,
-			SASLInitialResponse: pg.BackendWrapper.SASLInitialResponse,
-			SASLResponse:        pg.BackendWrapper.SASLResponse,
-			Sync:                pg.BackendWrapper.Sync,
-			Terminate:           pg.BackendWrapper.Terminate,
-			MsgType:             pg.BackendWrapper.MsgType,
-			AuthType:            pg.BackendWrapper.AuthType,
-		}
-		return pg_mock
-	}
-
-	return nil
 }
 
 func FuzzyCheck(encoded, reqBuff []byte) float64 {
