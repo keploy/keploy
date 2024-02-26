@@ -73,7 +73,8 @@ const (
 	AuthTypeSASLFinal         = 12
 )
 
-const ProtocolVersionNumber uint32 = 196608 // Replace with actual version number if different
+// Replace with actual version number if different
+const ProtocolVersionNumber uint32 = 196608 
 
 // PG Response Packet Transcoder
 func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.FrontendMessage, error) {

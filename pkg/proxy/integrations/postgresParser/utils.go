@@ -370,16 +370,16 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
-			actual_encode, err := PostgresDecoder(reqBuff.Payload)
+			actualEncode, err := PostgresDecoder(reqBuff.Payload)
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
 
-			if len(encode) != len(actual_encode) {
+			if len(encode) != len(actualEncode) {
 				log.Debug("Not Equal Length of buffer in request", zap.Any("payload", reqBuff.Payload))
-				log.Debug("Length of encode", zap.Int("length", len(encode)), zap.Int("length", len(actual_encode)))
+				log.Debug("Length of encode", zap.Int("length", len(encode)), zap.Int("length", len(actualEncode)))
 				log.Debug("Encode via readable", zap.Any("encode", encode))
-				log.Debug("Actual Encode", zap.Any("actual_encode", actual_encode))
+				log.Debug("Actual Encode", zap.Any("actual_encode", actualEncode))
 				log.Debug("Payload", zap.Any("payload", reqBuff.Payload))
 				continue
 			}
@@ -391,15 +391,15 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
-			actual_encode, err := PostgresDecoder(resBuff.Payload)
+			actualEncode, err := PostgresDecoder(resBuff.Payload)
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
-			if len(encode) != len(actual_encode) {
+			if len(encode) != len(actualEncode) {
 				log.Debug("Not Equal Length of buffer in response")
-				log.Debug("Length of encode", zap.Any("length", len(encode)), zap.Any("length", len(actual_encode)))
+				log.Debug("Length of encode", zap.Any("length", len(encode)), zap.Any("length", len(actualEncode)))
 				log.Debug("Encode via readable", zap.Any("encode", encode))
-				log.Debug("Actual Encode", zap.Any("actual_encode", actual_encode))
+				log.Debug("Actual Encode", zap.Any("actual_encode", actualEncode))
 				log.Debug("Payload", zap.Any("payload", resBuff.Payload))
 				continue
 			}
@@ -461,76 +461,13 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 				}
 			}
 
+			initMock := *mock
 			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 				for requestIndex, reqBuff := range requestBuffers {
 					bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-					encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+					encodedMock, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
 					if err != nil {
 						logger.Debug("Error while decoding postgres request", zap.Error(err))
-					}
-					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
-						logger.Debug("CHANGING TO MD5 for Response")
-						mock.Spec.PostgresResponses[requestIndex].AuthType = 5
-						continue
-					} else {
-						if len(encoded) > 0 && encoded[0] == 'p' {
-							logger.Debug("CHANGING TO MD5 for Request and Response")
-							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
-
-							mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
-							mock.Spec.PostgresResponses[requestIndex].AuthType = 0
-							mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
-								ProcessID: 2613,
-								SecretKey: 824670820,
-							}
-							mock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
-							mock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
-								{
-									Name:  "application_name",
-									Value: "",
-								},
-								{
-									Name:  "client_encoding",
-									Value: "UTF8",
-								},
-								{
-									Name:  "DateStyle",
-									Value: "ISO, MDY",
-								},
-								{
-									Name:  "integer_datetimes",
-									Value: "on",
-								},
-								{
-									Name:  "IntervalStyle",
-									Value: "postgres",
-								},
-								{
-									Name:  "is_superuser",
-									Value: "UTF8",
-								},
-								{
-									Name:  "server_version",
-									Value: "13.12 (Debian 13.12-1.pgdg120+1)",
-								},
-								{
-									Name:  "session_authorization",
-									Value: "keploy-user",
-								},
-								{
-									Name:  "standard_conforming_strings",
-									Value: "on",
-								},
-								{
-									Name:  "TimeZone",
-									Value: "Etc/UTC",
-								},
-								{
-									Name:  "TimeZone",
-									Value: "Etc/UTC",
-								},
-							}
-						}
 					}
 
 					if bufStr == "AAAACATSFi8=" {
@@ -539,6 +476,73 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 						}
 						return true, []models.Frontend{ssl}, nil
 					}
+
+					// Below condition will change auth type to MD5 in case of SCRAM but in case of clear text it will execute
+					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && mock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && mock.Spec.PostgresResponses[requestIndex].AuthType == 10 {
+						logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
+						initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
+						return true, initMock.Spec.PostgresResponses, nil
+					} else if len(encodedMock) > 0 && encodedMock[0] == 'p' && mock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p' {
+						logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
+
+						initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
+
+						initMock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
+						initMock.Spec.PostgresResponses[requestIndex].AuthType = 0
+						initMock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
+							ProcessID: 2613,
+							SecretKey: 824670820,
+						}
+						initMock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
+						initMock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
+							{
+								Name:  "application_name",
+								Value: "",
+							},
+							{
+								Name:  "client_encoding",
+								Value: "UTF8",
+							},
+							{
+								Name:  "DateStyle",
+								Value: "ISO, MDY",
+							},
+							{
+								Name:  "integer_datetimes",
+								Value: "on",
+							},
+							{
+								Name:  "IntervalStyle",
+								Value: "postgres",
+							},
+							{
+								Name:  "is_superuser",
+								Value: "UTF8",
+							},
+							{
+								Name:  "server_version",
+								Value: "13.12 (Debian 13.12-1.pgdg120+1)",
+							},
+							{
+								Name:  "session_authorization",
+								Value: "keploy-user",
+							},
+							{
+								Name:  "standard_conforming_strings",
+								Value: "on",
+							},
+							{
+								Name:  "TimeZone",
+								Value: "Etc/UTC",
+							},
+							{
+								Name:  "TimeZone",
+								Value: "Etc/UTC",
+							},
+						}
+						return true, initMock.Spec.PostgresResponses, nil
+					}
+
 				}
 			}
 		}
