@@ -4,13 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"go.keploy.io/server/v2/pkg/core"
-	"go.keploy.io/server/v2/pkg/core/app/docker"
-	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
 	"os"
 	"os/exec"
 	"os/user"
@@ -20,6 +13,14 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
+	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/app/docker"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 func NewApp(logger *zap.Logger, id uint64, cmd string) core.App {

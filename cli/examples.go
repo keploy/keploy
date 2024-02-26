@@ -94,7 +94,7 @@ Docker
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
 `
 
-func Example(ctx context.Context, logger *zap.Logger, conf *config.Config, svc Services) *cobra.Command {
+func Example(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdcmdConfigurator CmdConfigurator) *cobra.Command {
 	var customSetup bool
 	var cmd = &cobra.Command{
 		Use:   "example",

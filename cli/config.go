@@ -2,11 +2,12 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 
 	"go.keploy.io/server/v2/config"
 
-	"go.keploy.io/server/v2/pkg/service/tools"
+	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 
 	"github.com/spf13/cobra"
@@ -17,7 +18,7 @@ func init() {
 	Register("config", Config)
 }
 
-func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, servicefactory ServiceFactory, cmdConfiguration CmdConfigurator) *cobra.Command {
+func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, servicefactory ServiceFactory, cmdConfiguration CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "config",
 		Short:   "manage keploy configuration file",
@@ -28,28 +29,37 @@ func Config(ctx context.Context, logger *zap.Logger, conf *config.Config, servic
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			path, err := cmd.Flags().GetString("path")
+			isGenerate, err := cmd.Flags().GetBool("generate")
 			if err != nil {
-				logger.Error("failed to read the config path")
+				logger.Fatal("Failed to get generate flag", zap.Error(err))
 				return err
 			}
 
-			filePath := filepath.Join(path, "keploy.yml")
-
-			if utils.CheckFileExists(filePath) {
-				override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
+			if isGenerate {
+				filePath := filepath.Join(cfg.Path, "keploy.yml")
+				if utils.CheckFileExists(filePath) {
+					override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
+					if err != nil {
+						logger.Fatal("Failed to ask for confirmation", zap.Error(err))
+						return err
+					}
+					if !override {
+						return nil
+					}
+				}
+				svc, err := servicefactory.GetService(cmd.Name(), *cfg)
 				if err != nil {
-					logger.Fatal("Failed to ask for confirmation", zap.Error(err))
 					return err
 				}
-				if !override {
-					return nil
+				if tools, ok := svc.(toolsSvc.Service); !ok {
+					return fmt.Errorf("record is not of type MyInterface")
+				} else {
+					tools.CreateConfig(ctx, cfg.Path, "")
 				}
 			}
-
-			tools.GenerateConfig(filePath, tools.GenerateConfigOptions{})
 			return nil
 		},
 	}
+	cmdConfiguration.AddFlags(cmd, cfg)
 	return cmd
 }

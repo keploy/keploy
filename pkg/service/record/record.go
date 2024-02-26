@@ -32,7 +32,7 @@ func NewRecorder(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Tel
 	}
 }
 
-func (r *recorder) Record(ctx context.Context) error {
+func (r *recorder) Start(ctx context.Context) error {
 	var runAppError models.AppError
 	var appErrChan = make(chan models.AppError)
 	var incomingChan <-chan *models.TestCase
@@ -123,7 +123,7 @@ func (r *recorder) Record(ctx context.Context) error {
 	return recordErr
 }
 
-func (r *recorder) MockRecord(ctx context.Context) error {
+func (r *recorder) StartMock(ctx context.Context) error {
 	var outgoingChan <-chan *models.Mock
 	var outgoingErrChan <-chan error
 	var stopReason string
