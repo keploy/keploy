@@ -365,7 +365,7 @@ func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HttpR
 
 }
 
-func (r *replayer) printSummary(testRunResult bool) {
+func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 	if totalTests > 0 {
 		testSuiteNames := make([]string, 0, len(completeTestReport))
 		for testSuiteName := range completeTestReport {
@@ -393,13 +393,13 @@ func (r *replayer) printSummary(testRunResult bool) {
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
 		if r.config.Test.Coverage {
 			r.logger.Info("there is a opportunity to get the coverage here")
-			coverCmd := exec.Command("go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
+			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 			output, err := coverCmd.Output()
 			if err != nil {
 				r.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))
 			}
 			r.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
-			generateCovTxtCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+			generateCovTxtCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
 			output, err = generateCovTxtCmd.Output()
 			if err != nil {
 				r.logger.Error("failed to get the coverage of the go binary", zap.Error(err), zap.Any("cmd", coverCmd.String()))

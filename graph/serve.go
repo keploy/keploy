@@ -4,22 +4,14 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
-\	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/pkg/service/replay"
-	"go.keploy.io/server/v2/pkg/core/hooks"
-	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/telemetry"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -51,9 +43,9 @@ func (g *graph) Serve(ctx context.Context) {
 	// Starting the test command
 	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
 		Resolvers: &Resolver{
-			Tester:         replayer,
-			Logger:         g.logger,
-			ServeTest:      true,
+			Tester:    replayer,
+			Logger:    g.logger,
+			ServeTest: true,
 		},
 	}))
 
@@ -80,7 +72,7 @@ func (g *graph) Serve(ctx context.Context) {
 	defer g.stopGraphqlServer(httpSrv)
 
 	// Start the testing framework. This will run until all the testsets are complete.
-	go func(){
+	go func() {
 		defer utils.HandlePanic(g.logger)
 		replayer.RunApplication(ctx, pid, models.RunOptions{})
 	}()

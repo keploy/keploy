@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto"
 	"crypto/tls"
 	"crypto/x509"
@@ -55,12 +56,12 @@ func commandExists(cmd string) bool {
 	return err == nil
 }
 
-func updateCaStore() error {
+func updateCaStore(ctx context.Context) error {
 	commandRun := false
 	for _, cmd := range caStoreUpdateCmd {
 		if commandExists(cmd) {
 			commandRun = true
-			_, err := exec.Command(cmd).CombinedOutput()
+			_, err := exec.CommandContext(ctx, cmd).CombinedOutput()
 			if err != nil {
 				return err
 			}
@@ -114,8 +115,8 @@ func extractCertToTemp() (string, error) {
 }
 
 // isJavaCAExist checks if the CA is already installed in the specified Java keystore
-func isJavaCAExist(alias, storepass, cacertsPath string) bool {
-	cmd := exec.Command("keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
+func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bool {
+	cmd := exec.CommandContext(ctx, "keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 
 	err := cmd.Run()
 
@@ -123,11 +124,11 @@ func isJavaCAExist(alias, storepass, cacertsPath string) bool {
 }
 
 // installJavaCA installs the CA in the Java keystore
-func installJavaCA(logger *zap.Logger, caPath string) error {
+func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error {
 	// check if java is installed
 	if util.IsJavaInstalled() {
 		logger.Debug("checking java path from default java home")
-		javaHome, err := util.GetJavaHome()
+		javaHome, err := util.GetJavaHome(ctx)
 
 		if err != nil {
 			logger.Error("Java detected but failed to find JAVA_HOME", zap.Error(err))
@@ -142,12 +143,12 @@ func installJavaCA(logger *zap.Logger, caPath string) error {
 
 		logger.Debug("", zap.Any("java_home", javaHome), zap.Any("caCertsPath", cacertsPath), zap.Any("caPath", caPath))
 
-		if isJavaCAExist(alias, storePass, cacertsPath) {
+		if isJavaCAExist(ctx, alias, storePass, cacertsPath) {
 			logger.Info("Java detected and CA already exists", zap.String("path", cacertsPath))
 			return nil
 		}
 
-		cmd := exec.Command("keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
+		cmd := exec.CommandContext(ctx, "keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
 
 		cmdOutput, err := cmd.CombinedOutput()
 
@@ -165,7 +166,7 @@ func installJavaCA(logger *zap.Logger, caPath string) error {
 }
 
 // setupCA setups custom certificate authority to handle TLS connections
-func setupCA(logger *zap.Logger) error {
+func setupCA(ctx context.Context, logger *zap.Logger) error {
 	caPaths, err := getCaPaths()
 	if err != nil {
 		logger.Error("Failed to find the CA store path", zap.Error(err))
@@ -188,7 +189,7 @@ func setupCA(logger *zap.Logger) error {
 		}
 
 		// install CA in the java keystore if java is installed
-		err = installJavaCA(logger, caPath)
+		err = installJavaCA(ctx, logger, caPath)
 		if err != nil {
 			logger.Error("failed to install CA in the java keystore", zap.Error(err))
 			return err
@@ -196,7 +197,7 @@ func setupCA(logger *zap.Logger) error {
 	}
 
 	// Update the trusted CAs store
-	err = updateCaStore()
+	err = updateCaStore(ctx)
 	if err != nil {
 		logger.Error("Failed to tools the CA store", zap.Error(err))
 		return err
