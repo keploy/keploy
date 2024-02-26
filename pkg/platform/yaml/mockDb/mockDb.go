@@ -25,7 +25,7 @@ type MockYaml struct {
 	mutex       sync.RWMutex
 }
 
-func New(Logger *zap.Logger, tele telemetry.Telemetry, mockPath string, mockName string) replay.MockDB {
+func New(Logger *zap.Logger, tele telemetry.Telemetry, mockPath string, mockName string) *MockYaml {
 	return &MockYaml{
 		MockPath:    mockPath,
 		MockName:    mockName,

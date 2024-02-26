@@ -13,7 +13,6 @@ import (
 	"go.keploy.io/server/v2/pkg/platform"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
-	"go.keploy.io/server/v2/pkg/service/record"
 	"go.uber.org/zap"
 )
 
@@ -26,7 +25,7 @@ type TestYaml struct {
 	mutex       sync.RWMutex
 }
 
-func New(Logger *zap.Logger, tcsPath, TcsName string, tele telemetry.Telemetry) record.TestDB {
+func New(Logger *zap.Logger, tcsPath, TcsName string, tele telemetry.Telemetry) *TestYaml {
 	return &TestYaml{
 		TcsPath:     tcsPath,
 		TcsName:     TcsName,
@@ -89,7 +88,7 @@ func (ts *TestYaml) GetAllTestSetIds(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ts.TcsPath, ts.Logger)
 }
 
-func (ys *TestYaml) ReadTestcases(testSet string, lastSeenId platform.KindSpecifier, options platform.KindSpecifier) ([]platform.KindSpecifier, error) {
+func (ys *TestYaml) GetTestCases(ctx context.Context, testSet string) ([]platform.KindSpecifier, error) {
 	path := ys.TcsPath + "/" + testSet + "/tests"
 	tcs := []*models.TestCase{}
 

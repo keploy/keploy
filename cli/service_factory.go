@@ -8,6 +8,10 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
+	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockDb"
+	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportDb"
+	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testDb"
+
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/service/tools"
@@ -20,10 +24,10 @@ type serviceProvider struct {
 }
 
 type commonInternalService struct {
-	YamlTestDB      yaml.testDB
-	YamlMockDb      yaml.mockDB
-	YamlReportDb    yaml.reportDB
-	Instrumentation core.Core
+	YamlTestDB      *testdb.TestYaml
+	YamlMockDb      *mockdb.MockYaml
+	YamlReportDb    *reportdb.TestReport
+	Instrumentation *core.Core
 }
 
 func NewServiceProvider(logger *zap.Logger) *serviceProvider {
@@ -40,19 +44,19 @@ func (n *serviceProvider) GetTelemetryService(config config.Config) *telemetry.T
 	})
 }
 
-// TODO error handling
+// TODO error handling like path vadilations, remove tele from platform
 func (n *serviceProvider) GetCommonServices(config config.Config) *commonInternalService {
 	hooks := hooks.NewHooks()
 	proxy := proxy.New(n.logger, hooks, config)
-	intrumentation := core.New(logger, id, apps, hooks, proxy)
-	testDB := yaml.NewTestDB()
-	mockDB := yaml.NewMockDb()
-	reportDB := yaml.NewReportDb()
-	return &CommonService{
+	intrumentation := core.New(n.logger, hooks, proxy)
+	testDB := testdb.New(n.logger, config.Path+"/keploy", "", telemetry.Telemetry{})
+	mockDB := mockdb.New(n.logger, telemetry.Telemetry{}, config.Path+"/keploy", "")
+	reportDB := reportdb.New(n.logger, config.Path+"/keploy")
+	return &commonInternalService{
 		Instrumentation: intrumentation,
-		TestDB:          testDB,
-		MockDB:          mockDB,
-		ReportDB:        reportDB,
+		YamlTestDB:      testDB,
+		YamlMockDb:      mockDB,
+		YamlReportDb:    reportDB,
 	}
 }
 
@@ -72,7 +76,7 @@ func (n *serviceProvider) GetService(cmd string, config config.Config) (interfac
 			record.NewRecorder(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, telemetry, commonServices.Instrumentation, config)
 		}
 		if cmd == "test" {
-			replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.ReportDB, telemetry, commonServices.Instrumentation, config)
+			replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, telemetry, commonServices.Instrumentation, config)
 		}
 		return nil, nil
 	default:
