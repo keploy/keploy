@@ -100,7 +100,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSe
 		testReport.Name = fmt.Sprintf("report-%v", lastIndex)
 	}
 
-	_, err := yaml.CreateYamlFile(fe.Path, testReport.Name, fe.Logger)
+	_, err := yaml.CreateYamlFile(ctx, fe.Logger, fe.Path, testReport.Name)
 	if err != nil {
 		return err
 	}

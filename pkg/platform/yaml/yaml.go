@@ -35,7 +35,7 @@ func (nd *NetworkTrafficDoc) GetKind() string {
 func Write(ctx context.Context, logger *zap.Logger, path, fileName string, docRead platform.KindSpecifier) error {
 	//
 	doc, _ := docRead.(*NetworkTrafficDoc)
-	isFileEmpty, err := CreateYamlFile(path, fileName, logger)
+	isFileEmpty, err := CreateYamlFile(ctx, logger, path, fileName)
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func GetNextID() int64 {
 }
 
 // createYamlFile is used to create the yaml file along with the path directory (if does not exists)
-func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, error) {
+func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	// checks id the yaml exists
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
@@ -129,8 +129,7 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
 		}
 		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
-		//TODO: use CommandContext
-		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
+		cmd := exec.CommandContext(ctx, "sudo", "chmod", "-R", "777", keployPath)
 		err = cmd.Run()
 		if err != nil {
 			Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
