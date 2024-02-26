@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net/http"
 
 	"go.keploy.io/server/pkg/models"
@@ -31,7 +30,7 @@ func unmarshalResp(resp *http.Response, log *zap.Logger) (id string, err error) 
 	}(resp.Body)
 
 	var res map[string]string
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Debug("failed to read response from telemetry server", zap.String("url", "https://telemetry.keploy.io/analytics"), zap.Error(err))
 		return

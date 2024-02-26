@@ -42,7 +42,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = models.TestFilter{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, passThrough *[]models.Filters, configPath string) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, passThrough *[]models.Filters, configPath string, recordTimer *time.Duration) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -165,9 +165,14 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			recordTimer, err := cmd.Flags().GetDuration("recordTimer")
+			if err != nil {
+				r.logger.Error("Failed to read the timer value")
+			}
+
 			passThrough := []models.Filters{}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath, &recordTimer)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("Keploy config not found, continuing without configuration")
@@ -294,7 +299,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				}
 			}
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough)
+			r.recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough, recordTimer)
 			return nil
 		},
 	}
@@ -302,6 +307,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().StringP("path", "p", "", "Path to the local directory where generated testcases/mocks should be stored")
 
 	recordCmd.Flags().StringP("command", "c", "", "Command to start the user application")
+
+	recordCmd.Flags().Duration("recordTimer", 0, "Timer to stop keploy recorder after a specified time")
 
 	recordCmd.Flags().String("containerName", "", "Name of the application's docker container")
 
