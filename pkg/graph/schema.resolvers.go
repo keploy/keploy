@@ -7,12 +7,16 @@ package graph
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/pkg/graph/model"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform/fs"
 	"go.keploy.io/server/pkg/platform/telemetry"
+	"go.keploy.io/server/pkg/proxy"
 	"go.keploy.io/server/pkg/service/test"
 	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
@@ -60,17 +64,22 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	resultForTele := make([]int, 2)
 	ctx = context.WithValue(ctx, "resultForTele", &resultForTele)
 	initialisedValues := test.TestEnvironmentSetup{
-		Ctx:            ctx,
-		LoadedHooks:    loadedHooks,
-		TestReportFS:   testReportFS,
-		Storage:        ys,
-		IgnoreOrdering: false,
+		Ctx:                ctx,
+		LoadedHooks:        loadedHooks,
+		TestReportFS:       testReportFS,
+		Storage:            ys,
+		IgnoreOrdering:     false,
+		GenerateTestReport: true,
 	}
 	go func() {
 		defer utils.HandlePanic()
 		r.Logger.Debug("starting testrun...", zap.Any("testSet", testSet))
 		enableANSIColor := true
-		tester.RunTestSet(testSet, testCasePath, testReportPath, true, "", "", "", delay, 30*time.Second, pid, testRunChan, r.APITimeout, nil, nil, serveTest, &enableANSIColor, initialisedValues)
+
+		// send filtered testcases to run the test-set
+		testcaseFilter := utils.ArrayToMap(r.TestFilter[testSet])
+		// run the test set with a delay
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.APITimeout, testcaseFilter, nil, serveTest, &enableANSIColor, initialisedValues)
 	}()
 
 	testRunID := <-testRunChan
@@ -100,7 +109,71 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 		r.Resolver.Logger.Debug("No test sets found", zap.Any("testPath", testPath))
 	}
 
-	return testSets, nil
+	// Listen for the interrupt signal
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
+	r.Logger.Info("logging the pid in the graph handler", zap.Any("pid", r.AppPid))
+
+	// load the ebpf hooks into the kernel
+	select {
+	case <-stopper:
+		return nil, fmt.Errorf("test stopped during execution")
+	default:
+		if err := r.LoadedHooks.LoadHooks("", "", r.AppPid, context.Background(), nil); err != nil {
+			return nil, err
+		}
+
+	}
+
+	//sending this graphql server port to be filterd in the eBPF program
+	if err := r.LoadedHooks.SendKeployServerPort(r.KeployServerPort); err != nil {
+		return nil, err
+		// return err
+	}
+
+	select {
+	case <-stopper:
+		r.LoadedHooks.Stop(true)
+		return nil, fmt.Errorf("test stopped during execution")
+	default:
+		// start the proxy
+		r.ProxySet = proxy.BootProxy(r.Logger, proxy.Option{Port: r.ProxyPort, MongoPassword: r.MongoPassword}, "", "", r.AppPid, r.Lang, r.PassThroughPorts, r.LoadedHooks, ctx, 0)
+
+	}
+
+	// proxy update its state in the ProxyPorts map
+	// Sending Proxy Ip & Port to the ebpf program
+	if err := r.LoadedHooks.SendProxyInfo(r.ProxySet.IP4, r.ProxySet.Port, r.ProxySet.IP6); err != nil {
+		return nil, err
+	}
+
+	// Sending the Dns Port to the ebpf program
+	if err := r.LoadedHooks.SendDnsPort(r.ProxySet.DnsPort); err != nil {
+		return nil, err
+	}
+
+	r.Logger.Info("Adding default jacoco agent port to passthrough", zap.Uint("Port", 36320))
+	r.PassThroughPorts = append(r.PassThroughPorts, 36320)
+	// filter the required destination ports
+	if err := r.LoadedHooks.SendPassThroughPorts(r.PassThroughPorts); err != nil {
+		return nil, err
+	}
+
+	err = r.LoadedHooks.SendCmdType(false)
+	if err != nil {
+		return nil, err
+	}
+
+	resultTestsets := []string{}
+	// filter the test sets to be run based on cmd flag
+	for _, testset := range testSets {
+		// checking whether the provided testset match with a recorded testset.
+		if _, ok := r.TestFilter[testset]; !ok && len(r.TestFilter) != 0 {
+			continue
+		}
+		resultTestsets = append(resultTestsets, testset)
+	}
+	return resultTestsets, nil
 }
 
 // TestSetStatus is the resolver for the testSetStatus field.
@@ -134,6 +207,15 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string) (*m
 
 	r.Logger.Debug("", zap.Any("testRunID", testRunID), zap.Any("testSetStatus", readTestReport.Status))
 	return &model.TestSetStatus{Status: readTestReport.Status}, nil
+}
+
+func (r *Resolver) StopTest(ctx context.Context) (bool, error) {
+	r.Logger.Debug("stopping test...")
+	r.LoadedHooks.Stop(true)
+
+	// stop the proxy set
+	r.ProxySet.StopProxyServer()
+	return true, nil
 }
 
 // Mutation returns MutationResolver implementation.

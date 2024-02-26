@@ -24,6 +24,7 @@ import (
 // NewExecutableSchema creates an ExecutableSchema from the ResolverRoot interface.
 func NewExecutableSchema(cfg Config) graphql.ExecutableSchema {
 	return &executableSchema{
+		schema:     cfg.Schema,
 		resolvers:  cfg.Resolvers,
 		directives: cfg.Directives,
 		complexity: cfg.Complexity,
@@ -31,6 +32,7 @@ func NewExecutableSchema(cfg Config) graphql.ExecutableSchema {
 }
 
 type Config struct {
+	Schema     *ast.Schema
 	Resolvers  ResolverRoot
 	Directives DirectiveRoot
 	Complexity ComplexityRoot
@@ -50,6 +52,7 @@ type ComplexityRoot struct {
 	}
 
 	Query struct {
+		StopTest      func(childComplexity int) int
 		TestSetStatus func(childComplexity int, testRunID string) int
 		TestSets      func(childComplexity int) int
 	}
@@ -71,15 +74,20 @@ type MutationResolver interface {
 type QueryResolver interface {
 	TestSets(ctx context.Context) ([]string, error)
 	TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error)
+	StopTest(ctx context.Context) (bool, error)
 }
 
 type executableSchema struct {
+	schema     *ast.Schema
 	resolvers  ResolverRoot
 	directives DirectiveRoot
 	complexity ComplexityRoot
 }
 
 func (e *executableSchema) Schema() *ast.Schema {
+	if e.schema != nil {
+		return e.schema
+	}
 	return parsedSchema
 }
 
@@ -99,6 +107,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.Mutation.RunTestSet(childComplexity, args["testSet"].(string)), true
+
+	case "Query.stopTest":
+		if e.complexity.Query.StopTest == nil {
+			break
+		}
+
+		return e.complexity.Query.StopTest(childComplexity), true
 
 	case "Query.testSetStatus":
 		if e.complexity.Query.TestSetStatus == nil {
@@ -240,14 +255,14 @@ func (ec *executionContext) introspectSchema() (*introspection.Schema, error) {
 	if ec.DisableIntrospection {
 		return nil, errors.New("introspection disabled")
 	}
-	return introspection.WrapSchema(parsedSchema), nil
+	return introspection.WrapSchema(ec.Schema()), nil
 }
 
 func (ec *executionContext) introspectType(name string) (*introspection.Type, error) {
 	if ec.DisableIntrospection {
 		return nil, errors.New("introspection disabled")
 	}
-	return introspection.WrapTypeFromDef(parsedSchema, parsedSchema.Types[name]), nil
+	return introspection.WrapTypeFromDef(ec.Schema(), ec.Schema().Types[name]), nil
 }
 
 //go:embed "schema.graphqls"
@@ -381,7 +396,7 @@ func (ec *executionContext) _Mutation_runTestSet(ctx context.Context, field grap
 	}
 	res := resTmp.(*model.RunTestSetResponse)
 	fc.Result = res
-	return ec.marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx, field.Selections, res)
+	return ec.marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐRunTestSetResponse(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) fieldContext_Mutation_runTestSet(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
@@ -488,7 +503,7 @@ func (ec *executionContext) _Query_testSetStatus(ctx context.Context, field grap
 	}
 	res := resTmp.(*model.TestSetStatus)
 	fc.Result = res
-	return ec.marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx, field.Selections, res)
+	return ec.marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) fieldContext_Query_testSetStatus(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
@@ -515,6 +530,50 @@ func (ec *executionContext) fieldContext_Query_testSetStatus(ctx context.Context
 	if fc.Args, err = ec.field_Query_testSetStatus_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_stopTest(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_Query_stopTest(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Query().StopTest(rctx)
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_Query_stopTest(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
 	}
 	return fc, nil
 }
@@ -2714,6 +2773,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "stopTest":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_stopTest(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "__type":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Query___type(ctx, field)
@@ -3171,11 +3252,11 @@ func (ec *executionContext) marshalNBoolean2bool(ctx context.Context, sel ast.Se
 	return res
 }
 
-func (ec *executionContext) marshalNRunTestSetResponse2goᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v model.RunTestSetResponse) graphql.Marshaler {
+func (ec *executionContext) marshalNRunTestSetResponse2goᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v model.RunTestSetResponse) graphql.Marshaler {
 	return ec._RunTestSetResponse(ctx, sel, &v)
 }
 
-func (ec *executionContext) marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v *model.RunTestSetResponse) graphql.Marshaler {
+func (ec *executionContext) marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v *model.RunTestSetResponse) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			ec.Errorf(ctx, "the requested element is null which the schema does not allow")
@@ -3232,11 +3313,11 @@ func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel
 	return ret
 }
 
-func (ec *executionContext) marshalNTestSetStatus2goᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v model.TestSetStatus) graphql.Marshaler {
+func (ec *executionContext) marshalNTestSetStatus2goᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v model.TestSetStatus) graphql.Marshaler {
 	return ec._TestSetStatus(ctx, sel, &v)
 }
 
-func (ec *executionContext) marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v *model.TestSetStatus) graphql.Marshaler {
+func (ec *executionContext) marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v *model.TestSetStatus) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			ec.Errorf(ctx, "the requested element is null which the schema does not allow")

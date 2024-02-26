@@ -53,8 +53,10 @@ type TestOptions struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	IgnoreOrdering     bool
+	RemoveUnusedMocks  bool
 	PassthroughHosts   []models.Filters
 	EnableANSIColor    *bool
+	GenerateTestReport bool
 }
 
 var (
@@ -198,21 +200,21 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		}
 	}()
 	returnVal.IgnoreOrdering = cfg.IgnoreOrdering
-
+	returnVal.RemoveUnusedMocks = cfg.RemoveUnusedMocks
+	returnVal.GenerateTestReport = cfg.GenerateTestReport
 	return returnVal, nil
 }
 
-func (t *tester) Test(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB, EnableANSIColor *bool) bool {
+func (t *tester) Test(path string, testReportPath string, appCmd string, options TestOptions, tele *telemetry.Telemetry, testReportStorage platform.TestReportDB, tcsStorage platform.TestCaseDB, EnableANSIColor *bool) bool {
 
 	testRes := false
 	result := true
 	exitLoop := false
-
 	cfg := &TestConfig{
 		Path:               path,
 		Proxyport:          options.ProxyPort,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: options.GenerateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       options.AppContainer,
 		AppNetwork:         options.AppContainer,
@@ -228,6 +230,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 		Storage:            tcsStorage,
 		PassThroughHosts:   options.PassthroughHosts,
 		IgnoreOrdering:     options.IgnoreOrdering,
+		RemoveUnusedMocks:  options.RemoveUnusedMocks,
 	}
 	sessions, err := cfg.Storage.ReadTestSessionIndices()
 	if err != nil {
@@ -243,7 +246,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 	}
 	for _, sessionIndex := range sessions {
 		// checking whether the provided testset match with a recorded testset.
-		testcases := ArrayToMap(options.Tests[sessionIndex])
+		testcases := utils.ArrayToMap(options.Tests[sessionIndex])
 		if _, ok := options.Tests[sessionIndex]; !ok && len(options.Tests) != 0 {
 			continue
 		}
@@ -252,7 +255,7 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, generateTestReport, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.APITimeout, testcases, noiseConfig, false, EnableANSIColor, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.APITimeout, testcases, noiseConfig, false, EnableANSIColor, initialisedValues)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -347,12 +350,13 @@ func (t *tester) Test(path string, testReportPath string, generateTestReport boo
 	return false
 }
 
-func (t *tester) StartTest(path string, testReportPath string, generateTestReport bool, appCmd string, options TestOptions, enableTele bool) bool {
+func (t *tester) StartTest(path string, testReportPath string, appCmd string, options TestOptions, enableTele bool) bool {
+
 	teleFS := fs.NewTeleFS(t.logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, t.logger, "", nil)
 	reportStorage := yaml.NewTestReportFS(t.logger)
 	mockStorage := yaml.NewYamlStore(path+"/tests", path, "", "", t.logger, tele)
-	return t.Test(path, testReportPath, generateTestReport, appCmd, options, tele, reportStorage, mockStorage, options.EnableANSIColor)
+	return t.Test(path, testReportPath, appCmd, options, tele, reportStorage, mockStorage, options.EnableANSIColor)
 }
 
 func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSetReturn {
@@ -460,8 +464,12 @@ func (t *tester) InitialiseRunTestSet(cfg *RunTestSetConfig) InitialiseRunTestSe
 			return returnVal
 		}
 	} else {
-		index := strings.Split(cfg.TestSet, "-")[2]
-		returnVal.TestReport.Name = fmt.Sprintf("report-%v", index)
+		index := cfg.TestSet
+		fileName := strings.Split(cfg.TestSet, "-")
+		if len(fileName) > 2 {
+			index = fileName[2]
+		}
+		returnVal.TestReport.Name = "report-" + index
 	}
 
 	//if running keploy-tests along with unit tests
@@ -516,6 +524,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		testPass, testResult := t.testHTTP(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, &cfg.EnableANSIColor)
 
 		if !testPass {
+			t.logger.Info("", zap.Any("matched mocks", GetMatchedMocks(cfg.LoadedHooks.GetConsumedMocks())))
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString(testPass)))
 		} else {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightPassingString(cfg.TestSet)), zap.Any("passed", models.HighlightPassingString(testPass)))
@@ -630,12 +639,12 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestReport bool, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, EnableANSIColor *bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, EnableANSIColor *bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:            testSet,
 		Path:               path,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: initialisedValues.GenerateTestReport,
 		AppCmd:             appCmd,
 		AppContainer:       appContainer,
 		AppNetwork:         appNetwork,
@@ -778,6 +787,14 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 	if len(nonKeployTcs) > 0 {
 		t.logger.Warn("These testcases have not been recorded by Keploy, may not work properly with Keploy.", zap.Strings("non-keploy mocks:", nonKeployTcs))
 	}
+	if initialisedValues.RemoveUnusedMocks && status == models.TestRunStatusPassed {
+		err := cfg.LoadedHooks.RemoveUnusedMocks(testSet)
+		if err != nil {
+			t.logger.Error("failed to remove unmatched mocks", zap.Error(err))
+		} else if !cfg.LoadedHooks.GetAreAllMocksMatched() {
+			t.logger.Info("removed unused mocks from mock file", zap.Any("test-set", testSet))
+		}
+	}
 	resultsCfg := &FetchTestResultsConfig{
 		TestReportFS:       initialisedValues.TestReportFS,
 		TestReport:         initialisedTestSets.TestReport,
@@ -787,7 +804,7 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, generateTestRe
 		Failure:            &failure,
 		Ctx:                initialisedValues.Ctx,
 		TestReportPath:     testReportPath,
-		GenerateTestReport: generateTestReport,
+		GenerateTestReport: initialisedValues.GenerateTestReport,
 		Path:               path,
 		EnableANSIColor:    EnableANSIColor,
 	}
