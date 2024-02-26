@@ -1,8 +1,10 @@
-package mockstore
+package mockdb
 
 import (
+	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -533,4 +535,39 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 	}
 	mockSpec.MongoResponses = responses
 	return &mockSpec, nil
+}
+
+func filterMocks(ctx context.Context, m []*models.Mock, afterTime time.Time, beforeTime time.Time, logger *zap.Logger) []*models.Mock {
+	filteredMocks := make([]*models.Mock, 0)
+
+	if afterTime == (time.Time{}) {
+		logger.Debug("request timestamp is missing  ")
+		return m
+	}
+
+	if beforeTime == (time.Time{}) {
+		logger.Debug("response timestamp is missing  ")
+		return m
+	}
+	for _, mock := range m {
+		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
+			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
+			logger.Debug("request or response timestamp of mock is missing  ")
+			mock.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, mock)
+			continue
+		}
+
+		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
+		if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
+			mock.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, mock)
+			continue
+		}
+		mock.TestModeInfo.IsFiltered = false
+	}
+	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("mocks", filteredMocks))
+	// TODO change this to debug
+	logger.Debug("number of filtered mocks", zap.Any("number of filtered mocks", len(filteredMocks)))
+	return filteredMocks
 }
