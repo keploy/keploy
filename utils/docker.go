@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
@@ -51,9 +52,10 @@ func logError(logger *zap.Logger, message, path string, err error) error {
 	return fmt.Errorf("%s: %v", message, err)
 }
 
-func getCurrentDirInDocker(curDir string) (string, error) {
+// TODO: Use inbuilt functions rather than executing cmd whereever possible
+func getCurrentDirInDocker(ctx context.Context, curDir string) (string, error) {
 	getDir := fmt.Sprintf(`docker inspect keploy-v2 --format '{{ range .Mounts }}{{ if eq .Destination "%s" }}{{ .Source }}{{ end }}{{ end }}'`, curDir)
-	cmd := exec.Command("sh", "-c", getDir)
+	cmd := exec.CommandContext(ctx, "sh", "-c", getDir)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -64,7 +66,7 @@ func getCurrentDirInDocker(curDir string) (string, error) {
 // StartInDocker will check if the docker command is provided as an input
 // then start the Keploy as a docker container and run the command
 // should also return a boolean if the execution is moved to docker
-func StartInDocker(logger *zap.Logger, conf *config.Config) error {
+func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config) error {
 	//Check if app command starts with docker or  docker-compose.
 	// If it does, then we would run the docker version of keploy and
 	// pass the command and control to it.
@@ -73,7 +75,7 @@ func StartInDocker(logger *zap.Logger, conf *config.Config) error {
 		return nil
 	}
 	// pass the all the commands and args to the docker version of Keploy
-	err := RunInDocker(logger, strings.Join(os.Args[1:], " "))
+	err := RunInDocker(ctx, logger, strings.Join(os.Args[1:], " "))
 	if err != nil {
 		logger.Error("failed to run the test command in docker", zap.Error(err))
 		return err

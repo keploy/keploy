@@ -342,8 +342,8 @@ func IsJavaInstalled() bool {
 }
 
 // GetJavaHome returns the JAVA_HOME path
-func GetJavaHome() (string, error) {
-	cmd := exec.Command("java", "-XshowSettings:properties", "-version")
+func GetJavaHome(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "java", "-XshowSettings:properties", "-version")
 	var out bytes.Buffer
 	cmd.Stderr = &out // The output we need is printed to STDERR
 

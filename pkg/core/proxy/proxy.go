@@ -78,7 +78,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}
 
 	// setup the CA for tls connections
-	err = setupCA(p.logger)
+	err = setupCA(ctx, p.logger)
 	if err != nil {
 		p.logger.Error("failed to setup CA", zap.Error(err))
 		return err

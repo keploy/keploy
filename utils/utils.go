@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,7 +57,7 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 	})
 }
 
-func ModifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
+func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentry.Client) *zap.Logger {
 	cfg := zapsentry.Configuration{
 		Level:             zapcore.ErrorLevel, //when to send message to sentry
 		EnableBreadcrumbs: true,               // enable sending breadcrumbs to Sentry
@@ -69,30 +70,30 @@ func ModifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 
 	//in case of err it will return noop core. So we don't need to attach it to log.
 	if err != nil {
-		log.Debug("failed to init zap", zap.Error(err))
-		return log
+		logger.Debug("failed to init zap", zap.Error(err))
+		return logger
 	}
 
-	log = zapsentry.AttachCoreToLogger(core, log)
+	logger = zapsentry.AttachCoreToLogger(core, logger)
 	kernelVersion := ""
 	if runtime.GOOS == "linux" {
 		cmd := exec.Command("uname", "-r")
 		kernelBytes, err := cmd.Output()
 		if err != nil {
-			log.Debug("failed to get kernel version", zap.Error(err))
+			logger.Debug("failed to get kernel version", zap.Error(err))
 		} else {
 			kernelVersion = string(kernelBytes)
 		}
 	}
 	arch := runtime.GOARCH
-	installationID, err := fst.NewTeleFS(log).Get(false)
+	installationID, err := fst.NewTeleFS(logger).Get(false)
 	if err != nil {
-		log.Debug("failed to get installationID", zap.Error(err))
+		logger.Debug("failed to get installationID", zap.Error(err))
 	}
 	if installationID == "" {
-		installationID, err = fst.NewTeleFS(log).Get(true)
+		installationID, err = fst.NewTeleFS(logger).Get(true)
 		if err != nil {
-			log.Debug("failed to get installationID for new user.", zap.Error(err))
+			logger.Debug("failed to get installationID for new user.", zap.Error(err))
 		}
 	}
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
@@ -102,7 +103,7 @@ func ModifyToSentryLogger(log *zap.Logger, client *sentry.Client) *zap.Logger {
 		scope.SetTag("Installation ID", installationID)
 		// Add more context as needed
 	})
-	return log
+	return logger
 }
 
 type GitHubRelease struct {
@@ -327,37 +328,41 @@ type TestFlags struct {
 	WithCoverage       bool
 }
 
-func getAlias(keployAlias *string, logger *zap.Logger) {
+func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
-	if osName == "Windows" {
-		logger.Error("Windows is not supported. Use WSL2 instead.")
-		return
-	}
-	if osName == "darwin" {
-		//Get the current docker context.
-		cmd := exec.Command("docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
+	//TODO: configure the hardcoded port mapping
+	switch osName {
+	case "linux":
+		alias := "sudo docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+		return alias, nil
+	case "darwin":
+		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err != nil {
 			logger.Error("Failed to get the current docker context", zap.Error(err))
-			return
+			return "", errors.New("failed to get alias")
 		}
 		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 		if len(dockerContext) == 0 {
 			logger.Error("Could not get the current docker context")
-			return
+			return "", errors.New("failed to get alias")
 		}
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			*keployAlias = "docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+			alias := "docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+			return alias, nil
 		} else {
 			logger.Info("Starting keploy in docker with default context, as that is the current context.")
-			*keployAlias = "docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+			alias := "docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+			return alias, nil
 		}
-	} else if osName == "linux" {
-		*keployAlias = "sudo docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+	case "Windows":
+		logger.Error("Windows is not supported. Use WSL2 instead.")
+		return "", errors.New("failed to get alias")
 	}
+	return "", errors.New("failed to get alias")
 }
 
 func appendFlags(flagName string, flagValue string) string {
@@ -371,14 +376,13 @@ func appendFlags(flagName string, flagValue string) string {
 	return ""
 }
 
-func RunInDocker(logger *zap.Logger, command string) error {
-	var keployAlias string
+func RunInDocker(ctx context.Context, logger *zap.Logger, command string) error {
 	//Get the correct keploy alias.
-	err := getAlias(&keployAlias, logger)
+	keployAlias, err := getAlias(ctx, logger)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("sh", "-c", keployAlias+command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", keployAlias+" "+command)
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr

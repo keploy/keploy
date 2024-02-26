@@ -129,6 +129,7 @@ func CreateYamlFile(path string, fileName string, Logger *zap.Logger) (bool, err
 			keployPath = filepath.Join(strings.TrimSuffix(path, filepath.Base(path)))
 		}
 		Logger.Debug("the path to the generated keploy directory", zap.Any("path", keployPath))
+		//TODO: use CommandContext
 		cmd := exec.Command("sudo", "chmod", "-R", "777", keployPath)
 		err = cmd.Run()
 		if err != nil {

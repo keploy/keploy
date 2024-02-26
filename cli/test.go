@@ -56,6 +56,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 				PassthroughHosts:   passThroughHosts,
 			}, enableTele)
 
+			//TODO: Use CommandContext here.
 			c := exec.Command("sudo", "chmod", "-R", "777", conf.Path)
 			err = c.Run()
 			if err != nil {

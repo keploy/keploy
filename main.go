@@ -54,12 +54,12 @@ func printLogo() {
 func start(ctx context.Context) {
 	// Now that flags are parsed, set up the log
 	logger := log.New()
-	logger = utils.ModifyToSentryLogger(logger, sentry.CurrentHub().Client())
+	logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client())
 	defer log.DeleteLogs(logger)
 
 	// TODO don't intitate sentry incase dev or if dsn is not set
 	utils.SentryInit(logger, dsn)
-	defer utils.HandlePanic(logger)
+	defer utils.Recover(logger)
 
 	svcProvider := cli.NewServiceProvider(logger)
 	cmdConfigurator := cli.NewCmdConfigurator(logger)
