@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -35,9 +36,9 @@ func ExtractInstallationId(isNewConfigPath bool) (string, error) {
 	return installationId, nil
 }
 
-func GenerateTelemetryConfigFile(logger *zap.Logger, id string) error {
+func GenerateTelemetryConfigFile(ctx context.Context, logger *zap.Logger, id string) error {
 	path := utils.FetchHomeDirectory(true)
-	yaml.CreateYamlFile(path, "installation-id", logger)
+	yaml.CreateYamlFile(ctx, logger, path, "installation-id")
 
 	data := []byte{}
 
