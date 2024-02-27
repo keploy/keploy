@@ -68,7 +68,7 @@ func (n *serviceProvider) GetService(cmd string, config config.Config) (interfac
 	case "record", "test", "mock":
 		commonServices := n.GetCommonServices(config)
 		if cmd == "record" {
-			record.NewRecorder(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, telemetry, commonServices.Instrumentation, config)
+			record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, telemetry, commonServices.Instrumentation, config)
 		}
 		if cmd == "test" {
 			replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, telemetry, commonServices.Instrumentation, config)
