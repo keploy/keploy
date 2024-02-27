@@ -146,9 +146,7 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		return fmt.Errorf("failed to execute mock-record due to error while loading hooks and proxy: %w", err)
 	}
 
-	go func() {
-		outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
-	}()
+	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
 
 	loop := true
 	for loop {
