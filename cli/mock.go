@@ -12,12 +12,10 @@ import (
 )
 
 func init() {
-	// Register the command hook
 	Register("mock", Mock)
 }
 
 func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
-	// mock the keploy testcases/mocks for the user application
 	var cmd = &cobra.Command{
 		Use:     "mock",
 		Short:   "Record and replay ougoung network traffic for the user application",
@@ -34,31 +32,35 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 				return err
 			}
 			if !record && !replay {
-				logger.Error("Couldn't find the record or replay flag")
 				return errors.New("missing required --record or --replay flag")
 			}
 			if record && replay {
-				logger.Error("Both record and replay flags are set")
 				return errors.New("both --record and --replay flags are set")
 			}
 			if record {
 				svc, err := serviceFactory.GetService("record", *cfg)
 				if err != nil {
-					logger.Error("failed to get the record service")
+					logger.Error("failed to get service", zap.Error(err))
 					return err
 				}
 				if recordService, ok := svc.(recordSvc.Service); ok {
 					return recordService.StartMock(ctx)
+				} else {
+					logger.Error("service doesn't satisfy record service interface")
+					return err
 				}
 			}
 			if replay {
 				svc, err := serviceFactory.GetService("replay", *cfg)
 				if err != nil {
-					logger.Error("failed to get the replay service")
+					logger.Error("failed to get service", zap.Error(err))
 					return err
 				}
-				if recordService, ok := svc.(replaySvc.Service); ok {
-					return recordService.ProvideMocks(ctx)
+				if replayService, ok := svc.(replaySvc.Service); ok {
+					return replayService.ProvideMocks(ctx)
+				} else {
+					logger.Error("service doesn't satisfy replay service interface")
+					return err
 				}
 			}
 			return nil
