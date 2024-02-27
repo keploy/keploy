@@ -47,7 +47,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
-func (r *replayer) Replay(ctx context.Context) error {
+func (r *replayer) Start(ctx context.Context) error {
 	var stopReason string
 	testRunId, appId, err := r.BootReplay(ctx)
 	if err != nil {
