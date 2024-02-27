@@ -159,7 +159,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
 	})
-	
+
 	return filteredMocks, nil
 }
 

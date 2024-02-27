@@ -7,62 +7,37 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
 )
 
 type TestYaml struct {
-	TcsPath     string
-	TcsName     string
-	Logger      *zap.Logger
-	tele        *telemetry.Telemetry
-	nameCounter int
-	mutex       sync.RWMutex
+	TcsPath string
+	Logger  *zap.Logger
 }
 
-func New(Logger *zap.Logger, tcsPath, TcsName string, tele telemetry.Telemetry) *TestYaml {
+func New(Logger *zap.Logger, tcsPath string) *TestYaml {
 	return &TestYaml{
-		TcsPath:     tcsPath,
-		TcsName:     TcsName,
-		Logger:      Logger,
-		tele:        &tele,
-		nameCounter: 0,
-		mutex:       sync.RWMutex{},
+		TcsPath: tcsPath,
+		Logger:  Logger,
 	}
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetId string) error {
-	if ts.tele != nil {
-		ts.tele.RecordedTestAndMocks()
-		ts.mutex.Lock()
-		testsTotal, ok := ctx.Value("testsTotal").(*int)
-		if !ok {
-			ts.Logger.Debug("failed to get testsTotal from context")
-		} else {
-			*testsTotal++
-		}
-		ts.mutex.Unlock()
-	}
-	tcsPath := filepath.Join(ts.TcsPath, testSetId)
+
+	tcsPath := filepath.Join(ts.TcsPath, testSetId, "tests")
 
 	var tcsName string
-	if ts.TcsName == "" {
-		if tc.Name == "" {
-			// finds the recently generated testcase to derive the sequence number for the current testcase
-			lastIndx, err := yaml.FindLastIndex(tcsPath, ts.Logger)
-			if err != nil {
-				return err
-			}
-			tcsName = fmt.Sprintf("test-%v", lastIndx)
-		} else {
-			tcsName = tc.Name
+	if tc.Name == "" {
+		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.Logger)
+		if err != nil {
+			return err
 		}
+		tcsName = fmt.Sprintf("test-%v", lastIndx)
 	} else {
-		tcsName = ts.TcsName
+		tcsName = tc.Name
 	}
 
 	// encode the testcase and its mocks into yaml docs
@@ -87,29 +62,31 @@ func (ts *TestYaml) GetAllTestSetIds(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ts.TcsPath, ts.Logger)
 }
 
-func (ys *TestYaml) GetTestCases(ctx context.Context, testSet string) ([]*models.TestCase, error) {
-	path := ys.TcsPath + "/" + testSet + "/tests"
+func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*models.TestCase, error) {
+
+	path := filepath.Join(ts.TcsPath, testSetId, "tests")
+
 	tcs := []*models.TestCase{}
 
-	mockPath, err := yaml.ValidatePath(path)
+	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
 		return nil, err
 	}
-	_, err = os.Stat(mockPath)
+	_, err = os.Stat(TestPath)
 	if err != nil {
-		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", testSet))
+		ts.Logger.Debug("no tests are recorded for the session", zap.String("index", testSetId))
 		return nil, nil
 	}
 
-	dir, err := os.OpenFile(mockPath, os.O_RDONLY, os.ModePerm)
+	dir, err := os.OpenFile(TestPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		ys.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", mockPath))
+		ts.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", TestPath))
 		return nil, err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		ys.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", mockPath))
+		ts.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", TestPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -118,13 +95,13 @@ func (ys *TestYaml) GetTestCases(ctx context.Context, testSet string) ([]*models
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		yamlTestcase, err := yaml.Read(mockPath, name)
+		yamlTestcase, err := yaml.Read(TestPath, name)
 		if err != nil {
-			ys.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
+			ts.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
 			return nil, err
 		}
 		// Unmarshal the yaml doc into Testcase
-		tc, err := Decode(yamlTestcase[0], ys.Logger)
+		tc, err := Decode(yamlTestcase[0], ts.Logger)
 		if err != nil {
 			return nil, err
 		}
