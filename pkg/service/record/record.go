@@ -138,6 +138,7 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	var outgoingErrChan <-chan error
 	var stopReason string
 	var recordErr error
+	var insertMockErrChan = make(chan error, 1)
 
 	appId, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
@@ -153,17 +154,21 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	for loop {
 		select {
 		case mock := <-outgoingChan:
-			err := r.mockDB.InsertMock(context.Background(), mock, "")
-			if err != nil {
-				stopReason = "error while inserting outgoing frame into db, hence stopping keploy"
-				r.logger.Error(stopReason, zap.Error(err))
-				recordErr = errors.New("failed to execute record due to error in inserting outgoing frame into db")
-				loop = false
-			}
+			go func(ctx context.Context) {
+				err := r.mockDB.InsertMock(context.Background(), mock, "")
+				if err != nil {
+					insertMockErrChan <- err
+				}
+			}(ctx)
 		case err := <-outgoingErrChan:
 			stopReason = "error while fetching outgoing frame, hence stopping keploy"
 			r.logger.Error(stopReason, zap.Error(err))
 			recordErr = errors.New("failed to execute record due to error in fetching outgoing frame")
+			loop = false
+		case err := <-insertMockErrChan:
+			stopReason = "error while inserting mock into db, hence stopping keploy"
+			r.logger.Error(stopReason, zap.Error(err))
+			recordErr = errors.New("failed to execute record due to error in inserting mock into db")
 			loop = false
 		case <-ctx.Done():
 			return nil
