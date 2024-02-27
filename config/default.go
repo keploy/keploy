@@ -7,69 +7,38 @@ import (
 	"sigs.k8s.io/kustomize/kyaml/yaml/walk"
 )
 
-// DefaultConfig is stored as string because comments are important for the
-// user to understand the usage of the config, and it's not possible to have
-// comments in the struct.
-// A little painful to maintain, but best for the user.
 const DefaultConfig = `
-record:
- path: ""
- # mandatory
- command: ""
- proxyport: 0
- containerName: ""
- networkName: ""
- delay: 5
- buildDelay: 30s
- tests:
-   filters:
-     - path: ""
-       urlMethods: []
-       headers: {}
-       host: ""
- stubs:
-   filters:
-     - path: ""
-       host: ""
-       ports: 0
+path: ""
+command: ""
+port: 0
+proxyPort: 0
+debug: false
+telemetry: false
+inDocker: false
+containerName: ""
+networkName: ""
+buildDelay: 30s
 test:
- path: ""
- # mandatory
- command: ""
- proxyPort: 0
- containerName: ""
- networkName: ""
- # example: "test-set-1": ["test-1", "test-2", "test-3"]
- # if you want to run all the tests in the testset, use empty array
- # example: "test-set-1": []
- selectedTests:
- # to use globalNoise, please follow the guide at the end of this file.
- globalNoise:
-   global:
-     body: {}
-     header: {}
- delay: 10
- buildDelay: 30s
- apiTimeout: 5
- ignoreOrdering: true
-# used if you are using mongo SCRAM authentication
- mongoPassword: "default@123"
- stubs:
-   filters:
-     - path: ""
-       host: ""
-       ports: 0
- coverage: false
- coverageReportPath: ""
+  selectedTests: {}
+  globalNoise:
+    global: {}
+    test-sets: {}
+  delay: 10
+  apiTimeout: 5
+  coverage: false
+  coverageReportPath: ""
+  ignoreOrdering: true
+  mongoPassword: "default@123"
+  language: ""
+record:
+  filters: []
+configPath: ""
+bypassRules: []
 `
 
 const InternalConfig = `
- keployContainer: "keploy-v2"
- keployNetwork: "keploy-network"
- configPath: "."
- test:
-  # keploy unit test server port
-  port: 6789
+keployContainer: "keploy-v2"
+keployNetwork: "keploy-network"
 `
 
 var config = &Config{}

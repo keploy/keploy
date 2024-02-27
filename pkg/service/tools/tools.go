@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -37,15 +38,15 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 // Update initiates the tools process for the Keploy binary file.
 func (t *Tools) Update(ctx context.Context) error {
 	currentVersion := "v" + utils.Version
-	isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
-	if isDockerCmd {
-		return errors.New("please pull the latest Docker image of keploy")
+	isKeployInDocker := len(os.Getenv("KEPLOY_INDOCKER")) > 0
+	if isKeployInDocker {
+		return errors.New("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
 	}
 	if strings.HasSuffix(currentVersion, "-dev") {
-		return errors.New("you are using a development version of Keploy. Skipping tools check")
+		return errors.New("you are using a development version of Keploy. Skipping update check")
 	}
 
-	releaseInfo, err := utils.GetLatestGitHubRelease()
+	releaseInfo, err := utils.GetLatestGitHubRelease(ctx)
 	if err != nil {
 		if errors.Is(err, ErrGitHubAPIUnresponsive) {
 			t.logger.Error("GitHub API is unresponsive. Update process cannot continue.")
@@ -59,7 +60,7 @@ func (t *Tools) Update(ctx context.Context) error {
 	changelog := releaseInfo.Body
 
 	if currentVersion == latestVersion {
-		t.logger.Info("You are on the latest version of Keploy: " + latestVersion)
+		fmt.Println("✅You are already on the latest version of Keploy: " + latestVersion)
 		return nil
 	}
 
@@ -71,7 +72,7 @@ func (t *Tools) Update(ctx context.Context) error {
 	} else {
 		downloadUrl = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
 	}
-	err = t.downloadAndUpdate(downloadUrl)
+	err = t.downloadAndUpdate(ctx, downloadUrl)
 	if err != nil {
 		return err
 	}
@@ -98,9 +99,16 @@ func (t *Tools) Update(ctx context.Context) error {
 	return nil
 }
 
-func (t *Tools) downloadAndUpdate(downloadUrl string) error {
-	// Download the file
-	resp, err := http.Get(downloadUrl)
+func (t *Tools) downloadAndUpdate(ctx context.Context, downloadUrl string) error {
+	// Create a new request with context
+	req, err := http.NewRequestWithContext(ctx, "GET", downloadUrl, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Create a HTTP client and execute the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download file: %v", err)
 	}
@@ -127,6 +135,11 @@ func (t *Tools) downloadAndUpdate(downloadUrl string) error {
 
 	// Determine the path based on the alias "keploy"
 	aliasPath := "/usr/local/bin/keploy" // Default path
+
+	keployPath, err := exec.LookPath("keploy")
+	if err == nil && keployPath != "" {
+		aliasPath = keployPath
+	}
 
 	// Check if the aliasPath is a valid path
 	_, err = os.Stat(aliasPath)
