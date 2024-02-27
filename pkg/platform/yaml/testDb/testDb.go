@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
@@ -99,8 +98,7 @@ func (ys *TestYaml) GetTestCases(ctx context.Context, testSet string) ([]*models
 	_, err = os.Stat(mockPath)
 	if err != nil {
 		ys.Logger.Debug("no tests are recorded for the session", zap.String("index", testSet))
-		tcsRead := make([]platform.KindSpecifier, len(tcs))
-		return tcsRead, nil
+		return nil, nil
 	}
 
 	dir, err := os.OpenFile(mockPath, os.O_RDONLY, os.ModePerm)
