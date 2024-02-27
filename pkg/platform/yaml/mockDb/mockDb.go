@@ -30,39 +30,24 @@ func New(Logger *zap.Logger, tele telemetry.Telemetry, mockPath string, mockName
 		MockName:    mockName,
 		Logger:      Logger,
 		mutex:       sync.RWMutex{},
-		nameCounter: 0,
 		tele:        &tele,
 	}
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetId string) error {
-	mocksTotal, ok := ctx.Value("mocksTotal").(*map[string]int)
-	if !ok {
-		ys.Logger.Debug("failed to get mocksTotal from context")
-	}
-	(*mocksTotal)[string(mock.Kind)]++
-	if ctx.Value("cli") == "mockrecord" {
-		if ys.tele != nil {
-			ys.tele.RecordedMock(string(mock.Kind))
-		}
-	}
 	if ys.MockName != "" {
 		mock.Name = ys.MockName
 	}
-
 	mock.Name = fmt.Sprint("mock-", yaml.GetNextID())
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
-
 	ys.MockPath = filepath.Join(ys.MockPath, testSetId, "tests")
-
 	err = yaml.Write(ctx, ys.Logger, ys.MockPath, "mocks", mockYaml)
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 

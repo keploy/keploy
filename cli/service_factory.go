@@ -37,6 +37,7 @@ func NewServiceProvider(logger *zap.Logger) *serviceProvider {
 }
 
 func (n *serviceProvider) GetTelemetryService(config config.Config) *telemetry.Telemetry {
+	// TODO: Add installation ID
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:   config.Telemetry,
 		Version:   utils.Version,
@@ -62,6 +63,7 @@ func (n *serviceProvider) GetCommonServices(config config.Config) *commonInterna
 
 func (n *serviceProvider) GetService(cmd string, config config.Config) (interface{}, error) {
 	telemetry := n.GetTelemetryService(config)
+	telemetry.Ping()
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, telemetry), nil

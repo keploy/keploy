@@ -48,4 +48,6 @@ type ReportDB interface {
 }
 
 type Telemetry interface {
+	Testrun(ctx context.Context, success int, failure int)
+	MockTestRun(ctx context.Context, utilizedMocks int)
 }
