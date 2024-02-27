@@ -20,7 +20,7 @@ type Instrumentation interface {
 }
 
 type Service interface {
-	Replay(ctx context.Context) error
+	Start(ctx context.Context) error
 	BootReplay(ctx context.Context) (string, uint64, error)
 	GetAllTestSetIds(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64, serveTest bool) (models.TestSetStatus, error)
