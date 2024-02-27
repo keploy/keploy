@@ -442,19 +442,17 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 						logger.Debug("Error while decoding postgres request", zap.Error(err))
 					}
 
-					if bufStr == "AAAACATSFi8=" {
+					switch {
+					case bufStr == "AAAACATSFi8=":
 						ssl := models.Frontend{
 							Payload: "Tg==",
 						}
 						return true, []models.Frontend{ssl}, nil
-					}
-
-					// Below condition will change auth type to MD5 in case of SCRAM but in case of clear text it will execute
-					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && mock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && mock.Spec.PostgresResponses[requestIndex].AuthType == 10 {
+					case mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && mock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && mock.Spec.PostgresResponses[requestIndex].AuthType == 10:
 						logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
 						initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
 						return true, initMock.Spec.PostgresResponses, nil
-					} else if len(encodedMock) > 0 && encodedMock[0] == 'p' && mock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p' {
+					case len(encodedMock) > 0 && encodedMock[0] == 'p' && mock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
 						logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
 
 						initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
