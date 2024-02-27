@@ -415,7 +415,7 @@ func (r *replayer) RunApplication(ctx context.Context, appId uint64, opts models
 	return r.instrumentation.Run(ctx, appId, opts)
 }
 
-func (r *replayer) MockReplay(ctx context.Context) error {
+func (r *replayer) ProvideMocks(ctx context.Context) error {
 	var stopReason string
 
 	filteredMocks, err := r.mockDB.GetFilteredMocks(ctx, "", time.Time{}, time.Now())

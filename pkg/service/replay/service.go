@@ -26,6 +26,7 @@ type Service interface {
 	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appId uint64, opts models.RunOptions) models.AppError
+	ProvideMocks(ctx context.Context) error
 }
 
 type TestDB interface {
@@ -35,9 +36,6 @@ type TestDB interface {
 
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	// TODO timestamps are added as in unfiltered also we filtering and put the filtered in unfiltered, need to discuss on this
-	// TODO Need to decide who will do sorting
-	// TODO define ctx
 	GetUnFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 }
 
