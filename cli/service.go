@@ -11,8 +11,5 @@ type ServiceFactory interface {
 
 type CmdConfigurator interface {
 	AddFlags(cmd *cobra.Command, config *config.Config) error
-	GetHelpTemplate() string
-	GetExampleTemplate() string
-	GetVersionTemplate() string
 	ValidateFlags(cmd *cobra.Command, config *config.Config) error
 }

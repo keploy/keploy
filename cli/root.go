@@ -21,15 +21,15 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	var rootCmd = &cobra.Command{
 		Use:     "keploy",
 		Short:   "Keploy CLI",
-		Example: cmdConfigurator.GetExampleTemplate(),
+		Example: rootExamples,
 		Version: utils.Version,
 	}
 
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
-	rootCmd.SetHelpTemplate(cmdConfigurator.GetHelpTemplate())
+	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
 
-	rootCmd.SetVersionTemplate(cmdConfigurator.GetVersionTemplate())
+	rootCmd.SetVersionTemplate(versionTemplate)
 
 	err := cmdConfigurator.AddFlags(rootCmd, conf)
 	if err != nil {
@@ -39,7 +39,6 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 
 	for _, cmd := range Registered {
 		c := cmd(ctx, logger, conf, svcFactory, cmdConfigurator)
-		utils.BindFlagsToViper(logger, c, "")
 		rootCmd.AddCommand(c)
 	}
 	return rootCmd

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 
 	"go.keploy.io/server/v2/config"
@@ -23,15 +22,11 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		Use:     "config",
 		Short:   "manage keploy configuration file",
 		Example: "keploy config --generate --path /path/to/localdir",
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// override root command's persistent pre run
-			return nil
-		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			isGenerate, err := cmd.Flags().GetBool("generate")
 			if err != nil {
-				logger.Fatal("Failed to get generate flag", zap.Error(err))
+				logger.Error("Failed to get generate flag", zap.Error(err))
 				return err
 			}
 
@@ -40,7 +35,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				if utils.CheckFileExists(filePath) {
 					override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
 					if err != nil {
-						logger.Fatal("Failed to ask for confirmation", zap.Error(err))
+						logger.Error("Failed to ask for confirmation", zap.Error(err))
 						return err
 					}
 					if !override {
@@ -49,10 +44,12 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				}
 				svc, err := servicefactory.GetService(cmd.Name(), *cfg)
 				if err != nil {
+					logger.Error("failed to get service", zap.Error(err))
 					return err
 				}
 				if tools, ok := svc.(toolsSvc.Service); !ok {
-					return fmt.Errorf("record is not of type MyInterface")
+					logger.Error("service doesn't satisfy tools service interface")
+					return err
 				} else {
 					tools.CreateConfig(ctx, cfg.Path, "")
 				}

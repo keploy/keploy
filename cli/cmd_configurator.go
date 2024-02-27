@@ -16,6 +16,87 @@ import (
 	"go.uber.org/zap"
 )
 
+var customHelpTemplate = `
+{{if .Example}}Examples:
+{{.Example}}
+{{end}}
+{{if .HasAvailableSubCommands}}Guided Commands:{{range .Commands}}{{if .IsAvailableCommand}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}
+{{end}}
+{{if .HasAvailableFlags}}Flags:
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}
+{{end}}
+Use "{{.CommandPath}} [command] --help" for more information about a command.
+`
+
+var withoutexampleOneClickInstall = `
+Note: If installed keploy without One Click Install, use "keploy example --customSetup true"
+`
+var examples = `
+Golang Application
+	Record:
+	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
+	
+	Test:
+	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
+
+Node Application
+	Record:
+	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
+	
+	Test:
+	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+
+Java 
+	Record:
+	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
+
+	Test:
+	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+
+Docker
+	Alias:
+	alias keploy='sudo docker run --name keploy-ebpf -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup
+	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
+
+	Record:
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
+
+	Test:
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
+
+`
+
+var exampleOneClickInstall = `
+Golang Application
+	Record:
+	keploy record -c "/path/to/user/app/binary"
+	
+	Test:
+	keploy test -c "/path/to/user/app/binary" --delay 2
+
+Node Application
+	Record:
+	keploy record -c “npm start --prefix /path/to/node/app"
+	
+	Test:
+	keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+
+Java 
+	Record:
+	keploy record -c "java -jar /path/to/java-project/target/jar"
+
+	Test:
+	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+
+Docker
+	Record:
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
+
+	Test:
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
+`
+
 var rootCustomHelpTemplate = `{{.Short}}
 
 Usage:{{if .Runnable}}
@@ -131,28 +212,15 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			cmd.Flags().StringP("language", "l", cfg.Test.Language, "application programming language")
 			cmd.Flags().Bool("ignoreOrdering", cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
-			utils.BindFlagsToViper(c.logger, cmd, "")
 		}
-		return nil
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", cfg.Debug, "Run in debug mode")
 		viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
 	default:
 		return errors.New("unknown command name")
 	}
+	utils.BindFlagsToViper(c.logger, cmd, "")
 	return nil
-}
-
-func (c *cmdConfigurator) GetHelpTemplate() string {
-	return rootCustomHelpTemplate
-}
-
-func (c *cmdConfigurator) GetExampleTemplate() string {
-	return rootExamples
-}
-
-func (c *cmdConfigurator) GetVersionTemplate() string {
-	return versionTemplate
 }
 
 func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
@@ -190,7 +258,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			if cfg.InDocker {
 				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 			} else {
-				c.logger.Info(LogExample(c.GetExampleTemplate()))
+				c.logger.Info(LogExample(rootExamples))
 			}
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
