@@ -31,20 +31,14 @@ func New(logger *zap.Logger, reportPath string) *TestReport {
 	}
 }
 
-func (fe *TestReport) Lock() {
-	fe.m.Lock()
-}
-
-func (fe *TestReport) Unlock() {
-	fe.m.Unlock()
-}
-
 func (fe *TestReport) GetAllTestRunIds(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(fe.Path, fe.Logger)
 }
 
 func (fe *TestReport) InsertTestCaseResult(ctx context.Context, testRunId string, testSetId string, testCaseId string, result *models.TestResult) error {
 	fe.m.Lock()
+	defer fe.m.Unlock()
+
 	testSet := fe.tests[testRunId]
 	if testSet == nil {
 		testSet = make(map[string][]models.TestResult)
@@ -53,7 +47,6 @@ func (fe *TestReport) InsertTestCaseResult(ctx context.Context, testRunId string
 		testSet[testSetId] = append(testSet[testSetId], *result)
 	}
 	fe.tests[testRunId] = testSet
-	fe.m.Unlock()
 	return nil
 }
 
