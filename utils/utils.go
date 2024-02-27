@@ -233,7 +233,7 @@ func Recover(logger *zap.Logger) {
 }
 
 // getLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
-func GetLatestGitHubRelease() (GitHubRelease, error) {
+func GetLatestGitHubRelease(ctx context.Context) (GitHubRelease, error) {
 	// GitHub repository details
 	repoOwner := "keploy"
 	repoName := "keploy"
@@ -244,10 +244,10 @@ func GetLatestGitHubRelease() (GitHubRelease, error) {
 		Timeout: 4 * time.Second,
 	}
 
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return GitHubRelease{}, err
-	}
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+    if err != nil {
+        return GitHubRelease{}, err
+    }
 
 	resp, err := client.Do(req)
 	if err != nil {
