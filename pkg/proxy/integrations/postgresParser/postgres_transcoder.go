@@ -127,8 +127,36 @@ func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.Fr
 		return nil, fmt.Errorf("unknown message type: %c", b.BackendWrapper.MsgType)
 	}
 	err := msg.Decode(msgBody[5:])
+
 	if b.BackendWrapper.MsgType == 'P' {
 		*msg.(*pgproto3.Parse) = b.BackendWrapper.Parse
+	}
+	if b.BackendWrapper.MsgType == 'E' {
+		*msg.(*pgproto3.Execute) = b.BackendWrapper.Execute
+	}
+	if b.BackendWrapper.MsgType == 'f' {
+		*msg.(*pgproto3.CopyFail) = b.BackendWrapper.CopyFail
+	}
+	if b.BackendWrapper.MsgType == 'd' {
+		*msg.(*pgproto3.CopyData) = b.BackendWrapper.CopyData
+	}
+	if b.BackendWrapper.MsgType == 'c' {
+		*msg.(*pgproto3.CopyDone) = b.BackendWrapper.CopyDone
+	}
+	if b.BackendWrapper.MsgType == 'H' {
+		*msg.(*pgproto3.Flush) = b.BackendWrapper.Flush
+	}
+	if b.BackendWrapper.MsgType == 'B' {
+		*msg.(*pgproto3.Bind) = b.BackendWrapper.Bind
+	}
+	if b.BackendWrapper.MsgType == 'C' {
+		*msg.(*pgproto3.Close) = b.BackendWrapper.Close
+	}
+	if b.BackendWrapper.MsgType == 'D' {
+		*msg.(*pgproto3.Describe) = b.BackendWrapper.Describe
+	}
+	if b.BackendWrapper.MsgType == 'F' {
+		*msg.(*pgproto3.FunctionCall) = b.BackendWrapper.FunctionCall
 	}
 
 	return msg, err
