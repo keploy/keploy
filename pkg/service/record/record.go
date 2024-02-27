@@ -39,6 +39,8 @@ func (r *recorder) Start(ctx context.Context) error {
 	var outgoingChan <-chan *models.Mock
 	var incomingErrChan <-chan error
 	var outgoingErrChan <-chan error
+	var insertTestErrChan = make(chan error, 1)
+	var insertMockErrChan = make(chan error, 1)
 	var recordErr error
 	var appId uint64
 
@@ -90,21 +92,19 @@ func (r *recorder) Start(ctx context.Context) error {
 			recordErr = errors.New("failed to execute record due to error in running the user application")
 			loop = false
 		case testCase := <-incomingChan:
-			err := r.testDB.InsertTestCase(context.Background(), testCase, newTestSetId)
-			if err != nil {
-				stopReason = "error while inserting incoming frame into db, hence stopping keploy"
-				r.logger.Error(stopReason, zap.Error(err))
-				recordErr = errors.New("failed to execute record due to error in inserting incoming frame into db")
-				loop = false
-			}
+			go func(ctx context.Context) {
+				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetId)
+				if err != nil {
+					insertTestErrChan <- err
+				}
+			}(ctx)
 		case mock := <-outgoingChan:
-			err := r.mockDB.InsertMock(context.Background(), mock, newTestSetId)
-			if err != nil {
-				stopReason = "error while inserting outgoing frame into db, hence stopping keploy"
-				r.logger.Error(stopReason, zap.Error(err))
-				recordErr = errors.New("failed to execute record due to error in inserting outgoing frame into db")
-				loop = false
-			}
+			go func(ctx context.Context) {
+				err := r.mockDB.InsertMock(ctx, mock, newTestSetId)
+				if err != nil {
+					insertMockErrChan <- err
+				}
+			}(ctx)
 		case err := <-incomingErrChan:
 			stopReason = "error while fetching incoming frame, hence stopping keploy"
 			r.logger.Error(stopReason, zap.Error(err))
@@ -114,6 +114,16 @@ func (r *recorder) Start(ctx context.Context) error {
 			stopReason = "error while fetching outgoing frame, hence stopping keploy"
 			r.logger.Error(stopReason, zap.Error(err))
 			recordErr = errors.New("failed to execute record due to error in fetching outgoing frame")
+			loop = false
+		case err := <-insertTestErrChan:
+			stopReason = "error while inserting test case into db, hence stopping keploy"
+			r.logger.Error(stopReason, zap.Error(err))
+			recordErr = errors.New("failed to execute record due to error in inserting test case into db")
+			loop = false
+		case err := <-insertMockErrChan:
+			stopReason = "error while inserting mock into db, hence stopping keploy"
+			r.logger.Error(stopReason, zap.Error(err))
+			recordErr = errors.New("failed to execute record due to error in inserting mock into db")
 			loop = false
 		case <-ctx.Done():
 			return nil
