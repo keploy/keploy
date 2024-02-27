@@ -66,7 +66,6 @@ func (r *recorder) Start(ctx context.Context) error {
 	}
 
 	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appId, models.IncomingOptions{})
-
 	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
 
 	go func() {

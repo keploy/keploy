@@ -538,6 +538,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 }
 
 func filterMocks(ctx context.Context, m []*models.Mock, afterTime time.Time, beforeTime time.Time, logger *zap.Logger) []*models.Mock {
+	
 	filteredMocks := make([]*models.Mock, 0)
 
 	if afterTime == (time.Time{}) {
@@ -549,10 +550,10 @@ func filterMocks(ctx context.Context, m []*models.Mock, afterTime time.Time, bef
 		logger.Debug("response timestamp is missing  ")
 		return m
 	}
+
 	for _, mock := range m {
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
-			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
-			logger.Debug("request or response timestamp of mock is missing  ")
+			logger.Debug("request or response timestamp of mock is missing")
 			mock.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, mock)
 			continue
@@ -566,8 +567,6 @@ func filterMocks(ctx context.Context, m []*models.Mock, afterTime time.Time, bef
 		}
 		mock.TestModeInfo.IsFiltered = false
 	}
-	logger.Debug("filtered mocks after filtering accornding to the testcase timestamps", zap.Any("mocks", filteredMocks))
-	// TODO change this to debug
-	logger.Debug("number of filtered mocks", zap.Any("number of filtered mocks", len(filteredMocks)))
+
 	return filteredMocks
 }
