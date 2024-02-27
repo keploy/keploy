@@ -305,7 +305,7 @@ func Register(parserName string, parser DependencyHandler) {
 	ParsersMap[parserName] = parser
 }
 
-func SetupCA (logger *zap.Logger, pid uint32, lang string) error {
+func SetupCA(logger *zap.Logger, pid uint32, lang string) error {
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
