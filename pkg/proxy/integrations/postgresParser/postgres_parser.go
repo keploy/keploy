@@ -68,7 +68,6 @@ func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destC
 	default:
 		p.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
-
 }
 
 // This is the encoding function for the streaming postgres wiremessage
@@ -172,6 +171,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionId: ctx.Value("connectionId").(string),
 				}, ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
@@ -204,6 +204,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionId: ctx.Value("connectionId").(string),
 				}, ctx)
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
@@ -220,6 +221,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					for i := 0; i < len(bufferCopy)-5; {
 						logger.Debug("Inside the if condition")
 						pg.BackendWrapper.MsgType = buffer[i]
+						fmt.Println("MSG TYPE for REQUEST", string(pg.BackendWrapper.MsgType))
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
 							logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
@@ -246,6 +248,36 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						if pg.BackendWrapper.MsgType == 'E' {
 							pg.BackendWrapper.Execute = *msg.(*pgproto3.Execute)
 							pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
+						}
+						if pg.BackendWrapper.MsgType == 'C' {
+							pg.BackendWrapper.Close = *msg.(*pgproto3.Close)
+						}
+						if pg.BackendWrapper.MsgType == 'D' {
+							pg.BackendWrapper.Describe = *msg.(*pgproto3.Describe)
+						}
+						if pg.BackendWrapper.MsgType == 'F' {
+							pg.BackendWrapper.FunctionCall = *msg.(*pgproto3.FunctionCall)
+						}
+						if pg.BackendWrapper.MsgType == 'f' {
+							pg.BackendWrapper.CopyFail = *msg.(*pgproto3.CopyFail)
+						}
+						if pg.BackendWrapper.MsgType == 'd' {
+							pg.BackendWrapper.CopyData = *msg.(*pgproto3.CopyData)
+						}
+						if pg.BackendWrapper.MsgType == 'c' {
+							pg.BackendWrapper.CopyDone = *msg.(*pgproto3.CopyDone)
+						}
+						// if pg.BackendWrapper.MsgType == 'H' {
+						// 	pg.BackendWrapper.Flush = *msg.(*pgproto3.Flush)
+						// }
+						// if pg.BackendWrapper.MsgType == 'P' {
+						// 	pg.BackendWrapper.Parse = *msg.(*pgproto3.Parse)
+						// }
+						// if pg.BackendWrapper.MsgType == 'Q' {
+						// 	pg.BackendWrapper.Query = *msg.(*pgproto3.Query)
+						// }
+						if pg.BackendWrapper.MsgType == 'S' {
+							pg.BackendWrapper.Sync = *msg.(*pgproto3.Sync)
 						}
 
 						pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
@@ -332,6 +364,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 					for i := 0; i < len(bufferCopy)-5; {
 						pg.FrontendWrapper.MsgType = buffer[i]
+						fmt.Println("MSG TYPE for RESPONSE", string(pg.FrontendWrapper.MsgType))
 						pg.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						msg, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger)
 						if err != nil {
@@ -348,15 +381,15 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 							pg.FrontendWrapper.CommandComplete = *msg.(*pgproto3.CommandComplete)
 							pg.FrontendWrapper.CommandCompletes = append(pg.FrontendWrapper.CommandCompletes, pg.FrontendWrapper.CommandComplete)
 						}
-						if pg.FrontendWrapper.DataRow.RowValues != nil {
+						if pg.FrontendWrapper.MsgType == 'D' && pg.FrontendWrapper.DataRow.RowValues != nil {
 							// Create a new slice for each DataRow
 							valuesCopy := make([]string, len(pg.FrontendWrapper.DataRow.RowValues))
 							copy(valuesCopy, pg.FrontendWrapper.DataRow.RowValues)
 
 							row := pgproto3.DataRow{
 								RowValues: valuesCopy, // Use the copy of the values
+								Values:    pg.FrontendWrapper.DataRow.Values,
 							}
-							// fmt.Println("row is ", row)
 							dataRows = append(dataRows, row)
 						}
 					}
@@ -415,6 +448,8 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					}
 					if (len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R") || len(pg_mock.DataRows) > 0 {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
+						fmt.Println("BUFFER -- - -", buffer)
+						fmt.Println("AFTER_ENCODED -- - - -", after_encoded)
 						pg_mock.Payload = bufStr
 					}
 					pgResponses = append(pgResponses, *pg_mock)
@@ -463,6 +498,24 @@ func ReadBuffConn(conn net.Conn, bufferChannel chan []byte, errChannel chan erro
 // This is the decoding function for the postgres wiremessage
 func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context) error {
 	pgRequests := [][]byte{requestBuffer}
+	// preferedConnectionIdFromMocks := "x"
+	ConnectionId := ctx.Value("connectionId").(string)
+	fmt.Println("CONNECTION ID", ConnectionId)
+	// stores the mapping between the prepared statements in the request buffer and the corresponding prepared statements in the mock.
+	// prepareStatementMap := make(map[string]string)
+	allMocks, err := h.GetConfigMocks()
+
+	if err != nil {
+		logger.Error("failed to get the mocks from the config", zap.Error(err))
+		return err
+	}
+	fmt.Println("LENGTH OF ALL MOCKS", len(allMocks))
+	prep := getRecordPrepStatement(allMocks)
+	if prep != nil {
+		fmt.Println("PREPARED STATEMENT", prep)
+	}
+
+	decodePgResponse("MgAAAAREAAAARwAKAAAABAAAAAMAAAAEAAAAAQAAAAQAAB6yAAAABkRleHRlcgAAAAQAAAACAAAAA0NhdP////////////////////9DAAAADVNFTEVDVCAxAFoAAAAFVA==", logger)
 
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
@@ -497,7 +550,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			continue
 		}
 
-		matched, pgResponses, err := matchingReadablePG(pgRequests, logger, h)
+		matched, pgResponses, err := matchingReadablePG(pgRequests, logger, h, ConnectionId, prep)
 		if err != nil {
 			return fmt.Errorf("error while matching tcs mocks %v", err)
 		}
@@ -519,6 +572,8 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				logger.Error("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 				return err
 			}
+
+			fmt.Println("ENCODED@@@@@@@@@@@))))E)IW)", encoded)
 			_, err = clientConn.Write([]byte(encoded))
 			if err != nil {
 				logger.Error("failed to write request message to the client application", zap.Error(err))
@@ -529,4 +584,47 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		pgRequests = [][]byte{}
 	}
 
+}
+
+type QueryData struct {
+	PrepIdentifier string `json:"PrepIdentifier" yaml:"PrepIdentifier"`
+	Query          string `json:"Query" yaml:"Query"`
+}
+
+type PrepMap map[string][]QueryData
+
+type TestPrepMap map[string][]QueryData
+
+func getRecordPrepStatement(allMocks []*models.Mock) PrepMap {
+	preparedstatement := make(PrepMap)
+	for _, v := range allMocks {
+		if v.Kind != "Postgres" {
+			continue
+		}
+		for _, req := range v.Spec.PostgresRequests {
+			var querydata []QueryData
+			ps_map := make(map[string]string)
+			if len(req.PacketTypes) > 0 && req.PacketTypes[0] != "p" && req.Identfier != "StartupRequest" {
+				p := 0
+				for _, header := range req.PacketTypes {
+					if header == "P" {
+						if strings.Contains(req.Parses[p].Name, "S_") {
+							ps_map[req.Parses[p].Query] = req.Parses[p].Name
+							querydata = append(querydata, QueryData{PrepIdentifier: req.Parses[p].Name,
+								Query: req.Parses[p].Query,
+							})
+
+						}
+						p++
+					}
+				}
+			}
+			// also append the query data for the prepared statement
+			if len(querydata) > 0 {
+				preparedstatement[v.ConnectionId] = append(preparedstatement[v.ConnectionId], querydata...)
+			}
+		}
+
+	}
+	return preparedstatement
 }

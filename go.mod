@@ -2,7 +2,7 @@ module go.keploy.io/server
 
 go 1.20
 
-replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.2
+replace github.com/jackc/pgproto3/v2 => /Users/sarthak_1/Documents/Keploy/v2/pgproto3
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
