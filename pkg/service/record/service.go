@@ -14,7 +14,8 @@ type Instrumentation interface {
 	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, <-chan error)
 	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, <-chan error)
 	// Run is blocking call and will execute until error
-	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+	//Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+	Run(ctx context.Context, id uint64, opts models.RunOptions) error
 }
 
 type Service interface {

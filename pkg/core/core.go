@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -12,11 +13,12 @@ import (
 )
 
 type Core struct {
-	logger *zap.Logger
-	id     utils.AutoInc
-	apps   sync.Map
-	hook   Hooks
-	proxy  Proxy
+	logger       *zap.Logger
+	id           utils.AutoInc
+	apps         sync.Map
+	hook         Hooks
+	proxy        Proxy
+	proxyStarted bool
 }
 
 func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
@@ -30,21 +32,17 @@ func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	id := uint64(c.id.Next())
 	a := app.NewApp(c.logger, id, cmd)
-	err := a.Setup(ctx, AppOptions{
+	err := a.Setup(ctx, app.AppOptions{
 		DockerNetwork: opts.DockerNetwork,
 	})
 	if err != nil {
 		c.logger.Error("Failed to create app", zap.Error(err))
 		return 0, err
 	}
-
-	if a.KeployIPv4Addr() == "" {
-		// TODO implement me
-	}
 	return id, nil
 }
 
-func (c *Core) getApp(id uint64) (App, error) {
+func (c *Core) getApp(id uint64) (*app.App, error) {
 	a, ok := c.apps.Load(id)
 	if !ok {
 		return nil, fmt.Errorf("app with id:%v not found", id)
@@ -60,19 +58,54 @@ func (c *Core) getApp(id uint64) (App, error) {
 }
 
 func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
+	hookErr := errors.New("failed to hook into the app")
+
 	a, err := c.getApp(id)
 	if err != nil {
-		return err
+		c.logger.Error("Failed to get app", zap.Error(err))
+		return hookErr
 	}
 
-	opts.KeployIPv4 = a.KeployIPv4Addr()
+	isDocker := false
+	appKind := a.Kind(ctx)
+	//check if the app is docker/docker-compose or native
+	if appKind == utils.Docker || appKind == utils.DockerCompose {
+		isDocker = true
+	}
+
 	// TODO: ensure right values are passed to the hook
-	return c.hook.Load(ctx, id, HookOptions{
+	//load hooks
+	err = c.hook.Load(ctx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
-		IsDocker:   false,
-		KeployIPV4: "",
+		IsDocker:   isDocker,
+		KeployIPV4: a.KeployIPv4Addr(),
 	})
+	if err != nil {
+		c.logger.Error("Failed to load hooks", zap.Error(err))
+		return hookErr
+	}
+
+	if c.proxyStarted {
+		c.logger.Debug("Proxy already started")
+		return nil
+	}
+
+	// TODO: Hooks can be loaded multiple times but proxy should be started only once
+	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
+	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
+	//start proxy
+	err = c.proxy.StartProxy(ctx, ProxyOptions{
+		DnsIPv4Addr: a.KeployIPv4Addr(),
+		//DnsIPv6Addr: ""
+	})
+	if err != nil {
+		c.logger.Error("Failed to start proxy", zap.Error(err))
+		return hookErr
+	}
+
+	c.proxyStarted = true
+	return nil
 }
 
 func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) error {
@@ -84,17 +117,18 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) error
 		return err
 	}
 	// TODO: send the docker inode to the hook
-	switch a.Kind(ctx) {
-	case utils.Docker, utils.DockerCompose:
-		// process ebpf hooks
-	case utils.Native:
-		// process native hooks
+
+	//switch a.Kind(ctx) {
+	//case utils.Docker, utils.DockerCompose:
+	//	// process ebpf hooks
+	//case utils.Native:
+	//	// process native hooks
+	//}
+	err = c.hook.SendInode(ctx, id, 0)
+	if err != nil {
+		return err
 	}
 
-	return a.Run(ctx)
+	return a.Run(ctx, app.AppOptions{DockerDelay: opts.DockerDelay})
 
 }
-
-
-
-

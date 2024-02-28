@@ -1,6 +1,7 @@
 package models
 
 import "fmt"
+
 type AppError struct {
 	AppErrorType AppErrorType
 	Err          error
@@ -16,10 +17,10 @@ func (e AppError) Error() string {
 }
 
 const (
-	ErrInterrupted    AppErrorType = "exited with interrupt"
-	ErrCommandError   AppErrorType = "exited due to command error"
-	ErrUnExpected     AppErrorType = "an unexpected error occurred"
-	ErrDockerError    AppErrorType = "an error occurred while using docker client"
-	ErrFailedUnitTest AppErrorType = "test failure occurred when running keploy tests along with unit tests"
-	ErrKilledByKeploy AppErrorType = "killed by keploy"
+	//ErrInterrupted    AppErrorType = "exited with interrupt"
+	ErrCommandError AppErrorType = "exited due to command error"
+	ErrUnExpected   AppErrorType = "an unexpected error occurred"
+	//ErrDockerError    AppErrorType = "an error occurred while using docker client"
+	//ErrFailedUnitTest AppErrorType = "test failure occurred when running keploy tests along with unit tests"
+	//ErrKilledByKeploy AppErrorType = "killed by keploy"
 )

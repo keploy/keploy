@@ -1,0 +1,135 @@
+package hooks
+
+import (
+	"context"
+	"fmt"
+	"github.com/cilium/ebpf"
+	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
+	"go.uber.org/zap"
+)
+
+// Used by proxy
+func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*core.NetworkAddress, error) {
+	d, err := h.GetDestinationInfo(srcPort)
+	if err != nil {
+		return nil, err
+	}
+	// TODO : need to implement eBPF code to differentiate between different apps
+	s, ok := h.sess.Get(0)
+	if !ok {
+		return nil, fmt.Errorf("session not found")
+	}
+
+	return &core.NetworkAddress{
+		AppID:    s.ID,
+		Version:  d.IpVersion,
+		IPv4Addr: d.DestIp4,
+		IPv6Addr: d.DestIp6,
+		Port:     d.DestPort,
+	}, nil
+}
+
+// GetDestinationInfo retrieves destination information associated with a source port.
+func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
+	h.m.Lock()
+	defer h.m.Unlock()
+	destInfo := structs.DestInfo{}
+	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
+		return nil, err
+	}
+	return &destInfo, nil
+}
+
+func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
+	return h.CleanProxyEntry(srcPort)
+}
+
+func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
+	h.m.Lock()
+	defer h.m.Unlock()
+	err := h.redirectProxyMap.Delete(srcPort)
+	if err != nil {
+		h.logger.Error("no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Any("(Key)/SourcePort", srcPort))
+	return nil
+}
+
+func (h *Hooks) SendKeployPid(kPid uint32) error {
+	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", kPid))
+	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send the keploy pid to the ebpf program", zap.Any("Keploy Pid", kPid), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	return nil
+}
+
+// SendAppPid sends the application's process ID (PID) to the kernel.
+// This function is used when running Keploy tests along with unit tests of the application.
+func (h *Hooks) SendAppPid(pid uint32) error {
+	h.logger.Debug("Sending app pid to kernel", zap.Any("app Pid", pid))
+	err := h.appPidMap.Update(uint32(0), &pid, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send the app pid to the ebpf program", zap.Any("app Pid", pid), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	return nil
+}
+
+func (h *Hooks) SetKeployModeInKernel(mode uint32) {
+	key := 0
+	err := h.keployModeMap.Update(uint32(key), &mode, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+	}
+}
+
+// This function sends the IP and Port of the running proxy in the eBPF program.
+func (h *Hooks) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
+	key := 0
+	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP4: ip4, Ip6: ip6, Port: port}, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	return nil
+}
+
+// SendInode sends the inode of the container to ebpf hooks to filter the network traffic
+func (h *Hooks) SendInode(ctx context.Context, id uint64, inode uint64) error {
+	return h.SendNameSpaceId(0, inode)
+}
+
+// This function is helpful when user application in running inside a docker container.
+func (h *Hooks) SendNameSpaceId(key uint32, inode uint64) error {
+	err := h.inodeMap.Update(key, &inode, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()), zap.Any("key", key), zap.Any("Inode", inode))
+		return err
+	}
+	return nil
+}
+
+func (h *Hooks) SendCmdType(isDocker bool) error {
+	// to notify the kernel hooks that the user application command is running in native linux or docker/docker-compose.
+	key := 0
+	err := h.DockerCmdMap.Update(uint32(key), &isDocker, ebpf.UpdateAny)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *Hooks) SendDnsPort(port uint32) error {
+	h.logger.Debug("sending dns server port", zap.Any("port", port))
+	key := 0
+	err := h.DnsPort.Update(uint32(key), &port, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send dns server port to the epbf program", zap.Any("dns server port", port), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
+	}
+	return nil
+}

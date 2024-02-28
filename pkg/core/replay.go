@@ -5,16 +5,24 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type Replay struct {
-	Core
+func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) <-chan error {
+	//make a new channel for the errors
+	errCh := make(chan error, 10) // Buffered channel to prevent blocking
+
+	err := c.proxy.Mock(ctx, id, opts)
+	if err != nil {
+		errCh <- err
+		return errCh
+	}
+
+	return errCh
 }
 
-func (r *Replay) MockOutgoing(ctx context.Context, id uint64, mocks []models.Frame, opts models.OutgoingOptions) <-chan error {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (r *Replay) SetMocks(ctx context.Context, id uint64, mocks []models.Frame) error {
-	//TODO implement me
-	panic("implement me")
+func (c *Core) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	err := c.proxy.SetMocks(ctx, id, filtered, unFiltered)
+	if err != nil {
+		c.logger.Error("Failed to set mocks")
+		return err
+	}
+	return nil
 }

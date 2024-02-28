@@ -1,19 +1,15 @@
 package models
 
 import (
-	"go.keploy.io/server/v2/config"
 	"time"
+
+	"go.keploy.io/server/v2/config"
 )
 
 type HookOptions struct {
-	// if pid==0, we use keploy's pid. Since keploy is the parent process
-	// for all processes started by it.
-	Pid        uint32
-	KeployIPv4 string
 }
 
-//TODO: Role of SQLDelay should be mentioned in the comments.
-
+// TODO: Role of SQLDelay should be mentioned in the comments.
 type OutgoingOptions struct {
 	Rules         []config.BypassRule
 	MongoPassword string

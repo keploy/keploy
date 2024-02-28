@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/miekg/dns"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"net"
@@ -93,15 +92,15 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				if question.Qtype == dns.TypeA {
 					answers = []dns.RR{&dns.A{
 						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-						A:   net.ParseIP(util.ToIP4AddressStr(p.IP4)),
+						A:   net.ParseIP(p.IP4),
 					}}
-					p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", util.ToIP4AddressStr(p.IP4)))
+					p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", p.IP4))
 				} else if question.Qtype == dns.TypeAAAA {
 					answers = []dns.RR{&dns.AAAA{
 						Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-						AAAA: net.ParseIP(util.ToIPv6AddressStr(p.IP6)),
+						AAAA: net.ParseIP(p.IP6),
 					}}
-					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", util.ToIPv6AddressStr(p.IP6)))
+					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
 
 				}
 
