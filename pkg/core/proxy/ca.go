@@ -165,8 +165,11 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 	return nil
 }
 
+// TODO: This function should be used even before starting the proxy server. It should be called just after the keploy is started.
+// because the custom ca in case of NODE is set via env variable NODE_EXTRA_CA_CERTS and env variables can be set only on startup.
+// As in case of unit test integration, we are starting the proxy via api.
 // setupCA setups custom certificate authority to handle TLS connections
-func setupCA(ctx context.Context, logger *zap.Logger) error {
+func SetupCA(ctx context.Context, logger *zap.Logger) error {
 	caPaths, err := getCaPaths()
 	if err != nil {
 		logger.Error("Failed to find the CA store path", zap.Error(err))

@@ -5,7 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -14,18 +21,13 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"io"
-	"net"
-	"strings"
-	"sync"
-	"time"
 )
 
 type Proxy struct {
 	logger *zap.Logger
 
-	IP4     uint32
-	IP6     [4]uint32
+	IP4     string
+	IP6     string
 	Port    uint32
 	DnsPort uint32
 
@@ -37,6 +39,7 @@ type Proxy struct {
 	sessions *core.Sessions
 
 	connMutex *sync.Mutex
+	ipMutex   *sync.Mutex
 
 	clientConnections []net.Conn
 
@@ -46,16 +49,17 @@ type Proxy struct {
 	TcpDnsServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opt config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
 	return &Proxy{
 		logger:       logger,
-		Port:         opt.Port,   // default
-		DnsPort:      26789,      // default
-		IP4:          2130706433, // 127.0.0.1
-		IP6:          [4]uint32{0000, 0000, 0000, 0001},
+		Port:         opts.Port,    // default: 16789
+		DnsPort:      opts.DnsPort, // default: 26789
+		IP4:          "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
+		IP6:          "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,
-		sessions:     sess,
+		sessions:     core.NewSessions(),
 		MockManagers: sync.Map{},
 	}
 }
@@ -70,6 +74,7 @@ func (p *Proxy) InitIntegrations(ctx context.Context) error {
 }
 
 func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
+
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
 	if err != nil {
@@ -78,7 +83,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}
 
 	// setup the CA for tls connections
-	err = setupCA(ctx, p.logger)
+	err = SetupCA(ctx, p.logger)
 	if err != nil {
 		p.logger.Error("failed to setup CA", zap.Error(err))
 		return err
@@ -89,6 +94,15 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		utils.Recover(p.logger)
 		p.start(ctx)
 	}()
+
+	//change the ip4 and ip6 if provided in the opts in case of docker environment
+	if len(opts.DnsIPv4Addr) != 0 {
+		p.IP4 = opts.DnsIPv4Addr
+	}
+
+	if len(opts.DnsIPv6Addr) != 0 {
+		p.IP6 = opts.DnsIPv6Addr
+	}
 
 	// start the TCP DNS server
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
@@ -400,6 +414,13 @@ func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
+
+	////set the new proxy ip:port for a new session
+	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
+	//if err != nil {
+	//	return errors.New("failed to record the outgoing message")
+	//}
+
 	return nil
 }
 
@@ -411,6 +432,12 @@ func (p *Proxy) Mock(ctx context.Context, id uint64, opts models.OutgoingOptions
 	})
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
 
+	////set the new proxy ip:port for a new session
+	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
+	//if err != nil {
+	//	return errors.New("failed to mock the outgoing message")
+	//}
+
 	return nil
 }
 
@@ -419,12 +446,27 @@ func (p *Proxy) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock
 	//if !ok {
 	//	return fmt.Errorf("session not found")
 	//}
-
 	m, ok := p.MockManagers.Load(id)
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
 	}
 
+	return nil
+}
+
+func (p *Proxy) setProxyIP(ip4, ip6 string) error {
+	p.ipMutex.Lock()
+	defer p.ipMutex.Unlock()
+
+	if len(ip4) == 0 {
+		return errors.New("ip4 is empty")
+	}
+
+	p.IP4 = ip4
+	//set the ip6 if provided
+	if len(ip6) != 0 {
+		p.IP6 = ip6
+	}
 	return nil
 }

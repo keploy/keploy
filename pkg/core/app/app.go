@@ -4,26 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/models"
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
-	"regexp"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/app/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func NewApp(logger *zap.Logger, id uint64, cmd string) core.App {
+func NewApp(logger *zap.Logger, id uint64, cmd string) *App {
 	app := &App{
 		logger: logger,
 		id:     id,
@@ -49,7 +46,15 @@ type App struct {
 	inode            uint64
 }
 
-func (a *App) Setup(ctx context.Context, opts core.AppOptions) error {
+type AppOptions struct {
+	// canExit disables any error returned if the app exits by itself.
+	//CanExit       bool
+	Type          utils.CmdType
+	DockerDelay   time.Duration
+	DockerNetwork string
+}
+
+func (a *App) Setup(ctx context.Context, opts AppOptions) error {
 	d, err := docker.New(a.logger)
 	if err != nil {
 		return err
@@ -328,6 +333,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	})
 
 	go func(errCh chan error) {
+		defer utils.Recover(a.logger)
 		for {
 			select {
 			case <-timer.C:
@@ -363,8 +369,9 @@ func (a *App) runDocker(ctx context.Context) error {
 		return nil
 	}
 	go func(ctx context.Context) {
+		defer utils.Recover(a.logger)
 		defer cancel()
-		err := a.Run(ctx)
+		err := a.run(ctx)
 		if err != nil {
 			a.logger.Error("Application stopped with the error", zap.Error(err))
 			errCh <- err
@@ -379,19 +386,10 @@ func (a *App) runDocker(ctx context.Context) error {
 		return nil
 	}
 }
-func findComposeFile() string {
-	filenames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
-	for _, filename := range filenames {
-		if _, err := os.Stat(filename); !os.IsNotExist(err) {
-			return filename
-		}
-	}
+func (a *App) Run(ctx context.Context, opts AppOptions) error {
+	a.containerDelay = opts.DockerDelay
 
-	return ""
-}
-
-func (a *App) Run(ctx context.Context) error {
 	if a.kind == utils.DockerCompose || a.kind == utils.Docker {
 		return a.runDocker(ctx)
 	}
@@ -438,74 +436,15 @@ func (a *App) run(ctx context.Context) error {
 	if err != nil {
 		a.logger.Error("failed to start the app", zap.Error(err))
 		// TODO return named error
-		return err
+		return models.AppError{AppErrorType: models.ErrCommandError, Err: err}
 	}
 
-	return cmd.Wait()
-}
-
-func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
-	// Ensure newComposeFile starts with ./
-	if !strings.HasPrefix(newComposeFile, "./") {
-		newComposeFile = "./" + newComposeFile
-	}
-
-	// Define a regular expression pattern to match "-f <file>"
-	pattern := `(-f\s+("[^"]+"|'[^']+'|\S+))`
-	re := regexp.MustCompile(pattern)
-
-	// Check if the "-f <file>" pattern exists in the appCmd
-	if re.MatchString(appCmd) {
-		// Replace it with the new Compose file
-		return re.ReplaceAllString(appCmd, fmt.Sprintf("-f %s", newComposeFile))
-	}
-
-	// If the pattern doesn't exist, inject the new Compose file right after "docker-compose" or "docker compose"
-	upIdx := strings.Index(appCmd, " up")
-	if upIdx != -1 {
-		return fmt.Sprintf("%s -f %s%s", appCmd[:upIdx], newComposeFile, appCmd[upIdx:])
-	}
-
-	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
-}
-
-func parseDockerCmd(cmd string) (string, string, error) {
-	// Regular expression patterns
-	containerNamePattern := `--name\s+([^\s]+)`
-	networkNamePattern := `(--network|--net)\s+([^\s]+)`
-
-	// Extract container name
-	containerNameRegex := regexp.MustCompile(containerNamePattern)
-	containerNameMatches := containerNameRegex.FindStringSubmatch(cmd)
-	if len(containerNameMatches) < 2 {
-		return "", "", fmt.Errorf("failed to parse container name")
-	}
-	containerName := containerNameMatches[1]
-
-	// Extract network name
-	networkNameRegex := regexp.MustCompile(networkNamePattern)
-	networkNameMatches := networkNameRegex.FindStringSubmatch(cmd)
-	if len(networkNameMatches) < 3 {
-		return containerName, "", fmt.Errorf("failed to parse network name")
-	}
-	networkName := networkNameMatches[2]
-
-	return containerName, networkName, nil
-}
-
-func getInode(pid int) (uint64, error) {
-	path := filepath.Join("/proc", strconv.Itoa(pid), "ns", "pid")
-
-	f, err := os.Stat(path)
+	err = cmd.Wait()
 	if err != nil {
-		return 0, err
+		a.logger.Error("application exited with error", zap.Error(err))
+		return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
 	}
-	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
-	i := (f.Sys().(*syscall.Stat_t)).Ino
-	if i == 0 {
-		return 0, fmt.Errorf("failed to get the inode of the process")
-	}
-	return i, nil
+	return nil
 }
 
 //if a.docker.GetContainerID() == "" {

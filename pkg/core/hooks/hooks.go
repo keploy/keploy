@@ -3,27 +3,38 @@ package hooks
 import (
 	"context"
 	"fmt"
+	"go.keploy.io/server/v2/config"
+	"os"
+	"sync"
+
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/conn"
-	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
-	"os"
-	"sync"
 )
 
-func NewHooks() *Hooks {
-	return &Hooks{}
+// TODO: do we need the config here, if not then how can i set the proxyPort
+func NewHooks(logger *zap.Logger, opts config.Config) *Hooks {
+	return &Hooks{
+		logger:    logger,
+		sess:      core.NewSessions(),
+		m:         sync.Mutex{},
+		proxyPort: opts.Port,
+		dnsPort:   opts.DnsPort,
+	}
 }
 
 type Hooks struct {
 	logger    *zap.Logger
-	sess      core.Sessions
+	sess      *core.Sessions
 	proxyPort uint32
-	m         sync.Mutex
+	dnsPort   uint32
+
+	m sync.Mutex
 	// eBPF C shared maps
 	proxyInfoMap     *ebpf.Map
 	inodeMap         *ebpf.Map
@@ -33,6 +44,7 @@ type Hooks struct {
 	appPidMap        *ebpf.Map
 	keployServerPort *ebpf.Map
 	passthroughPorts *ebpf.Map
+	DockerCmdMap     *ebpf.Map
 	DnsPort          *ebpf.Map
 
 	// eBPF C shared objectsobjects
@@ -70,31 +82,7 @@ type Hooks struct {
 	writevRet   link.Link
 }
 
-func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*core.NetworkAddress, error) {
-	d, err := h.GetDestinationInfo(srcPort)
-	if err != nil {
-		return nil, err
-	}
-	// TODO : need to implement eBPF code to differentiate between different apps
-	s, ok := h.sess.Get(0)
-	if !ok {
-		return nil, fmt.Errorf("session not found")
-	}
-
-	return &core.NetworkAddress{
-		AppID:    s.ID,
-		Version:  d.IpVersion,
-		IPv4Addr: d.DestIp4,
-		IPv6Addr: d.DestIp6,
-		Port:     d.DestPort,
-	}, nil
-}
-
-func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
-	return h.CleanProxyEntry(srcPort)
-}
-
-func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookOptions) error {
+func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 
 	h.sess.Set(id, &core.Session{
 		ID: id,
@@ -104,6 +92,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookOptions) erro
 	if err != nil {
 		return err
 	}
+
 	proxyIp, err := IPv4ToUint32(opts.KeployIPV4)
 	if err != nil {
 		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
@@ -113,10 +102,23 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookOptions) erro
 		h.logger.Error("failed to send new proxy ip to kernel", zap.Any("NewProxyIp", proxyIp))
 		return err
 	}
+
+	err = h.SendDnsPort(h.dnsPort)
+	if err != nil {
+		h.logger.Error("failed to send dns port to kernel", zap.Any("DnsPort", h.dnsPort))
+		return err
+	}
+
+	err = h.SendCmdType(opts.IsDocker)
+	if err != nil {
+		h.logger.Error("failed to send the cmd type to kernel", zap.Bool("isDocker", opts.IsDocker))
+		return err
+	}
+
 	return nil
 }
 
-func (h *Hooks) load(ctx context.Context, opts core.HookOptions) error {
+func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		h.logger.Error("failed to lock memory for eBPF resources", zap.Error(err))
@@ -139,6 +141,8 @@ func (h *Hooks) load(ctx context.Context, opts core.HookOptions) error {
 	h.appPidMap = objs.AppNsPidMap
 	h.keployServerPort = objs.KeployServerPort
 	h.passthroughPorts = objs.PassThroughPorts
+	h.DnsPort = objs.DnsPortMap
+	h.DockerCmdMap = objs.DockerCmdMap
 	h.objects = objs
 
 	// ----- used in case of wsl -----
@@ -436,7 +440,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookOptions) error {
 	}
 	h.logger.Debug("Keploy Pid sent successfully...")
 
-	//send app pid to kernel to get filtered in case of integration with unit test file
+	//send app pid to kernel to get filtered in case of mock record/test feature of unit test file
 	// app pid here is the pid of the unit test file process or application pid
 	if opts.Pid != 0 {
 		err = h.SendAppPid(opts.Pid)
@@ -448,83 +452,10 @@ func (h *Hooks) load(ctx context.Context, opts core.HookOptions) error {
 
 	return nil
 }
-func (h *Hooks) SetKeployModeInKernel(mode uint32) {
-	key := 0
-	err := h.keployModeMap.Update(uint32(key), &mode, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
-	}
-}
 
 func (h *Hooks) Record(ctx context.Context, id uint64) (<-chan *models.TestCase, <-chan error) {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents)
-}
-
-// This function sends the IP and Port of the running proxy in the eBPF program.
-func (h *Hooks) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
-	key := 0
-	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP4: ip4, Ip6: ip6, Port: port}, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
-		return err
-	}
-	return nil
-}
-
-// This function is helpful when user application in running inside a docker container.
-func (h *Hooks) SendNameSpaceId(key uint32, inode uint64) error {
-	err := h.inodeMap.Update(uint32(key), &inode, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()), zap.Any("key", key), zap.Any("Inode", inode))
-		return err
-	}
-	return nil
-}
-
-func (h *Hooks) SendKeployPid(kPid uint32) error {
-	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", kPid))
-	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error("failed to send the keploy pid to the ebpf program", zap.Any("Keploy Pid", kPid), zap.Any("error thrown by ebpf map", err.Error()))
-		return err
-	}
-	return nil
-}
-
-// SendAppPid sends the application's process ID (PID) to the kernel.
-// This function is used when running Keploy tests along with unit tests of the application.
-func (h *Hooks) SendAppPid(pid uint32) error {
-	h.logger.Debug("Sending app pid to kernel", zap.Any("app Pid", pid))
-	err := h.appPidMap.Update(uint32(0), &pid, ebpf.UpdateAny)
-	if err != nil {
-		h.logger.Error("failed to send the app pid to the ebpf program", zap.Any("app Pid", pid), zap.Any("error thrown by ebpf map", err.Error()))
-		return err
-	}
-	return nil
-}
-
-// GetDestinationInfo retrieves destination information associated with a source port.
-func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
-	h.m.Lock()
-	defer h.m.Unlock()
-	destInfo := structs.DestInfo{}
-	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
-		return nil, err
-	}
-	return &destInfo, nil
-}
-
-func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
-	h.m.Lock()
-	defer h.m.Unlock()
-	err := h.redirectProxyMap.Delete(srcPort)
-	if err != nil {
-		h.logger.Error("no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
-		return err
-	}
-	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Any("(Key)/SourcePort", srcPort))
-	return nil
 }

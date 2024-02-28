@@ -42,6 +42,7 @@ func printLogo() {
 	}
 	utils.Version = version
 	// TODO why is version printed on an if-else shoudln't it be printed always..?
+	// Don't print the logo again if running in docker via binary alias of keploy, `sudo -E env PATH=$PATH keploy`
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
 		fmt.Println(logo, " ")
 		fmt.Printf("version: %v\n\n", version)
