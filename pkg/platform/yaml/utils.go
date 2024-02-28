@@ -183,27 +183,6 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 	return fmt.Sprintf("%s%v", models.TestSetPattern, indx), nil
 }
 
-func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
-	indices := []string{}
-	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
-	}
-
-	files, err := dir.ReadDir(0)
-	if err != nil {
-		return indices, err
-	}
-
-	for _, v := range files {
-		if v.Name() != "testReports" {
-			indices = append(indices, v.Name())
-		}
-	}
-	return indices, nil
-}
-
 func ValidatePath(path string) (string, error) {
 	// Validate the input to prevent directory traversal attack
 	if strings.Contains(path, "..") {

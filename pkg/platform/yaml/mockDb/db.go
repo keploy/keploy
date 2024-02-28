@@ -47,7 +47,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetId
 	if err != nil {
 		return err
 	}
-	err = yaml.Write(ctx, ys.Logger, mockPath, mockFileName, data)
+	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data)
 	if err != nil {
 		return err
 	}
@@ -71,13 +71,14 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-
-		yamls, err := yaml.Read(path, mockFileName)
+		var mockYamls []*yaml.NetworkTrafficDoc
+		data, err := yaml.ReadFile(path, mockFileName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
-		mocks, err := decodeMocks(yamls, ys.Logger)
+		err = yamlLib.Unmarshal(data, &mockYamls)
+		mocks, err := decodeMocks(mockYamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
@@ -116,12 +117,14 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		yamls, err := yaml.Read(path, mockName)
+		var mockYamls []*yaml.NetworkTrafficDoc
+		data, err := yaml.ReadFile(path, mockName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
-		mocks, err := decodeMocks(yamls, ys.Logger)
+		err = yamlLib.Unmarshal(data, &mockYamls)
+		mocks, err := decodeMocks(mockYamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
@@ -147,8 +150,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 		unfilteredMocks = unfilteredMocks[:10]
 	}
 
-	mocks := append(filteredMocks, unfilteredMocks......)
-
+	mocks := append(filteredMocks, unfilteredMocks...)
 
 	return mocks, nil
 }
