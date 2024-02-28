@@ -68,7 +68,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(testpath, os.O_RDONLY, os.ModePerm)
+	file, err := yaml.ReadDir(testpath, os.ModePerm)
 	if err != nil {
 		return &models.TestReport{}, err
 	}
@@ -104,7 +104,13 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSe
 	}
 	data = append(data, d...)
 
-	err = os.WriteFile(filepath.Join(fe.Path, testReport.Name+".yaml"), data, os.ModePerm)
+	err = yaml.Write(ctx, fe.Logger, filepath.Join(fe.Path), testReport.Name+".yaml", data)
+
+	if err != nil {
+		fe.Logger.Error("failed to write report yaml file", zap.Error(err))
+		return err
+	}
+
 	if err != nil {
 		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", utils.Emoji, err.Error())
 	}

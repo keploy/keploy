@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -32,9 +31,8 @@ func (nd *NetworkTrafficDoc) GetKind() string {
 }
 
 // write is used to generate the yaml file for the recorded calls and writes the yaml document.
-func Write(ctx context.Context, logger *zap.Logger, path, fileName string, docRead platform.KindSpecifier) error {
+func Write(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte) error {
 	//
-	doc, _ := docRead.(*NetworkTrafficDoc)
 	isFileEmpty, err := CreateYamlFile(ctx, logger, path, fileName)
 	if err != nil {
 		return err
@@ -55,12 +53,7 @@ func Write(ctx context.Context, logger *zap.Logger, path, fileName string, docRe
 	if isFileEmpty {
 		data = []byte{}
 	}
-	d, err := yamlLib.Marshal(&doc)
-	if err != nil {
-		logger.Error("failed to marshal the recorded calls into yaml", zap.Error(err), zap.Any("yaml file name", fileName))
-		return err
-	}
-	data = append(data, d...)
+	data = append(data, docData...)
 
 	_, err = file.Write(data)
 	if err != nil {
