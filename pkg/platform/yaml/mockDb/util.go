@@ -536,37 +536,3 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 	mockSpec.MongoResponses = responses
 	return &mockSpec, nil
 }
-
-func filterMocks(ctx context.Context, m []*models.Mock, afterTime time.Time, beforeTime time.Time, logger *zap.Logger) []*models.Mock {
-	
-	filteredMocks := make([]*models.Mock, 0)
-
-	if afterTime == (time.Time{}) {
-		logger.Debug("request timestamp is missing  ")
-		return m
-	}
-
-	if beforeTime == (time.Time{}) {
-		logger.Debug("response timestamp is missing  ")
-		return m
-	}
-
-	for _, mock := range m {
-		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
-			logger.Debug("request or response timestamp of mock is missing")
-			mock.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, mock)
-			continue
-		}
-
-		// Checking if the mock's request and response timestamps lie between the test's request and response timestamp
-		if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
-			mock.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, mock)
-			continue
-		}
-		mock.TestModeInfo.IsFiltered = false
-	}
-
-	return filteredMocks
-}

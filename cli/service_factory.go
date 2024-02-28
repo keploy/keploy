@@ -8,9 +8,9 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
-	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockDb"
-	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportDb"
-	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testDb"
+	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
+	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
+	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
 
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
