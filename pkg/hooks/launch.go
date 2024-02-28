@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/cloudflare/cfssl/log"
 
 	"github.com/cilium/ebpf"
 	"github.com/docker/docker/api/types"
