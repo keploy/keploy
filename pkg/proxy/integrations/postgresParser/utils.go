@@ -2,11 +2,11 @@ package postgresparser
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"math"
 
 	"errors"
 	"fmt"
+
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -307,7 +307,7 @@ func PostgresEncoder(buffer []byte) string {
 	return encoded
 }
 
-func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, isSorted bool) int {
+func findBinaryStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger *zap.Logger, isSorted bool) int {
 
 	mxSim := -1.0
 	mxIdx := -1
@@ -370,16 +370,16 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
-			actual_encode, err := PostgresDecoder(reqBuff.Payload)
+			actualEncode, err := PostgresDecoder(reqBuff.Payload)
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
 
-			if len(encode) != len(actual_encode) {
+			if len(encode) != len(actualEncode) {
 				log.Debug("Not Equal Length of buffer in request", zap.Any("payload", reqBuff.Payload))
-				log.Debug("Length of encode", zap.Int("length", len(encode)), zap.Int("length", len(actual_encode)))
+				log.Debug("Length of encode", zap.Int("length", len(encode)), zap.Int("length", len(actualEncode)))
 				log.Debug("Encode via readable", zap.Any("encode", encode))
-				log.Debug("Actual Encode", zap.Any("actual_encode", actual_encode))
+				log.Debug("Actual Encode", zap.Any("actual_encode", actualEncode))
 				log.Debug("Payload", zap.Any("payload", reqBuff.Payload))
 				continue
 			}
@@ -391,15 +391,15 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
-			actual_encode, err := PostgresDecoder(resBuff.Payload)
+			actualEncode, err := PostgresDecoder(resBuff.Payload)
 			if err != nil {
 				log.Debug("Error in decoding")
 			}
-			if len(encode) != len(actual_encode) {
+			if len(encode) != len(actualEncode) {
 				log.Debug("Not Equal Length of buffer in response")
-				log.Debug("Length of encode", zap.Any("length", len(encode)), zap.Any("length", len(actual_encode)))
+				log.Debug("Length of encode", zap.Any("length", len(encode)), zap.Any("length", len(actualEncode)))
 				log.Debug("Encode via readable", zap.Any("encode", encode))
-				log.Debug("Actual Encode", zap.Any("actual_encode", actual_encode))
+				log.Debug("Actual Encode", zap.Any("actual_encode", actualEncode))
 				log.Debug("Payload", zap.Any("payload", resBuff.Payload))
 				continue
 			}
@@ -407,34 +407,6 @@ func CheckValidEncode(tcsMocks []*models.Mock, h *hooks.Hook, log *zap.Logger) {
 		}
 	}
 	h.SetTcsMocks(tcsMocks)
-}
-
-func IfBeginOnlyQuery(reqBuff []byte, logger *zap.Logger, expectedPgReq *models.Backend, h *hooks.Hook) (*models.Backend, bool) {
-	actualreq := decodePgRequest(reqBuff, logger, h)
-	if actualreq == nil {
-		return nil, false
-	}
-	actualPgReq := *actualreq
-
-	if len(actualPgReq.Parses) > 0 && len(expectedPgReq.Parses) > 0 && len(expectedPgReq.Parses) == len(actualPgReq.Parses) {
-
-		if expectedPgReq.Parses[0].Query == "BEGIN READ ONLY" || expectedPgReq.Parses[0].Query == "BEGIN" {
-			expectedPgReq.Parses = expectedPgReq.Parses[1:]
-			if expectedPgReq.PacketTypes[0] == "P" {
-				expectedPgReq.PacketTypes = expectedPgReq.PacketTypes[1:]
-			}
-		}
-
-		if actualPgReq.Parses[0].Query == "BEGIN READ ONLY" || actualPgReq.Parses[0].Query == "BEGIN" {
-			actualPgReq.Parses = actualPgReq.Parses[1:]
-			if actualPgReq.PacketTypes[0] == "P" {
-				actualPgReq.PacketTypes = actualPgReq.PacketTypes[1:]
-			}
-		}
-		return &actualPgReq, true
-	}
-
-	return nil, false
 }
 
 func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook) (bool, []models.Frontend, error) {
@@ -454,91 +426,93 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			}
 
 			if sortFlag {
-				if mock.TestModeInfo.IsFiltered == false {
+				if !mock.TestModeInfo.IsFiltered {
 					sortFlag = false
 				} else {
 					sortedTcsMocks = append(sortedTcsMocks, mock)
 				}
 			}
 
+			initMock := *mock
 			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 				for requestIndex, reqBuff := range requestBuffers {
 					bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-					encoded, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+					encodedMock, err := PostgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
 					if err != nil {
 						logger.Debug("Error while decoding postgres request", zap.Error(err))
 					}
-					if mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" {
-						logger.Debug("CHANGING TO MD5 for Response")
-						mock.Spec.PostgresResponses[requestIndex].AuthType = 5
-						continue
-					} else {
-						if len(encoded) > 0 && encoded[0] == 'p' {
-							logger.Debug("CHANGING TO MD5 for Request and Response")
-							mock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
 
-							mock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
-							mock.Spec.PostgresResponses[requestIndex].AuthType = 0
-							mock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
-								ProcessID: 2613,
-								SecretKey: 824670820,
-							}
-							mock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
-							mock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
-								{
-									Name:  "application_name",
-									Value: "",
-								},
-								{
-									Name:  "client_encoding",
-									Value: "UTF8",
-								},
-								{
-									Name:  "DateStyle",
-									Value: "ISO, MDY",
-								},
-								{
-									Name:  "integer_datetimes",
-									Value: "on",
-								},
-								{
-									Name:  "IntervalStyle",
-									Value: "postgres",
-								},
-								{
-									Name:  "is_superuser",
-									Value: "UTF8",
-								},
-								{
-									Name:  "server_version",
-									Value: "13.12 (Debian 13.12-1.pgdg120+1)",
-								},
-								{
-									Name:  "session_authorization",
-									Value: "keploy-user",
-								},
-								{
-									Name:  "standard_conforming_strings",
-									Value: "on",
-								},
-								{
-									Name:  "TimeZone",
-									Value: "Etc/UTC",
-								},
-								{
-									Name:  "TimeZone",
-									Value: "Etc/UTC",
-								},
-							}
-						}
-					}
-
-					if bufStr == "AAAACATSFi8=" {
+					switch {
+					case bufStr == "AAAACATSFi8=":
 						ssl := models.Frontend{
 							Payload: "Tg==",
 						}
 						return true, []models.Frontend{ssl}, nil
+					case mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && mock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && mock.Spec.PostgresResponses[requestIndex].AuthType == 10:
+						logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
+						initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
+						return true, initMock.Spec.PostgresResponses, nil
+					case len(encodedMock) > 0 && encodedMock[0] == 'p' && mock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
+						logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
+
+						initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
+
+						initMock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
+						initMock.Spec.PostgresResponses[requestIndex].AuthType = 0
+						initMock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
+							ProcessID: 2613,
+							SecretKey: 824670820,
+						}
+						initMock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
+						initMock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
+							{
+								Name:  "application_name",
+								Value: "",
+							},
+							{
+								Name:  "client_encoding",
+								Value: "UTF8",
+							},
+							{
+								Name:  "DateStyle",
+								Value: "ISO, MDY",
+							},
+							{
+								Name:  "integer_datetimes",
+								Value: "on",
+							},
+							{
+								Name:  "IntervalStyle",
+								Value: "postgres",
+							},
+							{
+								Name:  "is_superuser",
+								Value: "UTF8",
+							},
+							{
+								Name:  "server_version",
+								Value: "13.12 (Debian 13.12-1.pgdg120+1)",
+							},
+							{
+								Name:  "session_authorization",
+								Value: "keploy-user",
+							},
+							{
+								Name:  "standard_conforming_strings",
+								Value: "on",
+							},
+							{
+								Name:  "TimeZone",
+								Value: "Etc/UTC",
+							},
+							{
+								Name:  "TimeZone",
+								Value: "Etc/UTC",
+							},
+						}
+						return true, initMock.Spec.PostgresResponses, nil
 					}
+
 				}
 			}
 		}
@@ -552,7 +526,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			// give more priority to sorted like if you find more than 0.5 in sorted then return that
 			if len(sortedTcsMocks) > 0 {
 				isSorted = true
-				idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted)
+				idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, isSorted)
 				if idx != -1 {
 					isMatched = true
 					matchedMock = tcsMocks[idx]
@@ -562,7 +536,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 
 		if !isMatched {
 			isSorted = false
-			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
+			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, isSorted)
 			if idx != -1 {
 				isMatched = true
 				matchedMock = tcsMocks[idx]
@@ -586,85 +560,6 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 		break
 	}
 	return false, nil, nil
-}
-
-func decodePgRequest(buffer []byte, logger *zap.Logger, h *hooks.Hook) *models.Backend {
-
-	pg := NewBackend()
-
-	if !isStartupPacket(buffer) && len(buffer) > 5 {
-		bufferCopy := buffer
-		for i := 0; i < len(bufferCopy)-5; {
-			logger.Debug("Inside the if condition")
-			pg.BackendWrapper.MsgType = buffer[i]
-			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
-			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-				logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
-				break
-			}
-			msg, err := pg.TranslateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
-			if err != nil && buffer[i] != 112 {
-				logger.Error("failed to translate the request message to readable", zap.Error(err))
-			}
-			if pg.BackendWrapper.MsgType == 'p' {
-				pg.BackendWrapper.PasswordMessage = *msg.(*pgproto3.PasswordMessage)
-			}
-
-			if pg.BackendWrapper.MsgType == 'P' {
-				pg.BackendWrapper.Parse = *msg.(*pgproto3.Parse)
-				pg.BackendWrapper.Parses = append(pg.BackendWrapper.Parses, pg.BackendWrapper.Parse)
-			}
-
-			if pg.BackendWrapper.MsgType == 'B' {
-				pg.BackendWrapper.Bind = *msg.(*pgproto3.Bind)
-				pg.BackendWrapper.Binds = append(pg.BackendWrapper.Binds, pg.BackendWrapper.Bind)
-			}
-
-			if pg.BackendWrapper.MsgType == 'E' {
-				pg.BackendWrapper.Execute = *msg.(*pgproto3.Execute)
-				pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
-			}
-
-			pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
-
-			i += (5 + pg.BackendWrapper.BodyLen)
-		}
-
-		pg_mock := &models.Backend{
-			PacketTypes: pg.BackendWrapper.PacketTypes,
-			Identfier:   "ClientRequest",
-			Length:      uint32(len(buffer)),
-			// Payload:             bufStr,
-			Bind:                pg.BackendWrapper.Bind,
-			Binds:               pg.BackendWrapper.Binds,
-			PasswordMessage:     pg.BackendWrapper.PasswordMessage,
-			CancelRequest:       pg.BackendWrapper.CancelRequest,
-			Close:               pg.BackendWrapper.Close,
-			CopyData:            pg.BackendWrapper.CopyData,
-			CopyDone:            pg.BackendWrapper.CopyDone,
-			CopyFail:            pg.BackendWrapper.CopyFail,
-			Describe:            pg.BackendWrapper.Describe,
-			Execute:             pg.BackendWrapper.Execute,
-			Executes:            pg.BackendWrapper.Executes,
-			Flush:               pg.BackendWrapper.Flush,
-			FunctionCall:        pg.BackendWrapper.FunctionCall,
-			GssEncRequest:       pg.BackendWrapper.GssEncRequest,
-			Parse:               pg.BackendWrapper.Parse,
-			Parses:              pg.BackendWrapper.Parses,
-			Query:               pg.BackendWrapper.Query,
-			SSlRequest:          pg.BackendWrapper.SSlRequest,
-			StartupMessage:      pg.BackendWrapper.StartupMessage,
-			SASLInitialResponse: pg.BackendWrapper.SASLInitialResponse,
-			SASLResponse:        pg.BackendWrapper.SASLResponse,
-			Sync:                pg.BackendWrapper.Sync,
-			Terminate:           pg.BackendWrapper.Terminate,
-			MsgType:             pg.BackendWrapper.MsgType,
-			AuthType:            pg.BackendWrapper.AuthType,
-		}
-		return pg_mock
-	}
-
-	return nil
 }
 
 func FuzzyCheck(encoded, reqBuff []byte) float64 {
