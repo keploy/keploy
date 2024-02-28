@@ -104,7 +104,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSe
 	}
 	data = append(data, d...)
 
-	err = yaml.Write(ctx, fe.Logger, filepath.Join(fe.Path), testReport.Name+".yaml", data)
+	err = yaml.WriteFile(ctx, fe.Logger, filepath.Join(fe.Path), testReport.Name+".yaml", data)
 
 	if err != nil {
 		fe.Logger.Error("failed to write report yaml file", zap.Error(err))

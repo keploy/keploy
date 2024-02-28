@@ -27,9 +27,7 @@ func New(Logger *zap.Logger, tcsPath string) *TestYaml {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetId string) error {
-
 	tcsPath := filepath.Join(ts.TcsPath, testSetId, "tests")
-
 	var tcsName string
 	if tc.Name == "" {
 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.Logger)
@@ -40,26 +38,21 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	} else {
 		tcsName = tc.Name
 	}
-
-	// encode the testcase and its mocks into yaml docs
 	yamlTc, err := EncodeTestcase(*tc, ts.Logger)
 	if err != nil {
 		return err
 	}
-
-	// write testcase yaml
 	yamlTc.Name = tcsName
 	data, err := yamlLib.Marshal(&yamlTc)
 	if err != nil {
 		return err
 	}
-	err = yaml.Write(ctx, ts.Logger, tcsPath, tcsName, data)
+	err = yaml.WriteFile(ctx, ts.Logger, tcsPath, tcsName, data)
 	if err != nil {
 		ts.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
 	}
 	ts.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
-
 	return nil
 }
 
@@ -68,11 +61,8 @@ func (ts *TestYaml) GetAllTestSetIds(ctx context.Context) ([]string, error) {
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*models.TestCase, error) {
-
 	path := filepath.Join(ts.TcsPath, testSetId, "tests")
-
 	tcs := []*models.TestCase{}
-
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
 		return nil, err
@@ -82,13 +72,11 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 		ts.Logger.Debug("no tests are recorded for the session", zap.String("index", testSetId))
 		return nil, nil
 	}
-
 	dir, err := yaml.ReadDir(TestPath, os.ModePerm)
 	if err != nil {
 		ts.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", TestPath))
 		return nil, err
 	}
-
 	files, err := dir.ReadDir(0)
 	if err != nil {
 		ts.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", TestPath))
@@ -100,20 +88,25 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		yamlTestcase, err := yaml.Read(TestPath, name)
+		data, err := yaml.ReadFile(TestPath, name)
+
+		var testCase *yaml.NetworkTrafficDoc
+		err = yamlLib.Unmarshal(data, &testCase)
+		if err != nil {
+			ts.Logger.Error("failed to unmarshall YAML data", zap.Error(err))
+			return nil, err
+		}
+
 		if err != nil {
 			ts.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
 			return nil, err
 		}
-		// Unmarshal the yaml doc into Testcase
-		tc, err := Decode(yamlTestcase[0], ts.Logger)
+		tc, err := Decode(testCase, ts.Logger)
 		if err != nil {
 			return nil, err
 		}
-		// Append the encoded testcase
 		tcs = append(tcs, tc)
 	}
-
 	sort.SliceStable(tcs, func(i, j int) bool {
 		return tcs[i].HttpReq.Timestamp.Before(tcs[j].HttpReq.Timestamp)
 	})
