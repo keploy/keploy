@@ -154,7 +154,7 @@ func Contains(elems []string, v string) bool {
 
 func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 	indx := 0
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
 		return fmt.Sprintf("%s%v", models.TestSetPattern, indx), nil
@@ -185,7 +185,7 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
 		return indices, nil
@@ -214,12 +214,10 @@ func ValidatePath(path string) (string, error) {
 
 // findLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
 func FindLastIndex(path string, Logger *zap.Logger) (int, error) {
-
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		return 1, nil
 	}
-
 	files, err := dir.ReadDir(0)
 	if err != nil {
 		return 1, nil
@@ -248,4 +246,12 @@ func FindLastIndex(path string, Logger *zap.Logger) (int, error) {
 	lastIndex += 1
 
 	return lastIndex, nil
+}
+
+func ReadDir(path string, fileMode fs.FileMode) (*os.File, error) {
+	dir, err := os.OpenFile(path, os.O_RDONLY, fileMode)
+	if err != nil {
+		return nil, err
+	}
+	return dir, nil
 }

@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 type TestYaml struct {
@@ -48,7 +49,11 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 
 	// write testcase yaml
 	yamlTc.Name = tcsName
-	err = yaml.Write(ctx, ts.Logger, tcsPath, tcsName, yamlTc)
+	data, err := yamlLib.Marshal(&yamlTc)
+	if err != nil {
+		return err
+	}
+	err = yaml.Write(ctx, ts.Logger, tcsPath, tcsName, data)
 	if err != nil {
 		ts.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err
@@ -78,7 +83,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 		return nil, nil
 	}
 
-	dir, err := os.OpenFile(TestPath, os.O_RDONLY, os.ModePerm)
+	dir, err := yaml.ReadDir(TestPath, os.ModePerm)
 	if err != nil {
 		ts.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", TestPath))
 		return nil, err

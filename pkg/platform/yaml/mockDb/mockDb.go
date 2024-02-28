@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 type MockYaml struct {
@@ -42,7 +43,11 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetId
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-	err = yaml.Write(ctx, ys.Logger, mockPath, mockFileName, mockYaml)
+	data, err := yamlLib.Marshal(&mockYaml)
+	if err != nil {
+		return err
+	}
+	err = yaml.Write(ctx, ys.Logger, mockPath, mockFileName, data)
 	if err != nil {
 		return err
 	}
