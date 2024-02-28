@@ -1,0 +1,39 @@
+plugins {
+	id 'org.springframework.boot' version '2.3.1.RELEASE'
+	id 'io.spring.dependency-management' version '1.0.9.RELEASE'
+	id 'java'
+	id 'au.com.dius.pact' version '3.5.23'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '1.8'
+
+configurations {
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	implementation 'org.springframework.boot:spring-boot-starter-webflux'
+	compileOnly 'org.projectlombok:lombok'
+	annotationProcessor 'org.projectlombok:lombok'
+	testImplementation "org.springframework.boot:spring-boot-starter-test"
+	testCompile "org.springframework.boot:spring-boot-starter-test"
+	testCompile "org.mockito:mockito-core:2.+"
+	testImplementation 'io.projectreactor:reactor-test'
+    implementation 'junit:junit:4.12'
+	testImplementation("au.com.dius:pact-jvm-provider-spring_2.12:3.5.24")
+	testImplementation("au.com.dius:pact-jvm-provider-junit_2.12:3.5.24")
+}
+
+test {
+	systemProperty 'pact.verifier.publishResults', 'true'
+	useJUnitPlatform()
+}
