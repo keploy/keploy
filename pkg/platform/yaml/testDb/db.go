@@ -57,7 +57,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) GetAllTestSetIds(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(ts.TcsPath, ts.Logger)
+	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.Logger)
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*models.TestCase, error) {
@@ -88,7 +88,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		data, err := yaml.ReadFile(TestPath, name)
+		data, err := yaml.ReadFile(ctx, TestPath, name)
 
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
