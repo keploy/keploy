@@ -32,7 +32,7 @@ func New(logger *zap.Logger, reportPath string) *TestReport {
 }
 
 func (fe *TestReport) GetAllTestRunIds(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(fe.Path, fe.Logger)
+	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger)
 }
 
 func (fe *TestReport) InsertTestCaseResult(ctx context.Context, testRunId string, testSetId string, testCaseId string, result *models.TestResult) error {

@@ -22,24 +22,43 @@ type NetworkTrafficDoc struct {
 	Curl    string         `json:"curl" yaml:"curl,omitempty"`
 }
 
-// ContextReader wraps an io.Reader with a context for cancellation support
-type ContextReader struct {
-	Reader io.Reader
-	Ctx    context.Context
+// ctxReader wraps an io.Reader with a context for cancellation support
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
 }
 
-// Read implements the io.Reader interface for ContextReader
-func (cr *ContextReader) Read(p []byte) (n int, err error) {
+func (cr *ctxReader) Read(p []byte) (n int, err error) {
 	select {
-	case <-cr.Ctx.Done():
-		return 0, cr.Ctx.Err()
+	case <-cr.ctx.Done():
+		return 0, cr.ctx.Err()
 	default:
-		return cr.Reader.Read(p)
+		return cr.r.Read(p)
 	}
 }
 
-func (nd *NetworkTrafficDoc) GetKind() string {
-	return string(nd.Kind)
+// ctxWriter wraps an io.Writer with a context for cancellation support
+type ctxWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (cw *ctxWriter) Write(p []byte) (n int, err error) {
+	for len(p) > 0 {
+		select {
+		case <-cw.ctx.Done():
+			return n, cw.ctx.Err()
+		default:
+			var written int
+			written, err = cw.writer.Write(p)
+			n += written
+			if err != nil {
+				return n, err
+			}
+			p = p[written:]
+		}
+	}
+	return n, nil
 }
 
 func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte) error {
@@ -53,18 +72,47 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	}
 	data = append(data, docData...)
 	yamlPath := filepath.Join(path, fileName+".yaml")
-	err = os.WriteFile(yamlPath, data, os.ModePerm)
+	file, err := os.OpenFile(yamlPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
-		logger.Error("failed to write the yaml document", zap.Error(err), zap.Any("yaml file name", fileName))
+		logger.Error("failed to open file for writing", zap.Error(err), zap.String("file", yamlPath))
+		return err
+	}
+	defer file.Close()
+
+	cw := &ctxWriter{
+		ctx:    ctx,
+		writer: file,
+	}
+
+	_, err = cw.Write(data)
+	if err != nil {
+		if err == ctx.Err() {
+			return nil // Ignore context cancellation error
+		}
+		logger.Error("failed to write the yaml document", zap.Error(err), zap.String("yaml file name", fileName))
 		return err
 	}
 	return nil
 }
 
-func ReadFile(path, name string) ([]byte, error) {
+func ReadFile(ctx context.Context, path, name string) ([]byte, error) {
 	filePath := filepath.Join(path, name+".yaml")
-	data, err := os.ReadFile(filePath)
+	file, err := os.Open(filePath)
 	if err != nil {
+		return nil, fmt.Errorf("failed to read the file: %v", err)
+	}
+	defer file.Close()
+
+	cr := &ctxReader{
+		ctx: ctx,
+		r:   file,
+	}
+
+	data, err := io.ReadAll(cr)
+	if err != nil {
+		if err == ctx.Err() {
+			return nil, nil // Ignore context cancellation error
+		}
 		return nil, fmt.Errorf("failed to read the file: %v", err)
 	}
 	return data, nil
@@ -78,12 +126,12 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	if _, err := os.Stat(yamlPath); err != nil {
 		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
 		if err != nil {
-			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.String("path directory", path), zap.String("yaml", fileName))
 			return false, err
 		}
 		file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
 		if err != nil {
-			Logger.Error("failed to create a yaml file", zap.Error(err), zap.Any("path directory", path), zap.Any("yaml", fileName))
+			Logger.Error("failed to create a yaml file", zap.Error(err), zap.String("path directory", path), zap.String("yaml", fileName))
 			return false, err
 		}
 		file.Close()
@@ -92,7 +140,7 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	return false, nil
 }
 
-func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
+func ReadSessionIndices(ctx context.Context, path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {

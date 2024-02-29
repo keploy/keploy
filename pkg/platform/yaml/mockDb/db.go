@@ -72,7 +72,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 
 	if _, err := os.Stat(mockPath); err == nil {
 		var mockYamls []*yaml.NetworkTrafficDoc
-		data, err := yaml.ReadFile(path, mockFileName)
+		data, err := yaml.ReadFile(ctx, path, mockFileName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
@@ -118,7 +118,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 
 	if _, err := os.Stat(mockPath); err == nil {
 		var mockYamls []*yaml.NetworkTrafficDoc
-		data, err := yaml.ReadFile(path, mockName)
+		data, err := yaml.ReadFile(ctx, path, mockName)
 		if err != nil {
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
