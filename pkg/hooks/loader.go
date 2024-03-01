@@ -62,6 +62,7 @@ type Hook struct {
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
 	userAppShutdownInitiated bool
+	isHooksLoaded 		 bool
 	mainRoutineId            int
 
 	// ebpf objects and events
@@ -583,7 +584,10 @@ func deleteFileIfExists(filename string, logger *zap.Logger) error {
 }
 
 func (h *Hook) Stop(forceStop bool) {
-
+	if !h.isHooksLoaded || h.socket == nil {
+		return	
+	}
+	
 	if !forceStop && !h.IsUserAppTerminateInitiated() {
 		h.logger.Info("Received signal to exit keploy program..")
 		h.StopUserApplication()
@@ -606,6 +610,7 @@ func (h *Hook) Stop(forceStop bool) {
 		}
 	}
 
+	
 	// closing all events
 	//other
 	h.socket.Close()
@@ -976,6 +981,8 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 		h.SendAppPid(pid)
 	}
 
+	// hooks are loaded so inform the state
+	h.isHooksLoaded = true
 	return nil
 }
 
