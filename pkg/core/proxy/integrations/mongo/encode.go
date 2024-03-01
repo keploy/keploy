@@ -52,8 +52,8 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 
 			var (
-				mongoRequests  = []models.MongoRequest{}
-				mongoResponses = []models.MongoResponse{}
+				mongoRequests  []models.MongoRequest
+				mongoResponses []models.MongoResponse
 			)
 			opReq, requestHeader, mongoRequest, err := Decode(reqBuf, logger)
 			if err != nil {
@@ -240,6 +240,6 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 }
 
 func getPacketLength(src []byte) (length int32) {
-	length = (int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16 | int32(src[3])<<24)
+	length = int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16 | int32(src[3])<<24
 	return length
 }

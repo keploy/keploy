@@ -9,6 +9,8 @@ import (
 	"go.uber.org/zap"
 )
 
+//TODO: rename this file.
+
 // Used by proxy
 func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*core.NetworkAddress, error) {
 	d, err := h.GetDestinationInfo(srcPort)
@@ -130,6 +132,41 @@ func (h *Hooks) SendDnsPort(port uint32) error {
 	if err != nil {
 		h.logger.Error("failed to send dns server port to the epbf program", zap.Any("dns server port", port), zap.Any("error thrown by ebpf map", err.Error()))
 		return err
+	}
+	return nil
+}
+
+func (h *Hooks) PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error {
+	return h.SendPassThroughPorts(ports)
+}
+
+// SendPassThroughPorts sends the destination ports of the server which should not be intercepted by keploy proxy.
+func (h *Hooks) SendPassThroughPorts(filterPorts []uint) error {
+	portsSize := len(filterPorts)
+	if portsSize > 10 {
+		h.logger.Error("can not send more than 10 ports to be filtered to the ebpf program")
+		return fmt.Errorf("passthrough ports limit exceeded")
+	}
+
+	var ports [10]int32
+
+	for i := 0; i < 10; i++ {
+		if i < portsSize {
+			// Convert uint to int32
+			ports[i] = int32(filterPorts[i])
+		} else {
+			// Fill the remaining elements with -1
+			ports[i] = -1
+		}
+	}
+
+	for i, v := range ports {
+		h.logger.Debug(fmt.Sprintf("PassthroughPort(%v):[%v]", i, v))
+		err := h.passthroughPorts.Update(uint32(i), &v, ebpf.UpdateAny)
+		if err != nil {
+			h.logger.Error("failed to send the passthrough ports to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
+			return err
+		}
 	}
 	return nil
 }

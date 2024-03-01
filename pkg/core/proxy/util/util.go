@@ -154,9 +154,9 @@ func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]b
 	}
 }
 
-// Passthrough function is used to pass the network traffic to the destination connection.
+// PassThrough function is used to pass the network traffic to the destination connection.
 // It also closes the destination connection if the function returns an error.
-func Passthrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte) ([]byte, error) {
+func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte) ([]byte, error) {
 
 	if destConn == nil {
 		return nil, errors.New("failed to pass network traffic to the destination conn")
@@ -260,7 +260,7 @@ func GetLocalIPv4() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("No valid IP address found")
+	return nil, fmt.Errorf("no valid IP address found")
 }
 
 func ToIPV4(ip net.IP) (uint32, bool) {
@@ -292,7 +292,7 @@ func GetLocalIPv6() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("No valid IPv6 address found")
+	return nil, fmt.Errorf("no valid IPv6 address found")
 }
 
 func IPv6ToUint32Array(ip net.IP) ([4]uint32, error) {

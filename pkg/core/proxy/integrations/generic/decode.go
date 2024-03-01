@@ -72,7 +72,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					return err
 				}
 
-				reqBuffer, err := pUtil.Passthrough(ctx, logger, clientConn, destConn, genericRequests)
+				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, destConn, genericRequests)
 				if err != nil {
 					logger.Error("failed to passthrough the generic request", zap.Error(err))
 					return err
@@ -95,7 +95,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						return err
 					}
 				}
-				_, err := clientConn.Write([]byte(encoded))
+				_, err := clientConn.Write(encoded)
 				if err != nil {
 					logger.Error("failed to write request message to the client application", zap.Error(err))
 					return err

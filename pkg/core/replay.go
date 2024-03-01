@@ -9,6 +9,15 @@ func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 	//make a new channel for the errors
 	errCh := make(chan error, 10) // Buffered channel to prevent blocking
 
+	ports := GetPortToSendToKernel(ctx, opts.Rules)
+	if len(ports) > 0 {
+		err := c.hook.PassThroughPortsInKernel(ctx, id, ports)
+		if err != nil {
+			errCh <- err
+			return errCh
+		}
+	}
+
 	err := c.proxy.Mock(ctx, id, opts)
 	if err != nil {
 		errCh <- err

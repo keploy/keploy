@@ -82,7 +82,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		return err
 	}
 
-	// setup the CA for tls connections
+	// set up the CA for tls connections
 	err = SetupCA(ctx, p.logger)
 	if err != nil {
 		p.logger.Error("failed to setup CA", zap.Error(err))
@@ -280,7 +280,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		}
 	}
 
-	// attempt to read the conn until buffer is either filled or conn is closed
+	// attempt to read conn until buffer is either filled or conn is closed
 	initialBuf, err := util.ReadInitialBuf(ctx, p.logger, srcConn)
 	if err != nil {
 		p.logger.Error("failed to read the initial buffer", zap.Error(err))
@@ -294,7 +294,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		logger: p.logger,
 	}
 
-	// dstConn stores the conn with actual destination for the outgoing network call
+	// dstConn stores conn with actual destination for the outgoing network call
 	var dstConn net.Conn
 
 	//Dialing for tls conn

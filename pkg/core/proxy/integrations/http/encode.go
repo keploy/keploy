@@ -40,9 +40,9 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	logger.Debug("This is the initial request: " + string(reqBuf))
 	finalReq = append(finalReq, reqBuf...)
 
-	//for keeping the conn alive
+	//for keeping conn alive
 	for {
-		//check if the expect : 100-continue header is present
+		//check if expect : 100-continue header is present
 		lines := strings.Split(string(finalReq), "\n")
 		var expectHeader string
 		for _, line := range lines {
@@ -106,7 +106,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if len(resp) != 0 {
 
 					// Capturing the response timestamp
-					resTimestampcMock := time.Now()
+					resTimestampMock := time.Now()
 					// write the response message to the user client
 					_, err = clientConn.Write(resp)
 					if err != nil {
@@ -119,7 +119,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 						req:              finalReq,
 						resp:             resp,
 						reqTimestampMock: reqTimestampMock,
-						resTimestampMock: resTimestampcMock,
+						resTimestampMock: resTimestampMock,
 					}
 					err := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
 					if err != nil {
@@ -135,7 +135,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		}
 
 		// Capturing the response timestamp
-		resTimestampcMock := time.Now()
+		resTimestampMock := time.Now()
 
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
@@ -156,7 +156,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					req:              finalReq,
 					resp:             finalResp,
 					reqTimestampMock: reqTimestampMock,
-					resTimestampMock: resTimestampcMock,
+					resTimestampMock: resTimestampMock,
 				}
 				parseErr := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
 				if parseErr != nil {
@@ -176,7 +176,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			req:              finalReq,
 			resp:             finalResp,
 			reqTimestampMock: reqTimestampMock,
-			resTimestampMock: resTimestampcMock,
+			resTimestampMock: resTimestampMock,
 		}
 
 		err = ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)

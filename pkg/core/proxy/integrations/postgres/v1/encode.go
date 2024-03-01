@@ -24,7 +24,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	}(destConn)
 
 	logger.Debug("Inside the encodePostgresOutgoing function")
-	pgRequests := []models.Backend{}
+	var pgRequests []models.Backend
 
 	bufStr := util.EncodeBase64(reqBuf)
 	logger.Debug("bufStr is ", zap.String("bufStr", bufStr))
@@ -73,7 +73,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
-	pgResponses := []models.Frontend{}
+	var pgResponses []models.Frontend
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
@@ -190,7 +190,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 						pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
 
-						i += (5 + pg.BackendWrapper.BodyLen)
+						i += 5 + pg.BackendWrapper.BodyLen
 					}
 
 					pg_mock := &models.Backend{
@@ -268,7 +268,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 					//Saving list of packets in case of multiple packets in a single buffer steam
 					ps := make([]pgproto3.ParameterStatus, 0)
-					dataRows := []pgproto3.DataRow{}
+					var dataRows []pgproto3.DataRow
 
 					for i := 0; i < len(bufferCopy)-5; {
 						pg.FrontendWrapper.MsgType = buffer[i]
@@ -280,7 +280,8 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						}
 
 						pg.FrontendWrapper.PacketTypes = append(pg.FrontendWrapper.PacketTypes, string(pg.FrontendWrapper.MsgType))
-						i += (5 + pg.FrontendWrapper.BodyLen)
+						i += 5 + pg.FrontendWrapper.BodyLen
+
 						if pg.FrontendWrapper.ParameterStatus.Name != "" {
 							ps = append(ps, pg.FrontendWrapper.ParameterStatus)
 						}

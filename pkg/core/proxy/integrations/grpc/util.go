@@ -2,7 +2,7 @@ package grpc
 
 import "golang.org/x/net/http2/hpack"
 
-// Header Decoder
+// NewDecoder returns a header decoder.
 func NewDecoder() *hpack.Decoder {
 	return hpack.NewDecoder(KmaxDynamicTableSize, nil)
 }

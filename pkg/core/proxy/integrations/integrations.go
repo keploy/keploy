@@ -26,7 +26,7 @@ const (
 // replace "http"-> HTTP
 var Registered = make(map[string]Initializer)
 
-// Used to establish destination connection in case of any passthrough.
+// Used to establish destination connection in case of any passThrough.
 // TODO: Change the name of the struct
 type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)

@@ -22,7 +22,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		}
 	}(destConn)
 
-	genericRequests := []models.GenericPayload{}
+	var genericRequests []models.GenericPayload
 
 	bufStr := string(reqBuf)
 	dataType := models.String
@@ -47,7 +47,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
-	genericResponses := []models.GenericPayload{}
+	var genericResponses []models.GenericPayload
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
@@ -65,7 +65,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	}()
 
 	prevChunkWasReq := false
-	var reqTimestampMock time.Time = time.Now()
+	var reqTimestampMock = time.Now()
 	var resTimestampMock time.Time
 
 	// ticker := time.NewTicker(1 * time.Second)

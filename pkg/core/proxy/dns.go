@@ -82,7 +82,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		if !found {
 			// If not found in cache, resolve the DNS query only in case of record mode
-			//TODO: Add support for passthrough here using the src<->dst mapping
+			//TODO: Add support for passThrough here using the src<->dst mapping
 			if models.GetMode() == models.MODE_RECORD {
 				answers = resolveDNSQuery(p.logger, question.Name)
 			}

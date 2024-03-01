@@ -83,7 +83,7 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 			if !match {
 				if !isPassThrough(logger, request, dstCfg.Port, opts) {
-					logger.Error("Didn't match any prexisting http mock", zap.Any("metadata", getReqMeta(request)))
+					logger.Error("Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
 				// making destConn
 				destConn, err := net.Dial("tcp", dstCfg.Addr)
@@ -91,9 +91,9 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					logger.Error("failed to dial the destination server", zap.Error(err))
 					return err
 				}
-				_, err = util.Passthrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf})
+				_, err = util.PassThrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf})
 				if err != nil {
-					logger.Error("failed to passthrough http request", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
+					logger.Error("failed to passThrough http request", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
 					return err
 				}
 			}

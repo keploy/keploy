@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/models"
 	"os"
 	"os/exec"
 	"os/user"
 	"strconv"
 	"syscall"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/models"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
@@ -22,10 +23,11 @@ import (
 
 func NewApp(logger *zap.Logger, id uint64, cmd string) *App {
 	app := &App{
-		logger: logger,
-		id:     id,
-		cmd:    cmd,
-		kind:   utils.FindDockerCmd(cmd),
+		logger:          logger,
+		id:              id,
+		cmd:             cmd,
+		kind:            utils.FindDockerCmd(cmd),
+		keployContainer: "keploy-v2",
 	}
 	return app
 }
@@ -41,12 +43,13 @@ type App struct {
 	containerNetwork string
 	containerIPv4    string
 	keployNetwork    string
-	keloyContainer   string
+	keployContainer  string
 	keployIPv4       string
 	inode            uint64
+	inodeChan        chan uint64
 }
 
-type AppOptions struct {
+type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
 	Type          utils.CmdType
@@ -54,7 +57,7 @@ type AppOptions struct {
 	DockerNetwork string
 }
 
-func (a *App) Setup(ctx context.Context, opts AppOptions) error {
+func (a *App) Setup(ctx context.Context, opts Options) error {
 	d, err := docker.New(a.logger)
 	if err != nil {
 		return err
@@ -98,7 +101,6 @@ func (a *App) SetupDocker() error {
 		a.containerNetwork = net
 	} else if a.containerNetwork != net {
 		a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
-
 	}
 
 	//injecting appNetwork to keploy.
@@ -122,7 +124,7 @@ func (a *App) SetupCompose() error {
 	// or by asking the user to provide the path
 	path := findComposeFile()
 	if path == "" {
-		return errors.New("can't find the docker compose file of user. Are you in the right directory?")
+		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
 	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
 	newPath := "docker-compose-tmp.yaml"
@@ -206,7 +208,7 @@ func (a *App) Kind(ctx context.Context) utils.CmdType {
 func (a *App) injectNetwork(network string) error {
 	// inject the network to the keploy container
 	a.logger.Info(fmt.Sprintf("trying to inject network:%v to the keploy container", network))
-	err := a.docker.AttachNetwork(a.keloyContainer, []string{network})
+	err := a.docker.AttachNetwork(a.keployContainer, []string{network})
 	if err != nil {
 		a.logger.Error("could not inject application network to the keploy container")
 		return err
@@ -215,7 +217,7 @@ func (a *App) injectNetwork(network string) error {
 	a.keployNetwork = network
 
 	//sending new proxy ip to kernel, since dynamically injected new network has different ip for keploy.
-	kInspect, err := a.docker.ContainerInspect(context.Background(), a.keloyContainer)
+	kInspect, err := a.docker.ContainerInspect(context.Background(), a.keployContainer)
 	if err != nil {
 		a.logger.Error(fmt.Sprintf("failed to get inspect keploy container:%v", kInspect))
 		return err
@@ -228,7 +230,7 @@ func (a *App) injectNetwork(network string) error {
 	for n, settings := range keployNetworks {
 		if n == network {
 			a.keployIPv4 = settings.IPAddress
-			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keloyContainer), zap.Any("appNetwork", network))
+			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network))
 			return nil
 		}
 		//if networkName != "bridge" {
@@ -306,6 +308,8 @@ func (a *App) handleDockerEvents(ctx context.Context, e events.Message) error {
 		if err != nil {
 			return err
 		}
+
+		a.inodeChan <- a.inode
 		a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", a.inode))
 	}
 	return nil
@@ -357,7 +361,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	return errCh
 }
 
-func (a *App) runDocker(ctx context.Context) error {
+func (a *App) runDocker(ctx context.Context) models.AppError {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errCh := make(chan error)
@@ -366,29 +370,30 @@ func (a *App) runDocker(ctx context.Context) error {
 	// if a.cmd is empty, it means the user wants to run the application manually,
 	// so we don't need to run the application in a goroutine
 	if a.cmd == "" {
-		return nil
+		return models.AppError{}
 	}
 	go func(ctx context.Context) {
 		defer utils.Recover(a.logger)
 		defer cancel()
 		err := a.run(ctx)
-		if err != nil {
+		if err.Err != nil {
 			a.logger.Error("Application stopped with the error", zap.Error(err))
-			errCh <- err
+			errCh <- err.Err
 		}
 	}(ctx)
 	select {
 	case err := <-errCh:
-		return err
+		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case err := <-errCh2:
-		return err
+		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
-		return nil
+		return models.AppError{}
 	}
 }
 
-func (a *App) Run(ctx context.Context, opts AppOptions) error {
+func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) models.AppError {
 	a.containerDelay = opts.DockerDelay
+	a.inodeChan = inodeChan
 
 	if a.kind == utils.DockerCompose || a.kind == utils.Docker {
 		return a.runDocker(ctx)
@@ -396,7 +401,7 @@ func (a *App) Run(ctx context.Context, opts AppOptions) error {
 	return a.run(ctx)
 }
 
-func (a *App) run(ctx context.Context) error {
+func (a *App) run(ctx context.Context) models.AppError {
 	// Create a new command with your appCmd
 	// TODO: do we need sh here? or just use appCmd directly?
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
@@ -404,6 +409,9 @@ func (a *App) run(ctx context.Context) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
+
+	// Explicitly set the environment for cmd
+	cmd.Env = os.Environ()
 
 	// Set the output of the command
 	cmd.Stdout = os.Stdout
@@ -416,7 +424,7 @@ func (a *App) run(ctx context.Context) error {
 		u, err := user.Lookup(uname)
 		if err != nil {
 			a.logger.Error("failed to lookup user", zap.Error(err))
-			return err
+			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 		}
 
 		uid, err := strconv.ParseUint(u.Uid, 10, 32)
@@ -424,7 +432,7 @@ func (a *App) run(ctx context.Context) error {
 
 		if err != nil {
 			a.logger.Error("failed to parse user or group id", zap.Error(err))
-			return err
+			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 		}
 		// Switch the user
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
@@ -435,7 +443,6 @@ func (a *App) run(ctx context.Context) error {
 	err := cmd.Start()
 	if err != nil {
 		a.logger.Error("failed to start the app", zap.Error(err))
-		// TODO return named error
 		return models.AppError{AppErrorType: models.ErrCommandError, Err: err}
 	}
 
@@ -444,7 +451,7 @@ func (a *App) run(ctx context.Context) error {
 		a.logger.Error("application exited with error", zap.Error(err))
 		return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
 	}
-	return nil
+	return models.AppError{}
 }
 
 //if a.docker.GetContainerID() == "" {

@@ -6,6 +6,7 @@ type Config struct {
 	Path            string        `json:"path" yaml:"path" mapstructure:"path" `
 	Command         string        `json:"command" yaml:"command" mapstructure:"command"`
 	Port            uint32        `json:"port" yaml:"port" mapstructure:"port"`
+	DnsPort         uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort       uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug           bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
 	Telemetry       bool          `json:"telemetry" yaml:"telemetry" mapstructure:"telemetry"`

@@ -45,7 +45,8 @@ type Operation interface {
 var lOgger *zap.Logger
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1361-L1426
-// func Decode(wm []byte) (Operation, int32, int32, int32, int32, error) {
+
+// Decode (wm []byte) (Operation, int32, int32, int32, int32, error) {
 func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, interface{}, error) {
 	lOgger = logger
 	wmLength := len(wm)
@@ -106,7 +107,7 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
 		}
-		replyDocs := []string{}
+		var replyDocs []string
 		for _, v := range op.(*opReply).documents {
 			jsonBytes, err := bson.MarshalExtJSON(v, true, false)
 			if err != nil {

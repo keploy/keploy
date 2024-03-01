@@ -29,6 +29,7 @@ func EncodeBase64(decoded []byte) string {
 }
 
 // Functions related to fuzzy matching
+
 func AdaptiveK(length, kMin, kMax, N int) int {
 	k := length / N
 	if k < kMin {

@@ -2,16 +2,18 @@ package core
 
 import (
 	"context"
+	"sync"
+
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/utils"
-	"sync"
 
 	"go.keploy.io/server/v2/pkg/models"
 )
 
 type Hooks interface {
-	DestInfo
 	AppInfo
+	DestInfo
+	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64) (<-chan *models.TestCase, <-chan error)
 }
@@ -25,7 +27,7 @@ type HookCfg struct {
 
 type App interface {
 	Setup(ctx context.Context, opts app.AppOptions) error
-	Run(ctx context.Context, opts app.AppOptions) error
+	Run(ctx context.Context, inodeChan chan uint64, opts app.AppOptions) error
 	Kind(ctx context.Context) utils.CmdType
 	KeployIPv4Addr() string
 }
@@ -50,8 +52,14 @@ type DestInfo interface {
 	Delete(ctx context.Context, srcPort uint16) error
 }
 
+// TODO: change the name of this interface
 type AppInfo interface {
 	SendInode(ctx context.Context, id uint64, inode uint64) error
+}
+
+// TODO: change the name of this interface
+type OutgoingInfo interface {
+	PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error
 }
 
 type NetworkAddress struct {
