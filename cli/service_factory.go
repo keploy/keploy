@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
+	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
@@ -21,7 +22,8 @@ import (
 )
 
 type serviceProvider struct {
-	logger *zap.Logger
+	logger   *zap.Logger
+	configDb *configdb.ConfigDb
 }
 
 type commonInternalService struct {
@@ -31,19 +33,25 @@ type commonInternalService struct {
 	Instrumentation *core.Core
 }
 
-func NewServiceProvider(logger *zap.Logger) *serviceProvider {
+func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb) *serviceProvider {
 	return &serviceProvider{
-		logger: logger,
+		logger:   logger,
+		configDb: configDb,
 	}
 }
 
-func (n *serviceProvider) GetTelemetryService(config config.Config) *telemetry.Telemetry {
-	// TODO: Add installation ID
+func (n *serviceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
+	installtionId, err := n.configDb.GetInstallationId(ctx)
+	if err != nil {
+		return nil, errors.New("failed to get installation id")
+	}
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
-		Enabled:   config.Telemetry,
-		Version:   utils.Version,
-		GlobalMap: map[string]interface{}{},
-	})
+		Enabled:        config.Telemetry,
+		Version:        utils.Version,
+		GlobalMap:      map[string]interface{}{},
+		InstallationID: installtionId,
+	},
+	), nil
 }
 
 // TODO error handling like path vadilations, remove tele from platform
@@ -63,7 +71,10 @@ func (n *serviceProvider) GetCommonServices(config config.Config) *commonInterna
 }
 
 func (n *serviceProvider) GetService(ctx context.Context, cmd string, config config.Config) (interface{}, error) {
-	tel := n.GetTelemetryService(config)
+	tel, err := n.GetTelemetryService(ctx, config)
+	if err != nil {
+		return nil, err
+	}
 	tel.Ping(ctx)
 	switch cmd {
 	case "config", "update":

@@ -7,6 +7,7 @@ import (
 
 	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v2/cli"
+	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
@@ -55,14 +56,15 @@ func printLogo() {
 func start(ctx context.Context) {
 	// Now that flags are parsed, set up the log
 	logger := log.New()
-	logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client())
+	configDb := configdb.NewConfigDb(logger)
+	logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	defer log.DeleteLogs(logger)
 
 	// TODO don't intitate sentry incase dev or if dsn is not set
 	utils.SentryInit(logger, dsn)
 	defer utils.Recover(logger)
 
-	svcProvider := cli.NewServiceProvider(logger)
+	svcProvider := cli.NewServiceProvider(logger, configDb)
 	cmdConfigurator := cli.NewCmdConfigurator(logger)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {

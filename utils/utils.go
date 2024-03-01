@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 
 	"github.com/TheZeroSlave/zapsentry"
 	sentry "github.com/getsentry/sentry-go"
@@ -57,7 +58,7 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 	})
 }
 
-func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentry.Client) *zap.Logger {
+func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentry.Client, configDb *configdb.ConfigDb) *zap.Logger {
 	cfg := zapsentry.Configuration{
 		Level:             zapcore.ErrorLevel, //when to send message to sentry
 		EnableBreadcrumbs: true,               // enable sending breadcrumbs to Sentry
@@ -86,15 +87,9 @@ func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentr
 		}
 	}
 	arch := runtime.GOARCH
-	installationID, err := fst.NewTeleFS(logger).Get(false)
+	installationID, err := configDb.GetInstallationId(ctx)
 	if err != nil {
 		logger.Debug("failed to get installationID", zap.Error(err))
-	}
-	if installationID == "" {
-		installationID, err = fst.NewTeleFS(logger).Get(true)
-		if err != nil {
-			logger.Debug("failed to get installationID for new user.", zap.Error(err))
-		}
 	}
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTag("Keploy Version", Version)
