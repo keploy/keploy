@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -23,7 +22,7 @@ type MockYaml struct {
 	idCounter int64
 }
 
-func New(Logger *zap.Logger, tele telemetry.Telemetry, mockPath string, mockName string) *MockYaml {
+func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 	return &MockYaml{
 		MockPath:  mockPath,
 		MockName:  mockName,

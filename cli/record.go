@@ -22,7 +22,7 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			return cmdConfigurator.ValidateFlags(ctx, cmd, cfg)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := serviceFactory.GetService(cmd.Name(), *cfg)
+			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
 			if err != nil {
 				logger.Error("failed to get service", zap.Error(err))
 				return err

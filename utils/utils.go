@@ -215,13 +215,17 @@ func attachLogFileToSentry(logFilePath string) {
 // Recover recovers from a panic and logs the stack trace to Sentry.
 // It also stops the global context.
 func Recover(logger *zap.Logger) {
+	if logger == nil {
+		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
+		return
+	}
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
 		attachLogFileToSentry("./keploy-logs.txt")
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 		// Get the stack trace
 		stackTrace := debug.Stack()
-		logger.Error(Emoji+"Recovered from:", zap.String("stack trace", string(stackTrace)))
+		logger.Error("Recovered from:", zap.String("stack trace", string(stackTrace)))
 		//stopping the global context
 		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
@@ -245,9 +249,9 @@ func GetLatestGitHubRelease(ctx context.Context) (GitHubRelease, error) {
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-    if err != nil {
-        return GitHubRelease{}, err
-    }
+	if err != nil {
+		return GitHubRelease{}, err
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

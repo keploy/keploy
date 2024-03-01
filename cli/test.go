@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/graph"
+	_ "go.keploy.io/server/v2/graph"
 	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
@@ -25,12 +25,12 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			if cfg.Test.Coverage {
-				g := graph.NewGraph(logger)
-				return g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
-			}
+			// if cfg.Test.Coverage {
+			// 	g := graph.NewGraph(logger)
+			// 	return g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
+			// }
 
-			svc, err := serviceFactory.GetService(cmd.Name(), *cfg)
+			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
 			if err != nil {
 				logger.Error("failed to get service", zap.Error(err))
 				return err

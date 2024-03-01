@@ -21,7 +21,7 @@ func Update(ctx context.Context, logger *zap.Logger, conf *config.Config, servic
 		Short:   "Update Keploy ",
 		Example: "keploy tools",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := serviceFactory.GetService("tools", *conf)
+			svc, err := serviceFactory.GetService(ctx, "tools", *conf)
 			if err != nil {
 				return err
 			}

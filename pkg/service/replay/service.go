@@ -17,6 +17,8 @@ type Instrumentation interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+
+	GetAppIp(ctx context.Context, id uint64) (string, error)
 }
 
 type Service interface {

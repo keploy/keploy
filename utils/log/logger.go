@@ -2,10 +2,8 @@ package log
 
 import (
 	"log"
-	"net/http"
 	"os"
 
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -58,10 +56,10 @@ func New() *zap.Logger {
 	}
 
 	if debugMode {
-		go func() {
-			defer utils.HandlePanic()
-			log.Println(http.ListenAndServe("localhost:6060", nil))
-		}()
+		// for running pprof
+		// go func() {
+		// 	log.Println(http.ListenAndServe("localhost:6060", nil))
+		// }()
 
 		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 		logCfg.DisableStacktrace = false

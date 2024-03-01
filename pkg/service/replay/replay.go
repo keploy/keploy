@@ -228,7 +228,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 			return models.TestSetStatusFailed, fmt.Errorf("failed to set mocks: %w", err)
 		}
 		started := time.Now().UTC()
-		resp, err := r.SimulateRequest(testLoopCtx, testCase, testSetId)
+		resp, err := r.SimulateRequest(testLoopCtx, appId, testCase, testSetId)
 		if err != nil && resp == nil {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetId)), zap.Any("passed", models.HighlightFailingString("false")))
 		} else {
@@ -335,14 +335,21 @@ func (r *replayer) GetTestSetStatus(ctx context.Context, testRunId string, testS
 	return status, nil
 }
 
-func (r *replayer) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetId string) (*models.HttpResp, error) {
+func (r *replayer) SimulateRequest(ctx context.Context, appId uint64, tc *models.TestCase, testSetId string) (*models.HttpResp, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		r.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
 		cmdType := utils.FindDockerCmd(r.config.Command)
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 			var err error
-			tc.HttpReq.URL, err = replaceHostToIP(tc.HttpReq.URL, cfg.UserIP)
+
+			userIp, err := r.instrumentation.GetAppIp(ctx, appId)
+			if err != nil {
+				r.logger.Error("failed to get the app ip", zap.Error(err))
+				return nil, err
+			}
+
+			tc.HttpReq.URL, err = replaceHostToIP(tc.HttpReq.URL, userIp)
 			if err != nil {
 				r.logger.Error("failed to replace host to docker container's IP", zap.Error(err))
 			}

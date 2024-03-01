@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 
 	"go.keploy.io/server/v2/config"
@@ -47,33 +48,33 @@ func (n *serviceProvider) GetTelemetryService(config config.Config) *telemetry.T
 
 // TODO error handling like path vadilations, remove tele from platform
 func (n *serviceProvider) GetCommonServices(config config.Config) *commonInternalService {
-	hooks := hooks.NewHooks()
-	proxy := proxy.New(n.logger, hooks, config)
-	intrumentation := core.New(n.logger, hooks, proxy)
-	testDB := testdb.New(n.logger, config.Path+"/keploy", "", telemetry.Telemetry{})
-	mockDB := mockdb.New(n.logger, telemetry.Telemetry{}, config.Path+"/keploy", "")
+	h := hooks.NewHooks(n.logger, config)
+	p := proxy.New(n.logger, h, config)
+	instrumentation := core.New(n.logger, h, p)
+	testDB := testdb.New(n.logger, config.Path+"/keploy")
+	mockDB := mockdb.New(n.logger, config.Path+"/keploy", "")
 	reportDB := reportdb.New(n.logger, config.Path+"/keploy")
 	return &commonInternalService{
-		Instrumentation: intrumentation,
+		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
 		YamlMockDb:      mockDB,
 		YamlReportDb:    reportDB,
 	}
 }
 
-func (n *serviceProvider) GetService(cmd string, config config.Config) (interface{}, error) {
-	telemetry := n.GetTelemetryService(config)
-	telemetry.Ping()
+func (n *serviceProvider) GetService(ctx context.Context, cmd string, config config.Config) (interface{}, error) {
+	tel := n.GetTelemetryService(config)
+	tel.Ping(ctx)
 	switch cmd {
 	case "config", "update":
-		return tools.NewTools(n.logger, telemetry), nil
+		return tools.NewTools(n.logger, tel), nil
 	case "record", "test", "mock":
 		commonServices := n.GetCommonServices(config)
 		if cmd == "record" {
-			record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, telemetry, commonServices.Instrumentation, config)
+			record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, config)
 		}
 		if cmd == "test" {
-			replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, telemetry, commonServices.Instrumentation, config)
+			replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, config)
 		}
 		return nil, nil
 	default:

@@ -26,8 +26,8 @@ type HookCfg struct {
 }
 
 type App interface {
-	Setup(ctx context.Context, opts app.AppOptions) error
-	Run(ctx context.Context, inodeChan chan uint64, opts app.AppOptions) error
+	Setup(ctx context.Context, opts app.Options) error
+	Run(ctx context.Context, inodeChan chan uint64, opts app.Options) error
 	Kind(ctx context.Context) utils.CmdType
 	KeployIPv4Addr() string
 }

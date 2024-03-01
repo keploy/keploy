@@ -14,19 +14,6 @@ type TestReportVerdict struct {
 	failed int
 }
 
-type TestEnvironmentSetup struct {
-	Sessions                 []string
-	TestReportFS             platform.TestReportDB
-	Ctx                      context.Context
-	AbortStopHooksForcefully bool
-	ProxySet                 *proxy.ProxySet
-	ExitCmd                  chan bool
-	Storage                  platform.TestCaseDB
-	LoadedHooks              *hooks.Hook
-	AbortStopHooksInterrupt  chan bool
-	IgnoreOrdering           bool
-}
-
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
 	noise := globalNoise
 	for field, regexArr := range tsNoise["body"] {
