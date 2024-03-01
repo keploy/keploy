@@ -197,8 +197,9 @@ func findBinaryStreamMatch(logger *zap.Logger, tcsMocks []*models.Mock, requestB
 					similarity2 = fuzzyCheck(encoded64, reqBuf)
 				}
 
-				// calculate the jaccard similarity between the two buffers one with base64 encoding and another via that ..
-				similarity := max(similarity1, similarity2)
+				// calculate the jaccard similarity between the two buffers one with base64 encoding and another via that
+				//find the max similarity between the two
+				similarity := math.Max(similarity1, similarity2)
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx

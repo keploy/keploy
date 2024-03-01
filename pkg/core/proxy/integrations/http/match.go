@@ -126,13 +126,6 @@ func findStringMatch(req string, mockString []string) int {
 	return bestMatch
 }
 
-func HttpDecoder(encoded string) ([]byte, error) {
-	// decode the string to a buffer.
-
-	data := []byte(encoded)
-	return data, nil
-}
-
 // TODO: generalize the function to work with any type of integration
 func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 
@@ -140,7 +133,7 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	mxIdx := -1
 	// find the fuzzy hash of the mocks
 	for idx, mock := range mocks {
-		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
+		encoded, _ := decode(mock.Spec.HttpReq.Body)
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)
 		shingles2 := util.CreateShingles(reqBuff, k)
@@ -156,16 +149,21 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	return mxIdx
 }
 
-func HttpEncoder(buffer []byte) string {
+func encode(buffer []byte) string {
 	//Encode the buffer to string
 	encoded := string(buffer)
 	return encoded
 }
+func decode(encoded string) ([]byte, error) {
+	// decode the string to a buffer.
+	data := []byte(encoded)
+	return data, nil
+}
 
 func fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
-	com := HttpEncoder(reqBuff)
+	com := encode(reqBuff)
 	for _, mock := range tcsMocks {
-		encoded, _ := HttpDecoder(mock.Spec.HttpReq.Body)
+		encoded, _ := decode(mock.Spec.HttpReq.Body)
 		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
 			return true, mock
 		}
@@ -173,7 +171,7 @@ func fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	// convert all the configmocks to string array
 	mockString := make([]string, len(tcsMocks))
 	for i := 0; i < len(tcsMocks); i++ {
-		mockString[i] = string(tcsMocks[i].Spec.HttpReq.Body)
+		mockString[i] = tcsMocks[i].Spec.HttpReq.Body
 	}
 	// find the closest match
 	if util.IsAsciiPrintable(string(reqBuff)) {

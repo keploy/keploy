@@ -32,7 +32,7 @@ func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	id := uint64(c.id.Next())
 	a := app.NewApp(c.logger, id, cmd)
-	err := a.Setup(ctx, app.AppOptions{
+	err := a.Setup(ctx, app.Options{
 		DockerNetwork: opts.DockerNetwork,
 	})
 	if err != nil {
@@ -108,27 +108,29 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
-func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) error {
+func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
 	if opts.ServeTest {
-		return nil
+		c.logger.Debug("Serve test is true, not running the app")
+		return models.AppError{}
 	}
 	a, err := c.getApp(id)
 	if err != nil {
-		return err
-	}
-	// TODO: send the docker inode to the hook
-
-	//switch a.Kind(ctx) {
-	//case utils.Docker, utils.DockerCompose:
-	//	// process ebpf hooks
-	//case utils.Native:
-	//	// process native hooks
-	//}
-	err = c.hook.SendInode(ctx, id, 0)
-	if err != nil {
-		return err
+		c.logger.Error("Failed to get app", zap.Error(err))
+		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	}
 
-	return a.Run(ctx, app.AppOptions{DockerDelay: opts.DockerDelay})
+	//send inode to the hook
+	inodeChan := make(chan uint64)
+	go func(inodeChan chan uint64) {
+		defer utils.Recover(c.logger)
+		defer close(inodeChan)
 
+		inode := <-inodeChan
+		err := c.hook.SendInode(ctx, id, inode)
+		if err != nil {
+			c.logger.Error("Failed to send inode", zap.Error(err))
+		}
+	}(inodeChan)
+
+	return a.Run(ctx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
 }

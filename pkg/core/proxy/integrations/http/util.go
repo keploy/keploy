@@ -74,7 +74,7 @@ func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]
 			}
 		}
 	} else if transferEncodingHeader != "" {
-		// check if the intial request is the complete request.
+		// check if the initial request is the complete request.
 		if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
 			return nil
 		}
@@ -157,7 +157,7 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 			}
 		}
 	} else if transferEncodingHeader != "" {
-		//check if the intial response is the complete response.
+		//check if the initial response is the complete response.
 		if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
 			return nil
 		}
@@ -243,7 +243,7 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 				}
 			}
 
-			//check if the intial request is completed
+			//check if the initial request is completed
 			if strings.HasSuffix(string(requestChunked), "0\r\n\r\n") {
 				return nil
 			}
@@ -265,7 +265,7 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 		if err != nil {
 			if err == io.EOF {
 				isEOF = true
-				logger.Debug("recieved EOF, conn closed by the destination server")
+				logger.Debug("received EOF, conn closed by the destination server")
 				if len(resp) == 0 {
 					break
 				}
@@ -311,7 +311,7 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 					return err
 				} else {
 					isEOF = true
-					logger.Debug("recieved EOF", zap.Error(err))
+					logger.Debug("received EOF", zap.Error(err))
 					if len(resp) == 0 {
 						logger.Debug("exiting loop as response is complete")
 						break

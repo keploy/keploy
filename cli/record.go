@@ -31,13 +31,21 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				logger.Error("service doesn't satisfy record service interface")
 				return err
 			} else {
-				record.Start(ctx)
+				err := record.Start(ctx)
+				if err != nil {
+					logger.Error("failed to start recording", zap.Error(err))
+					return err
+				}
 			}
 			return nil
 		},
 	}
 
-	cmdConfigurator.AddFlags(cmd, cfg)
+	err := cmdConfigurator.AddFlags(cmd, cfg)
+	if err != nil {
+		logger.Error("failed to add record flags", zap.Error(err))
+		return nil
+	}
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	return cmd

@@ -19,8 +19,8 @@ func encodeMySql(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	}(destConn)
 
 	var (
-		mysqlRequests  = []models.MySQLRequest{}
-		mysqlResponses = []models.MySQLResponse{}
+		mysqlRequests  []models.MySQLRequest
+		mysqlResponses []models.MySQLResponse
 	)
 	for {
 		select {

@@ -26,7 +26,7 @@ var caCrt []byte //certificate
 var caPKey []byte //private key
 
 //go:embed asset
-var caFolder embed.FS
+var _ embed.FS
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -74,7 +74,7 @@ func updateCaStore(ctx context.Context) error {
 }
 
 func getCaPaths() ([]string, error) {
-	var caPaths = []string{}
+	var caPaths []string
 	for _, dir := range caStorePath {
 		if util.IsDirectoryExist(dir) {
 			caPaths = append(caPaths, dir)
@@ -92,7 +92,12 @@ func extractCertToTemp() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer tempFile.Close()
+	defer func(tempFile *os.File) {
+		err := tempFile.Close()
+		if err != nil {
+			return
+		}
+	}(tempFile)
 
 	// Change the file permissions to allow read access for all users
 	err = os.Chmod(tempFile.Name(), 0666)
@@ -168,7 +173,8 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 // TODO: This function should be used even before starting the proxy server. It should be called just after the keploy is started.
 // because the custom ca in case of NODE is set via env variable NODE_EXTRA_CA_CERTS and env variables can be set only on startup.
 // As in case of unit test integration, we are starting the proxy via api.
-// setupCA setups custom certificate authority to handle TLS connections
+
+// SetupCA setups custom certificate authority to handle TLS connections
 func SetupCA(ctx context.Context, logger *zap.Logger) error {
 	caPaths, err := getCaPaths()
 	if err != nil {

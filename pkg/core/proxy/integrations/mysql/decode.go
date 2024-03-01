@@ -163,7 +163,7 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 						return err
 					}
 
-					responseBuffer, err := util.Passthrough(ctx, logger, clientConn, destConn, requestBuffers)
+					responseBuffer, err := util.PassThrough(ctx, logger, clientConn, destConn, requestBuffers)
 					if err != nil {
 						logger.Error("failed to passthrough the mysql request to the actual database server", zap.Error(err))
 						return err

@@ -16,7 +16,7 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 	var resbuffer []byte
 	// list of packets available in the buffer
 	packets := response.PacketTypes
-	var cc, dtr, ps int = 0, 0, 0
+	var cc, dtr, ps = 0, 0, 0
 	for _, packet := range packets {
 		var msg pgproto3.BackendMessage
 
@@ -183,7 +183,7 @@ func postgresDecoderBackend(request models.Backend) ([]byte, error) {
 
 	var reqbuffer []byte
 	// list of packets available in the buffer
-	var b, e, p int = 0, 0, 0
+	var b, e, p = 0, 0, 0
 	packets := request.PacketTypes
 	for _, packet := range packets {
 		var msg pgproto3.FrontendMessage
@@ -364,11 +364,4 @@ func isBeginOnlyQuery(logger *zap.Logger, reqBuf []byte, expectedPgReq *models.B
 	}
 
 	return nil, false
-}
-
-func max(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
 }

@@ -71,7 +71,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					return err
 				}
 
-				_, err = pUtil.Passthrough(ctx, logger, clientConn, destConn, pgRequests)
+				_, err = pUtil.PassThrough(ctx, logger, clientConn, destConn, pgRequests)
 				if err != nil {
 					logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
 					return err
@@ -137,7 +137,7 @@ func decodePgRequest(logger *zap.Logger, buffer []byte) *models.Backend {
 
 			pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
 
-			i += (5 + pg.BackendWrapper.BodyLen)
+			i += 5 + pg.BackendWrapper.BodyLen
 		}
 
 		pg_mock := &models.Backend{

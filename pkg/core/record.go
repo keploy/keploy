@@ -15,6 +15,15 @@ func (c *Core) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingO
 	errCh := make(chan error, 10) // Buffered channel to prevent blocking
 	m := make(chan *models.Mock, 500)
 
+	ports := GetPortToSendToKernel(ctx, opts.Rules)
+	if len(ports) > 0 {
+		err := c.hook.PassThroughPortsInKernel(ctx, id, ports)
+		if err != nil {
+			errCh <- err
+			return nil, errCh
+		}
+	}
+
 	err := c.proxy.Record(ctx, id, m, opts)
 	if err != nil {
 		errCh <- err

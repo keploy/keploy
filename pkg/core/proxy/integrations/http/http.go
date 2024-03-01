@@ -152,9 +152,9 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 		"operation": req.Method,
 	}
 
-	// Check if the request is a passthrough request
+	// Check if the request is a passThrough request
 	if isPassThrough(logger, req, destPort, opts) {
-		logger.Debug("The request is a passthrough request", zap.Any("metadata", getReqMeta(req)))
+		logger.Debug("The request is a passThrough request", zap.Any("metadata", getReqMeta(req)))
 		return nil
 	}
 

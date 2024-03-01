@@ -33,7 +33,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			logger.Debug(fmt.Sprintf("the config mocks are: %v", configMocks))
 
 			var (
-				mongoRequests = []models.MongoRequest{}
+				mongoRequests []models.MongoRequest
 			)
 			if string(reqBuf) == "read form client conn" {
 				started := time.Now()
@@ -194,7 +194,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					case wiremessage.OpMsg:
 						respMessage := mongoResponse.Message.(*models.MongoOpMessage)
 
-						expectedRequestSections := []string{}
+						var expectedRequestSections []string
 						if len(configMocks[bestMatchIndex].Spec.MongoRequests) > 0 {
 							expectedRequestSections = configMocks[bestMatchIndex].Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 						}
@@ -241,7 +241,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					}
 
 					logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
-					reqBuf, err = util.Passthrough(ctx, logger, clientConn, destConn, requestBuffers)
+					reqBuf, err = util.PassThrough(ctx, logger, clientConn, destConn, requestBuffers)
 					if err != nil {
 						logger.Error("failed to passthrough the mongo request to the actual database server", zap.Error(err))
 						return err
@@ -254,7 +254,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 
 				for _, resp := range matchedMock.Spec.MongoResponses {
 					respMessage := resp.Message.(*models.MongoOpMessage)
-					expectedRequestSections := []string{}
+					var expectedRequestSections []string
 					if len(matchedMock.Spec.MongoRequests) > 0 {
 						expectedRequestSections = matchedMock.Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 					}

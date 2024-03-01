@@ -191,6 +191,8 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 				testSetStatusByErrChan = models.TestSetStatusFaultUserApp
 			case models.ErrUnExpected:
 				testSetStatusByErrChan = models.TestSetStatusAppHalted
+			case models.ErrInternal:
+
 			default:
 				testSetStatusByErrChan = models.TestSetStatusAppHalted
 			}
