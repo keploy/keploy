@@ -134,3 +134,14 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	return a.Run(ctx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
 }
+
+func (c *Core) GetAppIp(ctx context.Context, id uint64) (string, error) {
+
+	a, err := c.getApp(id)
+	if err != nil {
+		c.logger.Error("Failed to get app", zap.Error(err))
+		return "", err
+	}
+
+	return a.ContainerIPv4Addr(), nil
+}

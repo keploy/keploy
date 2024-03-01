@@ -8,7 +8,7 @@ import (
 )
 
 type ServiceFactory interface {
-	GetService(cmd string, config config.Config) (interface{}, error)
+	GetService(ctx context.Context, cmd string, config config.Config) (interface{}, error)
 }
 
 type CmdConfigurator interface {

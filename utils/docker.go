@@ -3,44 +3,45 @@ package utils
 import (
 	"context"
 	"fmt"
-	"go.keploy.io/server/v2/config"
-	"go.uber.org/zap"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"go.keploy.io/server/v2/config"
+	"go.uber.org/zap"
 )
 
 func CheckPath(logger *zap.Logger, conf *config.Config, curDir string) error {
 	var err error
-	if strings.Contains(conf.Test.Path, "..") || strings.HasPrefix(conf.Test.Path, "/") {
-		conf.Test.Path, err = filepath.Abs(filepath.Clean(conf.Test.Path))
+	if strings.Contains(conf.Path, "..") || strings.HasPrefix(conf.Path, "/") {
+		conf.Path, err = filepath.Abs(filepath.Clean(conf.Path))
 		if err != nil {
-			return logError(logger, "failed to get the absolute path", conf.Test.Path, err)
+			return logError(logger, "failed to get the absolute path", conf.Path, err)
 		}
 
-		relativePath, err := filepath.Rel(curDir, conf.Test.Path)
+		relativePath, err := filepath.Rel(curDir, conf.Path)
 		if err != nil {
-			return logError(logger, "failed to get the relative path", conf.Test.Path, err)
+			return logError(logger, "failed to get the relative path", conf.Path, err)
 		}
 
 		if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
-			return logError(logger, "path provided is not a subdirectory of current directory", conf.Test.Path, nil)
+			return logError(logger, "path provided is not a subdirectory of current directory", conf.Path, nil)
 		}
 
-		if strings.HasPrefix(conf.Test.Path, "/") {
+		if strings.HasPrefix(conf.Path, "/") {
 			currentDir, err := getCurrentDirInDocker(curDir)
 			if err != nil {
-				return logError(logger, "failed to get the current directory path in docker", conf.Test.Path, err)
+				return logError(logger, "failed to get the current directory path in docker", conf.Path, err)
 			}
 
-			if !strings.HasPrefix(conf.Test.Path, currentDir) {
-				return logError(logger, "path provided is not a subdirectory of current directory", conf.Test.Path, nil)
+			if !strings.HasPrefix(conf.Path, currentDir) {
+				return logError(logger, "path provided is not a subdirectory of current directory", conf.Path, nil)
 			}
 
-			conf.Test.Path, err = filepath.Rel(currentDir, conf.Test.Path)
+			conf.Path, err = filepath.Rel(currentDir, conf.Path)
 			if err != nil {
-				return logError(logger, "failed to get the relative path for the subdirectory", conf.Test.Path, err)
+				return logError(logger, "failed to get the relative path for the subdirectory", conf.Path, err)
 			}
 		}
 	}

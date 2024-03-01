@@ -180,6 +180,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("dnsPort", cfg.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", cfg.Command, "Command to start the user application")
 		cmd.Flags().DurationP("buildDelay", "bd", cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", cfg.ContainerName, "Name of the application's docker container")

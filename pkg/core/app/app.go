@@ -84,6 +84,10 @@ func (a *App) KeployIPv4Addr() string {
 	return a.keployIPv4
 }
 
+func (a *App) ContainerIPv4Addr() string {
+	return a.containerIPv4
+}
+
 func (a *App) SetupDocker() error {
 	var err error
 	cont, net, err := parseDockerCmd(a.cmd)
@@ -391,6 +395,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}
 }
 
+// TODO: return error rather than AppError, so that nil error can also be returned
 func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) models.AppError {
 	a.containerDelay = opts.DockerDelay
 	a.inodeChan = inodeChan
