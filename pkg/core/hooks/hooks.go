@@ -18,13 +18,13 @@ import (
 )
 
 // TODO: do we need the config here, if not then how can i set the proxyPort
-func NewHooks(logger *zap.Logger, opts config.Config) *Hooks {
+func NewHooks(logger *zap.Logger, cfg config.Config) *Hooks {
 	return &Hooks{
 		logger:    logger,
 		sess:      core.NewSessions(),
 		m:         sync.Mutex{},
-		proxyPort: opts.Port,
-		dnsPort:   opts.DnsPort,
+		proxyPort: cfg.ProxyPort,
+		dnsPort:   cfg.DnsPort,
 	}
 }
 
