@@ -6,15 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,12 +22,12 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 
 	"github.com/TheZeroSlave/zapsentry"
-	sentry "github.com/getsentry/sentry-go"
+	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-var ErrFileNotFound = errors.New("file Not found")
+// var ErrFileNotFound = errors.New("file Not found")
 var WarningSign = "\U000026A0"
 
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) {
@@ -86,6 +84,7 @@ func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentr
 			kernelVersion = string(kernelBytes)
 		}
 	}
+
 	arch := runtime.GOARCH
 	installationID, err := configDb.GetInstallationId(ctx)
 	if err != nil {
@@ -157,7 +156,7 @@ var ConfigGuide = `
 #        }
 `
 
-// askForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
+// AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
 // confirmations. If the input is not recognized, it will ask again. The function does not return
 // until it gets a valid response from the user.
@@ -191,20 +190,23 @@ func CheckFileExists(path string) bool {
 
 var Version string
 
-func attachLogFileToSentry(logFilePath string) {
+func attachLogFileToSentry(logFilePath string) error {
 	file, err := os.Open(logFilePath)
 	if err != nil {
-		errors.New(fmt.Sprintf("Error opening log file: %s", err.Error()))
-		return
+		return errors.New(fmt.Sprintf("Error opening log file: %s", err.Error()))
 	}
 	defer file.Close()
 
-	content, _ := ioutil.ReadAll(file)
+	content, err := io.ReadAll(file)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Error reading log file: %s", err.Error()))
+	}
 
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetExtra("logfile", string(content))
 	})
 	sentry.Flush(time.Second * 5)
+	return nil
 }
 
 // Recover recovers from a panic and logs the stack trace to Sentry.
@@ -216,13 +218,16 @@ func Recover(logger *zap.Logger) {
 	}
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
-		attachLogFileToSentry("./keploy-logs.txt")
+		err := attachLogFileToSentry("./keploy-logs.txt")
+		if err != nil {
+			logger.Error("Failed to attach log file to sentry", zap.Error(err))
+		}
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 		// Get the stack trace
 		stackTrace := debug.Stack()
 		logger.Error("Recovered from:", zap.String("stack trace", string(stackTrace)))
 		//stopping the global context
-		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+		err = Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			logger.Error("Failed to stop the global context", zap.Error(err))
 			//return
@@ -264,7 +269,7 @@ func GetLatestGitHubRelease(ctx context.Context) (GitHubRelease, error) {
 	return release, nil
 }
 
-// It checks if the cli is related to docker or not, it also returns if its a docker compose file
+// It checks if the cli is related to docker or not, it also returns if it is a docker compose file
 func FindDockerCmd(cmd string) CmdType {
 	// Convert command to lowercase for case-insensitive comparison
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
@@ -364,16 +369,16 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	return "", errors.New("failed to get alias")
 }
 
-func appendFlags(flagName string, flagValue string) string {
-	if len(flagValue) > 0 {
-		// Check for = in the flagName.
-		if strings.Contains(flagName, "=") {
-			return " --" + flagName + flagValue
-		}
-		return " --" + flagName + " " + flagValue
-	}
-	return ""
-}
+//func appendFlags(flagName string, flagValue string) string {
+//	if len(flagValue) > 0 {
+//		// Check for = in the flagName.
+//		if strings.Contains(flagName, "=") {
+//			return " --" + flagName + flagValue
+//		}
+//		return " --" + flagName + " " + flagValue
+//	}
+//	return ""
+//}
 
 func RunInDocker(ctx context.Context, logger *zap.Logger, command string) error {
 	//Get the correct keploy alias.
@@ -416,38 +421,38 @@ func SentryInit(logger *zap.Logger, dsn string) {
 	}()
 }
 
-func GetUniqueReportDir(testReportPath, subDirPrefix string) (string, error) {
-	latestReportNumber := 1
-
-	if _, err := os.Stat(testReportPath); !os.IsNotExist(err) {
-		file, err := os.Open(testReportPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to open directory: %w", err)
-		}
-		defer file.Close()
-
-		files, err := file.Readdir(-1) // -1 to read all files and directories
-		if err != nil {
-			return "", fmt.Errorf("failed to read directory: %w", err)
-		}
-
-		for _, f := range files {
-			if f.IsDir() && strings.HasPrefix(f.Name(), subDirPrefix) {
-				reportNumber, err := strconv.Atoi(strings.TrimPrefix(f.Name(), subDirPrefix))
-				if err != nil {
-					return "", fmt.Errorf("failed to parse report number: %w", err)
-				}
-				if reportNumber > latestReportNumber {
-					latestReportNumber = reportNumber
-				}
-			}
-		}
-		latestReportNumber++ // increment to create a new report directory
-	}
-
-	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
-	return newTestReportPath, nil
-}
+//func GetUniqueReportDir(testReportPath, subDirPrefix string) (string, error) {
+//	latestReportNumber := 1
+//
+//	if _, err := os.Stat(testReportPath); !os.IsNotExist(err) {
+//		file, err := os.Open(testReportPath)
+//		if err != nil {
+//			return "", fmt.Errorf("failed to open directory: %w", err)
+//		}
+//		defer file.Close()
+//
+//		files, err := file.Readdir(-1) // -1 to read all files and directories
+//		if err != nil {
+//			return "", fmt.Errorf("failed to read directory: %w", err)
+//		}
+//
+//		for _, f := range files {
+//			if f.IsDir() && strings.HasPrefix(f.Name(), subDirPrefix) {
+//				reportNumber, err := strconv.Atoi(strings.TrimPrefix(f.Name(), subDirPrefix))
+//				if err != nil {
+//					return "", fmt.Errorf("failed to parse report number: %w", err)
+//				}
+//				if reportNumber > latestReportNumber {
+//					latestReportNumber = reportNumber
+//				}
+//			}
+//		}
+//		latestReportNumber++ // increment to create a new report directory
+//	}
+//
+//	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
+//	return newTestReportPath, nil
+//}
 
 func FetchHomeDirectory(isNewConfigPath bool) string {
 	var configFolder = "/.keploy-config"
