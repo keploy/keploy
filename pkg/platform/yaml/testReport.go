@@ -98,13 +98,13 @@ func (fe *TestReport) Write(ctx context.Context, path string, doc platform.KindS
 	data = append(data, d...)
 
 	validatedPath, err := util.ValidatePath(filepath.Join(path, readDock.Name+".yaml"))
-    if err != nil {
-        return fmt.Errorf("%s failed to validate path: %s", Emoji, err.Error())
-    }
-    
-    err = os.WriteFile(validatedPath, data, os.ModePerm)
-    if err != nil {
-        return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
-    }
+	if err != nil {
+		return fmt.Errorf("%s failed to validate path: %s", Emoji, err.Error())
+	}
+
+	err = os.WriteFile(validatedPath, data, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", Emoji, err.Error())
+	}
 	return nil
 }
