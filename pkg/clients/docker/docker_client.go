@@ -537,8 +537,8 @@ func (idc *internalDockerClient) AddNetworkToCompose(dockerComposefilePath, newC
 			&yaml.Node{
 				Kind: yaml.MappingNode,
 				Content: []*yaml.Node{
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "external"},
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "true"},
+					{Kind: yaml.ScalarNode, Value: "external"},
+					{Kind: yaml.ScalarNode, Value: "true"},
 				},
 			},
 		)
@@ -560,7 +560,7 @@ func (idc *internalDockerClient) AddNetworkToCompose(dockerComposefilePath, newC
 				&yaml.Node{
 					Kind: yaml.SequenceNode,
 					Content: []*yaml.Node{
-						&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-network"},
+						{Kind: yaml.ScalarNode, Value: "keploy-network"},
 					},
 				},
 			)
