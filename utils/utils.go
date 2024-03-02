@@ -139,7 +139,7 @@ func HandlePanic() {
 }
 
 // GenerateGithubActions generates a GitHub Actions workflow file for Keploy
-func GenerateGithubActions(logger *zap.Logger, path string, appCmd string) {
+func GenerateGithubActions(logger *zap.Logger, appCmd string) {
 	// Determine the path based on the alias "keploy"
 	var keployPath string
 	isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0

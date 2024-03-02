@@ -287,7 +287,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			r.logger.Info("", zap.Any("keploy test and mock path", path))
 
-			defer utils.GenerateGithubActions(r.logger, path, appCmd)
+			defer utils.GenerateGithubActions(r.logger, appCmd)
 
 			var hasContainerName bool
 			if isDockerCmd {
