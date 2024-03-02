@@ -467,3 +467,43 @@ func (h *Hooks) Record(ctx context.Context, id uint64) (<-chan *models.TestCase,
 	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents)
 }
+
+func (h *Hooks) unLoad(ctx context.Context) {
+	// closing all events
+	//other
+	h.socket.Close()
+	//egress
+	h.bind.Close()
+	h.udpp4.Close()
+	//ipv4
+	h.connect4.Close()
+	h.gp4.Close()
+	h.tcppv4.Close()
+	h.tcpv4.Close()
+	h.tcpv4Ret.Close()
+	//ipv6
+	h.connect6.Close()
+	h.gp6.Close()
+	h.tcppv6.Close()
+	h.tcpv6.Close()
+	h.tcpv6Ret.Close()
+	//ingress
+	h.accept.Close()
+	h.acceptRet.Close()
+	h.accept4.Close()
+	h.accept4Ret.Close()
+	h.close.Close()
+	h.closeRet.Close()
+	h.read.Close()
+	h.readRet.Close()
+	h.write.Close()
+	h.writeRet.Close()
+	h.writev.Close()
+	h.writevRet.Close()
+	h.sendto.Close()
+	h.sendtoRet.Close()
+	h.recvfrom.Close()
+	h.recvfromRet.Close()
+	h.objects.Close()
+	h.logger.Info("eBPF resources released successfully...")
+}
