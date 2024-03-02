@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/pkg/models"
@@ -28,26 +27,26 @@ func NewFrontend() *FrontendWrapper {
 	return &FrontendWrapper{}
 }
 
-func checkScram(encoded []byte, log *zap.Logger) bool {
-	// encoded, err := PostgresDecoder(packet)
+// func checkScram(encoded []byte, log *zap.Logger) bool {
+// 	// encoded, err := PostgresDecoder(packet)
 
-	// check if payload contains SCRAM-SHA-256
-	messageType := encoded[0]
-	log.Debug("Message Type: %c\n", zap.String("messageType", string(messageType)))
-	if messageType == 'N' {
-		return false
-	}
-	// Print the message payload (for simplicity, the payload is printed as a string)
-	payload := string(encoded[5:])
-	if messageType == 'R' {
-		if strings.Contains(payload, "SCRAM-SHA") {
-			log.Debug("scram packet")
-			return true
-		}
-	}
+// 	// check if payload contains SCRAM-SHA-256
+// 	messageType := encoded[0]
+// 	log.Debug("Message Type: %c\n", zap.String("messageType", string(messageType)))
+// 	if messageType == 'N' {
+// 		return false
+// 	}
+// 	// Print the message payload (for simplicity, the payload is printed as a string)
+// 	payload := string(encoded[5:])
+// 	if messageType == 'R' {
+// 		if strings.Contains(payload, "SCRAM-SHA") {
+// 			log.Debug("scram packet")
+// 			return true
+// 		}
+// 	}
 
-	return false
-}
+// 	return false
+// }
 
 func isStartupPacket(packet []byte) bool {
 	protocolVersion := binary.BigEndian.Uint32(packet[4:8])
@@ -55,27 +54,28 @@ func isStartupPacket(packet []byte) bool {
 	return protocolVersion == 196608 // 3.0 in PostgreSQL
 }
 
-func isRegularPacket(packet []byte) bool {
-	messageType := packet[0]
-	return messageType == 'Q' || messageType == 'P' || messageType == 'D' || messageType == 'C' || messageType == 'E'
-}
+// func isRegularPacket(packet []byte) bool {
+// 	messageType := packet[0]
+// 	return messageType == 'Q' || messageType == 'P' || messageType == 'D' || messageType == 'C' || messageType == 'E'
+// }
 
 const (
-	AuthTypeOk                = 0
-	AuthTypeCleartextPassword = 3
-	AuthTypeMD5Password       = 5
-	AuthTypeSCMCreds          = 6
-	AuthTypeGSS               = 7
-	AuthTypeGSSCont           = 8
-	AuthTypeSSPI              = 9
-	AuthTypeSASL              = 10
-	AuthTypeSASLContinue      = 11
-	AuthTypeSASLFinal         = 12
+	AuthTypeOk                = 0  // AuthTypeOk is the code for the OK message.
+	AuthTypeCleartextPassword = 3  // AuthTypeCleartextPassword is the code for the Cleartext Password message.
+	AuthTypeMD5Password       = 5  // AuthTypeMD5Password is the code for the MD5 Password message.
+	AuthTypeSCMCreds          = 6  // AuthTypeSCMCreds is the code for the SCM Credentials message.
+	AuthTypeGSS               = 7  // AuthTypeGSS is the code for the GSS message.
+	AuthTypeGSSCont           = 8  // AuthTypeGSSCont is the code for the GSS Continue message.
+	AuthTypeSSPI              = 9  // AuthTypeSSPI is the code for the SSPI message.
+	AuthTypeSASL              = 10 // AuthTypeSASL is the code for the SASL message.
+	AuthTypeSASLContinue      = 11 // AuthTypeSASLContinue is the code for the SASL Continue message.
+	AuthTypeSASLFinal         = 12 // AuthTypeSASLFinal is the code for the SASL Final message.
 )
 
-const ProtocolVersionNumber uint32 = 196608 // Replace with actual version number if different
+// ProtocolVersionNumber represents the version number of the protocol.
+const ProtocolVersionNumber uint32 = 196608
 
-// PG Response Packet Transcoder
+// TranslateToReadableBackend - PG Response Packet Transcoder
 func (b *BackendWrapper) TranslateToReadableBackend(msgBody []byte) (pgproto3.FrontendMessage, error) {
 
 	// fmt.Println("msgType", b.BackendWrapper.MsgType)
@@ -256,7 +256,7 @@ func parseAuthType(buffer []byte) (int32, error) {
 	reader := bytes.NewReader(buffer)
 
 	// Skip the message type (1 byte) as you know it's 'R'
-	reader.Seek(1, 0)
+	_, _ = reader.Seek(1, 0)
 
 	// Read the length of the message (4 bytes)
 	var length int32
