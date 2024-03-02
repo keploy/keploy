@@ -98,6 +98,7 @@ type bpfMapSpecs struct {
 	ConnInfoMap               *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap            *ebpf.MapSpec `ebpf:"current_sock_map"`
 	DestInfoMap               *ebpf.MapSpec `ebpf:"dest_info_map"`
+	DnsPortMap                *ebpf.MapSpec `ebpf:"dns_port_map"`
 	DockerCmdMap              *ebpf.MapSpec `ebpf:"docker_cmd_map"`
 	GlobalNsPidInfoMap        *ebpf.MapSpec `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.MapSpec `ebpf:"inode_map"`
@@ -143,6 +144,7 @@ type bpfMaps struct {
 	ConnInfoMap               *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap            *ebpf.Map `ebpf:"current_sock_map"`
 	DestInfoMap               *ebpf.Map `ebpf:"dest_info_map"`
+	DnsPortMap                *ebpf.Map `ebpf:"dns_port_map"`
 	DockerCmdMap              *ebpf.Map `ebpf:"docker_cmd_map"`
 	GlobalNsPidInfoMap        *ebpf.Map `ebpf:"global_nsPid_info_map"`
 	InodeMap                  *ebpf.Map `ebpf:"inode_map"`
@@ -171,6 +173,7 @@ func (m *bpfMaps) Close() error {
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
+		m.DnsPortMap,
 		m.DockerCmdMap,
 		m.GlobalNsPidInfoMap,
 		m.InodeMap,

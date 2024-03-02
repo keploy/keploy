@@ -22,8 +22,8 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/utils"
 	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 )
 
 const (
@@ -243,10 +243,13 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		} else { //Supports only linux
 			h.logger.Debug("Running user application on Linux", zap.Any("pid of keploy", os.Getpid()))
 
-			// to notify the kernel hooks that the user application command is running in native linux.
-			key := 0
-			value := false
-			h.objects.DockerCmdMap.Update(uint32(key), &value, ebpf.UpdateAny)
+			if !isUnitTestIntegration {
+				err := h.SendCmdType(false)
+				if err != nil {
+					h.logger.Error("failed to send cmd type to kernel", zap.Error(err))
+					return err
+				}
+			}
 
 			// Recover from panic and gracefully shutdown
 			defer h.Recover(pkg.GenerateRandomID())
@@ -595,7 +598,6 @@ func (h *Hook) injectNetworkToKeploy(appNetwork string) error {
 	h.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", KeployContainerName), zap.Any("appNetwork", appNetwork))
 	return nil
 }
-
 
 func parseDockerCommand(dockerCmd string) (string, string, error) {
 	// Regular expression patterns

@@ -8,6 +8,8 @@ type TestCaseDB interface {
 	WriteTestcase(tc KindSpecifier, ctx context.Context, filters KindSpecifier) error
 	WriteMock(tc KindSpecifier, ctx context.Context) error
 
+	UpdateMocks(mocks []KindSpecifier, testSet string) error
+
 	ReadTestcases(testSet string, lastSeenId KindSpecifier, options KindSpecifier) ([]KindSpecifier, error)
 	ReadTcsMocks(tc KindSpecifier, testSet string) ([]KindSpecifier, error)
 	ReadConfigMocks(testSet string) ([]KindSpecifier, error)

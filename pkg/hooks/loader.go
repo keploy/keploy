@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,13 +46,18 @@ type Hook struct {
 	appPidMap        *ebpf.Map
 	keployServerPort *ebpf.Map
 	passthroughPorts *ebpf.Map
+	DnsPort          *ebpf.Map
 
 	platform.TestCaseDB
 
-	logger                   *zap.Logger
-	proxyPort                uint32
-	tcsMocks                 *treeDb
-	configMocks              *treeDb
+	logger      *zap.Logger
+	proxyPort   uint32
+	tcsMocks    *treeDb
+	configMocks *treeDb
+	// here key represents mock name and value is true only when
+	// it is not a config mock or it is not being used by any test case yet.
+	consumedMocks            map[string]bool
+	areAllMocksMatched       bool
 	mu                       *sync.Mutex
 	mutex                    sync.RWMutex
 	userAppCmd               *exec.Cmd
@@ -127,6 +133,7 @@ func NewHook(db platform.TestCaseDB, mainRoutineId int, logger *zap.Logger) (*Ho
 		TestCaseDB:    db,
 		configMocks:   configMocks,
 		tcsMocks:      tcsMocks,
+		consumedMocks: make(map[string]bool),
 		mu:            &sync.Mutex{},
 		userIpAddress: make(chan string),
 		idc:           idc,
@@ -162,6 +169,22 @@ func (h *Hook) AppendMocks(m *models.Mock, ctx context.Context) error {
 	return nil
 }
 
+func (h *Hook) RemoveUnusedMocks(testSet string) error {
+	mocks, err := h.GetUsedMocks(testSet)
+	if err != nil {
+		return err
+	}
+	kindSpecifiers := make([]platform.KindSpecifier, len(mocks))
+	for i, mock := range mocks {
+		kindSpecifiers[i] = mock
+	}
+	err = h.TestCaseDB.UpdateMocks(kindSpecifiers, testSet)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (h *Hook) SetTcsMocks(m []*models.Mock) {
 	h.tcsMocks.deleteAll()
 	for index, mock := range m {
@@ -182,6 +205,9 @@ func (h *Hook) SetConfigMocks(m []*models.Mock) {
 
 func (h *Hook) UpdateConfigMock(oldMock *models.Mock, newMock *models.Mock) bool {
 	isUpdated := h.configMocks.update(oldMock.TestModeInfo, newMock.TestModeInfo, newMock)
+	if isUpdated {
+		h.UpdateConsumedMocks(oldMock.Name, false)
+	}
 	return isUpdated
 }
 
@@ -225,17 +251,99 @@ func (h *Hook) GetConfigMocks() ([]*models.Mock, error) {
 
 func (h *Hook) DeleteTcsMock(mock *models.Mock) bool {
 	isDeleted := h.tcsMocks.delete(mock.TestModeInfo)
+	if isDeleted {
+		h.UpdateConsumedMocks(mock.Name, true)
+	}
 	return isDeleted
 }
 
 func (h *Hook) DeleteConfigMock(mock *models.Mock) bool {
 	isDeleted := h.configMocks.delete(mock.TestModeInfo)
+	if isDeleted {
+		h.UpdateConsumedMocks(mock.Name, false)
+	}
 	return isDeleted
+}
+
+func (h *Hook) GetUsedMocks(testSet string) ([]*models.Mock, error) {
+	var matchedMocks []*models.Mock
+	tcsMocks, err := h.TestCaseDB.ReadTcsMocks(nil, testSet)
+	if err != nil {
+		return nil, err
+	}
+	configMocks, err := h.TestCaseDB.ReadConfigMocks(testSet)
+	if err != nil {
+		return nil, err
+	}
+	mocks := []*models.Mock{}
+	for _, mock := range append(tcsMocks, configMocks...) {
+		m, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		mocks = append(mocks, m)
+	}
+	totalMatches := 0
+	for _, mock := range mocks {
+		if _, ok := h.consumedMocks[mock.Name]; ok {
+			totalMatches++
+			matchedMocks = append(matchedMocks, mock)
+		}
+	}
+	if len(mocks) == totalMatches {
+		// this means all mocks have matched
+		h.areAllMocksMatched = true
+	} else {
+		h.areAllMocksMatched = false
+	}
+	SortMocksByName(matchedMocks)
+	return matchedMocks, nil
+}
+
+func SortMocksByName(mocks []*models.Mock) {
+	sort.SliceStable(mocks, func(i, j int) bool {
+
+		mockNamePartsI := strings.Split(mocks[i].Name, "-")
+		mockNamePartsJ := strings.Split(mocks[j].Name, "-")
+
+		if len(mockNamePartsI) < 2 || len(mockNamePartsJ) < 2 {
+			return false
+		}
+
+		mockNumberI, err1 := strconv.Atoi(mockNamePartsI[1])
+		mockNumberJ, err2 := strconv.Atoi(mockNamePartsJ[1])
+
+		if err1 != nil || err2 != nil {
+			return false
+		}
+
+		return mockNumberI < mockNumberJ
+	})
+}
+
+func (h *Hook) GetAreAllMocksMatched() bool {
+	return h.areAllMocksMatched
+}
+
+func (h *Hook) GetConsumedMocks() map[string]bool {
+	return h.consumedMocks
+}
+
+func (h *Hook) UpdateConsumedMocks(mockName string, isTcsUnused bool) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.consumedMocks[mockName] = isTcsUnused
 }
 
 func (h *Hook) ResetDeps() int {
 	h.tcsMocks.deleteAll()
 	return 1
+}
+
+func (h *Hook) SendCmdType(isDocker bool) error {
+	// to notify the kernel hooks that the user application command is running in native linux.
+	key := 0
+	return h.objects.DockerCmdMap.Update(uint32(key), &isDocker, ebpf.UpdateAny)
 }
 
 // SendPassThroughPorts sends the destination ports of the server which should not be intercepted by keploy proxy.
@@ -265,6 +373,18 @@ func (h *Hook) SendPassThroughPorts(filterPorts []uint) error {
 			h.logger.Error("failed to send the passthrough ports to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
 			return err
 		}
+	}
+	return nil
+}
+
+// SendDnsPort sends the dns server port to the eBPF program.
+func (h *Hook) SendDnsPort(port uint32) error {
+	h.logger.Debug("sending dns server port", zap.Any("port", port))
+	key := 0
+	err := h.DnsPort.Update(uint32(key), &port, ebpf.UpdateAny)
+	if err != nil {
+		h.logger.Error("failed to send dns server port to the epbf program", zap.Any("dns server port", port), zap.Any("error thrown by ebpf map", err.Error()))
+		return err
 	}
 	return nil
 }
@@ -322,7 +442,7 @@ func (h *Hook) PrintRedirectProxyMap() {
 	for itr.Next(&key, &dest) {
 		h.logger.Debug(fmt.Sprintf("Redirect Proxy:  [key:%v] || [value:%v]\n", key, dest))
 	}
-	h.logger.Debug("--------Redirect Proxy Map-------")
+	h.logger.Debug("-------- Proxy Map-------")
 }
 
 // GetDestinationInfo retrieves destination information associated with a source port.
@@ -559,6 +679,7 @@ func (h *Hook) LoadHooks(appCmd, appContainer string, pid uint32, ctx context.Co
 	h.appPidMap = objs.AppNsPidMap
 	h.keployServerPort = objs.KeployServerPort
 	h.passthroughPorts = objs.PassThroughPorts
+	h.DnsPort = objs.DnsPortMap
 
 	h.stopper = stopper
 	h.objects = objs

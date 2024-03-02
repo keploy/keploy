@@ -22,6 +22,18 @@ import (
 	"go.uber.org/zap"
 )
 
+type jsonComparisonResult struct {
+	matches     bool     // Indicates if the JSON strings match according to the criteria
+	isExact     bool     // Indicates if the match is exact, considering ordering and noise
+	differences []string // Lists the keys or indices of values that are not the same
+}
+
+type validatedJSON struct {
+	expected    interface{} // The expected JSON
+	actual      interface{} // The actual JSON
+	isIdentical bool
+}
+
 type InitialiseRunTestSetReturn struct {
 	Tcs           []*models.TestCase
 	ErrChan       chan error
@@ -43,6 +55,8 @@ type TestEnvironmentSetup struct {
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 	IgnoreOrdering           bool
+	RemoveUnusedMocks        bool
+	GenerateTestReport       bool
 }
 
 type TestConfig struct {
@@ -65,6 +79,7 @@ type TestConfig struct {
 	Tele               *telemetry.Telemetry
 	PassThroughHosts   []models.Filters
 	IgnoreOrdering     bool
+	RemoveUnusedMocks  bool
 }
 
 type RunTestSetConfig struct {
@@ -461,6 +476,16 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 	// TODO change this to debug
 	logger.Debug("number of filtered mocks", zap.Any("testcase", tc.Name), zap.Any("number of filtered mocks", len(filteredMocks)))
 	return filteredMocks, unFilteredMocks
+}
+
+func GetMatchedMocks(consumedMocks map[string]bool) []string {
+	var matchedMocks []string
+	for mockName, isTcsUnused := range consumedMocks {
+		if isTcsUnused {
+			matchedMocks = append(matchedMocks, mockName)
+		}
+	}
+	return matchedMocks
 }
 
 // creates a directory if not exists with all user access
