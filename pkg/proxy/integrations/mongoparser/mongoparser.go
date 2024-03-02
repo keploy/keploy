@@ -213,6 +213,8 @@ func decodeOutgoingMongo(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			if bestMatchIndex == -1 || maxMatchScore == 0.0 {
 				logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
 				continue
+			} else {
+				h.UpdateConfigMock(configMocks[bestMatchIndex], configMocks[bestMatchIndex])
 			}
 			for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
 				switch mongoResponse.Header.Opcode {
