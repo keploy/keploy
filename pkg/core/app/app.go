@@ -409,7 +409,10 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) mode
 func (a *App) run(ctx context.Context) models.AppError {
 	// Create a new command with your appCmd
 	// TODO: do we need sh here? or just use appCmd directly?
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
+	//TODO: we can't use ctx if we are using sh -c, because it doesn't pass the signal to the actual child process
+	// which is the app process.
+	// cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
+	cmd := exec.CommandContext(ctx, a.cmd)
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
