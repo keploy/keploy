@@ -103,7 +103,6 @@ func (ys *Yaml) Write(path, fileName string, docRead platform.KindSpecifier) err
 	if err != nil {
 		return err
 	}
-
 	file, err := os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		ys.Logger.Error("failed to open the created yaml file", zap.Error(err), zap.Any("yaml file name", fileName))
@@ -363,6 +362,37 @@ func (ys *Yaml) WriteMock(mockRead platform.KindSpecifier, ctx context.Context) 
 		return err
 	}
 
+	return nil
+}
+
+func (ys *Yaml) UpdateMocks(mockRead []platform.KindSpecifier, testSet string) error {
+	mocks := []*models.Mock{}
+	for _, mock := range mockRead {
+		mockModel, ok := mock.(*models.Mock)
+		if !ok {
+			continue
+		}
+		mocks = append(mocks, mockModel)
+	}
+	mockPath := filepath.Join(ys.MockPath, testSet)
+	mockFilePath, err := util.ValidatePath(filepath.Join(mockPath, "mocks.yaml"))
+	if err != nil {
+		return err
+	}
+	err = os.Remove(mockFilePath)
+	if err != nil {
+		return err
+	}
+	for _, mock := range mocks {
+		mockYaml, err := EncodeMock(mock, ys.Logger)
+		if err != nil {
+			return err
+		}
+		err = ys.Write(mockPath, "mocks", mockYaml)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

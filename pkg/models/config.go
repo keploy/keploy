@@ -51,7 +51,6 @@ test:
   coverageReportPath: ""
 `
 
-
 type Config struct {
 	Record Record `json:"record" yaml:"record"`
 	Test   Test   `json:"test" yaml:"test"`
@@ -103,7 +102,7 @@ type Test struct {
 	BypassEndpointsRegistry []string            `json:"bypassEndpointsRegistry" yaml:"bypassEndpointsRegistry"`
 	WithCoverage            bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
 	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
-	GenerateTestReport      bool                `json:"generateTestReport" yaml:"generateTestReport"` 
+	GenerateTestReport      bool                `json:"generateTestReport" yaml:"generateTestReport"`
 	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
 	Stubs                   Stubs               `json:"stubs" yaml:"stubs"`
 }

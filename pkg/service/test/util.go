@@ -55,6 +55,8 @@ type TestEnvironmentSetup struct {
 	LoadedHooks              *hooks.Hook
 	AbortStopHooksInterrupt  chan bool
 	IgnoreOrdering           bool
+	RemoveUnusedMocks        bool
+	GenerateTestReport       bool
 }
 
 type TestConfig struct {
@@ -77,6 +79,7 @@ type TestConfig struct {
 	Tele               *telemetry.Telemetry
 	PassThroughHosts   []models.Filters
 	IgnoreOrdering     bool
+	RemoveUnusedMocks  bool
 }
 
 type RunTestSetConfig struct {
@@ -473,6 +476,16 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 	// TODO change this to debug
 	logger.Debug("number of filtered mocks", zap.Any("testcase", tc.Name), zap.Any("number of filtered mocks", len(filteredMocks)))
 	return filteredMocks, unFilteredMocks
+}
+
+func GetMatchedMocks(consumedMocks map[string]bool) []string {
+	var matchedMocks []string
+	for mockName, isTcsUnused := range consumedMocks {
+		if isTcsUnused {
+			matchedMocks = append(matchedMocks, mockName)
+		}
+	}
+	return matchedMocks
 }
 
 // creates a directory if not exists with all user access
