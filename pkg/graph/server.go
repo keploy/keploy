@@ -68,7 +68,7 @@ func (g *Graph) Serve(ctx context.Context) error {
 	return nil
 }
 
-// Gracefully shut down the HTTP server with a timeout
+// Gracefully shut down the HTTP server
 func (g *Graph) stopGraphqlServer(ctx context.Context, httpSrv *http.Server) {
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		g.logger.Error("Graphql server shutdown failed", zap.Error(err))

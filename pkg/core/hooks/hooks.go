@@ -3,9 +3,10 @@ package hooks
 import (
 	"context"
 	"fmt"
-	"go.keploy.io/server/v2/config"
 	"os"
 	"sync"
+
+	"go.keploy.io/server/v2/config"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -23,6 +24,7 @@ func NewHooks(logger *zap.Logger, cfg config.Config) *Hooks {
 		logger:    logger,
 		sess:      core.NewSessions(),
 		m:         sync.Mutex{},
+		proxyIp:   "127.0.0.1",
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DnsPort,
 	}
@@ -31,6 +33,7 @@ func NewHooks(logger *zap.Logger, cfg config.Config) *Hooks {
 type Hooks struct {
 	logger    *zap.Logger
 	sess      *core.Sessions
+	proxyIp   string
 	proxyPort uint32
 	dnsPort   uint32
 
@@ -93,10 +96,15 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		return err
 	}
 
-	proxyIp, err := IPv4ToUint32(opts.KeployIPV4)
+	if opts.IsDocker {
+		h.proxyIp = opts.KeployIPV4
+	}
+
+	proxyIp, err := IPv4ToUint32(h.proxyIp)
 	if err != nil {
 		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
 	}
+
 	err = h.SendProxyInfo(proxyIp, h.proxyPort, [4]uint32{0000, 0000, 0000, 0001})
 	if err != nil {
 		h.logger.Error("failed to send new proxy ip to kernel", zap.Any("NewProxyIp", proxyIp))

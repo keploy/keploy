@@ -17,6 +17,15 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+
+	// import all the integrations
+	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/generic"
+	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/grpc"
+	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
+	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/mongo"
+	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql"
+	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/postgres/v1"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -61,6 +70,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
 		DestInfo:     info,
 		sessions:     core.NewSessions(),
 		MockManagers: sync.Map{},
+		Integrations: make(map[string]integrations.Integrations),
 	}
 }
 
@@ -414,6 +424,8 @@ func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
+
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)

@@ -11,7 +11,8 @@ const DefaultConfig = `
 path: ""
 command: ""
 port: 0
-proxyPort: 0
+proxyPort: 16789
+dnsPort: 26789
 debug: false
 telemetry: false
 inDocker: false

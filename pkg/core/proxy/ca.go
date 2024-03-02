@@ -7,16 +7,17 @@ import (
 	"crypto/x509"
 	"embed"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"path/filepath"
+
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.uber.org/zap"
-	"io/ioutil"
-	"os"
-	"os/exec"
-	"path/filepath"
 )
 
 //go:embed asset/ca.crt
@@ -39,8 +40,8 @@ var caStorePath = []string{
 }
 
 var caStoreUpdateCmd = []string{
-	"tools-ca-certificates",
-	"tools-ca-trust",
+	"update-ca-certificates",
+	"update-ca-trust",
 	"trust extract-compat",
 	"tools-ca-trust extract",
 	"certctl rehash",
