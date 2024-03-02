@@ -298,18 +298,12 @@ func Register(parserName string, parser DependencyHandler) {
 	ParsersMap[parserName] = parser
 }
 
-// BootProxy starts proxy server on the idle local port, Default:16789
-func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context, delay uint64) *ProxySet {
-	//Register all the parsers in the map.
-	Register("grpc", grpcparser.NewGrpcParser(logger, h))
-	Register("postgres", postgresparser.NewPostgresParser(logger, h))
-	Register("mongo", mongoparser.NewMongoParser(logger, h, opt.MongoPassword))
-	Register("http", httpparser.NewHttpParser(logger, h))
-	Register("mysql", mysqlparser.NewMySqlParser(logger, h, delay))
+func SetupCA(logger *zap.Logger, pid uint32, lang string) error {
 	// assign default values if not provided
 	caPaths, err := getCaPaths()
 	if err != nil {
-		logger.Error("Failed to find the CA store path", zap.Error(err))
+		logger.Error("failed to find the CA store path", zap.Error(err))
+		return err
 	}
 
 	for _, path := range caPaths {
@@ -318,7 +312,7 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 		fs, err := os.Create(caPath)
 		if err != nil {
 			logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
-			return nil
+			return err
 		}
 
 		_, err = fs.Write(caCrt)
@@ -338,24 +332,46 @@ func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid 
 	// Update the trusted CAs store
 	err = updateCaStore()
 	if err != nil {
-		logger.Error("Failed to update the CA store", zap.Error(err))
+		logger.Error("failed to update the CA store", zap.Error(err))
+		return err
 	}
 
 	tempCertPath, err := ExtractCertToTemp()
 	if err != nil {
-		logger.Error(Emoji+"Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
+		logger.Error(Emoji+"failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
+		return err
 	}
 
 	// for node
 	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
 	if err != nil {
-		logger.Error(Emoji+"Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
+		logger.Error(Emoji+"failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
+		return err
 	}
+
+	fmt.Println("set the certificate path in environment", os.Getenv("NODE_EXTRA_CA_CERTS"))
 
 	// for python
 	err = os.Setenv("REQUESTS_CA_BUNDLE", tempCertPath)
 	if err != nil {
-		logger.Error(Emoji+"Failed to set environment variable REQUESTS_CA_BUNDLE: %v", zap.Any("failed to certificate path in environment", err))
+		logger.Error(Emoji+"failed to set environment variable REQUESTS_CA_BUNDLE: %v", zap.Any("failed to certificate path in environment", err))
+		return err
+	}
+	return nil
+}
+
+// BootProxy starts proxy server on the idle local port, Default:16789
+func BootProxy(logger *zap.Logger, opt Option, appCmd, appContainer string, pid uint32, lang string, passThroughPorts []uint, h *hooks.Hook, ctx context.Context, delay uint64) *ProxySet {
+	//Register all the parsers in the map.
+	Register("grpc", grpcparser.NewGrpcParser(logger, h))
+	Register("postgres", postgresparser.NewPostgresParser(logger, h))
+	Register("mongo", mongoparser.NewMongoParser(logger, h, opt.MongoPassword))
+	Register("http", httpparser.NewHttpParser(logger, h))
+	Register("mysql", mysqlparser.NewMySqlParser(logger, h, delay))
+	// Setup the CA store for TLS-integeration
+	err := SetupCA(logger, pid, lang)
+	if err != nil {
+		return nil
 	}
 
 	if opt.Port == 0 {
