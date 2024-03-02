@@ -79,15 +79,16 @@ func (n *serviceProvider) GetService(ctx context.Context, cmd string, config con
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, tel), nil
+	// TODO: add case for mock
 	case "record", "test", "mock":
 		commonServices := n.GetCommonServices(config)
 		if cmd == "record" {
-			record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, config)
+			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, config), nil
 		}
 		if cmd == "test" {
-			replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, config)
+			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, config), nil
 		}
-		return nil, nil
+		return nil, errors.New("invalid command")
 	default:
 		return nil, errors.New("invalid command")
 	}
