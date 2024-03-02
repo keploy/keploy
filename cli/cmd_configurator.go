@@ -185,7 +185,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		cmd.Flags().DurationP("buildDelay", "b", cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", cfg.NetworkName, "Name of the application's docker network")
-		cmd.Flags().UintSlice("bypassPorts", config.GetByPassPorts(cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(cfg), "Ports to bypass the proxy server and ignore the traffic")
 		err = cmd.Flags().MarkHidden("telemetry")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -198,12 +198,6 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			c.logger.Error(errMsg, zap.Error(err))
 			return errors.New(errMsg)
 		}
-		err = viper.BindPFlags(cmd.Flags())
-		if err != nil {
-			errMsg := "failed to bind flags to config"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
 		if cmd.Name() == "test" {
 			cmd.Flags().StringSliceP("testsets", "t", utils.Keys(cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 			cmd.Flags().Uint64P("delay", "d", cfg.Test.Delay, "User provided time to run its application")
@@ -213,6 +207,12 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			cmd.Flags().StringP("language", "l", cfg.Test.Language, "application programming language")
 			cmd.Flags().Bool("ignoreOrdering", cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
+		}
+		err = viper.BindPFlags(cmd.Flags())
+		if err != nil {
+			errMsg := "failed to bind flags to config"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", cfg.Debug, "Run in debug mode")
@@ -248,7 +248,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			c.logger.Info("config file not found; proceeding with flags only")
 		}
 	}
-	if err := viper.Unmarshal(&cfg); err != nil {
+	if err := viper.Unmarshal(cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		c.logger.Error(errMsg, zap.Error(err))
 		return errors.New(errMsg)
@@ -263,7 +263,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		config.SetByPassPorts(cfg, bypassPorts)
 
 		if cfg.Command == "" {
-			c.logger.Error("Couldn't find the application command to test")
+			c.logger.Error("missing required -c flag or appCmd in config file")
 			if cfg.InDocker {
 				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 			} else {
