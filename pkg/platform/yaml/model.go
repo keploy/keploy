@@ -16,11 +16,11 @@ import (
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
 type NetworkTrafficDoc struct {
-	Version models.Version `json:"version" yaml:"version"`
-	Kind    models.Kind    `json:"kind" yaml:"kind"`
-	Name    string         `json:"name" yaml:"name"`
-	Spec    yamlLib.Node   `json:"spec" yaml:"spec"`
-	Curl    string         `json:"curl" yaml:"curl,omitempty"`
+	Version      models.Version `json:"version" yaml:"version"`
+	Kind         models.Kind    `json:"kind" yaml:"kind"`
+	Name         string         `json:"name" yaml:"name"`
+	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
+	Curl         string         `json:"curl" yaml:"curl,omitempty"`
 	ConnectionId string         `json:"connectionId" yaml:"connectionId,omitempty"`
 }
 
@@ -85,9 +85,9 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*NetworkTrafficDoc, error) {
 	yamlDoc := NetworkTrafficDoc{
-		Version: mock.Version,
-		Kind:    mock.Kind,
-		Name:    mock.Name,
+		Version:      mock.Version,
+		Kind:         mock.Kind,
+		Name:         mock.Name,
 		ConnectionId: mock.ConnectionId,
 	}
 	switch mock.Kind {
@@ -289,9 +289,9 @@ func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.
 
 	for _, m := range yamlMocks {
 		mock := models.Mock{
-			Version: m.Version,
-			Name:    m.Name,
-			Kind:    m.Kind,
+			Version:      m.Version,
+			Name:         m.Name,
+			Kind:         m.Kind,
 			ConnectionId: m.ConnectionId,
 		}
 		mockCheck := strings.Split(string(m.Kind), "-")

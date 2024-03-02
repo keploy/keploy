@@ -51,6 +51,7 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 		case string('C'):
 			msg = &pgproto3.CommandComplete{
 				CommandTag: response.CommandCompletes[cc].CommandTag,
+				CommandTagType: response.CommandCompletes[cc].CommandTagType,
 			}
 			cc++
 		case string('d'):
@@ -475,9 +476,9 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 		}
 		return &copyMock
 	case 3:
+		// "B", "E", "P", "B", "D", "E" => "B", "E", "B",  "E"
 		fmt.Println("Inside Slice Command Tag for ", ps_case)
 		fmt.Println("Inside Execute Command Tag 3")
-		return nil
 	default:
 	}
 	return nil
