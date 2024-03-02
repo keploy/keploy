@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -183,7 +182,7 @@ jobs:
 	filePath := "/githubactions/keploy.yml"
 
 	// Write the content to the file
-	if err := ioutil.WriteFile(filePath, []byte(actionsFileContent), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(actionsFileContent), 0644); err != nil {
 		logger.Error("Error writing GitHub Actions workflow file", zap.Error(err))
 		return
 	}
