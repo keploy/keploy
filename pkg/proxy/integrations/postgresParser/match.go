@@ -18,10 +18,10 @@ import (
 func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Hook, ConnectionId string, recorded_prep PrepMap) (bool, []models.Frontend, error) {
 	reqGoingOn := decodePgRequest(requestBuffers[0], logger)
 	if reqGoingOn != nil {
-		fmt.Println("PacketTypes", reqGoingOn.PacketTypes)
-		fmt.Println("On going req .....", reqGoingOn)
-		fmt.Println("ConnectionId-", ConnectionId)
-		fmt.Println("TestMap*****", testmap)
+		logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
+		logger.Debug("On going req .....", zap.String("ConnectionId", ConnectionId))
+		logger.Debug("ConnectionId-", zap.String("ConnectionId", ConnectionId))
+		logger.Debug("TestMap*****", zap.Any("TestMap", testmap))
 	}
 	for {
 		tcsMocks, err := h.GetConfigMocks()
@@ -152,13 +152,13 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					fmt.Println("Matched In Absolute Custom Matching for sorted!!!", matchedMock.Name)
+					// fmt.Println("Matched In Absolute Custom Matching for sorted!!!", matchedMock.Name)
 				}
 				idx = findBinaryStreamMatch(sortedTcsMocks, requestBuffers, logger, h, isSorted)
 				if idx != -1 && !isMatched {
 					isMatched = true
 					matchedMock = tcsMocks[idx]
-					fmt.Println("Matched In Binary Matching for sorted!!!", matchedMock.Name)
+					// fmt.Println("Matched In Binary Matching for sorted!!!", matchedMock.Name)
 				}
 			}
 		}
@@ -172,7 +172,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 				if newMock != nil {
 					matchedMock = newMock
 				}
-				fmt.Println("Matched In Absolute Custom Matching for Unsorted", matchedMock.Name)
+				// fmt.Println("Matched In Absolute Custom Matching for Unsorted", matchedMock.Name)
 			}
 			idx = findBinaryStreamMatch(tcsMocks, requestBuffers, logger, h, isSorted)
 			// check if the validate the query with the matched mock
@@ -180,7 +180,7 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 			var isValid bool = true
 			if idx != -1 {
 				isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger, h, ConnectionId, recorded_prep)
-				fmt.Println("New Index is ", isValid)
+				logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
 			}
 
 			if idx != -1 && !isMatched {
@@ -189,12 +189,13 @@ func matchingReadablePG(requestBuffers [][]byte, logger *zap.Logger, h *hooks.Ho
 				if newMock != nil && !isValid {
 					matchedMock = newMock
 				}
-				fmt.Println("Matched In Binary Matching for Unsorted", matchedMock.Name)
+				// fmt.Println("Matched In Binary Matching for Unsorted", matchedMock.Name)
+				logger.Debug("Matched In Binary Matching for Unsorted!!!", zap.String("Mock Name", matchedMock.Name))
 			}
 		}
 
 		if isMatched {
-			logger.Info("Matched mock", zap.String("mock", matchedMock.Name))
+			logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
 			if matchedMock.TestModeInfo.IsFiltered {
 				originalMatchedMock := *matchedMock
 				matchedMock.TestModeInfo.IsFiltered = false
@@ -227,18 +228,18 @@ func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, log
 			}
 		}
 		if reflect.DeepEqual(mock.PacketTypes, []string{"B", "E", "B", "E"}) {
-			fmt.Println("Inside Validate Mock for B, E, B, E")
+			// fmt.Println("Inside Validate Mock for B, E, B, E")
 			return true, nil
 		}
 		if reflect.DeepEqual(mock.PacketTypes, []string{"B", "E"}) {
-			fmt.Println("Inside Validate Mock for B, E")
+			// fmt.Println("Inside Validate Mock for B, E")
 			copyMock := *tcsMocks[idx]
 			copyMock.Spec.PostgresResponses[0].PacketTypes = []string{"2", "C", "Z"}
 			copyMock.Spec.PostgresResponses[0].Payload = ""
 			return false, &copyMock
 		}
 		if reflect.DeepEqual(mock.PacketTypes, []string{"P", "B", "D", "E"}) {
-			fmt.Println("Inside Validate Mock for P, B, D, E")
+			// fmt.Println("Inside Validate Mock for P, B, D, E")
 			copyMock := *tcsMocks[idx]
 			copyMock.Spec.PostgresResponses[0].PacketTypes = []string{"1", "2", "T", "C", "Z"}
 			copyMock.Spec.PostgresResponses[0].Payload = ""
@@ -247,7 +248,7 @@ func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, log
 	} else {
 		// [B, E, P, B, D, E] => [ P, B, D, E]
 		if reflect.DeepEqual(mock.PacketTypes, []string{"B", "E", "P", "B", "D", "E"}) && reflect.DeepEqual(actualPgReq.PacketTypes, []string{"P", "B", "D", "E"}) {
-			fmt.Println("Inside Validate Mock for B, E, B, E")
+			// fmt.Println("Inside Validate Mock for B, E, B, E")
 			if mock.Parses[0].Query == actualPgReq.Parses[0].Query {
 				// no need to do anything
 				// fmt.Println("Matched with the query AHHAHAHAHAH", mock.Parses[0].Query)
@@ -314,14 +315,14 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 				break
 			}
 		}
-		fmt.Println("Current Query is ", current_query, "for mock", mock.Name, "and connectionId is", ConnectionId, "and current identifier is", current_ps, "FOR QUERY", current_query)
+		logger.Debug("Current Query for this prepared statement", zap.String("Query", current_query), zap.String("Identifier", current_ps))
 		foo = false
 
 		// for _, mb := range mockBinds {
 		// check if the query for mock ps (v.PreparedStatement) is same as the current query
 		for _, querydata := range recorded_prep[mockConn] {
 			if querydata.Query == current_query && mockBinds[idx].PreparedStatement == querydata.PrepIdentifier {
-				fmt.Println("Matched with the recorded prepared statement with Identifier and connectionID is", querydata.PrepIdentifier, ", conn- ", mockConn, "and current identifier is", current_ps, "FOR QUERY", current_query)
+				logger.Debug("Matched with the recorded prepared statement with Identifier and connectionID is", zap.String("Identifier", querydata.PrepIdentifier), zap.String("ConnectionId", mockConn), zap.String("Current Identifier", current_ps), zap.String("Query", current_query))
 				foo = true
 				break
 			}
@@ -358,41 +359,9 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 
 func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, h *hooks.Hook, ConnectionId string, isSorted bool, recorded_prep PrepMap) (bool, error) {
 
-	// fmt.Println("Inside Compare Exact Match", len(reqBuff), string(reqBuff), "MOCK NAME - ", mock.Name)
-	// actualPgReq := decodePgRequest(reqBuff, logger)
-	// if actualPgReq == nil {
-	// 	return false, nil
-	// }
-	// if mock.Name == "mock-196" || mock.Name == "mock-197" || mock.Name == "mock-198" || mock.Name == "mock-199" || mock.Name == "mock-204" {
-	// 	fmt.Println("Inside Compare Exact Match", actualPgReq, "MOCK NAME - ", mock.Name, "WITH CONN ID", ConnectionId)
-	// }
-
 	// have to ignore first parse message of begin read only
 	// should compare only query in the parse message
 	if len(actualPgReq.PacketTypes) != len(mock.Spec.PostgresRequests[0].PacketTypes) {
-		//check for begin read only
-		// if math.Abs(float64(len(actualPgReq.PacketTypes))-float64(len(mock.Spec.PostgresRequests[0].PacketTypes))) == 1 {
-		// 	if len(actualPgReq.PacketTypes) > 0 && len(mock.Spec.PostgresRequests[0].PacketTypes) > 0 {
-		// 		if mock.Spec.PostgresRequests[0].PacketTypes[0] == "P" && mock.Spec.PostgresRequests[0].Parses[0].Query == "BEGIN READ ONLY" {
-		// 			if mock.Spec.PostgresRequests[0].Parses[1].Query == actualPgReq.Parses[0].Query {
-		// 				sliceCommandTag(mock, logger, testmap[ConnectionId], actualPgReq, false)
-		// 				return true, nil
-		// 			}
-		// 		}
-		// 	}
-		// }
-
-		// if isSorted && len(actualPgReq.PacketTypes) > 0 && len(mock.Spec.PostgresRequests[0].PacketTypes) > 0 {
-		// 	if mock.Spec.PostgresRequests[0].PacketTypes[0] == "P" && actualPgReq.PacketTypes[0] == "B" && mock.Name == "mock-197" {
-		// 		// is_prep := checkIfps(actualPgReq.PacketTypes)
-		// 		// if is_prep {
-		// 		// 	// fmt.Println("Inside Prepared Statement")
-		// 		// 	// sliceCommandTag(mock, logger, testmap[ConnectionId], actualPgReq, true)
-		// 		// }
-
-		// 		return true, nil
-		// 	}
-		// }
 		return false, nil
 	}
 
@@ -436,17 +405,10 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 			if actualPgReq.Binds[b-1].DestinationPortal != mock.Spec.PostgresRequests[0].Binds[b-1].DestinationPortal {
 				return false, nil
 			}
-			// if Is Prep statement true hai to wo se jo aya hai usko S_ identifier ko and connection Id ko compare karo
-			// if is_prep && len(newBindPs) > 0 {
-			// 	// fmt.Println("New Bind Prepared Statement", newBindPs, "for mock", mock.Name)
-			// 	if mock.Spec.PostgresRequests[0].Binds[b-1].PreparedStatement != newBindPs[b-1] {
-			// 		return false, nil
-			// 	}
-			// } else {
+
 			if actualPgReq.Binds[b-1].PreparedStatement != mock.Spec.PostgresRequests[0].Binds[b-1].PreparedStatement {
 				return false, nil
 			}
-			// }
 
 			if len(actualPgReq.Binds[b-1].ParameterFormatCodes) != len(mock.Spec.PostgresRequests[0].Binds[b-1].ParameterFormatCodes) {
 				return false, nil
@@ -484,10 +446,7 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 			if actualPgReq.Executes[e-1].MaxRows != mock.Spec.PostgresRequests[0].Executes[e-1].MaxRows {
 				return false, nil
 			}
-		// case "d":
-		// 	if actualPgReq.CopyData.Data != mock.Spec.PostgresRequests[0].CopyData.Data {
-		// 		return false, nil
-		// 	}
+
 		case "c":
 			if actualPgReq.CopyDone != mock.Spec.PostgresRequests[0].CopyDone {
 				return false, nil
@@ -595,11 +554,7 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 					}
 
 					if match {
-						fmt.Println("New Bind Prepared Statement", newBindPs, "for mock", mock.Name)
-						fmt.Println(actualPgReq.Binds[0].PreparedStatement)
-						fmt.Println(actualPgReq.Binds[0].Parameters)
-						fmt.Println(actualPgReq.Binds[0].ParameterFormatCodes)
-						fmt.Println(actualPgReq.Binds[0].ResultFormatCodes)
+						logger.Debug("New Bind Prepared Statement", zap.Any("New Bind Prepared Statement", newBindPs), zap.String("ConnectionId", connectionId), zap.String("Mock Name", mock.Name))
 						return idx, nil
 					}
 					// just check the query
@@ -672,7 +627,7 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 	// [B E P D B E]
 	// [P, B, E, P, B, D, E] -> [B, E, P, B, D, E]
 	if (reflect.DeepEqual(actualpackets, []string{"B", "E", "P", "D", "B", "E"}) || reflect.DeepEqual(actualpackets, []string{"B", "E", "P", "B", "D", "E"})) && reflect.DeepEqual(mockPackets, []string{"P", "B", "E", "P", "B", "D", "E"}) {
-		fmt.Println("Handling Case 1 for mock", mock.Name)
+		// fmt.Println("Handling Case 1 for mock", mock.Name)
 		// handleCase1(packets, mockPackets)
 		// also check if the second query is same or not
 		// fmt.Println("ActualPgReq", actualPgReq.Parses[0].Query, "MOCK REQ 1", mock.Spec.PostgresRequests[0].Parses[0].Query, "MOCK REQ 2", mock.Spec.PostgresRequests[0].Parses[1].Query)
@@ -686,7 +641,7 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 	// case 2
 	var ps string
 	if reflect.DeepEqual(actualpackets, []string{"B", "E"}) && reflect.DeepEqual(mockPackets, []string{"P", "B", "D", "E"}) {
-		fmt.Println("Handling Case 2 for mock", mock.Name)
+		// fmt.Println("Handling Case 2 for mock", mock.Name)
 		ps = actualPgReq.Binds[0].PreparedStatement
 		for _, v := range testmap[connectionId] {
 			if v.Query == mock.Spec.PostgresRequests[0].Parses[0].Query && v.PrepIdentifier == ps {
@@ -698,7 +653,7 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 	if ischanged {
 		// if strings.Contains(ps, "S_") {
-		fmt.Println("Inside Prepared Statement")
+		// fmt.Println("Inside Prepared Statement")
 		newMock = sliceCommandTag(mock, logger, testmap[connectionId], actualPgReq, 2)
 		// }
 		return true, newMock
@@ -709,7 +664,7 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 	// Case 3
 	if reflect.DeepEqual(actualpackets, []string{"B", "E", "B", "E"}) && reflect.DeepEqual(mockPackets, []string{"P", "B", "E", "P", "B", "D", "E"}) {
-		fmt.Println("Handling Case 3 for mock", mock.Name)
+		// fmt.Println("Handling Case 3 for mock", mock.Name)
 		ischanged1 := false
 		ps1 := actualPgReq.Binds[0].PreparedStatement
 		for _, v := range testmap[connectionId] {
@@ -735,7 +690,7 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 	// Case 4
 	if reflect.DeepEqual(actualpackets, []string{"B", "E", "B", "E"}) && reflect.DeepEqual(mockPackets, []string{"B", "E", "P", "B", "D", "E"}) {
-		fmt.Println("Handling Case 4 for mock", mock.Name)
+		// fmt.Println("Handling Case 4 for mock", mock.Name)
 		// get the query for the prepared statement of test mode
 		ischanged := false
 		ps := actualPgReq.Binds[1].PreparedStatement

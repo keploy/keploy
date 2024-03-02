@@ -430,7 +430,7 @@ func SortMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) []*mod
 	// 	unFilteredMocks = unFilteredMocks[:10]
 	// }
 	for _, v := range filteredMocks {
-		logger.Info("sorted filtered mocks", zap.Any("testcase", tc.Name), zap.Any("mocks", v.Name))
+		logger.Debug("sorted filtered mocks", zap.Any("testcase", tc.Name), zap.Any("mocks", v.Name))
 	}
 	// Append the unfiltered mocks to the filtered mocks
 	sortedMocks := append(filteredMocks, unFilteredMocks...)
