@@ -91,6 +91,11 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		ID: id,
 	})
 
+	go func() {
+		<-ctx.Done()
+		h.unLoad(ctx)
+	}()
+
 	err := h.load(ctx, opts)
 	if err != nil {
 		return err
