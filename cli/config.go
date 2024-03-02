@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 
 	"go.keploy.io/server/v2/config"
@@ -17,11 +18,14 @@ func init() {
 	Register("config", Config)
 }
 
-func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, servicefactory ServiceFactory, cmdConfiguration CmdConfigurator) *cobra.Command {
+func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, servicefactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "config",
 		Short:   "manage keploy configuration file",
 		Example: "keploy config --generate --path /path/to/localdir",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return cmdConfigurator.ValidateFlags(ctx, cmd, cfg)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			isGenerate, err := cmd.Flags().GetBool("generate")
@@ -51,12 +55,20 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 					logger.Error("service doesn't satisfy tools service interface")
 					return err
 				} else {
-					tools.CreateConfig(ctx, cfg.Path, "")
+					if err := tools.CreateConfig(ctx, filePath, ""); err != nil {
+						logger.Error("failed to create config", zap.Error(err))
+						return err
+					}
 				}
+				return nil
+			} else {
+				return errors.New("only generate flag is supported in the config command")
 			}
-			return nil
 		},
 	}
-	cmdConfiguration.AddFlags(cmd, cfg)
+	if err := cmdConfigurator.AddFlags(cmd, cfg); err != nil {
+		logger.Error("Failed to add flags", zap.Error(err))
+		return nil
+	}
 	return cmd
 }

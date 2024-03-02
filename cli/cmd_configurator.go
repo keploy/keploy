@@ -150,7 +150,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 	case "update":
 		return nil
 	case "config":
-		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated config is stored")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
 		err = viper.BindPFlags(cmd.Flags())
 		if err != nil {
@@ -175,14 +175,14 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			return errors.New(errMsg)
 		}
 	case "record", "test":
+		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().Bool("telemetry", cfg.Telemetry, "Run in telemetry mode")
-		cmd.Flags().String("configPath", cfg.ConfigPath, "Path to the local directory where keploy configuration file is stored")
-		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dnsPort", cfg.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", cfg.Command, "Command to start the user application")
-		cmd.Flags().DurationP("buildDelay", "bd", cfg.BuildDelay, "User provided time to wait docker container build")
+		cmd.Flags().DurationP("buildDelay", "b", cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("bypassPorts", config.GetByPassPorts(cfg), "Ports to bypass the proxy server and ignore the traffic")
@@ -216,7 +216,12 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", cfg.Debug, "Run in debug mode")
-		viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
+		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
+		if err != nil {
+			errMsg := "failed to bind flag to config"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
 	default:
 		return errors.New("unknown command name")
 	}
@@ -225,25 +230,28 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 }
 
 func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
-	configPath, err := cmd.Flags().GetString("config-path")
-	if err != nil {
-		c.logger.Error("failed to read the config path")
-		return err
-	}
-	if cmd.Name() != "keploy" && configPath != "" {
-		viper.SetConfigName("keploy-config")
-		viper.SetConfigType("yaml")
+	if cmd.Name() == "test" || cmd.Name() == "record" {
+		configPath, err := cmd.Flags().GetString("configPath")
+		if err != nil {
+			c.logger.Error("failed to read the config path")
+			return err
+		}
+		viper.SetConfigName("keploy")
+		viper.SetConfigType("yml")
 		viper.AddConfigPath(configPath)
 		if err := viper.ReadInConfig(); err != nil {
-			errMsg := "failed to read config file"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
+			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+				errMsg := "failed to read config file"
+				c.logger.Error(errMsg, zap.Error(err))
+				return errors.New(errMsg)
+			}
+			c.logger.Info("config file not found; proceeding with flags only")
 		}
-		if err := viper.Unmarshal(&cfg); err != nil {
-			errMsg := "failed to unmarshal the config"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
+	}
+	if err := viper.Unmarshal(&cfg); err != nil {
+		errMsg := "failed to unmarshal the config"
+		c.logger.Error(errMsg, zap.Error(err))
+		return errors.New(errMsg)
 	}
 	switch cmd.Name() {
 	case "record", "test":

@@ -67,6 +67,9 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 
 		},
 	}
-	cmdConfigurator.AddFlags(cmd, cfg)
+	if err := cmdConfigurator.AddFlags(cmd, cfg); err != nil {
+		logger.Error("failed to add flags", zap.Error(err))
+		return nil
+	}
 	return cmd
 }

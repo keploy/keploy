@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	_ "go.keploy.io/server/v2/graph"
 	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )

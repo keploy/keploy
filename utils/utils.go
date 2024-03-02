@@ -65,6 +65,7 @@ func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentr
 			"component": "system",
 		},
 	}
+
 	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(client))
 
 	//in case of err it will return noop core. So we don't need to attach it to log.
@@ -95,7 +96,6 @@ func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentr
 		scope.SetTag("Linux Kernel Version", kernelVersion)
 		scope.SetTag("Architecture", arch)
 		scope.SetTag("Installation ID", installationID)
-		// Add more context as needed
 	})
 	return logger
 }
@@ -409,50 +409,14 @@ func Keys(m map[string][]string) []string {
 }
 
 func SentryInit(logger *zap.Logger, dsn string) {
-	go func() {
-		//Initialise sentry.
-		err := sentry.Init(sentry.ClientOptions{
-			Dsn:              dsn,
-			TracesSampleRate: 1.0,
-		})
-		if err != nil {
-			logger.Debug("Could not initialise sentry.", zap.Error(err))
-		}
-	}()
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn:              dsn,
+		TracesSampleRate: 1.0,
+	})
+	if err != nil {
+		logger.Debug("Could not initialise sentry.", zap.Error(err))
+	}
 }
-
-//func GetUniqueReportDir(testReportPath, subDirPrefix string) (string, error) {
-//	latestReportNumber := 1
-//
-//	if _, err := os.Stat(testReportPath); !os.IsNotExist(err) {
-//		file, err := os.Open(testReportPath)
-//		if err != nil {
-//			return "", fmt.Errorf("failed to open directory: %w", err)
-//		}
-//		defer file.Close()
-//
-//		files, err := file.Readdir(-1) // -1 to read all files and directories
-//		if err != nil {
-//			return "", fmt.Errorf("failed to read directory: %w", err)
-//		}
-//
-//		for _, f := range files {
-//			if f.IsDir() && strings.HasPrefix(f.Name(), subDirPrefix) {
-//				reportNumber, err := strconv.Atoi(strings.TrimPrefix(f.Name(), subDirPrefix))
-//				if err != nil {
-//					return "", fmt.Errorf("failed to parse report number: %w", err)
-//				}
-//				if reportNumber > latestReportNumber {
-//					latestReportNumber = reportNumber
-//				}
-//			}
-//		}
-//		latestReportNumber++ // increment to create a new report directory
-//	}
-//
-//	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
-//	return newTestReportPath, nil
-//}
 
 func FetchHomeDirectory(isNewConfigPath bool) string {
 	var configFolder = "/.keploy-config"

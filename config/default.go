@@ -48,6 +48,7 @@ func New() *Config {
 	mergedConfig, err := Merge(DefaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
+
 	}
 	err = yaml3.Unmarshal([]byte(mergedConfig), config)
 	if err != nil {
@@ -57,17 +58,18 @@ func New() *Config {
 }
 
 func Merge(srcStr, destStr string) (string, error) {
-	return mergeStrings(srcStr, destStr, true, yaml.MergeOptions{})
+	return mergeStrings(srcStr, destStr, false, yaml.MergeOptions{})
 }
 
-// MergeStrings merges fields from src YAML into dest YAML.
-// This copied from https://github.com/kubernetes-sigs/kustomize/blob/537c4fa5c2bf3292b273876f50c62ce1c81714d7/kyaml/yaml/merge2/merge2.go#L24
-// The only change is the VisitKeysAsScalars is set to true to enable merging comments.
+// Reference: https://github.com/kubernetes-sigs/kustomize/blob/537c4fa5c2bf3292b273876f50c62ce1c81714d7/kyaml/yaml/merge2/merge2.go#L24
+// VisitKeysAsScalars is set to true to enable merging comments.
+// inferAssociativeLists is set to fasle to disable merging associative lists.
 func mergeStrings(srcStr, destStr string, infer bool, mergeOptions yaml.MergeOptions) (string, error) {
 	src, err := yaml.Parse(srcStr)
 	if err != nil {
 		return "", err
 	}
+
 	dest, err := yaml.Parse(destStr)
 	if err != nil {
 		return "", err
