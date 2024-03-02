@@ -63,10 +63,6 @@ func PostgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 				RowValues: response.DataRows[dtr].RowValues,
 				Values:    response.DataRows[dtr].Values,
 			}
-			if response.DataRows[dtr].Values != nil {
-				fmt.Println("-----", response.DataRows[dtr].Values)
-				fmt.Println("-----", response.DataRows[dtr].RowValues)
-			}
 			dtr++
 		case string('E'):
 			msg = &pgproto3.ErrorResponse{
@@ -437,7 +433,7 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 	case 1:
 
 		copyMock := *mock
-		fmt.Println("Inside Slice Command Tag for ", ps_case)
+		// fmt.Println("Inside Slice Command Tag for ", ps_case)
 		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
 		for idx, v := range mockPackets {
 			if v == "1" {
@@ -451,7 +447,7 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 	case 2:
 		// ["2", D, C, Z]
 		copyMock := *mock
-		fmt.Println("Inside Slice Command Tag for ", ps_case)
+		// fmt.Println("Inside Slice Command Tag for ", ps_case)
 		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
 		for idx, v := range mockPackets {
 			if v == "1" || v == "T" {
@@ -461,7 +457,6 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 		copyMock.Spec.PostgresResponses[0].Payload = ""
 		copyMock.Spec.PostgresResponses[0].PacketTypes = mockPackets
 		rsFormat := actualPgReq.Bind.ResultFormatCodes
-		fmt.Println("Result Format Codes for mock ", copyMock.Name, "*** ", len(rsFormat), rsFormat)
 
 		for idx, datarow := range copyMock.Spec.PostgresResponses[0].DataRows {
 			for column, row_value := range datarow.RowValues {
@@ -475,10 +470,6 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 			}
 		}
 		return &copyMock
-	case 3:
-		// "B", "E", "P", "B", "D", "E" => "B", "E", "B",  "E"
-		fmt.Println("Inside Slice Command Tag for ", ps_case)
-		fmt.Println("Inside Execute Command Tag 3")
 	default:
 	}
 	return nil
@@ -495,7 +486,7 @@ func getChandedDataRow(input string) (string, error) {
 		// Perform additional operations on the date
 		epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 		difference := dateValue.Sub(epoch).Hours() / 24
-		fmt.Printf("Difference in days from epoch: %.2f days\n", difference)
+		// fmt.Printf("Difference in days from epoch: %.2f days\n", difference)
 		binary.BigEndian.PutUint32(buffer, uint32(difference))
 		return ("b64:" + PostgresEncoder(buffer)), nil
 	} else {

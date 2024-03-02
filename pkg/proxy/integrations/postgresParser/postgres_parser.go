@@ -221,7 +221,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					for i := 0; i < len(bufferCopy)-5; {
 						logger.Debug("Inside the if condition")
 						pg.BackendWrapper.MsgType = buffer[i]
-						fmt.Println("MSG TYPE for REQUEST", string(pg.BackendWrapper.MsgType))
+						// fmt.Println("MSG TYPE for REQUEST", string(pg.BackendWrapper.MsgType))
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
 							logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
@@ -364,7 +364,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 					for i := 0; i < len(bufferCopy)-5; {
 						pg.FrontendWrapper.MsgType = buffer[i]
-						fmt.Println("MSG TYPE for RESPONSE", string(pg.FrontendWrapper.MsgType))
 						pg.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						msg, err := pg.TranslateToReadableResponse(buffer[i:(i+pg.FrontendWrapper.BodyLen+5)], logger)
 						if err != nil {
@@ -500,7 +499,6 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 	pgRequests := [][]byte{requestBuffer}
 	// preferedConnectionIdFromMocks := "x"
 	ConnectionId := ctx.Value("connectionId").(string)
-	fmt.Println("CONNECTION ID", ConnectionId)
 	// stores the mapping between the prepared statements in the request buffer and the corresponding prepared statements in the mock.
 	// prepareStatementMap := make(map[string]string)
 	allMocks, err := h.GetConfigMocks()
@@ -509,13 +507,12 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		logger.Error("failed to get the mocks from the config", zap.Error(err))
 		return err
 	}
-	fmt.Println("LENGTH OF ALL MOCKS", len(allMocks))
+	// fmt.Println("LENGTH OF ALL MOCKS", len(allMocks))
 	prep := getRecordPrepStatement(allMocks)
-	if prep != nil {
-		fmt.Println("PREPARED STATEMENT", prep)
-	}
+	// if prep != nil {
+	// 	fmt.Println("PREPARED STATEMENT", prep)
+	// }
 
-	// decodePgResponse("MgAAAAREAAAARwAKAAAABAAAAAMAAAAEAAAAAQAAAAQAAB6yAAAABkRleHRlcgAAAAQAAAACAAAAA0NhdP////////////////////9DAAAADVNFTEVDVCAxAFoAAAAFVA==", logger)
 
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
