@@ -271,6 +271,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 	stopListenContainer := make(chan bool)
 	stopApplicationErrors := false
 	abortStopListenContainerChan := false
+	isContainerCreated := false
 
 	dockerClient := h.idc
 	appErrCh := make(chan error, 1)
@@ -283,6 +284,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 			err := h.runApp(appCmd, true)
 			h.logger.Debug("Application stopped with the error", zap.Error(err))
+			if isContainerCreated {
+				h.idc.StopAndRemoveDockerContainer()
+			}
 			if !stopApplicationErrors {
 				appErrCh <- err
 			}
@@ -308,7 +312,6 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 		eventFilter := filters.NewArgs()
 		eventFilter.Add("type", "container")
 		eventFilter.Add("event", "create")
-		eventFilter.Add("event", "start")
 
 		messages, errs := dockerClient.Events(context.Background(), types.EventsOptions{
 			Filters: eventFilter,
@@ -342,9 +345,11 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			case <-logTicker.C:
 				h.logger.Info("still waiting for the container to start.", zap.String("containerName", appContainer))
 			case e := <-messages:
-				if e.Type == events.ContainerEventType && (e.Action == "create" || e.Action == "start") {
+				if e.Type == events.ContainerEventType && e.Action == "create" {
 					// Set Docker Container ID
 					h.idc.SetContainerID(e.ID)
+
+					isContainerCreated = true
 
 					// Fetch container details by inspecting using container ID to check if container is created
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
