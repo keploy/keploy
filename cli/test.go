@@ -10,9 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// func init() {
-// 	Register("test", Test)
-// }
+func init() {
+	Register("test", Test)
+}
 
 func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var testCmd = &cobra.Command{

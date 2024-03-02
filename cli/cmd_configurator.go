@@ -152,12 +152,6 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
-		err = viper.BindPFlags(cmd.Flags())
-		if err != nil {
-			errMsg := "failed to bind flags to config"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
 	case "mock":
 		cmd.Flags().Bool("telemetry", cfg.Telemetry, "Run in telemetry mode")
 		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated testcases/mocks are stored")
@@ -168,12 +162,6 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		cmd.Flags().Bool("replay", true, "Intercept all outgoing network traffic and replay the recorded traffic")
 		cmd.Flags().Lookup("replay").NoOptDefVal = "true"
 		cmd.Flags().StringP("name", "n", "mocks", "Name of the mock")
-		err = viper.BindPFlags(cmd.Flags())
-		if err != nil {
-			errMsg := "failed to bind flags to config"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().Bool("telemetry", cfg.Telemetry, "Run in telemetry mode")
@@ -208,12 +196,6 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			cmd.Flags().Bool("ignoreOrdering", cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
 		}
-		err = viper.BindPFlags(cmd.Flags())
-		if err != nil {
-			errMsg := "failed to bind flags to config"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", cfg.Debug, "Run in debug mode")
 		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
@@ -225,11 +207,17 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 	default:
 		return errors.New("unknown command name")
 	}
-	utils.BindFlagsToViper(c.logger, cmd, "")
 	return nil
 }
 
 func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
+	err := viper.BindPFlags(cmd.Flags())
+	utils.BindFlagsToViper(c.logger, cmd, "")
+	if err != nil {
+		errMsg := "failed to bind flags to config"
+		c.logger.Error(errMsg, zap.Error(err))
+		return errors.New(errMsg)
+	}
 	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
