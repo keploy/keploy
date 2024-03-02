@@ -68,7 +68,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId
 	if err != nil {
 		return nil, err
 	}
-	file, err := yaml.ReadDir(testpath, os.ModePerm)
+	file, err := yaml.ReadDir(filepath.Join(testpath, testRunId), os.ModePerm)
 	if err != nil {
 		return &models.TestReport{}, err
 	}

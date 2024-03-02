@@ -131,7 +131,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	var testSetStatus models.TestSetStatus
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
-	var testLoopCtx, testLoopCtxCancel = context.WithCancel(context.Background())
+	var testLoopCtx, testLoopCtxCancel = context.WithCancel(ctx)
 
 	testCases, err := r.testDB.GetTestCases(ctx, testSetId)
 	if err != nil {

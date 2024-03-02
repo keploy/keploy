@@ -30,13 +30,16 @@ func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
 }
 
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
+	// create a new app and store it in the map
 	id := uint64(c.id.Next())
 	a := app.NewApp(c.logger, id, cmd)
+	c.apps.Store(id, a)
+
 	err := a.Setup(ctx, app.Options{
 		DockerNetwork: opts.DockerNetwork,
 	})
 	if err != nil {
-		c.logger.Error("Failed to create app", zap.Error(err))
+		c.logger.Error("failed to create app", zap.Error(err))
 		return 0, err
 	}
 	return id, nil
@@ -62,7 +65,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	a, err := c.getApp(id)
 	if err != nil {
-		c.logger.Error("Failed to get app", zap.Error(err))
+		c.logger.Error("failed to get app", zap.Error(err))
 		return hookErr
 	}
 
@@ -115,7 +118,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	}
 	a, err := c.getApp(id)
 	if err != nil {
-		c.logger.Error("Failed to get app", zap.Error(err))
+		c.logger.Error("failed to get app", zap.Error(err))
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	}
 
@@ -139,7 +142,7 @@ func (c *Core) GetAppIp(ctx context.Context, id uint64) (string, error) {
 
 	a, err := c.getApp(id)
 	if err != nil {
-		c.logger.Error("Failed to get app", zap.Error(err))
+		c.logger.Error("failed to get app", zap.Error(err))
 		return "", err
 	}
 

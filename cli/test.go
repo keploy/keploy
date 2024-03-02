@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"go.keploy.io/server/v2/pkg/graph"
 	"os/exec"
 
 	"github.com/spf13/cobra"
@@ -24,11 +25,6 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			// if cfg.Test.Coverage {
-			// 	g := graph.NewGraph(logger)
-			// 	return g.Serve(path, proxyPort, mongoPassword, testReportPath, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele)
-			// }
-
 			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
 			if err != nil {
 				logger.Error("failed to get service", zap.Error(err))
@@ -38,6 +34,14 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 				logger.Error("service doesn't satisfy replay service interface")
 				return err
 			} else {
+				if cfg.Test.Coverage {
+					g := graph.NewGraph(logger, replay, *cfg)
+					err := g.Serve(ctx)
+					if err != nil {
+						logger.Error("failed to start graph service", zap.Error(err))
+						return err
+					}
+				}
 				replay.Start(ctx)
 			}
 
