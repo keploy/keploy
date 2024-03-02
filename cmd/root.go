@@ -300,7 +300,7 @@ func (r *Root) execute() {
                ╰─────────────────────────────────────╯
 			   `
 				versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
-				fmt.Printf(versionmsg)
+				fmt.Println(versionmsg)
 			}
 		}
 	}
