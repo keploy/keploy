@@ -217,24 +217,28 @@ func (t *Tools) CreateConfig(ctx context.Context, filePath string, configData st
 	} else {
 		configData, err = config.Merge(config.InternalConfig, config.DefaultConfig)
 		if err != nil {
-			t.logger.Fatal("Error while creating default config string", zap.Error(err))
+			t.logger.Error("Error while creating default config string", zap.Error(err))
+			return nil
 		}
 		data = []byte(configData)
 	}
 
 	if err := yaml.Unmarshal(data, &node); err != nil {
-		t.logger.Fatal("Unmarshalling failed", zap.Error(err))
+		t.logger.Error("Unmarshalling failed", zap.Error(err))
+		return nil
 	}
 	results, err := yaml.Marshal(node.Content[0])
 	if err != nil {
-		t.logger.Fatal("Failed to marshal the config", zap.Error(err))
+		t.logger.Error("Failed to marshal the config", zap.Error(err))
+		return nil
 	}
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 
 	err = os.WriteFile(filePath, finalOutput, os.ModePerm)
 	if err != nil {
-		t.logger.Fatal("Failed to write config file", zap.Error(err))
+		t.logger.Error("Failed to write config file", zap.Error(err))
+		return nil
 	}
 
 	err = os.Chmod(filePath, 0777) // Set permissions to 777
