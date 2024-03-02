@@ -446,7 +446,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
-					if (len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R") || len(pg_mock.DataRows) > 0 {
+					if len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
 						fmt.Println("BUFFER -- - -", buffer)
 						fmt.Println("AFTER_ENCODED -- - - -", after_encoded)
@@ -515,12 +515,12 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		fmt.Println("PREPARED STATEMENT", prep)
 	}
 
-	decodePgResponse("MgAAAAREAAAARwAKAAAABAAAAAMAAAAEAAAAAQAAAAQAAB6yAAAABkRleHRlcgAAAAQAAAACAAAAA0NhdP////////////////////9DAAAADVNFTEVDVCAxAFoAAAAFVA==", logger)
+	// decodePgResponse("MgAAAAREAAAARwAKAAAABAAAAAMAAAAEAAAAAQAAAAQAAB6yAAAABkRleHRlcgAAAAQAAAACAAAAA0NhdP////////////////////9DAAAADVNFTEVDVCAxAFoAAAAFVA==", logger)
 
 	for {
 		// Since protocol packets have to be parsed for checking stream end,
 		// clientConnection have deadline for read to determine the end of stream.
-		err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+		err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Millisecond))
 		if err != nil {
 			logger.Error(hooks.Emoji+"failed to set the read deadline for the pg client connection", zap.Error(err))
 			return err
@@ -529,7 +529,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 		for {
 			buffer, err := util.ReadBytes(clientConn)
 			if !h.IsUserAppTerminateInitiated() && err != nil {
-				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) {
 					if err == io.EOF {
 						logger.Debug("EOF error received from client. Closing connection in postgres !!")
 						return err
@@ -573,7 +573,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 				return err
 			}
 
-			fmt.Println("ENCODED@@@@@@@@@@@))))E)IW)", encoded)
+			// fmt.Println("ENCODED@@@@@@@@@@@))))E)IW)", encoded)
 			_, err = clientConn.Write([]byte(encoded))
 			if err != nil {
 				logger.Error("failed to write request message to the client application", zap.Error(err))
