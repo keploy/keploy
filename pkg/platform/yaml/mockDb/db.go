@@ -1,8 +1,11 @@
 package mockdb
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -76,7 +79,18 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
-		err = yamlLib.Unmarshal(data, &mockYamls)
+		dec := yamlLib.NewDecoder(bytes.NewReader(data))
+		for {
+			var doc *yaml.NetworkTrafficDoc
+			err := dec.Decode(&doc)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+			}
+			mockYamls = append(mockYamls, doc)
+		}
 		mocks, err := decodeMocks(mockYamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
@@ -122,7 +136,18 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
-		err = yamlLib.Unmarshal(data, &mockYamls)
+		dec := yamlLib.NewDecoder(bytes.NewReader(data))
+		for {
+			var doc *yaml.NetworkTrafficDoc
+			err := dec.Decode(&doc)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+			}
+			mockYamls = append(mockYamls, doc)
+		}
 		mocks, err := decodeMocks(mockYamls, ys.Logger)
 		if err != nil {
 			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
