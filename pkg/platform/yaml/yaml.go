@@ -72,7 +72,7 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	}
 	data = append(data, docData...)
 	yamlPath := filepath.Join(path, fileName+".yaml")
-	file, err := os.OpenFile(yamlPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	file, err := os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		logger.Error("failed to open file for writing", zap.Error(err), zap.String("file", yamlPath))
 		return err
