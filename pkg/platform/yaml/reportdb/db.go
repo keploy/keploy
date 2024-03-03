@@ -1,9 +1,9 @@
 package reportdb
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 
@@ -63,17 +63,19 @@ func (fe *TestReport) GetTestCaseResults(ctx context.Context, testRunId string, 
 }
 
 func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId string) (*models.TestReport, error) {
-
-	testpath, err := yaml.ValidatePath(filepath.Join(fe.Path, fe.Name+".yaml"))
+	path := filepath.Join(fe.Path, "testReports", testRunId)
+	reportName := testSetId + "-report"
+	_, err := yaml.ValidatePath(filepath.Join(path, reportName+".yaml"))
 	if err != nil {
 		return nil, err
 	}
-	file, err := yaml.ReadDir(filepath.Join(testpath, testRunId), os.ModePerm)
+	data, err := yaml.ReadFile(ctx, path, reportName)
 	if err != nil {
-		return &models.TestReport{}, err
+		fe.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
+		return nil, err
 	}
-	defer file.Close()
-	decoder := yamlLib.NewDecoder(file)
+
+	decoder := yamlLib.NewDecoder(bytes.NewReader(data))
 	var doc models.TestReport
 	err = decoder.Decode(&doc)
 	if err != nil {
@@ -84,15 +86,14 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId
 
 func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSetId string, testReport *models.TestReport) error {
 
+	reportPath := filepath.Join(fe.Path, "testReports", testRunId)
+
+
 	if testReport.Name == "" {
-		lastIndex, err := yaml.FindLastIndex(fe.Path, fe.Logger)
-		if err != nil {
-			return err
-		}
-		testReport.Name = fmt.Sprintf("report-%v", lastIndex)
+		testReport.Name = testSetId + "-report"
 	}
 
-	_, err := yaml.CreateYamlFile(ctx, fe.Logger, fe.Path, testReport.Name)
+	_, err := yaml.CreateYamlFile(ctx, fe.Logger, reportPath, testReport.Name)
 	if err != nil {
 		return err
 	}
@@ -104,7 +105,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSe
 	}
 	data = append(data, d...)
 
-	err = yaml.WriteFile(ctx, fe.Logger, filepath.Join(fe.Path), testReport.Name+".yaml", data)
+	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 
 	if err != nil {
 		fe.Logger.Error("failed to write report yaml file", zap.Error(err))

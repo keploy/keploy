@@ -47,7 +47,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	if err != nil {
 		return err
 	}
-	err = yaml.WriteFile(ctx, ts.Logger, tcsPath, tcsName, data)
+	err = yaml.WriteFile(ctx, ts.Logger, tcsPath, tcsName, data, false)
 	if err != nil {
 		ts.Logger.Error("failed to write testcase yaml file", zap.Error(err))
 		return err

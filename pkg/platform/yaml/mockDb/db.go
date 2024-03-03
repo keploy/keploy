@@ -49,7 +49,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetId
 	if err != nil {
 		return err
 	}
-	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data)
+	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
 	if err != nil {
 		return err
 	}

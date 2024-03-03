@@ -66,6 +66,7 @@ func (r *replayer) Start(ctx context.Context) error {
 	testRunResult := true
 	abort := false
 	for _, testSetId := range testSetIds {
+		// TODO use other context and cancel it
 		testSetStatus, err := r.RunTestSet(ctx, testSetId, testRunId, appId, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)

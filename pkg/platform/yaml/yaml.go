@@ -61,18 +61,22 @@ func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte) error {
+func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte, isAppend bool) error {
 	isFileEmpty, err := CreateYamlFile(ctx, logger, path, fileName)
 	if err != nil {
 		return err
 	}
-	data := []byte("---\n")
-	if isFileEmpty {
-		data = []byte{}
+	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if isAppend {
+		data := []byte("---\n")
+		if isFileEmpty {
+			data = []byte{}
+		}
+		docData = append(data, docData...)
+		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 	}
-	data = append(data, docData...)
 	yamlPath := filepath.Join(path, fileName+".yaml")
-	file, err := os.OpenFile(yamlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
+	file, err := os.OpenFile(yamlPath, flag, os.ModePerm)
 	if err != nil {
 		logger.Error("failed to open file for writing", zap.Error(err), zap.String("file", yamlPath))
 		return err
@@ -84,7 +88,7 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 		writer: file,
 	}
 
-	_, err = cw.Write(data)
+	_, err = cw.Write(docData)
 	if err != nil {
 		if err == ctx.Err() {
 			return nil // Ignore context cancellation error
