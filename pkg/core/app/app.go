@@ -450,13 +450,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	err := cmd.Start()
 	if err != nil {
-		a.logger.Error("failed to start the app", zap.Error(err))
 		return models.AppError{AppErrorType: models.ErrCommandError, Err: err}
 	}
 
 	err = cmd.Wait()
 	if err != nil {
-		a.logger.Error("application exited with error", zap.Error(err))
 		return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
 	}
 	return models.AppError{}
