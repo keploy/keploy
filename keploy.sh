@@ -2,20 +2,32 @@
 
 installKeploy (){
     IS_CI=false
-    for arg in "$@"
-    do
+    # Default version is "latest"
+    VERSION="latest" 
+    for arg in "$@"; do
         case $arg in
             -isCI)
                 IS_CI=true
                 shift
-            ;;
+                ;;
+            -v=*|--version=*)
+                # Extract version from argument
+                VERSION="${arg#*=}" 
+                shift
+                ;;
             *)
-            ;;
+                ;;
         esac
     done
-
+    if [ "$VERSION" = "latest" ]; then
+        # If version is "latest", use the latest release
+        VERSION_TAG="latest"
+    else
+        # If specific version is provided, use that version
+        VERSION_TAG="v$VERSION"
+    fi
     install_keploy_arm() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+        curl --silent --location "https://github.com/keploy/keploy/releases/download/$VERSION_TAG/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
