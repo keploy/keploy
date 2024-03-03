@@ -73,6 +73,8 @@ func (r *recorder) Start(ctx context.Context) error {
 		appErrChan <- runAppError
 	}()
 
+	// TODO remove incomingChan from switch case only error channels
+
 	loop := true
 	for loop {
 		select {
