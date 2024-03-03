@@ -59,9 +59,9 @@ func (n *serviceProvider) GetCommonServices(config config.Config) *commonInterna
 	h := hooks.NewHooks(n.logger, config)
 	p := proxy.New(n.logger, h, config)
 	instrumentation := core.New(n.logger, h, p)
-	testDB := testdb.New(n.logger, config.Path+"/keploy")
-	mockDB := mockdb.New(n.logger, config.Path+"/keploy", "")
-	reportDB := reportdb.New(n.logger, config.Path+"/keploy")
+	testDB := testdb.New(n.logger, config.Path)
+	mockDB := mockdb.New(n.logger, config.Path, "")
+	reportDB := reportdb.New(n.logger, config.Path)
 	return &commonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
