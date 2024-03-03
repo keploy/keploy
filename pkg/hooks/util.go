@@ -40,7 +40,7 @@ func getContainerFromComposeFile(filePath string) ([]string, error) {
 	}
 
 	var composeConfig struct {
-		Services map[string] struct {
+		Services map[string]struct {
 			ContainerName string `yaml:"container_name"`
 		} `yaml:"services"`
 	}
