@@ -284,8 +284,20 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 			err := h.runApp(appCmd, true)
 			h.logger.Debug("Application stopped with the error", zap.Error(err))
-			if isContainerCreated {
-				h.idc.StopAndRemoveDockerContainer()
+
+			containerNames, composeErr := getContainerFromComposeFile("kdocker-compose.yaml")
+			if isContainerCreated && !os.IsNotExist(composeErr) {
+				if err != nil {
+					h.logger.Error("Failed to open the kdocker-compose.yaml file", zap.Error(composeErr))
+				}
+				for _, containerName := range containerNames {
+					if len(containerName) != 0 {
+						composeErr = h.idc.StopAndRemoveDockerContainerByContainerID(containerName)
+						if err != nil {
+							h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerName), zap.Error(composeErr))
+						}
+					}
+				}
 			}
 			if !stopApplicationErrors {
 				appErrCh <- err

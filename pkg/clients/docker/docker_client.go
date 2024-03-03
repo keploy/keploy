@@ -141,8 +141,13 @@ func (idc *internalDockerClient) ConnectContainerToNetworksByNames(containerName
 
 // Stop and Remove the docker container
 func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
-	dockerClient := idc
 	containerID := idc.containerID
+	return idc.StopAndRemoveDockerContainerByContainerID(containerID)
+}
+
+// Stop and Remove the docker container using containerName
+func (idc *internalDockerClient) StopAndRemoveDockerContainerByContainerID(containerID string) error {
+	dockerClient := idc
 
 	container, err := dockerClient.ContainerInspect(context.Background(), containerID)
 	if err != nil {
