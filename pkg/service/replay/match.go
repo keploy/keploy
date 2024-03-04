@@ -168,10 +168,6 @@ func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
-					keyStr := op.Path
-					if len(keyStr) > 1 && keyStr[0] == '/' {
-						keyStr = keyStr[1:]
-					}
 					if jsonComparisonResult.matches {
 						logDiffs.hasarrayIndexMismatch = true
 						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
