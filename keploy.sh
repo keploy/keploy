@@ -13,7 +13,6 @@ installKeploy (){
             ;;
         esac
     done
-<<<<<<< HEAD
     
     install_keploy_arm() {
         local download_url="https://github.com/keploy/keploy/releases"
@@ -24,11 +23,6 @@ installKeploy (){
         fi
 
         curl --silent --location "$download_url" | tar xz -C /tmp
-=======
-
-    install_keploy_arm() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
->>>>>>> parent of 8c63884... Addition of version argument to installation script
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
