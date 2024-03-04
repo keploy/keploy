@@ -66,6 +66,10 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 		ok, cmd := utils.IsDockerRelatedCmd(appCmd)
 		if ok {
 
+			if IsDetachMode(appCmd) {
+				return fmt.Errorf("detach mode is not allowed in Keploy command")
+			}
+
 			h.logger.Debug("Running user application on Docker", zap.Any("Docker env", cmd))
 
 			if cmd == "docker-compose" {
