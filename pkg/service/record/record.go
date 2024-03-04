@@ -89,6 +89,10 @@ func (r *recorder) Start(ctx context.Context) error {
 			case models.ErrInternal:
 				stopReason = "internal error occured while hooking into the application, hence stopping keploy"
 				r.logger.Error(stopReason, zap.Error(appErr))
+			case models.ErrAppStopped:
+				stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
+				r.logger.Warn(stopReason, zap.Error(appErr))
+			case models.ErrCtxCanceled:
 			default:
 				stopReason = "unknown error recieved from application, hence stopping keploy"
 				r.logger.Error("unknown error recieved from user application, hence stopping keploy", zap.Error(appErr))
