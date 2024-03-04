@@ -454,16 +454,16 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	err = cmd.Wait()
-	if err != nil {
-		select {
-		case <-ctx.Done():
-			fmt.Println("context canceled passed")
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
-		default:
+	select {
+	case <-ctx.Done():
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+	default:
+		if err != nil {
 			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
+		} else {
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 		}
 	}
-	return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 }
 
 //if a.docker.GetContainerID() == "" {
