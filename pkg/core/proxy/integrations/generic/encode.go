@@ -75,27 +75,25 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		case <-ctx.Done():
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
-				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
-				copy(genericResponseCopy, genericResponses)
+				genericResponsesCopy := make([]models.GenericPayload, len(genericResponses))
+				copy(genericResponsesCopy, genericResponses)
 				copy(genericRequestsCopy, genericRequests)
-				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
-					metadata := make(map[string]string)
-					metadata["type"] = "config"
-					// Save the mock
-					mocks <- &models.Mock{
-						Version: models.GetVersion(),
-						Name:    "mocks",
-						Kind:    models.GENERIC,
-						Spec: models.MockSpec{
-							GenericRequests:  reqs,
-							GenericResponses: resps,
-							ReqTimestampMock: reqTimestampMock,
-							ResTimestampMock: resTimestampMock,
-							Metadata:         metadata,
-						},
-					}
 
-				}(genericRequestsCopy, genericResponseCopy)
+				metadata := make(map[string]string)
+				metadata["type"] = "config"
+				// Save the mock
+				mocks <- &models.Mock{
+					Version: models.GetVersion(),
+					Name:    "mocks",
+					Kind:    models.GENERIC,
+					Spec: models.MockSpec{
+						GenericRequests:  genericRequestsCopy,
+						GenericResponses: genericResponsesCopy,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
+						Metadata:         metadata,
+					},
+				}
 				return nil
 			}
 		case buffer := <-clientBuffChan:
