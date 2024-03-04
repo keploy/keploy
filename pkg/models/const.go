@@ -269,3 +269,7 @@ var fieldTypeNames = map[FieldType]string{
 	FieldTypeString:     "FieldTypeString",
 	FieldTypeGeometry:   "FieldTypeGeometry",
 }
+
+type contextKey string
+
+const ErrGroupKey contextKey = "errGroup"
