@@ -19,15 +19,16 @@ installKeploy (){
                 ;;
         esac
     done
-    if [ "$VERSION" = "latest" ]; then
-        # If version is "latest", use the latest release
-        VERSION_TAG="latest"
-    else
-        # If specific version is provided, use that version
-        VERSION_TAG="v$VERSION"
-    fi
+    
     install_keploy_arm() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/download/$VERSION_TAG/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+        local download_url="https://github.com/keploy/keploy/releases"
+        if [ "$VERSION" = "latest" ]; then
+            download_url+="/latest/download/keploy_linux_arm64.tar.gz"
+        else
+            download_url+="/download/$VERSION/keploy_linux_arm64.tar.gz"
+        fi
+
+        curl --silent --location "$download_url" | tar xz -C /tmp
 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
@@ -50,8 +51,15 @@ installKeploy (){
     }
 
     install_keploy_amd() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+        local download_url="https://github.com/keploy/keploy/releases"
+        if [ "$VERSION" = "latest" ]; then
+            download_url+="/latest/download/keploy_linux_amd64.tar.gz"
+        else
+            download_url+="/download/$VERSION/keploy_linux_amd64.tar.gz"
+        fi
 
+        curl --silent --location "$download_url" | tar xz -C /tmp
+       
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
 
         set_alias 'sudo -E env PATH="$PATH" keploybin'
@@ -168,6 +176,13 @@ installKeploy (){
     }
 
     install_docker() {
+        local keploy_version
+        # Determine which Keploy version to use in the Docker run command
+        if [ "$VERSION" = "latest" ]; then
+            keploy_version="latest"
+        else
+            keploy_version="$VERSION"
+        fi
         if [ "$OS_NAME" = "Darwin" ]; then
             check_docker_status_for_Darwin
             dockerStatus=$?
@@ -178,9 +193,9 @@ installKeploy (){
             if ! docker volume inspect debugfs &>/dev/null; then
                 docker volume create --driver local --opt type=debugfs --opt device=debugfs debugfs
             fi
-            set_alias 'docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
+            set_alias "docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v \$(pwd):\$(pwd) -w \$(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v \$HOME/.keploy-config:/root/.keploy-config -v \$HOME/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy:$keploy_version"
         else
-            set_alias 'docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy-config:/root/.keploy-config -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
+            set_alias "docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v \$(pwd):\$(pwd) -w \$(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v \$HOME/.keploy-config:/root/.keploy-config -v \$HOME/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy:$keploy_version"
         fi
 }
 
