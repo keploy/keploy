@@ -356,8 +356,6 @@ func SetupCA(logger *zap.Logger, pid uint32, lang string) error {
 		return err
 	}
 
-	fmt.Println("set the certificate path in environment", os.Getenv("NODE_EXTRA_CA_CERTS"))
-
 	// for python
 	err = os.Setenv("REQUESTS_CA_BUNDLE", tempCertPath)
 	if err != nil {
