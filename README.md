@@ -121,9 +121,19 @@ On MacOS and Windows, additional tools are required for Keploy due to the lack o
 # 🚀 Quick Installation
 
 To get started let's set Keploy alias by running. 
-
+To install latest version of keploy
 ```shell
-curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh installKeploy 
+```
+
+To install particular fuction of keploy 
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh installKeploy -version=$version
+```
+
+Example :
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh installKeploy -version=v2.0.0-alpha43
 ```
 
 ## Capturing Testcases
