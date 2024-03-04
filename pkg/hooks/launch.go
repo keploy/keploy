@@ -285,11 +285,10 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			defer h.Recover(pkg.GenerateRandomID())
 
 			err := h.runApp(appCmd, true)
-			if err != nil {
-				h.logger.Debug("Application stopped with the error", zap.Error(err))
-				if !stopApplicationErrors {
-					appErrCh <- err
-				}
+			log.Println(err)
+			h.logger.Debug("Application stopped with the error", zap.Error(err))
+			if !stopApplicationErrors {
+				appErrCh <- err
 			}
 		}()
 	}
@@ -555,9 +554,9 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 		}
 		h.logger.Error("userApplication failed to run with the following error. Please check application logs", zap.Error(err))
 		return ErrCommandError
+	} else {
+		return ErrUnExpected
 	}
-
-	return nil
 }
 
 // injectNetworkToKeploy attaches the given network to the keploy container and also sends the keploy container ip of the new network interface to the kernel space
