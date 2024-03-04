@@ -112,10 +112,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 }
 
 func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
-	if opts.ServeTest {
-		c.logger.Debug("Serve test is true, not running the app")
-		return models.AppError{}
-	}
 	a, err := c.getApp(id)
 	if err != nil {
 		c.logger.Error("failed to get app", zap.Error(err))

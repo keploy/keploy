@@ -9,7 +9,7 @@ type Config struct {
 	DnsPort         uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort       uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug           bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
-	Telemetry       bool          `json:"telemetry" yaml:"telemetry" mapstructure:"telemetry"`
+	DisableTele     bool          `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	InDocker        bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
 	ContainerName   string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName     string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`

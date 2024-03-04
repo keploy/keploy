@@ -10,7 +10,6 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
-	"go.uber.org/zap"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -63,8 +62,6 @@ func start(ctx context.Context) {
 	cmdConfigurator := cli.NewCmdConfigurator(logger)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		// TODO: remove this log statement because cobra will log things anyways
-		logger.Error("failed to start the CLI.", zap.Any("error", err.Error()))
 		os.Exit(1)
 	}
 }

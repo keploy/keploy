@@ -6,13 +6,14 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
@@ -183,6 +184,5 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 			ResTimestampMock: mock.resTimestampMock,
 		},
 	}
-
 	return nil
 }

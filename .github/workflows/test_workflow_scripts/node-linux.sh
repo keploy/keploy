@@ -70,7 +70,7 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
 
 # Generate the keploy-config file.
-./../../keployv2 generate-config
+./../../keployv2 config --generate
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"

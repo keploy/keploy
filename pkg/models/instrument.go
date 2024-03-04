@@ -27,6 +27,5 @@ type SetupOptions struct {
 
 type RunOptions struct {
 	//IgnoreErrors bool
-	ServeTest   bool
 	DockerDelay time.Duration
 }

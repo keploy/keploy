@@ -169,11 +169,14 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to mock outgoing: %w", err)
 	}
-	go func() {
-		defer utils.Recover(r.logger)
-		appErr = r.RunApplication(ctx, appId, models.RunOptions{ServeTest: serveTest})
-		appErrChan <- appErr
-	}()
+
+	if !serveTest {
+		go func() {
+			defer utils.Recover(r.logger)
+			appErr = r.RunApplication(ctx, appId, models.RunOptions{})
+			appErrChan <- appErr
+		}()
+	}
 
 	time.Sleep(time.Duration(r.config.Test.Delay) * time.Second)
 
