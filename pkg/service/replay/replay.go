@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 var completeTestReport = make(map[string]TestReportVerdict)
@@ -47,17 +48,22 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 }
 
 func (r *replayer) Start(ctx context.Context) error {
+	g, ctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	var stopReason string
 	defer func() {
 		select {
 		case <-ctx.Done():
-			return
+			break
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
 				r.logger.Error("failed to stop replay", zap.Error(err))
 			}
-
+		}
+		err := g.Wait()
+		if err != nil {
+			r.logger.Error("failed to stop recording", zap.Error(err))
 		}
 	}()
 	testRunId, appId, err := r.BootReplay(ctx)
@@ -133,6 +139,14 @@ func (r *replayer) GetAllTestSetIds(ctx context.Context) ([]string, error) {
 }
 
 func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64, serveTest bool) (models.TestSetStatus, error) {
+	var testLoopCtx, testLoopCtxCancel = context.WithCancel(ctx)
+	defer testLoopCtxCancel()
+	var runTestSetCtx, runTestSetCtxCancel = context.WithCancel(ctx)
+	defer runTestSetCtxCancel()
+	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(runTestSetCtx)
+	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
+	testLoopErrGrp, testLoopCtx := errgroup.WithContext(testLoopCtx)
+	testLoopCtx = context.WithValue(testLoopCtx, models.ErrGroupKey, testLoopErrGrp)
 	var mockErrChan <-chan error
 	var appErrChan = make(chan models.AppError)
 	var appErr models.AppError
@@ -140,11 +154,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	var failure int
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
-
-	var testLoopCtx, testLoopCtxCancel = context.WithCancel(ctx)
-	defer testLoopCtxCancel()
-	var runTestSetCtx, runTestSetCtxCancel = context.WithCancel(ctx)
-	defer runTestSetCtxCancel()
 
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetId)
 	if err != nil {
@@ -185,11 +194,15 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	}
 
 	if !serveTest {
-		go func() {
+		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			appErr = r.RunApplication(runTestSetCtx, appId, models.RunOptions{})
+			if appErr.AppErrorType == models.ErrCtxCanceled {
+				return nil
+			}
 			appErrChan <- appErr
-		}()
+			return nil
+		})
 	}
 
 	time.Sleep(time.Duration(r.config.Test.Delay) * time.Second)
@@ -224,6 +237,10 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 		}
 		exitLoop = true
 		testLoopCtxCancel()
+		err := testLoopErrGrp.Wait()
+		if err != nil {
+			r.logger.Error("error in testLoop go routine", zap.Error(err))
+		}
 	}()
 
 	for _, testCase := range testCases {
@@ -343,6 +360,10 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 	totalTestFailed += testReport.Failure
 
 	runTestSetCtxCancel()
+	err = runTestSetErrGrp.Wait()
+	if err != nil {
+		r.logger.Error("error in runTestSetErrGrp", zap.Error(err))
+	}
 	return testSetStatus, nil
 }
 

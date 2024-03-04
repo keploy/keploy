@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 type recorder struct {
@@ -31,18 +32,24 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 }
 
 func (r *recorder) Start(ctx context.Context) error {
+	g, ctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	var stopReason string
 	defer func() {
 		select {
 		case <-ctx.Done():
-			return
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
 				r.logger.Error("failed to stop recording", zap.Error(err))
 			}
 		}
+		err := g.Wait()
+		if err != nil {
+			r.logger.Error("failed to stop recording", zap.Error(err))
+		}
 	}()
+
 	var runAppError models.AppError
 	var appErrChan = make(chan models.AppError)
 	var incomingChan <-chan *models.TestCase
@@ -77,36 +84,43 @@ func (r *recorder) Start(ctx context.Context) error {
 	}
 
 	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appId, models.IncomingOptions{})
-	go func() {
+	g.Go(func() error {
 		for testCase := range incomingChan {
-			go func(testCase *models.TestCase) {
+			testCase := testCase // capture range variable
+			g.Go(func() error {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetId)
 				if err != nil {
 					insertTestErrChan <- err
 				}
-			}(testCase)
+				return nil
+			})
 		}
-	}()
+		return nil
+	})
 
 	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
-	go func() {
+	g.Go(func() error {
 		for mock := range outgoingChan {
-			go func(mock *models.Mock) {
+			mock := mock // capture range variable
+			g.Go(func() error {
 				err := r.mockDB.InsertMock(ctx, mock, newTestSetId)
 				if err != nil {
 					insertMockErrChan <- err
 				}
-			}(mock)
+				return nil
+			})
 		}
-	}()
+		return nil
+	})
 
-	go func() {
+	g.Go(func() error {
 		runAppError = r.instrumentation.Run(ctx, appId, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
-			return
+			return nil
 		}
 		appErrChan <- runAppError
-	}()
+		return nil
+	})
 
 	select {
 	case appErr := <-appErrChan:
@@ -142,16 +156,22 @@ func (r *recorder) Start(ctx context.Context) error {
 }
 
 func (r *recorder) StartMock(ctx context.Context) error {
+	g, ctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	var stopReason string
 	defer func() {
 		select {
 		case <-ctx.Done():
-			return
+			break
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
 				r.logger.Error("failed to stop recording", zap.Error(err))
 			}
+		}
+		err := g.Wait()
+		if err != nil {
+			r.logger.Error("failed to stop recording", zap.Error(err))
 		}
 	}()
 	var outgoingChan <-chan *models.Mock
@@ -172,16 +192,19 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	}
 
 	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
-	go func() {
+	g.Go(func() error {
 		for mock := range outgoingChan {
-			go func(mock *models.Mock) {
+			mock := mock // capture range variable
+			g.Go(func() error {
 				err := r.mockDB.InsertMock(ctx, mock, "")
 				if err != nil {
 					insertMockErrChan <- err
 				}
-			}(mock)
+				return nil
+			})
 		}
-	}()
+		return nil
+	})
 
 	select {
 	case err = <-outgoingErrChan:
