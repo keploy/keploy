@@ -2,8 +2,8 @@ package cli
 
 import (
 	"context"
+
 	"go.keploy.io/server/v2/pkg/graph"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
@@ -43,14 +43,6 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 					}
 				}
 				replay.Start(ctx)
-			}
-
-			//TODO: Use CommandContext here.
-			c := exec.Command("sudo", "chmod", "-R", "777", cfg.Path)
-			err = c.Run()
-			if err != nil {
-				logger.Error("failed to set the permission of keploy directory", zap.Error(err))
-				return err
 			}
 			return nil
 		},

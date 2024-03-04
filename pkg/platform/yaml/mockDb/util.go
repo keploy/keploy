@@ -485,7 +485,6 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			}
 			req.Message = requestMessage
 		default:
-			// TODO
 		}
 		requests = append(requests, req)
 	}
@@ -527,7 +526,6 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			}
 			resp.Message = responseMessage
 		default:
-			// TODO
 		}
 		responses = append(responses, resp)
 	}
