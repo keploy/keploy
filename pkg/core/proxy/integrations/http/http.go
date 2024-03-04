@@ -8,7 +8,6 @@ import (
 	"errors"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
-	"go.keploy.io/server/v2/utils"
 	"io"
 	"net"
 	"net/http"
@@ -158,35 +157,32 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 		return nil
 	}
 
-	go func() {
-		defer utils.Recover(logger)
-		mocks <- &models.Mock{
-			Version: models.GetVersion(),
-			Name:    "mocks",
-			Kind:    models.HTTP,
-			Spec: models.MockSpec{
-				Metadata: meta,
-				HttpReq: &models.HttpReq{
-					Method:     models.Method(req.Method),
-					ProtoMajor: req.ProtoMajor,
-					ProtoMinor: req.ProtoMinor,
-					URL:        req.URL.String(),
-					Header:     pkg.ToYamlHttpHeader(req.Header),
-					Body:       string(reqBody),
-					URLParams:  pkg.UrlParams(req),
-					Host:       req.Host,
-				},
-				HttpResp: &models.HttpResp{
-					StatusCode: respParsed.StatusCode,
-					Header:     pkg.ToYamlHttpHeader(respParsed.Header),
-					Body:       string(respBody),
-				},
-				Created:          time.Now().Unix(),
-				ReqTimestampMock: mock.resTimestampMock,
-				ResTimestampMock: mock.resTimestampMock,
+	mocks <- &models.Mock{
+		Version: models.GetVersion(),
+		Name:    "mocks",
+		Kind:    models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: meta,
+			HttpReq: &models.HttpReq{
+				Method:     models.Method(req.Method),
+				ProtoMajor: req.ProtoMajor,
+				ProtoMinor: req.ProtoMinor,
+				URL:        req.URL.String(),
+				Header:     pkg.ToYamlHttpHeader(req.Header),
+				Body:       string(reqBody),
+				URLParams:  pkg.UrlParams(req),
+				Host:       req.Host,
 			},
-		}
-	}()
+			HttpResp: &models.HttpResp{
+				StatusCode: respParsed.StatusCode,
+				Header:     pkg.ToYamlHttpHeader(respParsed.Header),
+				Body:       string(respBody),
+			},
+			Created:          time.Now().Unix(),
+			ReqTimestampMock: mock.resTimestampMock,
+			ResTimestampMock: mock.resTimestampMock,
+		},
+	}
 
 	return nil
 }
