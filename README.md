@@ -122,10 +122,21 @@ On MacOS and Windows, additional tools are required for Keploy due to the lack o
 
 To get started let's set Keploy alias by running. 
 
+
+To install the latest version:
+
 ```shell
 curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
+To install a specific version:
 
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh installKeploy -version=$version
+```
+#### Example:
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh installKeploy -version=v2.0.0-alpha69
+```
 ## Capturing Testcases
 
 To initiate the recording of API calls, execute this command in your terminal:
