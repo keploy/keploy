@@ -63,7 +63,7 @@ func (fe *TestReport) GetTestCaseResults(ctx context.Context, testRunId string, 
 }
 
 func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId string) (*models.TestReport, error) {
-	path := filepath.Join(fe.Path, "testReports", testRunId)
+	path := filepath.Join(fe.Path, testRunId)
 	reportName := testSetId + "-report"
 	_, err := yaml.ValidatePath(filepath.Join(path, reportName+".yaml"))
 	if err != nil {
@@ -86,7 +86,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId
 
 func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSetId string, testReport *models.TestReport) error {
 
-	reportPath := filepath.Join(fe.Path, "testReports", testRunId)
+	reportPath := filepath.Join(fe.Path, testRunId)
 
 
 	if testReport.Name == "" {
