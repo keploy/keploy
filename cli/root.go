@@ -2,18 +2,14 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	_ "net/http/pprof"
 
 	"github.com/spf13/cobra"
+	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
-
-func LogExample(example string) string {
-	return fmt.Sprintf("Example usage: %s", example)
-}
 
 func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	conf := config.New()
@@ -21,15 +17,15 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	var rootCmd = &cobra.Command{
 		Use:     "keploy",
 		Short:   "Keploy CLI",
-		Example: rootExamples,
+		Example: provider.RootExamples,
 		Version: utils.Version,
 	}
 
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
-	rootCmd.SetHelpTemplate(rootCustomHelpTemplate)
+	rootCmd.SetHelpTemplate(provider.RootCustomHelpTemplate)
 
-	rootCmd.SetVersionTemplate(versionTemplate)
+	rootCmd.SetVersionTemplate(provider.VersionTemplate)
 
 	err := cmdConfigurator.AddFlags(rootCmd, conf)
 	if err != nil {
