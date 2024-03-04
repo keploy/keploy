@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+
+	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
 
@@ -25,15 +27,15 @@ func Example(ctx context.Context, logger *zap.Logger, conf *config.Config, servi
 				return err
 			}
 			if customSetup {
-				fmt.Println(examples)
+				fmt.Println(provider.Examples)
 				return nil
 			}
-			fmt.Println(exampleOneClickInstall)
-			fmt.Println(withoutexampleOneClickInstall)
+			fmt.Println(provider.ExampleOneClickInstall)
+			fmt.Println(provider.WithoutexampleOneClickInstall)
 			return nil
 		},
 	}
-	cmd.SetHelpTemplate(customHelpTemplate)
+	cmd.SetHelpTemplate(provider.CustomHelpTemplate)
 
 	cmd.Flags().Bool("customSetup", customSetup, "Check if the user is using one click install")
 

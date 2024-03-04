@@ -1,4 +1,4 @@
-package cli
+package provider
 
 import (
 	"context"
@@ -16,7 +16,11 @@ import (
 	"go.uber.org/zap"
 )
 
-var customHelpTemplate = `
+func LogExample(example string) string {
+	return fmt.Sprintf("Example usage: %s", example)
+}
+
+var CustomHelpTemplate = `
 {{if .Example}}Examples:
 {{.Example}}
 {{end}}
@@ -29,10 +33,10 @@ var customHelpTemplate = `
 Use "{{.CommandPath}} [command] --help" for more information about a command.
 `
 
-var withoutexampleOneClickInstall = `
+var WithoutexampleOneClickInstall = `
 Note: If installed keploy without One Click Install, use "keploy example --customSetup true"
 `
-var examples = `
+var Examples = `
 Golang Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
@@ -67,7 +71,7 @@ Docker
 
 `
 
-var exampleOneClickInstall = `
+var ExampleOneClickInstall = `
 Golang Application
 	Record:
 	keploy record -c "/path/to/user/app/binary"
@@ -97,7 +101,7 @@ Docker
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
 `
 
-var rootCustomHelpTemplate = `{{.Short}}
+var RootCustomHelpTemplate = `{{.Short}}
 
 Usage:{{if .Runnable}}
   {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
@@ -121,7 +125,7 @@ Examples:
 Use "{{.CommandPath}} [command] --help" for more information about a command.{{end}}
 `
 
-var rootExamples = `
+var RootExamples = `
   Record:
 	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1 --buildDelay 1m
 
@@ -132,7 +136,7 @@ var rootExamples = `
 	keploy config --generate -p "/path/to/localdir"
 `
 
-var versionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
+var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 
 type cmdConfigurator struct {
 	logger *zap.Logger
@@ -257,7 +261,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			if cfg.InDocker {
 				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 			} else {
-				c.logger.Info(LogExample(rootExamples))
+				c.logger.Info(LogExample(RootExamples))
 			}
 			return errors.New("missing required -c flag or appCmd in config file")
 		}

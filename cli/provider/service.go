@@ -1,4 +1,4 @@
-package cli
+package provider
 
 import (
 	"context"
@@ -60,7 +60,7 @@ func (n *serviceProvider) GetCommonServices(config config.Config) *commonInterna
 	instrumentation := core.New(n.logger, h, p)
 	testDB := testdb.New(n.logger, config.Path)
 	mockDB := mockdb.New(n.logger, config.Path, "")
-	reportDB := reportdb.New(n.logger, config.Path + "/reports")
+	reportDB := reportdb.New(n.logger, config.Path+"/reports")
 	return &commonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
