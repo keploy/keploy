@@ -25,16 +25,16 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
 			if err != nil {
 				logger.Error("failed to get service", zap.Error(err))
-				return err
+				return nil
 			}
 			if record, ok := svc.(recordSvc.Service); !ok {
 				logger.Error("service doesn't satisfy record service interface")
-				return err
+				return nil
 			} else {
 				err := record.Start(ctx)
 				if err != nil {
 					logger.Error("failed to start recording", zap.Error(err))
-					return err
+					return nil
 				}
 			}
 			return nil
