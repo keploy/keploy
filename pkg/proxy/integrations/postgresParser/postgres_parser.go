@@ -64,13 +64,13 @@ func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destC
 	case models.MODE_RECORD:
 		err := encodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger, ctx)
 		if err != nil {
-			p.logger.Error("failed to encode the outgoing postgres call", zap.Error(err))
+			p.logger.Debug("failed to encode the outgoing postgres call", zap.Error(err))
 		}
 	case models.MODE_TEST:
 		logger := p.logger.With(zap.Any("Client IP Address", clientConn.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 		err := decodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, logger, ctx)
-		if err != nil {
-			logger.Error("failed to decode the outgoing postgres call", zap.Error(err))
+		if err != nil && !p.hooks.IsUserAppTerminateInitiated() {
+			logger.Debug("failed to decode the outgoing postgres call", zap.Error(err))
 		}
 	default:
 		p.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
@@ -506,7 +506,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						logger.Debug("EOF error received from client. Closing connection in postgres !!")
 						return err
 					}
-					logger.Error("failed to read the request message in proxy for postgres dependency", zap.Error(err))
+					logger.Debug("failed to read the request message in proxy for postgres dependency", zap.Error(err))
 					return err
 				}
 			}
