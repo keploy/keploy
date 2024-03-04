@@ -285,7 +285,6 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			defer h.Recover(pkg.GenerateRandomID())
 
 			err := h.runApp(appCmd, true)
-			log.Println(err)
 			h.logger.Debug("Application stopped with the error", zap.Error(err))
 			if !stopApplicationErrors {
 				appErrCh <- err
