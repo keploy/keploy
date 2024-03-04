@@ -30,13 +30,13 @@ func ConvertIPToUint32(ipStr string) (uint32, error) {
 }
 
 func IsDetachMode(command string) bool {
-    args := strings.Fields(command)
-	
-    for _, arg := range args {
-        if arg == "-d" || arg == "--detach" {
-            return true
-        }
-    }
+	args := strings.Fields(command)
 
-    return false
+	for _, arg := range args {
+		if arg == "-d" || arg == "--detach" {
+			return true
+		}
+	}
+
+	return false
 }
