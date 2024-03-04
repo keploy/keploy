@@ -46,7 +46,7 @@ func (n *serviceProvider) GetTelemetryService(ctx context.Context, config config
 		return nil, errors.New("failed to get installation id")
 	}
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
-		Enabled:        config.Telemetry,
+		Enabled:        config.DisableTele,
 		Version:        utils.Version,
 		GlobalMap:      map[string]interface{}{},
 		InstallationID: installtionId,

@@ -128,8 +128,8 @@ var rootExamples = `
   Test:
 	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1 --buildDelay 1m
 
-  Generate-Config:
-	keploy generate-config -p "/path/to/localdir"
+  Config:
+	keploy config --generate -p "/path/to/localdir"
 `
 
 var versionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
@@ -153,18 +153,19 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
 	case "mock":
-		cmd.Flags().Bool("telemetry", cfg.Telemetry, "Run in telemetry mode")
 		cmd.Flags().StringP("path", "p", cfg.Path, "Path to local directory where generated testcases/mocks are stored")
-		cmd.Flags().Uint32("pid", 0, "Process id of your application.")
-		cmd.MarkFlagRequired("pid")
 		cmd.Flags().Bool("record", false, "Record all outgoing network traffic")
-		cmd.Flags().Lookup("record").NoOptDefVal = "true"
-		cmd.Flags().Bool("replay", true, "Intercept all outgoing network traffic and replay the recorded traffic")
-		cmd.Flags().Lookup("replay").NoOptDefVal = "true"
+		cmd.Flags().Bool("replay", false, "Intercept all outgoing network traffic and replay the recorded traffic")
 		cmd.Flags().StringP("name", "n", "mocks", "Name of the mock")
+		cmd.Flags().Uint32("pid", 0, "Process id of your application.")
+		err := cmd.MarkFlagRequired("pid")
+		if err != nil {
+			errMsg := "failed to mark pid as required flag"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
-		cmd.Flags().Bool("telemetry", cfg.Telemetry, "Run in telemetry mode")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -174,12 +175,6 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		cmd.Flags().String("containerName", cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(cfg), "Ports to bypass the proxy server and ignore the traffic")
-		err = cmd.Flags().MarkHidden("telemetry")
-		if err != nil {
-			errMsg := "failed to mark telemetry as hidden flag"
-			c.logger.Error(errMsg, zap.Error(err))
-			return errors.New(errMsg)
-		}
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -198,6 +193,13 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", cfg.Debug, "Run in debug mode")
+		cmd.PersistentFlags().Bool("disableTele", cfg.DisableTele, "Run in telemetry mode")
+		err = cmd.PersistentFlags().MarkHidden("disableTele")
+		if err != nil {
+			errMsg := "failed to mark telemetry as hidden flag"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
 		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
 		if err != nil {
 			errMsg := "failed to bind flag to config"

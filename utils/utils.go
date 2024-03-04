@@ -67,7 +67,6 @@ func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentr
 	}
 
 	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(client))
-
 	//in case of err it will return noop core. So we don't need to attach it to log.
 	if err != nil {
 		logger.Debug("failed to init zap", zap.Error(err))

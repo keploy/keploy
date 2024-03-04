@@ -391,7 +391,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	case err := <-errCh2:
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
-		return models.AppError{}
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	}
 }
 
@@ -455,9 +455,15 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	err = cmd.Wait()
 	if err != nil {
-		return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
+		select {
+		case <-ctx.Done():
+			fmt.Println("context canceled passed")
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+		default:
+			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
+		}
 	}
-	return models.AppError{}
+	return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 }
 
 //if a.docker.GetContainerID() == "" {
