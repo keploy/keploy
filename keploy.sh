@@ -2,11 +2,19 @@
 
 installKeploy (){
     IS_CI=false
+    # Default version is "latest"
+    VERSION="latest" 
     for arg in "$@"
     do
         case $arg in
             -isCI)
+                # Extract the IS_CI flag
                 IS_CI=true
+                shift
+            ;;
+            -version=*)
+                # Extract the version number
+                VERSION="${arg#*=}"  
                 shift
             ;;
             *)
