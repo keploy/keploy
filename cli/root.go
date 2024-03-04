@@ -15,7 +15,6 @@ func LogExample(example string) string {
 	return fmt.Sprintf("Example usage: %s", example)
 }
 
-// TODO return error
 func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	conf := config.New()
 

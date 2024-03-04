@@ -54,7 +54,6 @@ func (n *serviceProvider) GetTelemetryService(ctx context.Context, config config
 	), nil
 }
 
-// TODO error handling like path vadilations, remove tele from platform
 func (n *serviceProvider) GetCommonServices(config config.Config) *commonInternalService {
 	h := hooks.NewHooks(n.logger, config)
 	p := proxy.New(n.logger, h, config)
