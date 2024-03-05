@@ -18,14 +18,6 @@ import (
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
-	// import all the integrations
-	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/generic"
-	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/grpc"
-	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
-	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/mongo"
-	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql"
-	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/postgres/v1"
-
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -95,6 +87,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	// set up the CA for tls connections
 	err = SetupCA(ctx, p.logger)
 	if err != nil {
+		if errors.Is(err, ctx.Err()) {
+			println("context error in setup up CA")
+			return err
+		}
 		p.logger.Error("failed to setup CA", zap.Error(err))
 		return err
 	}

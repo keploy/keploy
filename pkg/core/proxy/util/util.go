@@ -6,12 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v2/utils"
 	"io"
 	"os"
 	"os/exec"
 	"sync/atomic"
 	"time"
+
+	"go.keploy.io/server/v2/utils"
 
 	"go.uber.org/zap"
 
@@ -347,8 +348,14 @@ func GetJavaHome(ctx context.Context) (string, error) {
 	var out bytes.Buffer
 	cmd.Stderr = &out // The output we need is printed to STDERR
 
-	if err := cmd.Run(); err != nil {
-		return "", err
+	err := cmd.Run()
+	if err != nil {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+			return "", err
+		}
 	}
 
 	for _, line := range strings.Split(out.String(), "\n") {

@@ -407,12 +407,11 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) mode
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
-	// Create a new command with your appCmd
-	// TODO: do we need sh here? or just use appCmd directly?
-	//TODO: we can't use ctx if we are using sh -c, because it doesn't pass the signal to the actual child process
-	// which is the app process.
-	// cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
-	cmd := exec.CommandContext(ctx, a.cmd)
+	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
+	cmd.Cancel = func() error {
+		return utils.InterruptProcessTree(cmd, cmd.Process.Pid, syscall.SIGINT)
+	}
+	cmd.WaitDelay = 3 * time.Second
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -456,6 +455,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	err = cmd.Wait()
 	select {
 	case <-ctx.Done():
+		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	default:
 		if err != nil {

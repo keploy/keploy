@@ -6,13 +6,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/cilium/ebpf"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
 	"os"
 	_ "strings"
 	"time"
 	"unsafe"
+
+	"github.com/cilium/ebpf"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -38,6 +39,8 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		for {
 			select {
 			case <-ctx.Done():
+				close(t)
+				close(errCh)
 				return
 			default:
 				// TODO refactor this to directly consume the events from the maps

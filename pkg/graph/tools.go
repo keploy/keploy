@@ -1,7 +1,7 @@
 //go:build tools
 // +build tools
 
-package main
+package graph
 
 import (
 	_ "github.com/99designs/gqlgen"
