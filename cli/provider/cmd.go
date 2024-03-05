@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -247,12 +248,23 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		c.logger.Error(errMsg, zap.Error(err))
 		return errors.New(errMsg)
 	}
+	if cfg.Debug {
+		logger, err := log.ChangeLogLevel(zap.DebugLevel)
+		*c.logger = *logger
+		if err != nil {
+			errMsg := "failed to change log level"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
+		}
+	}
+	c.logger.Debug("hi")
 	switch cmd.Name() {
 	case "record", "test":
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
 		if err != nil {
-			c.logger.Error("failed to read the ports of outgoing calls to be ignored")
-			return err
+			errMsg := "failed to read the ports of outgoing calls to be ignored"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
 		}
 		config.SetByPassPorts(cfg, bypassPorts)
 
@@ -270,23 +282,27 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			if len(cfg.Path) > 0 {
 				curDir, err := os.Getwd()
 				if err != nil {
-					c.logger.Error("failed to get current working directory", zap.Error(err))
-					return err
+					errMsg := "failed to get current working directory"
+					c.logger.Error(errMsg, zap.Error(err))
+					return errors.New(errMsg)
 				}
 				if strings.Contains(cfg.Path, "..") {
 					cfg.Path, err = filepath.Abs(filepath.Clean(cfg.Path))
 					if err != nil {
-						c.logger.Error("failed to get the absolute path from relative path", zap.Error(err), zap.String("path:", cfg.Path))
-						return err
+						errMsg := "failed to get the absolute path from relative path"
+						c.logger.Error(errMsg, zap.Error(err))
+						return errors.New(errMsg)
 					}
 					relativePath, err := filepath.Rel(curDir, cfg.Path)
 					if err != nil {
-						c.logger.Error("failed to get the relative path from absolute path", zap.Error(err), zap.String("path:", cfg.Path))
-						return err
+						errMsg := "failed to get the relative path from absolute path"
+						c.logger.Error(errMsg, zap.Error(err))
+						return errors.New(errMsg)
 					}
 					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
-						c.logger.Error("path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories", zap.String("path:", cfg.Path))
-						return err
+						errMsg := "path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories"
+						c.logger.Error(errMsg, zap.String("path:", cfg.Path))
+						return errors.New(errMsg)
 					}
 				}
 			}
@@ -311,15 +327,17 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 
 		absPath, err := filepath.Abs(cfg.Path)
 		if err != nil {
-			c.logger.Error("failed to get the absolute path from relative path", zap.String("path received", cfg.Path), zap.Error(err))
-			return err
+			errMsg := "failed to get the absolute path from relative path"
+			c.logger.Error(errMsg, zap.Error(err))
+			return errors.New(errMsg)
 		}
 		cfg.Path = absPath + "/keploy"
 		if cmd.Name() == "test" {
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
 			if err != nil {
-				c.logger.Error("failed to get the testsets", zap.Error(err))
-				return err
+				errMsg := "failed to get the testsets"
+				c.logger.Error(errMsg, zap.Error(err))
+				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(cfg, testSets)
 			if cfg.Test.Delay <= 5 {
