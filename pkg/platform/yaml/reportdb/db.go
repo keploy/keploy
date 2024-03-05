@@ -53,11 +53,11 @@ func (fe *TestReport) InsertTestCaseResult(ctx context.Context, testRunId string
 func (fe *TestReport) GetTestCaseResults(ctx context.Context, testRunId string, testSetId string) ([]models.TestResult, error) {
 	testRun, ok := fe.tests[testRunId]
 	if !ok {
-		return nil, fmt.Errorf("%s found no test results for test report with id: %s", utils.Emoji, testRunId)
+		return []models.TestResult{}, fmt.Errorf("%s found no test results for test report with id: %s", utils.Emoji, testRunId)
 	}
 	testSetResults, ok := testRun[testSetId]
 	if !ok {
-		return nil, fmt.Errorf("%s found no test results for test set with id: %s", utils.Emoji, testSetId)
+		return []models.TestResult{}, fmt.Errorf("%s found no test results for test set with id: %s", utils.Emoji, testSetId)
 	}
 	return testSetResults, nil
 }
@@ -87,7 +87,6 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId
 func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSetId string, testReport *models.TestReport) error {
 
 	reportPath := filepath.Join(fe.Path, testRunId)
-
 
 	if testReport.Name == "" {
 		testReport.Name = testSetId + "-report"

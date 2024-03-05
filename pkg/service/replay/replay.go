@@ -285,50 +285,56 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 			}
 		}
 
-		testCaseResult := &models.TestResult{
-			Kind:       models.HTTP,
-			Name:       testSetId,
-			Status:     testStatus,
-			Started:    started.Unix(),
-			Completed:  time.Now().UTC().Unix(),
-			TestCaseID: testCase.Name,
-			Req: models.HttpReq{
-				Method:     testCase.HttpReq.Method,
-				ProtoMajor: testCase.HttpReq.ProtoMajor,
-				ProtoMinor: testCase.HttpReq.ProtoMinor,
-				URL:        testCase.HttpReq.URL,
-				URLParams:  testCase.HttpReq.URLParams,
-				Header:     testCase.HttpReq.Header,
-				Body:       testCase.HttpReq.Body,
-				Binary:     testCase.HttpReq.Binary,
-				Form:       testCase.HttpReq.Form,
-				Timestamp:  testCase.HttpReq.Timestamp,
-			},
-			Res: models.HttpResp{
-				StatusCode:    testCase.HttpResp.StatusCode,
-				Header:        testCase.HttpResp.Header,
-				Body:          testCase.HttpResp.Body,
-				StatusMessage: testCase.HttpResp.StatusMessage,
-				ProtoMajor:    testCase.HttpResp.ProtoMajor,
-				ProtoMinor:    testCase.HttpResp.ProtoMinor,
-				Binary:        testCase.HttpResp.Binary,
-				Timestamp:     testCase.HttpResp.Timestamp,
-			},
-			Noise:  testCase.Noise,
-			Result: *testResult,
-		}
-		err = r.reportDB.InsertTestCaseResult(testLoopCtx, testRunId, testSetId, testCase.Name, testCaseResult)
-		if err != nil {
-			return models.TestSetStatusFailed, fmt.Errorf("failed to insert test case result: %w", err)
-		}
-		if !testPass {
-			testSetStatus = models.TestSetStatusFailed
+		// TODO remove this context canceled error is done
+		if testResult != nil {
+
+			testCaseResult := &models.TestResult{
+				Kind:       models.HTTP,
+				Name:       testSetId,
+				Status:     testStatus,
+				Started:    started.Unix(),
+				Completed:  time.Now().UTC().Unix(),
+				TestCaseID: testCase.Name,
+				Req: models.HttpReq{
+					Method:     testCase.HttpReq.Method,
+					ProtoMajor: testCase.HttpReq.ProtoMajor,
+					ProtoMinor: testCase.HttpReq.ProtoMinor,
+					URL:        testCase.HttpReq.URL,
+					URLParams:  testCase.HttpReq.URLParams,
+					Header:     testCase.HttpReq.Header,
+					Body:       testCase.HttpReq.Body,
+					Binary:     testCase.HttpReq.Binary,
+					Form:       testCase.HttpReq.Form,
+					Timestamp:  testCase.HttpReq.Timestamp,
+				},
+				Res: models.HttpResp{
+					StatusCode:    testCase.HttpResp.StatusCode,
+					Header:        testCase.HttpResp.Header,
+					Body:          testCase.HttpResp.Body,
+					StatusMessage: testCase.HttpResp.StatusMessage,
+					ProtoMajor:    testCase.HttpResp.ProtoMajor,
+					ProtoMinor:    testCase.HttpResp.ProtoMinor,
+					Binary:        testCase.HttpResp.Binary,
+					Timestamp:     testCase.HttpResp.Timestamp,
+				},
+				Noise:  testCase.Noise,
+				Result: *testResult,
+			}
+			err = r.reportDB.InsertTestCaseResult(testLoopCtx, testRunId, testSetId, testCase.Name, testCaseResult)
+			if err != nil {
+				return models.TestSetStatusFailed, fmt.Errorf("failed to insert test case result: %w", err)
+			}
+			if !testPass {
+				testSetStatus = models.TestSetStatusFailed
+			}
 		}
 	}
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunId, testSetId)
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get test case results: %w", err)
+		if runTestSetCtx.Err() != context.Canceled {
+			return models.TestSetStatusFailed, fmt.Errorf("failed to get test case results: %w", err)
+		}
 	}
 
 	testReport = &models.TestReport{
@@ -340,8 +346,11 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 		Tests:   testCaseResults,
 		ID:      testRunId,
 	}
+
+	// final report should have reason for sudden stop the test run.
+	reportCtx := context.WithoutCancel(runTestSetCtx)
 	// write final report
-	err = r.reportDB.InsertReport(runTestSetCtx, testRunId, testSetId, testReport)
+	err = r.reportDB.InsertReport(reportCtx, testRunId, testSetId, testReport)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to insert report: %w", err)
 	}
@@ -414,7 +423,6 @@ func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HttpR
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
-
 }
 
 func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
