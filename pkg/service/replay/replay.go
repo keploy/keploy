@@ -70,13 +70,13 @@ func (r *replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
 		r.logger.Error(stopReason, zap.Error(err))
-		return errors.New("failed to execute replay due to error in booting replay")
+		return fmt.Errorf(stopReason)
 	}
 	testSetIds, err := r.testDB.GetAllTestSetIds(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		r.logger.Error(stopReason, zap.Error(err))
-		return errors.New("failed to execute replay due to error in getting all test set ids")
+		return fmt.Errorf(stopReason)
 	}
 
 	testSetResult := false
@@ -87,7 +87,7 @@ func (r *replayer) Start(ctx context.Context) error {
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			r.logger.Error(stopReason, zap.Error(err))
-			return nil
+			return fmt.Errorf(stopReason)
 		}
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
@@ -487,27 +487,27 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to get filtered mocks"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(ctx, "", time.Time{}, time.Now())
 	if err != nil {
 		stopReason = "failed to get unfiltered mocks"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 
 	_, appId, err := r.BootReplay(ctx)
 	if err != nil {
 		stopReason = "failed to boot replay"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 
 	err = r.instrumentation.SetMocks(ctx, appId, filteredMocks, unfilteredMocks)
 	if err != nil {
 		stopReason = "failed to set mocks"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 	<-ctx.Done()
 	return nil
