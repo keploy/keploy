@@ -45,6 +45,9 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	var eofAfterColumns []byte
 	// Parse the column count packet
 	columnCount, _, n := readLengthEncodedInteger(b)
+	if n == 0{
+		return nil, errors.New("invalid column count")
+	}
 	b = b[n:]
 
 	// Parse the columns
@@ -104,7 +107,7 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 	packet := &ColumnDefinition{}
 	var n int
 	var m int
-	if len(b) < 4{
+	if len(b) < 4 {
 		return nil, nil, fmt.Errorf("invalid column definition packet")
 	}
 	// Read packet header
@@ -113,28 +116,56 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 	b = b[4:]
 
 	packet.Catalog, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Schema, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Table, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.OrgTable, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Name, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.OrgName, n = readLengthEncodedStrings(b)
-	b = b[n:]
-	b = b[1:] // Skip the next byte (length of the fixed-length fields)
+	if len(b) > n {
+		b = b[n:]
+	}
+
+	if len(b) > 1 {
+		b = b[1:] // Skip the next byte (length of the fixed-length fields)
+	}
 	packet.CharacterSet = binary.LittleEndian.Uint16(b)
-	b = b[2:]
+	if len(b) > 2 {
+		b = b[2:]
+	}
 	packet.ColumnLength = binary.LittleEndian.Uint32(b)
-	b = b[4:]
+	if len(b) > 4 {
+		b = b[4:]
+	}
 	packet.ColumnType = b[0]
-	b = b[1:]
+	if len(b) > 1 {
+		b = b[1:]
+	}
 	packet.Flags = binary.LittleEndian.Uint16(b)
-	b = b[2:]
-	packet.Decimals = b[0]
-	b = b[2:] // Skip filler
+	if len(b) > 2 {
+		b = b[2:]
+	}
+	if len(b) > 0 {
+		packet.Decimals = b[0]
+	}
+	if len(b) > 2 {
+		b = b[2:] // Skip filler
+	}
+
 	if len(b) > 0 {
 		packet.DefaultValue, m = readLengthEncodedStrings(b)
 		b = b[m:]

@@ -158,8 +158,10 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
+			if err != nil {
+				fmt.Println("Error parsing result set: ", err)
+			}
 			lastCommand = 0x00 // Reset the last command
-
 		default:
 			packetType = "Unknown"
 			packetData = data
