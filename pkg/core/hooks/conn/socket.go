@@ -40,7 +40,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 			select {
 			case <-ctx.Done():
 				close(t)
-				close(errCh)
+				errCh <- ctx.Err()
 				return
 			default:
 				// TODO refactor this to directly consume the events from the maps

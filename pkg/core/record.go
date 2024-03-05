@@ -24,7 +24,7 @@ func (c *Core) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingO
 		}
 	}
 
-	err := c.proxy.Record(ctx, id, m, opts)
+	err := c.proxy.Record(ctx, id, m, errCh, opts)
 	if err != nil {
 		errCh <- err
 		return nil, errCh

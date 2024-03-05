@@ -214,6 +214,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		return
 	}
 
+	//TODO: where to close the mock channel and this depsErrChan
+	depsErrChan := rule.DepsErrChan
 	var dstAddr string
 
 	if destInfo.Version == 4 {
@@ -230,12 +232,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
+				depsErrChan <- err
 				p.logger.Error("failed to dial the conn to destination server", zap.Error(err), zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 				return
 			}
 			// Record the outgoing message into a mock
 			err := p.Integrations["mysql"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
+				depsErrChan <- err
 				p.logger.Error("failed to record the outgoing message", zap.Error(err))
 				return
 			}
@@ -244,6 +248,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 
 		m, ok := p.MockManagers.Load(destInfo.AppID)
 		if !ok {
+			depsErrChan <- err
 			p.logger.Error("failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
 			return
 		}
@@ -251,6 +256,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		//mock the outgoing message
 		err := p.Integrations["mysql"].MockOutgoing(ctx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
+			depsErrChan <- err
 			p.logger.Error("failed to mock the outgoing message", zap.Error(err))
 			return
 		}
@@ -266,6 +272,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnId), zap.Error(err))
 			return
 		}
+		depsErrChan <- err
 		p.logger.Error("failed to peek the request message in proxy", zap.Any("proxy port", p.Port), zap.Error(err))
 		return
 	}
@@ -282,6 +289,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		srcConn, err = p.handleTLSConnection(srcConn)
 		if err != nil {
 			p.logger.Error("failed to handle TLS conn", zap.Error(err))
+			depsErrChan <- err
 			return
 		}
 	}
@@ -289,6 +297,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	// attempt to read conn until buffer is either filled or conn is closed
 	initialBuf, err := util.ReadInitialBuf(ctx, p.logger, srcConn)
 	if err != nil {
+		depsErrChan <- err
 		p.logger.Error("failed to read the initial buffer", zap.Error(err))
 		return
 	}
@@ -323,6 +332,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		addr := fmt.Sprintf("%v:%v", dstUrl, destInfo.Port)
 		dstConn, err = tls.Dial("tcp", addr, cfg)
 		if err != nil {
+			depsErrChan <- err
 			logger.Error("failed to dial the conn to destination server", zap.Error(err), zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 			return
 		}
@@ -333,6 +343,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	} else {
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
+			depsErrChan <- err
 			logger.Error("failed to dial the conn to destination server", zap.Error(err), zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 			return
 		}
@@ -342,6 +353,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.AppID)
 	if !ok {
+		depsErrChan <- errors.New(fmt.Sprintf("failed to fetch the mock manager for the app:%v", destInfo.AppID))
 		p.logger.Error("failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
 		return
 	}
@@ -353,12 +365,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			if rule.Mode == models.MODE_RECORD {
 				err := parser.RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 				if err != nil {
+					depsErrChan <- err
 					logger.Error("failed to record the outgoing message", zap.Error(err))
 					return
 				}
 			} else {
 				err := parser.MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 				if err != nil {
+					depsErrChan <- err
 					logger.Error("failed to mock the outgoing message", zap.Error(err))
 					return
 				}
@@ -372,12 +386,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations["generic"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
+				depsErrChan <- err
 				logger.Error("failed to record the outgoing message", zap.Error(err))
 				return
 			}
 		} else {
 			err := p.Integrations["generic"].MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
+				depsErrChan <- err
 				logger.Error("failed to mock the outgoing message", zap.Error(err))
 				return
 			}
@@ -413,11 +429,12 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("proxy stopped...")
 }
 
-func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, errChan chan error, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
+		DepsErrChan:     errChan,
 		OutgoingOptions: opts,
 	})
 
@@ -432,10 +449,11 @@ func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock
 	return nil
 }
 
-func (p *Proxy) Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
+func (p *Proxy) Mock(ctx context.Context, id uint64, errChan chan error, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_TEST,
+		DepsErrChan:     errChan,
 		OutgoingOptions: opts,
 	})
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))

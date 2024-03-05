@@ -18,7 +18,7 @@ func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 		}
 	}
 
-	err := c.proxy.Mock(ctx, id, opts)
+	err := c.proxy.Mock(ctx, id, errCh, opts)
 	if err != nil {
 		errCh <- err
 		return errCh

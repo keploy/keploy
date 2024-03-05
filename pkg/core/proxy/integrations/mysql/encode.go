@@ -432,7 +432,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			var queryBuffer []byte
 			var err error
