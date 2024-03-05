@@ -33,7 +33,7 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			} else {
 				err := record.Start(ctx)
 				if err != nil {
-					logger.Error("failed to start recording", zap.Error(err))
+					logger.Error("error occured while recording", zap.Error(err))
 					return nil
 				}
 			}
