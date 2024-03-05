@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -133,11 +134,16 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 			Header:     ToYamlHttpHeader(httpResp.Header),
 		}
 	} else if errHttpReq != nil {
-		// Case covered, nil HTTP response with non-nil error
-		logger.Error("failed sending testcase request to app", zap.Error(err))
+		if errors.Is(errHttpReq, context.Canceled) {
+			resp = nil
+		} else {
+			fmt.Println("Error:", errHttpReq)
+			// Case covered, nil HTTP response with non-nil error
+			logger.Error("failed sending testcase request to app", zap.Error(err))
 
-		resp = &models.HttpResp{
-			Body: errHttpReq.Error(),
+			resp = &models.HttpResp{
+				Body: errHttpReq.Error(),
+			}
 		}
 	}
 
