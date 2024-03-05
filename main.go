@@ -51,7 +51,11 @@ func printLogo() {
 }
 
 func start(ctx context.Context) {
-	logger := log.New()
+	logger, err := log.New()
+	if err != nil {
+		fmt.Println("Failed to start the logger for the CLI", err)
+		return
+	}
 	defer log.DeleteLogs(logger)
 	defer utils.Recover(logger)
 	configDb := configdb.NewConfigDb(logger)
