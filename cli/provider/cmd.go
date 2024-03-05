@@ -188,7 +188,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		}
 		if cmd.Name() == "test" {
 			cmd.Flags().StringSliceP("testsets", "t", utils.Keys(cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
-			cmd.Flags().Uint64P("delay", "d", cfg.Test.Delay, "User provided time to run its application")
+			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 			cmd.Flags().Uint64("apiTimeout", cfg.Test.ApiTimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongoPassword", cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverageReportPath", cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
