@@ -46,7 +46,7 @@ type ColumnDefinition struct {
 }
 
 type RowDataPacket struct {
-	Data []byte `yaml:"data"`
+	Data []byte `yaml:"data,omitempty,flow"`
 }
 
 type PluginDetails struct {
@@ -523,6 +523,10 @@ func readLengthEncodedIntegers(b []byte) (uint64, int) {
 
 func readLengthEncodedStrings(b []byte) (string, int) {
 	length, n := readLengthEncodedIntegers(b)
+	// add check for slice out of range
+	if int(length) > len(b) {
+		return "", n
+	}
 	return string(b[n : n+int(length)]), n + int(length)
 }
 
