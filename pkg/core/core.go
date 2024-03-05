@@ -76,6 +76,13 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		isDocker = true
 	}
 
+	select {
+	case <-ctx.Done():
+		println("context cancelled before loading hooks")
+		return ctx.Err()
+	default:
+	}
+
 	// TODO: ensure right values are passed to the hook
 	//load hooks
 	err = c.hook.Load(ctx, id, HookCfg{
@@ -94,6 +101,13 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return nil
 	}
 
+	select {
+	case <-ctx.Done():
+		println("context cancelled before starting proxy")
+		return ctx.Err()
+	default:
+	}
+
 	// TODO: Hooks can be loaded multiple times but proxy should be started only once
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
@@ -103,6 +117,10 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		//DnsIPv6Addr: ""
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			println("context cancelled in proxy")
+			return err
+		}
 		c.logger.Error("Failed to start proxy", zap.Error(err))
 		return hookErr
 	}

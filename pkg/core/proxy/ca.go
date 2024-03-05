@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -62,9 +63,15 @@ func updateCaStore(ctx context.Context) error {
 	for _, cmd := range caStoreUpdateCmd {
 		if commandExists(cmd) {
 			commandRun = true
-			_, err := exec.CommandContext(ctx, cmd).CombinedOutput()
+			c := exec.CommandContext(ctx, cmd)
+			_, err := c.CombinedOutput()
 			if err != nil {
-				return err
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					return err
+				}
 			}
 		}
 	}
@@ -125,7 +132,11 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 	cmd := exec.CommandContext(ctx, "keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 
 	err := cmd.Run()
-
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
 	return err == nil
 }
 
@@ -137,12 +148,16 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		javaHome, err := util.GetJavaHome(ctx)
 
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
 			logger.Error("Java detected but failed to find JAVA_HOME", zap.Error(err))
 			return err
 		}
 
 		// Assuming modern Java structure (without /jre/)
 		cacertsPath := fmt.Sprintf("%s/lib/security/cacerts", javaHome)
+		println("cacertsPath: ", cacertsPath)
 		// You can modify these as per your requirements
 		storePass := "changeit"
 		alias := "keployCA"
@@ -155,12 +170,16 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		}
 
 		cmd := exec.CommandContext(ctx, "keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
-
 		cmdOutput, err := cmd.CombinedOutput()
 
 		if err != nil {
-			logger.Error("Java detected but failed to import CA", zap.Error(err), zap.String("output", string(cmdOutput)))
-			return err
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				logger.Error("Java detected but failed to import CA", zap.Error(err), zap.String("output", string(cmdOutput)))
+				return err
+			}
 		}
 
 		logger.Info("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
@@ -201,6 +220,10 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 		// install CA in the java keystore if java is installed
 		err = installJavaCA(ctx, logger, caPath)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				println("context is canceled in installJavaCA")
+				return err
+			}
 			logger.Error("failed to install CA in the java keystore", zap.Error(err))
 			return err
 		}
@@ -209,6 +232,10 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 	// Update the trusted CAs store
 	err = updateCaStore(ctx)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			println("context is canceled in updateCaStore")
+			return err
+		}
 		logger.Error("Failed to tools the CA store", zap.Error(err))
 		return err
 	}

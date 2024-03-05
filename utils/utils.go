@@ -7,13 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -76,7 +80,7 @@ func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentr
 	logger = zapsentry.AttachCoreToLogger(core, logger)
 	kernelVersion := ""
 	if runtime.GOOS == "linux" {
-		cmd := exec.Command("uname", "-r")
+		cmd := exec.CommandContext(ctx, "uname", "-r")
 		kernelBytes, err := cmd.Output()
 		if err != nil {
 			logger.Debug("failed to get kernel version", zap.Error(err))
@@ -432,4 +436,81 @@ func FetchHomeDirectory(isNewConfigPath bool) string {
 	}
 
 	return os.Getenv("HOME") + configFolder
+}
+
+// InterruptProcessTree interrupts an entire process tree using the given signal
+func InterruptProcessTree(cmd *exec.Cmd, ppid int, sig syscall.Signal) error {
+	// Find all descendant PIDs of the given PID & then signal them.
+	// Any shell doesn't signal its children when it receives a signal.
+	// Children may have their own process groups, so we need to signal them separately.
+	children, err := findChildPIDs(ppid)
+	if err != nil {
+		return err
+	}
+
+	children = append(children, ppid)
+
+	for _, pid := range children {
+		if cmd.ProcessState == nil {
+			err := syscall.Kill(pid, sig)
+			if err != nil {
+				fmt.Printf("failed to send signal to process(%v): %v\n", pid, err)
+			}
+		}
+	}
+	return nil
+}
+
+// findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
+func findChildPIDs(parentPID int) ([]int, error) {
+	var childPIDs []int
+
+	// Recursive helper function to find all descendants of a given PID.
+	var findDescendants func(int)
+	findDescendants = func(pid int) {
+		procDirs, err := ioutil.ReadDir("/proc")
+		if err != nil {
+			return
+		}
+
+		for _, procDir := range procDirs {
+			if !procDir.IsDir() {
+				continue
+			}
+
+			childPid, err := strconv.Atoi(procDir.Name())
+			if err != nil {
+				continue
+			}
+
+			statusPath := filepath.Join("/proc", procDir.Name(), "status")
+			statusBytes, err := os.ReadFile(statusPath)
+			if err != nil {
+				continue
+			}
+
+			status := string(statusBytes)
+			for _, line := range strings.Split(status, "\n") {
+				if strings.HasPrefix(line, "PPid:") {
+					fields := strings.Fields(line)
+					if len(fields) == 2 {
+						ppid, err := strconv.Atoi(fields[1])
+						if err != nil {
+							break
+						}
+						if ppid == pid {
+							childPIDs = append(childPIDs, childPid)
+							findDescendants(childPid)
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Start the recursion with the initial parent PID.
+	findDescendants(parentPID)
+
+	return childPIDs, nil
 }
