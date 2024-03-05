@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"fmt"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -64,23 +65,23 @@ func (r *recorder) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to get testSetIds"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 
 	newTestSetId := pkg.NewId(testSetIds, models.TestSetPattern)
 
 	appId, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
-		stopReason = "failed to exeute record due to error while setting up the environment"
+		stopReason = "failed setting up the environment"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 
 	err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
 	if err != nil {
 		stopReason = "failed to start the hooks and proxy"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 
 	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appId, models.IncomingOptions{})
@@ -152,7 +153,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	}
 	r.logger.Error(stopReason, zap.Error(err))
-	return nil
+	return fmt.Errorf(stopReason)
 }
 
 func (r *recorder) StartMock(ctx context.Context) error {
@@ -182,13 +183,13 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to exeute mock record due to error while setting up the environment"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 	err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
 	if err != nil {
 		stopReason = "failed to start the hooks and proxy"
 		r.logger.Error(stopReason, zap.Error(err))
-		return nil
+		return fmt.Errorf(stopReason)
 	}
 
 	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
@@ -215,5 +216,5 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		return nil
 	}
 	r.logger.Error(stopReason, zap.Error(err))
-	return nil
+	return fmt.Errorf(stopReason)
 }
