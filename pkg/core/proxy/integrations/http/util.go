@@ -302,7 +302,7 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			resp, err := util.ReadBytes(ctx, destConn)
 			if err != nil {
