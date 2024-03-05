@@ -478,9 +478,15 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 // It runs the application using the given command
 func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
-	// Create a new command with your appCmd
-	cmd := exec.Command("sh", "-c", appCmd)
-
+	// Create a new command with your appCmd'
+	username := os.Getenv("SUDO_USER")
+	var cmd *exec.Cmd
+	if username != "" {
+		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
+		cmd = exec.Command("sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", appCmd)
+	} else {
+		cmd = exec.Command("sh", "-c", appCmd)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
@@ -491,7 +497,6 @@ func (h *Hook) runApp(appCmd string, isUnitTestIntegration bool) error {
 	h.userAppCmd = cmd
 
 	// Run the app as the user who invoked sudo
-	username := os.Getenv("SUDO_USER")
 	if username != "" {
 		uidCmd := exec.Command("id", "-u", username)
 		gidCmd := exec.Command("id", "-g", username)
