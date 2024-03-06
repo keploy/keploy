@@ -1,6 +1,5 @@
 package models
 
-
 // TDSPacketHeader is a struct that represents the header of a TDS packet.
 type TDSPacketHeader struct {
 	PacketType byte
@@ -15,4 +14,3 @@ type TDSPacket struct {
 	Header TDSPacketHeader
 	Data   interface{}
 }
-
