@@ -33,9 +33,13 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 }
 
 func (r *recorder) Start(ctx context.Context) error {
+
+	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	var stopReason string
+
+	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
 		case <-ctx.Done():
@@ -51,6 +55,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		}
 	}()
 
+	// defining all the channels and variables required for the record
 	var runAppError models.AppError
 	var appErrChan = make(chan models.AppError)
 	var incomingChan <-chan *models.TestCase
@@ -61,6 +66,10 @@ func (r *recorder) Start(ctx context.Context) error {
 	var insertMockErrChan = make(chan error)
 	var appId uint64
 
+	defer close(appErrChan)
+	defer close(insertTestErrChan)
+	defer close(insertMockErrChan)
+
 	testSetIds, err := r.testDB.GetAllTestSetIds(ctx)
 	if err != nil {
 		stopReason = "failed to get testSetIds"
@@ -70,6 +79,7 @@ func (r *recorder) Start(ctx context.Context) error {
 
 	newTestSetId := pkg.NewId(testSetIds, models.TestSetPattern)
 
+	// setting up the environment for recording
 	appId, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
 		stopReason = "failed setting up the environment"
@@ -77,13 +87,21 @@ func (r *recorder) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
-	if err != nil {
-		stopReason = "failed to start the hooks and proxy"
-		r.logger.Error(stopReason, zap.Error(err))
-		return fmt.Errorf(stopReason)
+	// checking for context cancellation as we don't want to start the hooks and proxy if the context is cancelled
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+		// Starting the hooks and proxy
+		err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
+		if err != nil {
+			stopReason = "failed to start the hooks and proxy"
+			r.logger.Error(stopReason, zap.Error(err))
+			return fmt.Errorf(stopReason)
+		}
 	}
 
+	// fetching test cases and mocks from the application and inserting them into the database
 	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appId, models.IncomingOptions{})
 	g.Go(func() error {
 		for testCase := range incomingChan {
@@ -114,6 +132,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
+	// running the user application
 	g.Go(func() error {
 		runAppError = r.instrumentation.Run(ctx, appId, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
@@ -123,6 +142,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
+	// Waiting for the error to occur in any of the go routines
 	select {
 	case appErr := <-appErrChan:
 		switch appErr.AppErrorType {
