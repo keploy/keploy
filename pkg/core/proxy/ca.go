@@ -8,7 +8,6 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,7 +96,8 @@ func getCaPaths() ([]string, error) {
 
 // to extract ca certificate to temp
 func extractCertToTemp() (string, error) {
-	tempFile, err := ioutil.TempFile("", "ca.crt")
+	tempFile, err := os.CreateTemp("", "ca.crt")
+
 	if err != nil {
 		return "", err
 	}

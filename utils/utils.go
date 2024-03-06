@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -479,7 +478,7 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	// Recursive helper function to find all descendants of a given PID.
 	var findDescendants func(int)
 	findDescendants = func(pid int) {
-		procDirs, err := ioutil.ReadDir("/proc")
+		procDirs, err := os.ReadDir("/proc")
 		if err != nil {
 			return
 		}
