@@ -29,7 +29,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	t := make(chan *models.TestCase, 500)
 	err := initRealTimeOffset()
 	if err != nil {
-		l.Error("failed to initialize real time offset", zap.Error(err))
+		utils.LogError(l, err, "failed to initialize real time offset")
 		errCh <- err
 		return nil, errCh
 	}
@@ -62,7 +62,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 
 	r, err := perf.NewReader(m, os.Getpagesize())
 	if err != nil {
-		l.Error("failed to create perf event reader of socketOpenEvent", zap.Error(err))
+		utils.LogError(l, err, "failed to create perf event reader of socketOpenEvent")
 		errCh <- err
 		return
 	}
@@ -78,7 +78,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 				if errors.Is(err, perf.ErrClosed) {
 					return
 				}
-				l.Error("failed to read from perf socketOpenEvent reader", zap.Error(err))
+				utils.LogError(l, err, "failed to read from perf socketOpenEvent reader")
 				continue
 			}
 
@@ -90,7 +90,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 			var event SocketOpenEvent
 
 			if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &event); err != nil {
-				l.Error("failed to decode the received data from perf socketOpenEvent reader", zap.Error(err))
+				utils.LogError(l, err, "failed to decode the received data from perf socketOpenEvent reader")
 				continue
 			}
 
@@ -104,7 +104,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 	defer utils.Recover(l)
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
-		l.Error("failed to create ring buffer of socketDataEvent", zap.Error(err))
+		utils.LogError(l, err, "failed to create ring buffer of socketDataEvent")
 		errCh <- err
 		return
 	}
@@ -118,7 +118,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 			record, err := r.Read()
 			if err != nil {
 				if !errors.Is(err, ringbuf.ErrClosed) {
-					l.Error("failed to receive signal from ringbuf socketDataEvent reader", zap.Error(err))
+					utils.LogError(l, err, "failed to receive signal from ringbuf socketDataEvent reader")
 					errCh <- err
 					return
 				}
@@ -137,7 +137,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 			var event SocketDataEvent
 
 			if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
-				l.Error("failed to decode the received data from ringbuf socketDataEvent reader", zap.Error(err))
+				utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
 				continue
 			}
 
@@ -157,7 +157,7 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 	defer utils.Recover(l)
 	r, err := perf.NewReader(m, os.Getpagesize())
 	if err != nil {
-		l.Error("failed to create perf event reader of socketCloseEvent", zap.Error(err))
+		utils.LogError(l, err, "failed to create perf event reader of socketCloseEvent")
 		errCh <- err
 		return
 	}
@@ -173,7 +173,7 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 				if errors.Is(err, perf.ErrClosed) {
 					return
 				}
-				l.Error("reading from perf socketCloseEvent reader", zap.Error(err))
+				utils.LogError(l, err, "failed to read from perf socketCloseEvent reader")
 				continue
 			}
 

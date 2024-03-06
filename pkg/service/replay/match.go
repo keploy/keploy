@@ -212,7 +212,7 @@ func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error
 func UnmarshallJson(s string, log *zap.Logger) (interface{}, error) {
 	var result interface{}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		log.Error("cannot convert json string into json object", zap.Error(err))
+		utils.LogError(log, err, "cannot convert json string into json object")
 		return nil, err
 	} else {
 		return result, nil
