@@ -2,13 +2,15 @@ package generic
 
 import (
 	"context"
+	"net"
+	"time"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"net"
-	"time"
 )
 
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -23,7 +25,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// clientConnection have deadline for read to determine the end of stream.
 			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 			if err != nil {
-				logger.Error("failed to set the read deadline for the client conn", zap.Error(err))
+				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 				return err
 			}
 
@@ -31,7 +33,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, clientConn)
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
-					logger.Error("failed to read the request message in proxy for generic dependency", zap.Error(err))
+					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
 					return err
 				}
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
@@ -50,13 +52,13 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// fuzzy match gives the index for the best matched generic mock
 			matched, genericResponses, err := fuzzymatch(ctx, genericRequests, mockDb)
 			if err != nil {
-				logger.Error("error while matching generic mocks", zap.Error(err))
+				utils.LogError(logger, err, "error while matching generic mocks")
 			}
 
 			if !matched {
 				err := clientConn.SetReadDeadline(time.Time{})
 				if err != nil {
-					logger.Error("failed to set the read deadline for the client conn", zap.Error(err))
+					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 					return err
 				}
 
@@ -68,13 +70,13 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// making destConn
 				destConn, err := net.Dial("tcp", dstCfg.Addr)
 				if err != nil {
-					logger.Error("failed to dial the destination server", zap.Error(err))
+					utils.LogError(logger, err, "failed to dial the destination server")
 					return err
 				}
 
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, destConn, genericRequests)
 				if err != nil {
-					logger.Error("failed to passthrough the generic request", zap.Error(err))
+					utils.LogError(logger, err, "failed to passthrough the generic request")
 					return err
 				}
 
@@ -91,13 +93,13 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				if genericResponse.Message[0].Type != models.String {
 					encoded, err = util.DecodeBase64(genericResponse.Message[0].Data)
 					if err != nil {
-						logger.Error("failed to decode the base64 response", zap.Error(err))
+						utils.LogError(logger, err, "failed to decode the base64 response")
 						return err
 					}
 				}
 				_, err := clientConn.Write(encoded)
 				if err != nil {
-					logger.Error("failed to write request message to the client application", zap.Error(err))
+					utils.LogError(logger, err, "failed to write the response message to the client application")
 					return err
 				}
 			}

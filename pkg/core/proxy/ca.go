@@ -18,6 +18,7 @@ import (
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -151,7 +152,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
-			logger.Error("Java detected but failed to find JAVA_HOME", zap.Error(err))
+			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
 			return err
 		}
 
@@ -177,7 +178,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
-				logger.Error("Java detected but failed to import CA", zap.Error(err), zap.String("output", string(cmdOutput)))
+				utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
 				return err
 			}
 		}
@@ -198,7 +199,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 func SetupCA(ctx context.Context, logger *zap.Logger) error {
 	caPaths, err := getCaPaths()
 	if err != nil {
-		logger.Error("Failed to find the CA store path", zap.Error(err))
+		utils.LogError(logger, err, "Failed to find the CA store path")
 		return err
 	}
 
@@ -207,13 +208,13 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 
 		fs, err := os.Create(caPath)
 		if err != nil {
-			logger.Error("failed to create path for ca certificate", zap.Error(err), zap.Any("root store path", path))
+			utils.LogError(logger, err, "Failed to create path for ca certificate", zap.Any("root store path", path))
 			return err
 		}
 
 		_, err = fs.Write(caCrt)
 		if err != nil {
-			logger.Error("failed to write custom ca certificate", zap.Error(err), zap.Any("root store path", path))
+			utils.LogError(logger, err, "Failed to write custom ca certificate", zap.Any("root store path", path))
 			return err
 		}
 
@@ -224,7 +225,7 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 				println("context is canceled in installJavaCA")
 				return err
 			}
-			logger.Error("failed to install CA in the java keystore", zap.Error(err))
+			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
 		}
 	}
@@ -236,27 +237,27 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 			println("context is canceled in updateCaStore")
 			return err
 		}
-		logger.Error("Failed to tools the CA store", zap.Error(err))
+		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}
 
 	tempCertPath, err := extractCertToTemp()
 	if err != nil {
-		logger.Error("Failed to extract certificate to tmp folder: %v", zap.Any("failed to extract certificate", err))
+		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err
 	}
 
 	// for node
 	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
 	if err != nil {
-		logger.Error("Failed to set environment variable NODE_EXTRA_CA_CERTS: %v", zap.Any("failed to certificate path in environment", err))
+		utils.LogError(logger, err, "Failed to set environment variable NODE_EXTRA_CA_CERTS")
 		return err
 	}
 
 	// for python
 	err = os.Setenv("REQUESTS_CA_BUNDLE", tempCertPath)
 	if err != nil {
-		logger.Error("Failed to set environment variable REQUESTS_CA_BUNDLE: %v", zap.Any("failed to certificate path in environment", err))
+		utils.LogError(logger, err, "Failed to set environment variable REQUESTS_CA_BUNDLE")
 		return err
 	}
 	return nil

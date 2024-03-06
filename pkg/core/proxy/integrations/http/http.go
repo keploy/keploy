@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
@@ -60,13 +61,13 @@ func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial http message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial http message")
 		return errors.New("failed to record the outgoing http call")
 	}
 
 	err = encodeHttp(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
-		logger.Error("failed to encode the http message into the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return errors.New("failed to record the outgoing http call")
 	}
 	return nil
@@ -77,13 +78,13 @@ func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrati
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial http message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial http message")
 		return errors.New("failed to mock the outgoing http call")
 	}
 
 	err = decodeHttp(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		logger.Error("failed to decode the http message from the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to decode the http message from the yaml")
 		return errors.New("failed to mock the outgoing http call")
 	}
 	return nil
@@ -95,7 +96,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.req)))
 	if err != nil {
-		logger.Error("failed to parse the http request message", zap.Error(err))
+		utils.LogError(logger, err, "failed to parse the http request message")
 		return err
 	}
 
@@ -105,7 +106,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			logger.Error("failed to read the http request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			utils.LogError(logger, err, "failed to read the http request body", zap.Any("metadata", getReqMeta(req)))
 			return err
 		}
 	}
@@ -113,7 +114,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 	// converts the response message buffer to http response
 	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(mock.resp)), req)
 	if err != nil {
-		logger.Error("failed to parse the http response message", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+		utils.LogError(logger, err, "failed to parse the http response message", zap.Any("metadata", getReqMeta(req)))
 		return err
 	}
 
@@ -129,7 +130,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 			if ok {
 				gzipReader, err := gzip.NewReader(reader)
 				if err != nil {
-					logger.Error("failed to create a gzip reader", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+					utils.LogError(logger, err, "failed to create a gzip reader", zap.Any("metadata", getReqMeta(req)))
 					return err
 				}
 				respParsed.Body = gzipReader
@@ -137,7 +138,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			logger.Error("failed to read the the http response body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+			utils.LogError(logger, err, "failed to read the the http response body", zap.Any("metadata", getReqMeta(req)))
 			return err
 		}
 		logger.Debug("This is the response body: " + string(respBody))

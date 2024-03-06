@@ -15,14 +15,14 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
 		if err != nil {
-			logger.Error("failed to close the destination connection", zap.Error(err))
+			utils.LogError(logger, err, "failed to close the destination connection")
 		}
 	}(destConn)
 
 	// Send the client preface to the server. This should be the first thing sent from the client.
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
-		logger.Error("Could not write preface onto the destination server", zap.Error(err))
+		utils.LogError(logger, err, "Could not write preface onto the destination server")
 		return err
 	}
 
@@ -43,7 +43,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				logger.Debug("EOF error received from client. Closing conn")
 				return
 			}
-			logger.Error("failed to transfer frame from client to server", zap.Error(err))
+			utils.LogError(logger, err, "failed to transfer frame from client to server")
 		}
 	}()
 
@@ -55,7 +55,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		defer wg.Done()
 		err := transferFrame(ctx, clientConn, destConn, streamInfoCollection, !reqFromClient, clientSideDecoder, mocks)
 		if err != nil {
-			logger.Error("failed to transfer frame from server to client", zap.Error(err))
+			utils.LogError(logger, err, "failed to transfer frame from server to client")
 		}
 	}()
 

@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/scram"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -19,7 +20,7 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
-			logger.Error("failed to extract the section of the recieved mongo request message", zap.Error(err), zap.Any("the section", v))
+			utils.LogError(logger, err, "failed to extract the section of the recieved mongo request message", zap.Any("the section", v))
 			return false
 		}
 
@@ -71,7 +72,7 @@ func handleScramAuth(actualRequestSections, expectedRequestSections []string, re
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
-			logger.Error("failed to extract the section of the recieved mongo request message", zap.Error(err))
+			utils.LogError(logger, err, "failed to extract the section of the recieved mongo request message")
 			return "", false, err
 		}
 
@@ -223,7 +224,7 @@ func extractMsgFromSection(section string) (map[string]interface{}, error) {
 func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSections []string, responseSection string, logger *zap.Logger) (string, bool, error) {
 	actualReqPayload, err := extractAuthPayload(actualMsg)
 	if err != nil {
-		logger.Error("failed to fetch the payload from the recieved mongo request", zap.Error(err))
+		utils.LogError(logger, err, "failed to fetch the payload from the recieved mongo request")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the payload of the recieved request: ", actualReqPayload))
@@ -231,7 +232,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	// Decode the base64 encoded payload of the recieved mongo request
 	decodedActualReqPayload, err := decodeBase64Str(actualReqPayload)
 	if err != nil {
-		logger.Error("Error decoding the recieved payload base64 string:", zap.Error(err))
+		utils.LogError(logger, err, "Error decoding the recieved payload base64 string")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the decoded payload of the actual for the saslstart: ", (string)(decodedActualReqPayload)))
@@ -239,19 +240,19 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	// check to ensure that the matched recorded mongo request contains the auth payload for SCRAM
 	if len(expectedRequestSections) < i+1 {
 		err = errors.New("unrecorded message sections for the recieved auth request")
-		logger.Error("failed to match the message section payload", zap.Error(err))
+		utils.LogError(logger, err, "failed to match the message section payload")
 		return "", false, err
 	}
 
 	expectedMsg, err := extractMsgFromSection(expectedRequestSections[i])
 	if err != nil {
-		logger.Error("failed to extract the section of the recorded mongo request message", zap.Error(err))
+		utils.LogError(logger, err, "failed to extract the section of the recorded mongo request message")
 		return "", false, err
 	}
 
 	expectedReqPayload, err := extractAuthPayload(expectedMsg)
 	if err != nil {
-		logger.Error("failed to fetch the payload from the recorded mongo request", zap.Error(err))
+		utils.LogError(logger, err, "failed to fetch the payload from the recorded mongo request")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the payload of the recorded request: ", expectedReqPayload))
@@ -259,7 +260,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	// Decode the base64 encoded payload of the recorded mongo request
 	decodedExpectedReqPayload, err := decodeBase64Str(expectedReqPayload)
 	if err != nil {
-		logger.Error("Error decoding the recorded request payload base64 string:", zap.Error(err))
+		utils.LogError(logger, err, "Error decoding the recorded request payload base64 string")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the decoded payload of the expected for the saslstart: ", (string)(decodedExpectedReqPayload)))
@@ -269,12 +270,12 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 
 	err = json.Unmarshal([]byte(responseSection), &responseMsg)
 	if err != nil {
-		logger.Error("failed to unmarshal string document of OpReply", zap.Error(err))
+		utils.LogError(logger, err, "failed to unmarshal string document of OpReply")
 		return "", false, err
 	}
 	responsePayload, err := extractAuthPayload(responseMsg)
 	if err != nil {
-		logger.Error("failed to fetch the payload from the recorded mongo response", zap.Error(err))
+		utils.LogError(logger, err, "failed to fetch the payload from the recorded mongo response")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the payload of the recorded response: ", responsePayload))
@@ -282,7 +283,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	// Decode the base64 encoded payload of the recorded mongo response
 	decodedResponsePayload, err := decodeBase64Str(responsePayload)
 	if err != nil {
-		logger.Error("Error decoding the recorded response payload base64 string:", zap.Error(err))
+		utils.LogError(logger, err, "Error decoding the recorded response payload base64 string")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the decoded payload of the repsonse for the saslstart: ", (string)(decodedResponsePayload)))
@@ -298,14 +299,14 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	responseMsg["payload"].(map[string]interface{})["$binary"].(map[string]interface{})["base64"] = base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
 	responseMsg, err = updateConversationId(responseMsg, int(util.GetNextID()))
 	if err != nil {
-		logger.Error("failed to tools conversationId in the sasl start auth message", zap.Error(err))
+		utils.LogError(logger, err, "failed to update the conversationId in the sasl start auth message")
 		return "", false, err
 	}
 
 	// fetch the conversation id
 	conversationId, err := extractConversationId(responseMsg)
 	if err != nil {
-		logger.Error("failed to fetch the conversationId for the SCRAM auth from the recorded first response", zap.Error(err))
+		utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the recorded first response")
 		return "", false, err
 	}
 	logger.Debug("fetch the conversationId for the SCRAM authentication", zap.String("cid", conversationId))
@@ -318,7 +319,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	// marshal the new first response for the SCRAM authentication
 	newAuthResponse, err := json.Marshal(responseMsg)
 	if err != nil {
-		logger.Error("failed to marshal the first auth response for SCRAM", zap.Error(err))
+		utils.LogError(logger, err, "failed to marshal the first auth response for SCRAM")
 		return "", false, err
 	}
 	return string(newAuthResponse), true, nil
@@ -341,21 +342,21 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 
 	err := json.Unmarshal([]byte(responseSection), &responseMsg)
 	if err != nil {
-		logger.Error("failed to unmarshal string document of second auth response for SCRAM", zap.Error(err))
+		utils.LogError(logger, err, "failed to unmarshal string document of OpReply")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprintf("the recorded OpMsg section: %v", responseMsg))
 
 	responsePayload, err := extractAuthPayload(responseMsg)
 	if err != nil {
-		logger.Error("failed to fetch the payload from the recorded mongo response", zap.Error(err))
+		utils.LogError(logger, err, "failed to fetch the payload from the recorded mongo response")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the payload of the recorded second response of SCRAM: ", responsePayload))
 
 	decodedResponsePayload, err := decodeBase64Str(responsePayload)
 	if err != nil {
-		logger.Error("Error decoding the recorded saslContinue response payload base64 string:", zap.Error(err))
+		utils.LogError(logger, err, "Error decoding the recorded saslContinue response payload base64 string")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the decoded payload of the repsonse for the saslContinue: ", (string)(decodedResponsePayload)))
@@ -363,7 +364,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 	fields := strings.Split(string(decodedResponsePayload), ",")
 	verifier, err := parseFieldBase64(fields[0], "v")
 	if err != nil {
-		logger.Error("failed to parse the verifier of final response message", zap.Error(err))
+		utils.LogError(logger, err, "failed to parse the verifier of final response message")
 		return "", false, err
 	}
 	logger.Debug("the recorded verifier of the auth request", zap.Any("verifier/server-signature", string(verifier)))
@@ -371,7 +372,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 	// fetch the conversation id
 	conversationId, err := extractConversationId(actualMsg)
 	if err != nil {
-		logger.Error("failed to fetch the conversationId for the SCRAM auth from the recorded final response", zap.Error(err))
+		utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the recieved final response")
 		return "", false, err
 	}
 	logger.Debug("fetched conversationId for the SCRAM authentication", zap.String("cid", conversationId))
@@ -388,7 +389,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 			// Split based on "=" and get the value of "s"
 			saltByt, err := decodeBase64Str(strings.TrimPrefix(part, "s="))
 			if err != nil {
-				logger.Error("failed to convert the string into integer", zap.Error(err))
+				utils.LogError(logger, err, "failed to decode the base64 string of salt")
 				return "", false, err
 			}
 			salt = string(saltByt)
@@ -397,7 +398,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 			// Split based on "=" and get the value of "i"
 			itr, err = strconv.Atoi(strings.Split(part, "=")[1])
 			if err != nil {
-				logger.Error("failed to convert the string into integer", zap.Error(err))
+				utils.LogError(logger, err, "failed to convert the string into integer")
 				return "", false, err
 			}
 		}
@@ -406,7 +407,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 	// So, need to return the new server proof according to the new authMessage which is different from the recorded.
 	newVerifier, err := scram.GenerateServerFinalMessage(authMessageMap[conversationId], "SCRAM-SHA-1", password, salt, itr, logger)
 	if err != nil {
-		logger.Error("failed to get the new server proof", zap.Error(err))
+		utils.LogError(logger, err, "failed to get the new server proof")
 		return "", false, err
 	}
 
@@ -414,7 +415,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 	responseMsg["payload"].(map[string]interface{})["$binary"].(map[string]interface{})["base64"] = base64.StdEncoding.EncodeToString([]byte("v=" + newVerifier))
 	byt, err := json.Marshal(responseMsg)
 	if err != nil {
-		logger.Error("failed to marshal the updated string document of OpReply", zap.Error(err))
+		utils.LogError(logger, err, "failed to marshal the updated string document of OpReply")
 		return "", false, err
 	}
 	responseSection = string(byt)

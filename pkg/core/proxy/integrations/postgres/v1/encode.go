@@ -19,7 +19,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
 		if err != nil {
-			logger.Error("failed to close the destination connection", zap.Error(err))
+			utils.LogError(logger, err, "failed to close the destination connection")
 		}
 	}(destConn)
 
@@ -32,7 +32,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	pg := NewBackend()
 	_, err := pg.decodeStartupMessage(reqBuf)
 	if err != nil {
-		logger.Error("failed to decode startup message server", zap.Error(err))
+		utils.LogError(logger, err, "failed to decode startup message server")
 	}
 
 	if bufStr != "" {
@@ -70,7 +70,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	_, err = destConn.Write(reqBuf)
 	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err))
+		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
 	var pgResponses []models.Frontend
@@ -125,7 +125,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			// Write the request message to the destination
 			_, err := destConn.Write(buffer)
 			if err != nil {
-				logger.Error("failed to write request message to the destination server", zap.Error(err))
+				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
 
@@ -162,12 +162,12 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						pg.BackendWrapper.MsgType = buffer[i]
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-							logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
+							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer")
 							break
 						}
 						msg, err = pg.translateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
-							logger.Error("failed to translate the request message to readable", zap.Error(err))
+							utils.LogError(logger, err, "failed to translate the request message to readable")
 						}
 						if pg.BackendWrapper.MsgType == 'p' {
 							pg.BackendWrapper.PasswordMessage = *msg.(*pgproto3.PasswordMessage)
@@ -255,7 +255,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
-				logger.Error("failed to write response to the client", zap.Error(err))
+				utils.LogError(logger, err, "failed to write response message to the client")
 				return err
 			}
 
@@ -275,7 +275,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						pg.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						msg, err := pg.translateToReadableResponse(logger, buffer[i:(i+pg.FrontendWrapper.BodyLen+5)])
 						if err != nil {
-							logger.Error("failed to translate the response message to readable", zap.Error(err))
+							utils.LogError(logger, err, "failed to translate the response message to readable")
 							break
 						}
 

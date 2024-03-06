@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"net"
 )
 
 func init() {
@@ -37,13 +39,13 @@ func (g *Grpc) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial grpc message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial grpc message")
 		return errors.New("failed to record the outgoing grpc call")
 	}
 
 	err = encodeGrpc(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
-		logger.Error("failed to encode the grpc message into the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to encode the grpc message into the yaml")
 		return errors.New("failed to record the outgoing grpc call")
 	}
 	return nil
@@ -54,13 +56,13 @@ func (g *Grpc) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrati
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial grpc message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial grpc message")
 		return errors.New("failed to mock the outgoing grpc call")
 	}
 
 	err = decodeGrpc(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		logger.Error("failed to decode the grpc message from the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to decode the grpc message from the yaml")
 		return errors.New("failed to mock the outgoing grpc call")
 	}
 	return nil

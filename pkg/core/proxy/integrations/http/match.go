@@ -3,13 +3,15 @@ package http
 import (
 	"context"
 	"errors"
+	"net/url"
+
 	"github.com/agnivade/levenshtein"
 	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"net/url"
 )
 
 func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
@@ -21,7 +23,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 			tcsMocks, err := mockDb.GetFilteredMocks()
 
 			if err != nil {
-				logger.Error("failed to get tcs mocks", zap.Error(err))
+				utils.LogError(logger, err, "failed to get tcs mocks")
 				return false, nil, errors.New("error while matching the request with the mocks")
 			}
 			var eligibleMocks []*models.Mock
@@ -38,7 +40,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					//parse request body url
 					parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
 					if err != nil {
-						logger.Error("failed to parse mock url", zap.Error(err))
+						utils.LogError(logger, err, "failed to parse mock url")
 						continue
 					}
 

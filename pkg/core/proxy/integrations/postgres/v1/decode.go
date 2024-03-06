@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"net"
+	"time"
+
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"io"
-	"net"
-	"time"
 )
 
 func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -28,7 +30,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 			if err != nil {
-				logger.Error("failed to set the read deadline for the pg client conn", zap.Error(err))
+				utils.LogError(logger, err, "failed to set the read deadline for the pg client conn")
 				return err
 			}
 
@@ -41,7 +43,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 							logger.Debug("EOF error received from client. Closing conn in postgres !!")
 							return err
 						}
-						logger.Error("failed to read the request message in proxy for postgres dependency", zap.Error(err))
+						utils.LogError(logger, err, "failed to read the request message in proxy for postgres dependency")
 						return err
 					}
 				}
@@ -67,13 +69,13 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				// making destConn
 				destConn, err := net.Dial("tcp", dstCfg.Addr)
 				if err != nil {
-					logger.Error("failed to dial the destination server", zap.Error(err))
+					utils.LogError(logger, err, "failed to dial the destination server")
 					return err
 				}
 
 				_, err = pUtil.PassThrough(ctx, logger, clientConn, destConn, pgRequests)
 				if err != nil {
-					logger.Error("failed to match the dependency call from user application", zap.Any("request packets", len(pgRequests)))
+					utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))
 					return err
 				}
 				continue
@@ -84,12 +86,12 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					encoded, err = postgresDecoderFrontend(pgResponse)
 				}
 				if err != nil {
-					logger.Error("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
+					utils.LogError(logger, err, "failed to decode the response message in proxy for postgres dependency")
 					return err
 				}
 				_, err = clientConn.Write(encoded)
 				if err != nil {
-					logger.Error("failed to write request message to the client application", zap.Error(err))
+					utils.LogError(logger, err, "failed to write the response message to the client application")
 					return err
 				}
 			}
@@ -109,12 +111,12 @@ func decodePgRequest(logger *zap.Logger, buffer []byte) *models.Backend {
 			pg.BackendWrapper.MsgType = buffer[i]
 			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-				logger.Error("failed to translate the postgres request message due to shorter network packet buffer")
+				utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer")
 				break
 			}
 			msg, err := pg.translateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 			if err != nil && buffer[i] != 112 {
-				logger.Error("failed to translate the request message to readable", zap.Error(err))
+				utils.LogError(logger, err, "failed to translate the request message to readable")
 			}
 			if pg.BackendWrapper.MsgType == 'p' {
 				pg.BackendWrapper.PasswordMessage = *msg.(*pgproto3.PasswordMessage)

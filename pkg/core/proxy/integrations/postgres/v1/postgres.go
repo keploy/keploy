@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"net"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
-	"net"
+	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"
 
@@ -51,12 +53,12 @@ func (p *PostgresV1) RecordOutgoing(ctx context.Context, src net.Conn, dst net.C
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial postgres message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial postgres message")
 		return errors.New("failed to record the outgoing postgres call")
 	}
 	err = encodePostgres(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
-		logger.Error("failed to encode the postgres message into the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to encode the postgres message into the yaml")
 		return errors.New("failed to record the outgoing postgres call")
 	}
 	return nil
@@ -68,13 +70,13 @@ func (p *PostgresV1) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *int
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial postgres message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial postgres message")
 		return errors.New("failed to mock the outgoing postgres call")
 	}
 
 	err = decodePostgres(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		logger.Error("failed to decode the postgres message from the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to decode the postgres message from the yaml")
 		return errors.New("failed to mock the outgoing postgres call")
 	}
 	return nil

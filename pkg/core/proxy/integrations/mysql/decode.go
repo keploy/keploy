@@ -2,12 +2,14 @@ package mysql
 
 import (
 	"context"
+	"net"
+	"time"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"net"
-	"time"
 )
 
 func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -18,13 +20,13 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 	configMocks, err := mockDb.GetUnFilteredMocks()
 	if err != nil {
-		logger.Error("Failed to get unfiltered mocks", zap.Error(err))
+		utils.LogError(logger, err, "Failed to get unfiltered mocks")
 		return err
 	}
 
 	tcsMocks, err := mockDb.GetFilteredMocks()
 	if err != nil {
-		logger.Error("Failed to get filtered mocks", zap.Error(err))
+		utils.LogError(logger, err, "Failed to get filtered mocks")
 		return err
 	}
 
@@ -51,13 +53,13 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 				binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
 				if err != nil {
-					logger.Error("Failed to encode to binary", zap.Error(err))
+					utils.LogError(logger, err, "Failed to encode to binary")
 					return err
 				}
 
 				_, err = clientConn.Write(binaryPacket)
 				if err != nil {
-					logger.Error("Failed to write binary packet", zap.Error(err))
+					utils.LogError(logger, err, "Failed to write binary packet")
 					return err
 				}
 				matchedIndex := 0
@@ -77,7 +79,7 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				timeoutDuration := 2 * time.Duration(opts.SQLDelay) * time.Second // 2-second timeout
 				err := clientConn.SetReadDeadline(time.Now().Add(timeoutDuration))
 				if err != nil {
-					logger.Error("Failed to set read deadline", zap.Error(err))
+					utils.LogError(logger, err, "Failed to set read deadline")
 					return err
 				}
 
@@ -99,7 +101,7 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				// Reset the read deadline
 				err = clientConn.SetReadDeadline(time.Time{})
 				if err != nil {
-					logger.Error("Failed to reset read deadline", zap.Error(err))
+					utils.LogError(logger, err, "Failed to reset read deadline")
 					return err
 				}
 
@@ -115,7 +117,7 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer))
 				if err != nil {
-					logger.Error("Failed to decode MySQL packet", zap.Error(err))
+					utils.LogError(logger, err, "Failed to decode MySQL packet")
 					return err
 				}
 				if oprRequest == "COM_QUIT" {
@@ -149,7 +151,7 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				// Due to this, there will be no passthrough in case of no match.
 				matchedResponse, matchedIndex, _, err := matchRequestWithMock(mysqlRequest, configMocks, tcsMocks)
 				if err != nil {
-					logger.Error("Failed to match request with mock", zap.Error(err))
+					utils.LogError(logger, err, "Failed to match request with mock")
 					return err
 				}
 
@@ -159,18 +161,18 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					// making destConn
 					destConn, err := net.Dial("tcp", dstCfg.Addr)
 					if err != nil {
-						logger.Error("failed to dial the destination server", zap.Error(err))
+						utils.LogError(logger, err, "Failed to dial the destination server")
 						return err
 					}
 
 					responseBuffer, err := util.PassThrough(ctx, logger, clientConn, destConn, requestBuffers)
 					if err != nil {
-						logger.Error("failed to passthrough the mysql request to the actual database server", zap.Error(err))
+						utils.LogError(logger, err, "Failed to passthrough the mysql request to the actual database server")
 						return err
 					}
 					_, err = clientConn.Write(responseBuffer)
 					if err != nil {
-						logger.Error("Failed to write response to clientConn", zap.Error(err))
+						utils.LogError(logger, err, "Failed to write response to clientConn")
 						return err
 					}
 					continue
@@ -182,13 +184,13 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					zap.String("packetType", matchedResponse.Header.PacketType))
 
 				if err != nil {
-					logger.Error("Failed to encode response to binary", zap.Error(err))
+					utils.LogError(logger, err, "Failed to encode response to binary")
 					return err
 				}
 
 				_, err = clientConn.Write(responseBinary)
 				if err != nil {
-					logger.Error("Failed to write response to clientConn", zap.Error(err))
+					utils.LogError(logger, err, "Failed to write response to clientConn")
 					return err
 				}
 			}

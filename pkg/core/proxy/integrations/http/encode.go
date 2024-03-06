@@ -3,13 +3,15 @@ package http
 import (
 	"context"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.uber.org/zap"
 	"io"
 	"net"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 // encodeHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
@@ -18,7 +20,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
 		if err != nil {
-			logger.Error("failed to close the destination connection", zap.Error(err))
+			utils.LogError(logger, err, "failed to close the destination connection")
 		}
 	}(destConn)
 
@@ -33,7 +35,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	//Writing the request to the server.
 	_, err = destConn.Write(reqBuf)
 	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err))
+		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
 
@@ -55,33 +57,33 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			//Read if the response from the server is 100-continue
 			resp, err = util.ReadBytes(ctx, destConn)
 			if err != nil {
-				logger.Error("failed to read the response message from the server after 100-continue request", zap.Error(err))
+				utils.LogError(logger, err, "failed to read the response message from the server after 100-continue request")
 				return err
 			}
 
 			// write the response message to the client
 			_, err = clientConn.Write(resp)
 			if err != nil {
-				logger.Error("failed to write response message to the user client", zap.Error(err))
+				utils.LogError(logger, err, "failed to write response message to the user client")
 				return err
 			}
 
 			logger.Debug("This is the response from the server after the expect header" + string(resp))
 
 			if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
-				logger.Error("failed to get the 100 continue response from the user client")
+				utils.LogError(logger, nil, "failed to get the 100 continue response from the user client")
 				return err
 			}
 			//Reading the request buffer again
 			reqBuf, err = util.ReadBytes(ctx, clientConn)
 			if err != nil {
-				logger.Error("failed to read the request message from the user client", zap.Error(err))
+				utils.LogError(logger, err, "failed to read the request buffer from the user client")
 				return err
 			}
 			// write the request message to the actual destination server
 			_, err = destConn.Write(reqBuf)
 			if err != nil {
-				logger.Error("failed to write request message to the destination server", zap.Error(err))
+				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
 			finalReq = append(finalReq, reqBuf...)
@@ -92,7 +94,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 		err := handleChunkedRequests(ctx, logger, &finalReq, clientConn, destConn)
 		if err != nil {
-			logger.Error("failed to handle chunk request", zap.Error(err))
+			utils.LogError(logger, err, "failed to handle chunked requests")
 			return err
 		}
 
@@ -110,7 +112,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					// write the response message to the user client
 					_, err = clientConn.Write(resp)
 					if err != nil {
-						logger.Error("failed to write response message to the user client", zap.Error(err))
+						utils.LogError(logger, err, "failed to write response message to the user client")
 						return err
 					}
 
@@ -123,13 +125,13 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					}
 					err := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
 					if err != nil {
-						logger.Error("failed to parse the final http request and response", zap.Error(err))
+						utils.LogError(logger, err, "failed to parse the final http request and response")
 						return err
 					}
 				}
 				break
 			} else {
-				logger.Error("failed to read the response message from the destination server", zap.Error(err))
+				utils.LogError(logger, err, "failed to read the response message from the destination server")
 				return err
 			}
 		}
@@ -140,7 +142,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
-			logger.Error("failed to write response message to the user client", zap.Error(err))
+			utils.LogError(logger, err, "failed to write response message to the user client")
 			return err
 		}
 
@@ -160,12 +162,12 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				}
 				parseErr := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
 				if parseErr != nil {
-					logger.Error("failed to parse the final http request and response", zap.Error(parseErr))
+					utils.LogError(logger, parseErr, "failed to parse the final http request and response")
 					return parseErr
 				}
 				return nil
 			} else {
-				logger.Error("failed to handle chunk response", zap.Error(err))
+				utils.LogError(logger, err, "failed to handle chunk response")
 				return err
 			}
 		}
@@ -181,7 +183,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 		err = ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
 		if err != nil {
-			logger.Error("failed to parse the final http request and response", zap.Error(err))
+			utils.LogError(logger, err, "failed to parse the final http request and response")
 			return err
 		}
 
@@ -200,7 +202,7 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		// write the request message to the actual destination server
 		_, err = destConn.Write(finalReq)
 		if err != nil {
-			logger.Error("failed to write request message to the destination server", zap.Error(err))
+			utils.LogError(logger, err, "failed to write request message to the destination server")
 			return err
 		}
 	}

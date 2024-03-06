@@ -3,12 +3,14 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"github.com/miekg/dns"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.uber.org/zap"
 	"net"
 	"strings"
 	"sync"
+
+	"github.com/miekg/dns"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 func (p *Proxy) startTcpDnsServer() {
@@ -27,7 +29,7 @@ func (p *Proxy) startTcpDnsServer() {
 	p.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-		p.logger.Error("failed to start tcp dns server", zap.Any("addr", server.Addr), zap.Error(err))
+		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.Any("addr", server.Addr))
 	}
 }
 
@@ -49,7 +51,7 @@ func (p *Proxy) startUdpDnsServer() {
 	p.logger.Info(fmt.Sprintf("starting UDP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-		p.logger.Error("failed to start dns server", zap.Any("addr", server.Addr), zap.Error(err))
+		utils.LogError(p.logger, err, "failed to start udp dns server", zap.Any("addr", server.Addr))
 	}
 }
 
@@ -124,7 +126,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	p.logger.Debug("Writing dns info back to the client...")
 	err := w.WriteMsg(msg)
 	if err != nil {
-		p.logger.Error("failed to write dns info back to the client", zap.Error(err))
+		utils.LogError(p.logger, err, "failed to write dns info back to the client")
 	}
 }
 
@@ -170,7 +172,7 @@ func (p *Proxy) stopDnsServer(ctx context.Context) {
 	if p.UdpDnsServer != nil {
 		err := p.UdpDnsServer.Shutdown()
 		if err != nil {
-			p.logger.Error("failed to stop udp dns server", zap.Error(err))
+			utils.LogError(p.logger, err, "failed to stop udp dns server")
 		}
 		p.logger.Info("Udp Dns server stopped successfully")
 	}
@@ -179,7 +181,7 @@ func (p *Proxy) stopDnsServer(ctx context.Context) {
 	if p.TcpDnsServer != nil {
 		err := p.TcpDnsServer.Shutdown()
 		if err != nil {
-			p.logger.Error("failed to stop tcp dns server", zap.Error(err))
+			utils.LogError(p.logger, err, "failed to stop tcp dns server")
 		}
 		p.logger.Info("Tcp Dns server stopped successfully")
 	}

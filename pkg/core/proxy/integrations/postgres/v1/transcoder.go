@@ -5,10 +5,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
+
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"strings"
 )
 
 type BackendWrapper struct {
@@ -149,7 +151,7 @@ func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBod
 
 	err := msg.Decode(msgBody[5:])
 	if err != nil {
-		logger.Error("Error from decoding request message ..", zap.Error(err))
+		utils.LogError(logger, err, "Error from decoding request message ..")	
 	}
 
 	bits := msg.Encode([]byte{})
