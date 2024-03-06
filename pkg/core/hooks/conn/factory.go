@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -55,12 +56,12 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 
 				parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
 				if err != nil {
-					factory.logger.Error("failed to parse the http request from byte array", zap.Error(err), zap.Any("requestBuf", requestBuf))
+					utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
 					continue
 				}
 				parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
 				if err != nil {
-					factory.logger.Error("failed to parse the http response from byte array", zap.Error(err))
+					utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 					continue
 				}
 				capture(ctx, factory.logger, t, parsedHttpReq, parsedHttpRes, reqTimestampTest, resTimestampTest)
@@ -93,14 +94,14 @@ func (factory *Factory) GetOrCreate(connectionID ConnID) *Tracker {
 func capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
-		logger.Error("failed to read the http request body", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the http request body")
 		return
 	}
 
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logger.Error("failed to read the http response body", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the http response body")
 		return
 	}
 	t <- &models.TestCase{
@@ -131,7 +132,7 @@ func capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// Mocks: mocks,
 	}
 	if err != nil {
-		logger.Error("failed to record the ingress requests", zap.Error(err))
+		utils.LogError(logger, err, "failed to record the ingress requests")
 		return
 	}
 }

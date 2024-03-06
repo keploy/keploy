@@ -46,12 +46,12 @@ func (r *recorder) Start(ctx context.Context) error {
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
-				r.logger.Error("failed to stop recording", zap.Error(err))
+				utils.LogError(r.logger, err, "failed to stop recording")
 			}
 		}
 		err := g.Wait()
 		if err != nil {
-			r.logger.Error("failed to stop recording", zap.Error(err))
+			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 	}()
 
@@ -73,7 +73,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	testSetIds, err := r.testDB.GetAllTestSetIds(ctx)
 	if err != nil {
 		stopReason = "failed to get testSetIds"
-		r.logger.Error(stopReason, zap.Error(err))
+		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
 
@@ -83,7 +83,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	appId, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
 		stopReason = "failed setting up the environment"
-		r.logger.Error(stopReason, zap.Error(err))
+		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
 
@@ -96,7 +96,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
-			r.logger.Error(stopReason, zap.Error(err))
+			utils.LogError(r.logger, err, stopReason)
 			return fmt.Errorf(stopReason)
 		}
 	}
@@ -172,7 +172,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
-	r.logger.Error(stopReason, zap.Error(err))
+	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf(stopReason)
 }
 
@@ -187,12 +187,12 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
-				r.logger.Error("failed to stop recording", zap.Error(err))
+				utils.LogError(r.logger, err, "failed to stop recording")
 			}
 		}
 		err := g.Wait()
 		if err != nil {
-			r.logger.Error("failed to stop recording", zap.Error(err))
+			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 	}()
 	var outgoingChan <-chan *models.Mock
@@ -202,13 +202,13 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	appId, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
 		stopReason = "failed to exeute mock record due to error while setting up the environment"
-		r.logger.Error(stopReason, zap.Error(err))
+		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
 	err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
 	if err != nil {
 		stopReason = "failed to start the hooks and proxy"
-		r.logger.Error(stopReason, zap.Error(err))
+		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
 
@@ -235,6 +235,6 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
-	r.logger.Error(stopReason, zap.Error(err))
+	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf(stopReason)
 }
