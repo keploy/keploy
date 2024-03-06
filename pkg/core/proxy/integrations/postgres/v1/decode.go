@@ -43,7 +43,8 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 							logger.Debug("EOF error received from client. Closing conn in postgres !!")
 							return err
 						}
-						utils.LogError(logger, err, "failed to read the request message in proxy for postgres dependency")
+						//TODO: why debug log sarthak?
+						logger.Debug("failed to read the request message in proxy for postgres dependency")
 						return err
 					}
 				}

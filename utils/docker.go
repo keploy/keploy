@@ -2,7 +2,6 @@ package utils
 
 import (
 	"context"
-	"fmt"
 	"os"
 	_ "os/exec"
 	_ "path/filepath"
@@ -48,10 +47,10 @@ import (
 //	return nil
 //}
 
-func logError(logger *zap.Logger, message, path string, err error) error {
-	LogError(logger, err, message, zap.String("path:", path))
-	return fmt.Errorf("%s: %v", message, err)
-}
+// func logError(logger *zap.Logger, message, path string, err error) error {
+// 	LogError(logger, err, message, zap.String("path:", path))
+// 	return fmt.Errorf("%s: %v", message, err)
+// }
 
 // TODO: Use inbuilt functions rather than executing cmd whereever possible
 //func getCurrentDirInDocker(curDir string) (string, error) {

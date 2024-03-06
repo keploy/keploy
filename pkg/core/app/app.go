@@ -407,10 +407,21 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) mode
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
+	// Run the app as the user who invoked sudo
+	username := os.Getenv("SUDO_USER")
+	var cmd *exec.Cmd
+	if username != "" {
+		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
+		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", a.cmd)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", a.cmd)
+	}
+
+	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 		return utils.InterruptProcessTree(cmd, cmd.Process.Pid, syscall.SIGINT)
 	}
+	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = 3 * time.Second
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -424,11 +435,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Run the app as the user who invoked sudo
-	uname := os.Getenv("SUDO_USER")
-	if uname != "" {
+	if username != "" {
 		// Switch to the user who invoked sudo
-		u, err := user.Lookup(uname)
+		u, err := user.Lookup(username)
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to lookup user")
 			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
