@@ -224,7 +224,7 @@ func (t *Tools) CreateConfig(ctx context.Context, filePath string, configData st
 	}
 
 	if err := yaml.Unmarshal(data, &node); err != nil {
-		utils.LogError(t.logger, err, "failed to unmarshal the config", zap.String("configData", data))
+		utils.LogError(t.logger, err, "failed to unmarshal the config")
 		return nil
 	}
 	results, err := yaml.Marshal(node.Content[0])

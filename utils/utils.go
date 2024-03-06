@@ -107,6 +107,19 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 		logger.Error(msg, append(fields, zap.Error(err))...)
 	}
 }
+func DeleteLogs(logger *zap.Logger) {
+	//Check if keploy-log.txt exists
+	_, err := os.Stat("keploy-logs.txt")
+	if os.IsNotExist(err) {
+		return
+	}
+	//If it does, remove it.
+	err = os.Remove("keploy-logs.txt")
+	if err != nil {
+		LogError(logger, err, "Error removing log file")
+		return
+	}
+}
 
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`

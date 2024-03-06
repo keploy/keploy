@@ -55,7 +55,7 @@ func start(ctx context.Context) {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
 	}
-	defer log.DeleteLogs(logger)
+	defer utils.DeleteLogs(logger)
 	defer utils.Recover(logger)
 	configDb := configdb.NewConfigDb(logger)
 	if dsn != "" {

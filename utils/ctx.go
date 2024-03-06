@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -45,13 +44,13 @@ func Stop(logger *zap.Logger, reason string) error {
 	}
 	if cancel == nil {
 		err := errors.New("cancel function is not set")
-		utils.LogError(logger, err, "failed stopping keploy")
+		LogError(logger, err, "failed stopping keploy")
 		return err
 	}
 
 	if reason == "" {
 		err := errors.New("cannot stop keploy without a reason")
-		utils.LogError(logger, err, "failed stopping keploy")
+		LogError(logger, err, "failed stopping keploy")
 		return err
 	}
 

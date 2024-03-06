@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -80,18 +79,4 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
 	}
 	return logger, nil
-}
-
-func DeleteLogs(logger *zap.Logger) {
-	//Check if keploy-log.txt exists
-	_, err := os.Stat("keploy-logs.txt")
-	if os.IsNotExist(err) {
-		return
-	}
-	//If it does, remove it.
-	err = os.Remove("keploy-logs.txt")
-	if err != nil {
-		utils.LogError(logger, err, "Error removing log file")
-		return
-	}
 }
