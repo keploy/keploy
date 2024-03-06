@@ -8,6 +8,7 @@ import (
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
@@ -60,8 +61,7 @@ func (idc *Impl) ExtractNetworksForContainer(containerName string) (map[string]*
 
 	containerJSON, err := idc.ContainerInspect(ctx, containerName)
 	if err != nil {
-		idc.logger.Error("Could not inspect container via the Docker API", zap.Error(err),
-			zap.Any("container_name", containerName))
+		utils.LogError(idc.logger, err, "couldn't inspect container via the Docker API", zap.String("containerName", containerName))
 		return nil, err
 	}
 
@@ -71,8 +71,7 @@ func (idc *Impl) ExtractNetworksForContainer(containerName string) (map[string]*
 		// Docker attaches the container to "bridge" network by default.
 		// If the network list is empty, the docker daemon is possibly misbehaving,
 		// or the container is in a bad state.
-		idc.logger.Error("The network list for the given container is empty. This is unexpected.",
-			zap.Any("container_name", containerName))
+		utils.LogError(idc.logger, nil, "The network list for the given container is empty. This is unexpected.", zap.String("containerName", containerName))
 		return nil, fmt.Errorf("the container is not attached to any network")
 	}
 }
@@ -346,13 +345,13 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 
 	curDir, err := os.Getwd()
 	if err != nil {
-		idc.logger.Error("failed to get current working directory", zap.Error(err))
+		utils.LogError(idc.logger, err, "failed to get current working directory")
 		return "", err
 	}
 
 	container, err := idc.ContainerInspect(ctx, "keploy-v2")
 	if err != nil {
-		idc.logger.Error("error inspecting keploy-v2 container", zap.Error(err))
+		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")
 		return "", err
 	}
 	containerMounts := container.Mounts
@@ -375,7 +374,7 @@ func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
 
 	dockerComposeContext, err := filepath.Abs(filepath.Join(hostWorkingDirectory, basePath))
 	if err != nil {
-		idc.logger.Error("error getting absolute path for docker compose file", zap.Error(err))
+		utils.LogError(idc.logger, err, "error getting absolute path for docker compose file")
 		return err
 	}
 	dockerComposeContext = filepath.Dir(dockerComposeContext)

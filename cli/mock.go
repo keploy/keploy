@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	recordSvc "go.keploy.io/server/v2/pkg/service/record"
 	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -23,12 +24,12 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		RunE: func(cmd *cobra.Command, args []string) error {
 			record, err := cmd.Flags().GetBool("record")
 			if err != nil {
-				logger.Error("failed to read the record flag")
+				utils.LogError(logger, nil, "failed to read the record flag")
 				return err
 			}
 			replay, err := cmd.Flags().GetBool("replay")
 			if err != nil {
-				logger.Error("failed to read the replay flag")
+				utils.LogError(logger, nil, "failed to read the replay flag")
 				return err
 			}
 			if !record && !replay {
@@ -40,26 +41,26 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 			if record {
 				svc, err := serviceFactory.GetService(ctx, "record", *cfg)
 				if err != nil {
-					logger.Error("failed to get service", zap.Error(err))
+					utils.LogError(logger, err, "failed to get service")
 					return err
 				}
 				if recordService, ok := svc.(recordSvc.Service); ok {
 					return recordService.StartMock(ctx)
 				} else {
-					logger.Error("service doesn't satisfy record service interface")
+					utils.LogError(logger, nil, "service doesn't satisfy record service interface")
 					return err
 				}
 			}
 			if replay {
 				svc, err := serviceFactory.GetService(ctx, "replay", *cfg)
 				if err != nil {
-					logger.Error("failed to get service", zap.Error(err))
+					utils.LogError(logger, err, "failed to get service")
 					return err
 				}
 				if replayService, ok := svc.(replaySvc.Service); ok {
 					return replayService.ProvideMocks(ctx)
 				} else {
-					logger.Error("service doesn't satisfy replay service interface")
+					utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 					return err
 				}
 			}
@@ -68,7 +69,7 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		},
 	}
 	if err := cmdConfigurator.AddFlags(cmd, cfg); err != nil {
-		logger.Error("failed to add flags", zap.Error(err))
+		utils.LogError(logger, err, "failed to add flags")
 		return nil
 	}
 	return cmd
