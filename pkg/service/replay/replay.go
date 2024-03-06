@@ -364,8 +364,10 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetId string, testRunId s
 					Binary:        testCase.HttpResp.Binary,
 					Timestamp:     testCase.HttpResp.Timestamp,
 				},
-				Noise:  testCase.Noise,
-				Result: *testResult,
+				TestCasePath: r.config.Path,
+				MockPath:     r.config.Path,
+				Noise:        testCase.Noise,
+				Result:       *testResult,
 			}
 			err = r.reportDB.InsertTestCaseResult(testLoopCtx, testRunId, testSetId, testCase.Name, testCaseResult)
 			if err != nil {

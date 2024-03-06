@@ -172,7 +172,6 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 				Header:     pkg.ToYamlHttpHeader(req.Header),
 				Body:       string(reqBody),
 				URLParams:  pkg.UrlParams(req),
-				Host:       req.Host,
 			},
 			HttpResp: &models.HttpResp{
 				StatusCode: respParsed.StatusCode,
