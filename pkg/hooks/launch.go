@@ -57,7 +57,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		h.logger.Debug("User Application is running inside docker in isolation", zap.Any("Container", appContainer), zap.Any("Network", appNetwork))
 		//search for the container and process it
-		err := h.processDockerEnv("", appContainer, appNetwork, buildDelay)
+		err := h.processDockerEnv("", appContainer, appNetwork, buildDelay, false)
 		if err != nil {
 			return err
 		}
@@ -236,7 +236,8 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				}
 			}
 
-			err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay)
+			isDockerComposeCmd := cmd == "docker-compose"
+			err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay, isDockerComposeCmd)
 			if err != nil {
 				return err
 			}
@@ -262,7 +263,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	}
 }
 
-func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration) error {
+func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration, isDockerComposeCmd bool) error {
 	// to notify the kernel hooks that the user application is related to Docker.
 	key := 0
 	value := true
@@ -285,10 +286,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 			err := h.runApp(appCmd, true)
 			h.logger.Debug("Application stopped with the error", zap.Error(err))
 
-			composeFile := findDockerComposeFile()
+			if containerCreatedNotStarted && isDockerComposeCmd {
 
-			if containerCreatedNotStarted && len(composeFile) != 0 {
-
+				composeFile := findDockerComposeFile()
 				containerNames, composeErr := getContainersFromComposeFile(composeFile)
 				if composeErr != nil {
 					h.logger.Error("Failed to get the containers from the docker compose file", zap.Error(composeErr))
