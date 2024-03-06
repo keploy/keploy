@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -73,7 +74,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 		logCfg.DisableStacktrace = false
 		logCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 	}
-		
+
 	logger, err := logCfg.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
@@ -90,7 +91,7 @@ func DeleteLogs(logger *zap.Logger) {
 	//If it does, remove it.
 	err = os.Remove("keploy-logs.txt")
 	if err != nil {
-		logger.Error("Error removing log file: %v\n", zap.String("error", err.Error()))
+		utils.LogError(logger, err, "Error removing log file")
 		return
 	}
 }

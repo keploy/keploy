@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -78,7 +79,7 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	yamlPath := filepath.Join(path, fileName+".yaml")
 	file, err := os.OpenFile(yamlPath, flag, os.ModePerm)
 	if err != nil {
-		logger.Error("failed to open file for writing", zap.Error(err), zap.String("file", yamlPath))
+		utils.LogError(logger, err, "failed to open file for writing", zap.String("file", yamlPath))
 		return err
 	}
 	defer file.Close()
@@ -93,7 +94,7 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 		if err == ctx.Err() {
 			return nil // Ignore context cancellation error
 		}
-		logger.Error("failed to write the yaml document", zap.Error(err), zap.String("yaml file name", fileName))
+		utils.LogError(logger, err, "failed to write the yaml document", zap.String("yaml file name", fileName))
 		return err
 	}
 	return nil
@@ -130,12 +131,12 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	if _, err := os.Stat(yamlPath); err != nil {
 		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
 		if err != nil {
-			Logger.Error("failed to create a directory for the yaml file", zap.Error(err), zap.String("path directory", path), zap.String("yaml", fileName))
+			utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 			return false, err
 		}
 		file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
 		if err != nil {
-			Logger.Error("failed to create a yaml file", zap.Error(err), zap.String("path directory", path), zap.String("yaml", fileName))
+			utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 			return false, err
 		}
 		file.Close()

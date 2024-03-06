@@ -3,9 +3,11 @@ package hooks
 import (
 	"context"
 	"fmt"
+
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -52,7 +54,7 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	defer h.m.Unlock()
 	err := h.redirectProxyMap.Delete(srcPort)
 	if err != nil {
-		h.logger.Error("no such key present in the redirect proxy map", zap.Any("error thrown by ebpf map", err.Error()))
+		utils.LogError(h.logger, err, "failed to remove entry from redirect proxy map")
 		return err
 	}
 	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Any("(Key)/SourcePort", srcPort))
@@ -63,7 +65,7 @@ func (h *Hooks) SendKeployPid(kPid uint32) error {
 	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", kPid))
 	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the keploy pid to the ebpf program", zap.Any("Keploy Pid", kPid), zap.Any("error thrown by ebpf map", err.Error()))
+		utils.LogError(h.logger, err, "failed to send the keploy pid to the ebpf program")
 		return err
 	}
 	return nil
@@ -75,18 +77,20 @@ func (h *Hooks) SendAppPid(pid uint32) error {
 	h.logger.Debug("Sending app pid to kernel", zap.Any("app Pid", pid))
 	err := h.appPidMap.Update(uint32(0), &pid, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the app pid to the ebpf program", zap.Any("app Pid", pid), zap.Any("error thrown by ebpf map", err.Error()))
+		utils.LogError(h.logger, err, "failed to send the app pid to the ebpf program")
 		return err
 	}
 	return nil
 }
 
-func (h *Hooks) SetKeployModeInKernel(mode uint32) {
+func (h *Hooks) SetKeployModeInKernel(mode uint32) error {
 	key := 0
 	err := h.keployModeMap.Update(uint32(key), &mode, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to set keploy mode in the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		utils.LogError(h.logger, err, "failed to set keploy mode in the epbf program")
+		return err
 	}
+	return nil
 }
 
 // This function sends the IP and Port of the running proxy in the eBPF program.
@@ -94,7 +98,7 @@ func (h *Hooks) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
 	key := 0
 	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP4: ip4, Ip6: ip6, Port: port}, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the proxy IP & Port to the epbf program", zap.Any("error thrown by ebpf map", err.Error()))
+		utils.LogError(h.logger, err, "failed to send the proxy IP & Port to the epbf program")
 		return err
 	}
 	return nil
@@ -109,7 +113,7 @@ func (h *Hooks) SendInode(ctx context.Context, id uint64, inode uint64) error {
 func (h *Hooks) SendNameSpaceId(key uint32, inode uint64) error {
 	err := h.inodeMap.Update(key, &inode, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send the namespace id to the epbf program", zap.Any("error thrown by ebpf map", err.Error()), zap.Any("key", key), zap.Any("Inode", inode))
+		utils.LogError(h.logger, err, "failed to send the namespace id to the epbf program", zap.Any("key", key), zap.Any("Inode", inode))
 		return err
 	}
 	return nil
@@ -130,7 +134,7 @@ func (h *Hooks) SendDnsPort(port uint32) error {
 	key := 0
 	err := h.DnsPort.Update(uint32(key), &port, ebpf.UpdateAny)
 	if err != nil {
-		h.logger.Error("failed to send dns server port to the epbf program", zap.Any("dns server port", port), zap.Any("error thrown by ebpf map", err.Error()))
+		utils.LogError(h.logger, err, "failed to send dns server port to the epbf program", zap.Any("dns server port", port))
 		return err
 	}
 	return nil
@@ -144,7 +148,7 @@ func (h *Hooks) PassThroughPortsInKernel(ctx context.Context, id uint64, ports [
 func (h *Hooks) SendPassThroughPorts(filterPorts []uint) error {
 	portsSize := len(filterPorts)
 	if portsSize > 10 {
-		h.logger.Error("can not send more than 10 ports to be filtered to the ebpf program")
+		utils.LogError(h.logger, nil, "can not send more than 10 ports to be filtered to the ebpf program")
 		return fmt.Errorf("passthrough ports limit exceeded")
 	}
 
@@ -164,7 +168,7 @@ func (h *Hooks) SendPassThroughPorts(filterPorts []uint) error {
 		h.logger.Debug(fmt.Sprintf("PassthroughPort(%v):[%v]", i, v))
 		err := h.passthroughPorts.Update(uint32(i), &v, ebpf.UpdateAny)
 		if err != nil {
-			h.logger.Error("failed to send the passthrough ports to the ebpf program", zap.Any("error thrown by ebpf map", err.Error()))
+			utils.LogError(h.logger, err, "failed to send the passthrough ports to the ebpf program")
 			return err
 		}
 	}

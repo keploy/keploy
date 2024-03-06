@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -49,7 +50,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	}
 	err = yaml.WriteFile(ctx, ts.Logger, tcsPath, tcsName, data, false)
 	if err != nil {
-		ts.Logger.Error("failed to write testcase yaml file", zap.Error(err))
+		utils.LogError(ts.Logger, err, "failed to write testcase yaml file")
 		return err
 	}
 	ts.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
@@ -74,12 +75,12 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 	}
 	dir, err := yaml.ReadDir(TestPath, os.ModePerm)
 	if err != nil {
-		ts.Logger.Error("failed to open the directory containing yaml testcases", zap.Error(err), zap.Any("path", TestPath))
+		utils.LogError(ts.Logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
 		return nil, err
 	}
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		ts.Logger.Error("failed to read the file names of yaml testcases", zap.Error(err), zap.Any("path", TestPath))
+		utils.LogError(ts.Logger, err, "failed to read the file names of yaml testcases", zap.Any("path", TestPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -93,12 +94,12 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {
-			ts.Logger.Error("failed to unmarshall YAML data", zap.Error(err))
+			utils.LogError(ts.Logger, err, "failed to unmarshall YAML data")
 			return nil, err
 		}
 
 		if err != nil {
-			ts.Logger.Error("failed to read the testcase from yaml", zap.Error(err))
+			utils.LogError(ts.Logger, err, "failed to read the testcase from yaml")
 			return nil, err
 		}
 		tc, err := Decode(testCase, ts.Logger)

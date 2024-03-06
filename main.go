@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	sentry "github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
@@ -61,7 +60,7 @@ func start(ctx context.Context) {
 	configDb := configdb.NewConfigDb(logger)
 	if dsn != "" {
 		utils.SentryInit(logger, dsn)
-		logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
+		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
 	svcProvider := provider.NewServiceProvider(logger, configDb)
 	cmdConfigurator := provider.NewCmdConfigurator(logger)

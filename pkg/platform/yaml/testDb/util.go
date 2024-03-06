@@ -32,7 +32,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
 	if err != nil {
 		msg := "error in flattening http response"
-		logger.Error(msg, zap.Error(err))
+		utils.LogError(logger, err, msg)
 	}
 	noise := tc.Noise
 
@@ -63,11 +63,11 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			},
 		})
 		if err != nil {
-			logger.Error("failed to encode testcase into a yaml doc", zap.Error(err))
+			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 			return nil, err
 		}
 	default:
-		logger.Error("failed to marshal the testcase into yaml due to invalid kind of testcase")
+		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
 	}
 	return doc, nil
@@ -236,7 +236,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		httpSpec := models.HttpSchema{}
 		err := yamlTestcase.Spec.Decode(&httpSpec)
 		if err != nil {
-			logger.Error("failed to unmarshal a yaml doc into the http testcase", zap.Error(err))
+			utils.LogError(logger, err, "failed to unmarshal a yaml doc into the http testcase")
 			return nil, err
 		}
 		tc.Created = httpSpec.Created
@@ -261,13 +261,13 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		grpcSpec := models.GrpcSpec{}
 		err := yamlTestcase.Spec.Decode(&grpcSpec)
 		if err != nil {
-			logger.Error(utils.Emoji+"failed to unmarshal a yaml doc into the gRPC testcase", zap.Error(err))
+			utils.LogError(logger, err, "failed to unmarshal a yaml doc into the gRPC testcase")
 			return nil, err
 		}
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
 	default:
-		logger.Error("failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
+		utils.LogError(logger, nil, "failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
 		return nil, errors.New("yaml doc of unknown type")
 	}
 	return &tc, nil

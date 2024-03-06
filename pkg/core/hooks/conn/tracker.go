@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	// "log"
 )
@@ -181,7 +182,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 
 			recordTraffic = validReq && validRes
 		} else {
-			conn.logger.Error("malformed request or response")
+			utils.LogError(conn.logger,nil, "malformed request or response")
 			recordTraffic = false
 		}
 
@@ -226,7 +227,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			}
 
 		} else {
-			conn.logger.Error("malformed request")
+			utils.LogError(conn.logger, nil, "malformed request")
 			recordTraffic = false
 		}
 

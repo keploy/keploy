@@ -7,8 +7,8 @@ package graph
 import (
 	"context"
 	"fmt"
+
 	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/graph/model"
 )
@@ -22,7 +22,7 @@ func (r *mutationResolver) Start(ctx context.Context) (*model.TestRunInfo, error
 
 	testRunId, appId, err := r.replay.BootReplay(ctx)
 	if err != nil {
-		r.logger.Error("failed to boot replay", zap.Error(err))
+		utils.LogError(r.logger, err, "failed to boot replay")
 		return nil, err
 	}
 	return &model.TestRunInfo{
@@ -40,7 +40,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 
 	ids, err := r.replay.GetAllTestSetIds(ctx)
 	if err != nil {
-		r.logger.Error("failed to get all test set ids", zap.Error(err))
+		utils.LogError(r.logger, err, "failed to get all test set ids")
 		return nil, err
 	}
 	return ids, nil
@@ -83,7 +83,7 @@ func (r *queryResolver) Stop(ctx context.Context) (bool, error) {
 	}
 	err := utils.Stop(r.logger, "stopping the test run")
 	if err != nil {
-		r.logger.Error("failed to stop the test run", zap.Error(err))
+		utils.LogError(r.logger, err, "failed to stop the test run")
 		return false, err
 	}
 	return true, nil

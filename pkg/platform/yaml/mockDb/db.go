@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -76,7 +77,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 		var mockYamls []*yaml.NetworkTrafficDoc
 		data, err := yaml.ReadFile(ctx, path, mockFileName)
 		if err != nil {
-			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 		dec := yamlLib.NewDecoder(bytes.NewReader(data))
@@ -93,7 +94,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 		}
 		mocks, err := decodeMocks(mockYamls, ys.Logger)
 		if err != nil {
-			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 
@@ -133,7 +134,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 		var mockYamls []*yaml.NetworkTrafficDoc
 		data, err := yaml.ReadFile(ctx, path, mockName)
 		if err != nil {
-			ys.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 		dec := yamlLib.NewDecoder(bytes.NewReader(data))
@@ -150,7 +151,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 		}
 		mocks, err := decodeMocks(mockYamls, ys.Logger)
 		if err != nil {
-			ys.Logger.Error("failed to decode the config mocks from yaml docs", zap.Error(err), zap.Any("session", filepath.Base(path)))
+			utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 		for _, mock := range mocks {

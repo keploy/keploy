@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/utils"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -91,7 +92,6 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		ID: id,
 	})
 
-
 	err := h.load(ctx, opts)
 	if err != nil {
 		return err
@@ -113,19 +113,19 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 
 	err = h.SendProxyInfo(proxyIp, h.proxyPort, [4]uint32{0000, 0000, 0000, 0001})
 	if err != nil {
-		h.logger.Error("failed to send new proxy ip to kernel", zap.Any("NewProxyIp", proxyIp))
+		utils.LogError(h.logger, err, "failed to send proxy info to kernel", zap.Any("NewProxyIp", proxyIp))
 		return err
 	}
 
 	err = h.SendDnsPort(h.dnsPort)
 	if err != nil {
-		h.logger.Error("failed to send dns port to kernel", zap.Any("DnsPort", h.dnsPort))
+		utils.LogError(h.logger, err, "failed to send dns port to kernel", zap.Any("DnsPort", h.dnsPort))
 		return err
 	}
 
 	err = h.SendCmdType(opts.IsDocker)
 	if err != nil {
-		h.logger.Error("failed to send the cmd type to kernel", zap.Bool("isDocker", opts.IsDocker))
+		utils.LogError(h.logger, err, "failed to send the cmd type to kernel", zap.Bool("isDocker", opts.IsDocker))
 		return err
 	}
 
@@ -135,14 +135,14 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
-		h.logger.Error("failed to lock memory for eBPF resources", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
 		return err
 	}
 
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
-		h.logger.Error("failed to load eBPF objects", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to load eBPF objects")
 		return err
 	}
 
@@ -162,7 +162,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// ----- used in case of wsl -----
 	socket, err := link.Kprobe("sys_socket", objs.SyscallProbeEntrySocket, nil)
 	if err != nil {
-		h.logger.Error("opening sys_socket kprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_socket")
 		return err
 	}
 	h.socket = socket
@@ -171,14 +171,14 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
 	if err != nil {
-		h.logger.Error("opening sys_bind kprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_bind")
 		return err
 	}
 	h.bind = bind
 
 	udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 	if err != nil {
-		h.logger.Error("opening udp_pre_connect kprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on udp_pre_connect")
 		return err
 	}
 	h.udpp4 = udppC4
@@ -186,21 +186,21 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// FOR IPV4
 	tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
 	if err != nil {
-		h.logger.Error("opening tcp_v4_pre_connect kprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
 		return err
 	}
 	h.tcppv4 = tcppC4
 
 	tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
 	if err != nil {
-		h.logger.Error("opening tcp_v4_connect kprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_connect")
 		return err
 	}
 	h.tcpv4 = tcpC4
 
 	tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("opening tcp_v4_connect kretprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
 		return err
 	}
 	h.tcpv4Ret = tcpRC4
@@ -208,7 +208,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// Get the first-mounted cgroupv2 path.
 	cGroupPath, err := detectCgroupPath()
 	if err != nil {
-		h.logger.Error("failed to detect the cgroup path", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to detect the cgroup path")
 		return err
 	}
 
@@ -219,7 +219,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	})
 
 	if err != nil {
-		h.logger.Error("failed to attach the connect4 cgroup hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the connect4 cgroup hook")
 		return err
 	}
 	h.connect4 = c4
@@ -231,7 +231,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	})
 
 	if err != nil {
-		h.logger.Error("failed to attach GetPeername4 cgroup hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the GetPeername4 cgroup hook")
 		return err
 	}
 	h.gp4 = gp4
@@ -240,21 +240,21 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	tcpPreC6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
 	if err != nil {
-		h.logger.Error("opening tcp_v6_pre_connect kprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
 		return err
 	}
 	h.tcppv6 = tcpPreC6
 
 	tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
 	if err != nil {
-		h.logger.Error("opening tcp_v6_connect kprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
 		return err
 	}
 	h.tcpv6 = tcpC6
 
 	tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("opening tcp_v6_connect kretprobe: %s", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
 		return err
 	}
 	h.tcpv6Ret = tcpRC6
@@ -266,7 +266,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	})
 
 	if err != nil {
-		h.logger.Error("failed to attach the connect6 cgroup hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the connect6 cgroup hook")
 		return err
 	}
 	h.connect6 = c6
@@ -278,7 +278,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	})
 
 	if err != nil {
-		h.logger.Error("failed to attach GetPeername6 cgroup hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the GetPeername6 cgroup hook")
 		return err
 	}
 	h.gp6 = gp6
@@ -286,7 +286,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	//Open a kprobe at the entry of sendto syscall
 	snd, err := link.Kprobe("sys_sendto", objs.SyscallProbeEntrySendto, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_sendto", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_sendto")
 		return err
 	}
 	h.sendto = snd
@@ -294,7 +294,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	//Opening a kretprobe at the exit of sendto syscall
 	sndr, err := link.Kretprobe("sys_sendto", objs.SyscallProbeRetSendto, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_sendto", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_sendto")
 		return err
 	}
 	h.sendtoRet = sndr
@@ -305,7 +305,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	ac, err := link.Kprobe("sys_accept", objs.SyscallProbeEntryAccept, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_accept", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_accept")
 		return err
 	}
 	h.accept = ac
@@ -314,7 +314,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	ac_, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_accept", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_accept")
 		return err
 	}
 	h.acceptRet = ac_
@@ -323,7 +323,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	ac4, err := link.Kprobe("sys_accept4", objs.SyscallProbeEntryAccept4, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_accept4", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_accept4")
 		return err
 	}
 	h.accept4 = ac4
@@ -332,7 +332,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	ac4_, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_accept4", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_accept4")
 		return err
 	}
 	h.accept4Ret = ac4_
@@ -341,7 +341,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_read", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_read")
 		return err
 	}
 	h.read = rd
@@ -350,7 +350,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	rd_, err := link.Kretprobe("sys_read", objs.SyscallProbeRetRead, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_read", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_read")
 		return err
 	}
 	h.readRet = rd_
@@ -359,7 +359,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	wt, err := link.Kprobe("sys_write", objs.SyscallProbeEntryWrite, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_write", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_write")
 		return err
 	}
 	h.write = wt
@@ -368,7 +368,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	wt_, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_write", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_write")
 		return err
 	}
 	h.writeRet = wt_
@@ -377,7 +377,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program for writev.
 	wtv, err := link.Kprobe("sys_writev", objs.SyscallProbeEntryWritev, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_writev", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_writev")
 		return err
 	}
 	h.writev = wtv
@@ -386,7 +386,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program for writev.
 	wtv_, err := link.Kretprobe("sys_writev", objs.SyscallProbeRetWritev, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_writev", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_writev")
 		return err
 	}
 	h.writevRet = wtv_
@@ -395,7 +395,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	cl, err := link.Kprobe("sys_close", objs.SyscallProbeEntryClose, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_close", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_close")
 		return err
 	}
 	h.close = cl
@@ -403,7 +403,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	//Attaching a kprobe at the entry of recvfrom syscall
 	rcv, err := link.Kprobe("sys_recvfrom", objs.SyscallProbeEntryRecvfrom, nil)
 	if err != nil {
-		h.logger.Error("failed to attach the kprobe hook on sys_recvfrom", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_recvfrom")
 		return err
 	}
 	h.recvfrom = rcv
@@ -411,7 +411,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	//Attaching a kretprobe at the exit of recvfrom syscall
 	rcvr, err := link.Kretprobe("sys_recvfrom", objs.SyscallProbeRetRecvfrom, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_recvfrom", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_recvfrom")
 		return err
 	}
 	h.recvfromRet = rcvr
@@ -420,7 +420,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// pre-compiled program.
 	cl_, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, &link.KprobeOptions{RetprobeMaxActive: 1024})
 	if err != nil {
-		h.logger.Error("failed to attach the kretprobe hook on sys_close", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_close")
 		return err
 	}
 	h.closeRet = cl_
@@ -437,19 +437,18 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	//sending keploy pid to kernel to get filtered
 	k_inode, err := getSelfInodeNumber()
 	if err != nil {
-		h.logger.Error("failed to get inode of the keploy process", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
 		return err
 	}
 	h.logger.Debug("", zap.Any("Keploy Inode number", k_inode))
 	err = h.SendNameSpaceId(1, k_inode)
 	if err != nil {
-		h.logger.Error("failed to send the namespace id to the epbf program", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to send the namespace id to the epbf program")
 		return err
-
 	}
 	err = h.SendKeployPid(uint32(os.Getpid()))
 	if err != nil {
-		h.logger.Error("failed to send the keploy pid to the ebpf program", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to send the keploy pid to the ebpf program")
 		return err
 	}
 	h.logger.Debug("Keploy Pid sent successfully...")
@@ -459,7 +458,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	if opts.Pid != 0 {
 		err = h.SendAppPid(opts.Pid)
 		if err != nil {
-			h.logger.Error("failed to send the app pid to the ebpf program", zap.Error(err))
+			utils.LogError(h.logger, err, "failed to send the app pid to the ebpf program")
 			return err
 		}
 	}

@@ -182,7 +182,7 @@ func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map
 		newLogger.Printf(logs)
 		err := logDiffs.Render()
 		if err != nil {
-			logger.Error("failed to render the diffs", zap.Error(err))
+			utils.LogError(logger, err, "failed to render the diffs")
 		}
 	} else {
 		logger := pp.New()

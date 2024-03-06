@@ -71,7 +71,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId
 	}
 	data, err := yaml.ReadFile(ctx, path, reportName)
 	if err != nil {
-		fe.Logger.Error("failed to read the mocks from config yaml", zap.Error(err), zap.Any("session", filepath.Base(path)))
+		utils.LogError(fe.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 		return nil, err
 	}
 
@@ -107,7 +107,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSe
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 
 	if err != nil {
-		fe.Logger.Error("failed to write report yaml file", zap.Error(err))
+		utils.LogError(fe.Logger, err, "failed to write the mocks to config yaml", zap.Any("session", filepath.Base(reportPath)))
 		return err
 	}
 

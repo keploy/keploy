@@ -19,15 +19,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
-
-	"github.com/TheZeroSlave/zapsentry"
-	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 // var ErrFileNotFound = errors.New("file Not found")
@@ -47,60 +43,59 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 		// Bind the flag to Viper with the constructed key
 		err := viper.BindPFlag(viperKey, flag)
 		if err != nil {
-			logger.Error("Failed to bind flag to config", zap.Error(err))
+			LogError(logger, err, "failed to bind flag to config")
 		}
 
 		// Tell Viper to also read this flag's value from the corresponding env variable
 		err = viper.BindEnv(viperKey, envVarName)
 		if err != nil {
-			logger.Error("Failed to bind environment variables to config", zap.Error(err))
-
+			LogError(logger, err, "failed to bind environment variables to config")
 		}
 	})
 }
 
-func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentry.Client, configDb *configdb.ConfigDb) *zap.Logger {
-	cfg := zapsentry.Configuration{
-		Level:             zapcore.ErrorLevel, //when to send message to sentry
-		EnableBreadcrumbs: true,               // enable sending breadcrumbs to Sentry
-		BreadcrumbLevel:   zapcore.InfoLevel,  // at what level should we sent breadcrumbs to sentry
-		Tags: map[string]string{
-			"component": "system",
-		},
-	}
-
-	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(client))
-	//in case of err it will return noop core. So we don't need to attach it to log.
-	if err != nil {
-		logger.Debug("failed to init zap", zap.Error(err))
-		return logger
-	}
-
-	logger = zapsentry.AttachCoreToLogger(core, logger)
-	kernelVersion := ""
-	if runtime.GOOS == "linux" {
-		cmd := exec.CommandContext(ctx, "uname", "-r")
-		kernelBytes, err := cmd.Output()
-		if err != nil {
-			logger.Debug("failed to get kernel version", zap.Error(err))
-		} else {
-			kernelVersion = string(kernelBytes)
-		}
-	}
-
-	arch := runtime.GOARCH
-	installationID, err := configDb.GetInstallationId(ctx)
-	if err != nil {
-		logger.Debug("failed to get installationID", zap.Error(err))
-	}
-	sentry.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetTag("Keploy Version", Version)
-		scope.SetTag("Linux Kernel Version", kernelVersion)
-		scope.SetTag("Architecture", arch)
-		scope.SetTag("Installation ID", installationID)
-	})
-	return logger
-}
+//func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentry.Client, configDb *configdb.ConfigDb) *zap.Logger {
+//	cfg := zapsentry.Configuration{
+//		Level:             zapcore.ErrorLevel, //when to send message to sentry
+//		EnableBreadcrumbs: true,               // enable sending breadcrumbs to Sentry
+//		BreadcrumbLevel:   zapcore.InfoLevel,  // at what level should we sent breadcrumbs to sentry
+//		Tags: map[string]string{
+//			"component": "system",
+//		},
+//	}
+//
+//	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(client))
+//	//in case of err it will return noop core. So we don't need to attach it to log.
+//	if err != nil {
+//		logger.Debug("failed to init zap", zap.Error(err))
+//		return logger
+//	}
+//
+//	logger = zapsentry.AttachCoreToLogger(core, logger)
+//	kernelVersion := ""
+//	if runtime.GOOS == "linux" {
+//		cmd := exec.CommandContext(ctx, "uname", "-r")
+//		kernelBytes, err := cmd.Output()
+//		if err != nil {
+//			logger.Debug("failed to get kernel version", zap.Error(err))
+//		} else {
+//			kernelVersion = string(kernelBytes)
+//		}
+//	}
+//
+//	arch := runtime.GOARCH
+//	installationID, err := configDb.GetInstallationId(ctx)
+//	if err != nil {
+//		logger.Debug("failed to get installationID", zap.Error(err))
+//	}
+//	sentry.ConfigureScope(func(scope *sentry.Scope) {
+//		scope.SetTag("Keploy Version", Version)
+//		scope.SetTag("Linux Kernel Version", kernelVersion)
+//		scope.SetTag("Architecture", arch)
+//		scope.SetTag("Installation ID", installationID)
+//	})
+//	return logger
+//}
 
 // LogError logs the error with the provided fields if the error is not context.Canceled.
 func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
@@ -233,16 +228,16 @@ func Recover(logger *zap.Logger) {
 	if r := recover(); r != nil {
 		err := attachLogFileToSentry("./keploy-logs.txt")
 		if err != nil {
-			logger.Error("Failed to attach log file to sentry", zap.Error(err))
+			LogError(logger, err, "failed to attach log file to sentry")
 		}
 		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 		// Get the stack trace
 		stackTrace := debug.Stack()
-		logger.Error("Recovered from:", zap.String("stack trace", string(stackTrace)))
+		LogError(logger, nil, "Recovered from panic", zap.String("stack trace", string(stackTrace)))
 		//stopping the global context
 		err = Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
-			logger.Error("Failed to stop the global context", zap.Error(err))
+			LogError(logger, err, "failed to stop the global context")
 			//return
 		}
 		sentry.Flush(time.Second * 2)
@@ -357,12 +352,12 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err != nil {
-			logger.Error("Failed to get the current docker context", zap.Error(err))
+			LogError(logger, err, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
 		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 		if len(dockerContext) == 0 {
-			logger.Error("Could not get the current docker context")
+			LogError(logger, nil, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
 		dockerContext = strings.Split(dockerContext, "\n")[0]
@@ -376,7 +371,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 			return alias, nil
 		}
 	case "Windows":
-		logger.Error("Windows is not supported. Use WSL2 instead.")
+		LogError(logger, nil, "Windows is not supported. Use WSL2 instead.")
 		return "", errors.New("failed to get alias")
 	}
 	return "", errors.New("failed to get alias")
@@ -406,7 +401,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger, command string) error 
 	logger.Debug("This is the keploy alias", zap.String("keployAlias:", keployAlias))
 	err = cmd.Run()
 	if err != nil {
-		logger.Error("Failed to start keploy in docker", zap.Error(err))
+		LogError(logger, err, "failed to start keploy in docker")
 		return err
 	}
 	return nil

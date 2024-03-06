@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -49,7 +50,7 @@ import (
 //}
 
 func logError(logger *zap.Logger, message, path string, err error) error {
-	logger.Error(message, zap.Error(err), zap.String("path:", path))
+	utils.LogError(logger, err, message, zap.String("path:", path))
 	return fmt.Errorf("%s: %v", message, err)
 }
 
@@ -78,7 +79,7 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 	// pass the all the commands and args to the docker version of Keploy
 	err := RunInDocker(ctx, logger, strings.Join(os.Args[1:], " "))
 	if err != nil {
-		logger.Error("failed to run the test command in docker", zap.Error(err))
+		utils.LogError(logger, err, "failed to run the command in docker")
 		return err
 	}
 	// gracefully exit the current process

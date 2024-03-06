@@ -2,16 +2,17 @@ package graph
 
 import (
 	"context"
+	"log"
+	"net/http"
+	"strconv"
+	"sync"
+
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"log"
-	"net/http"
-	"strconv"
-	"sync"
 )
 
 type Graph struct {
@@ -71,6 +72,6 @@ func (g *Graph) Serve(ctx context.Context) error {
 // Gracefully shut down the HTTP server
 func (g *Graph) stopGraphqlServer(ctx context.Context, httpSrv *http.Server) {
 	if err := httpSrv.Shutdown(ctx); err != nil {
-		g.logger.Error("Graphql server shutdown failed", zap.Error(err))
+		utils.LogError(g.logger, err, "Graphql server shutdown failed")
 	}
 }

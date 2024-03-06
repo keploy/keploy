@@ -27,7 +27,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			err := req.Message.Encode(v.Message)
 			if err != nil {
-				logger.Error("failed to encode mongo request wiremessage into yaml", zap.Error(err))
+				utils.LogError(logger, err, "failed to encode mongo request wiremessage into yaml")
 				return nil, err
 			}
 			requests = append(requests, req)
@@ -40,7 +40,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			err := resp.Message.Encode(v.Message)
 			if err != nil {
-				logger.Error("failed to encode mongo response wiremessage into yaml", zap.Error(err))
+				utils.LogError(logger, err, "failed to encode mongo response wiremessage into yaml")
 				return nil, err
 			}
 			responses = append(responses, resp)
@@ -56,7 +56,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 
 		err := yamlDoc.Spec.Encode(mongoSpec)
 		if err != nil {
-			logger.Error("failed to marshal the mongo input-output as yaml", zap.Error(err))
+			utils.LogError(logger, err, "failed to marshal the mongo input-output as yaml")
 			return nil, err
 		}
 
@@ -71,7 +71,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		err := yamlDoc.Spec.Encode(httpSpec)
 		if err != nil {
-			logger.Error("failed to marshal the http input-output as yaml", zap.Error(err))
+			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
 			return nil, err
 		}
 	case models.GENERIC:
@@ -84,7 +84,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		err := yamlDoc.Spec.Encode(genericSpec)
 		if err != nil {
-			logger.Error("failed to marshal binary input-output of external call into yaml", zap.Error(err))
+			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
 			return nil, err
 		}
 	case models.Postgres:
@@ -99,7 +99,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 
 		err := yamlDoc.Spec.Encode(postgresSpec)
 		if err != nil {
-			logger.Error("failed to marshal postgres of external call into yaml", zap.Error(err))
+			utils.LogError(logger, err, "failed to marshal the postgres input-output as yaml")
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
@@ -111,7 +111,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		err := yamlDoc.Spec.Encode(gRPCSpec)
 		if err != nil {
-			logger.Error(utils.Emoji+"failed to marshal gRPC of external call into yaml", zap.Error(err))
+			utils.LogError(logger, err, "failed to marshal gRPC of external call into yaml")
 			return nil, err
 		}
 	case models.SQL:
@@ -124,7 +124,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			err := req.Message.Encode(v.Message)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to encode mongo request wiremessage into yaml", zap.Error(err))
+				utils.LogError(logger, err, "failed to encode mongo request wiremessage into yaml")
 				return nil, err
 			}
 			requests = append(requests, req)
@@ -137,7 +137,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			err := resp.Message.Encode(v.Message)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to encode mongo request wiremessage into yaml", zap.Error(err))
+				utils.LogError(logger, err, "failed to encode mongo response wiremessage into yaml")
 				return nil, err
 			}
 			responses = append(responses, resp)
@@ -151,11 +151,11 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		err := yamlDoc.Spec.Encode(sqlSpec)
 		if err != nil {
-			logger.Error(utils.Emoji+"failed to marshal the SQL input-output as yaml", zap.Error(err))
+			utils.LogError(logger, err, "failed to marshal the SQL input-output as yaml")
 			return nil, err
 		}
 	default:
-		logger.Error("failed to marshal the recorded mock into yaml due to invalid kind of mock")
+		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
 	}
 
@@ -181,7 +181,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			httpSpec := models.HttpSchema{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
-				logger.Error("failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -197,7 +197,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			mongoSpec := models.MongoSpec{}
 			err := m.Spec.Decode(&mongoSpec)
 			if err != nil {
-				logger.Error("failed to unmarshal a yaml doc into mongo mock", zap.Error(err), zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into mongo mock", zap.Any("mock name", m.Name))
 				return nil, err
 			}
 
@@ -210,7 +210,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			grpcSpec := models.GrpcSpec{}
 			err := m.Spec.Decode(&grpcSpec)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal a yaml doc into http mock", zap.Error(err), zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -223,7 +223,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			genericSpec := models.GenericSchema{}
 			err := m.Spec.Decode(&genericSpec)
 			if err != nil {
-				logger.Error("failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -240,7 +240,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			err := m.Spec.Decode(&PostSpec)
 
 			if err != nil {
-				logger.Error("failed to unmarshal a yaml doc into generic mock", zap.Error(err), zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -255,7 +255,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			mysqlSpec := models.MySQLSpec{}
 			err := m.Spec.Decode(&mysqlSpec)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal a yaml doc into mongo mock", zap.Error(err), zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into mysql mock", zap.Any("mock name", m.Name))
 				return nil, err
 			}
 
@@ -265,7 +265,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = *mockSpec
 		default:
-			logger.Error("failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
+			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
 			continue
 		}
 		mocks = append(mocks, &mock)
@@ -290,7 +290,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLHandshakeResponse{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLHandshakeResponse ", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeResponse")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -298,7 +298,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLQueryPacket{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLQueryPacket", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLQueryPacket")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -306,7 +306,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLComStmtPreparePacket{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLComStmtPreparePacket", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtPreparePacket")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -314,7 +314,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLComStmtExecute{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLComStmtExecute", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtExecute")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -322,7 +322,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLCOM_STMT_SEND_LONG_DATA{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLCOM_STMT_SEND_LONG_DATA", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_SEND_LONG_DATA")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -330,7 +330,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLCOM_STMT_RESET{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLCOM_STMT_RESET", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_RESET")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -338,7 +338,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLComStmtFetchPacket{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLComStmtFetchPacket", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtFetchPacket")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -346,7 +346,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLComStmtClosePacket{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLComStmtClosePacket", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtClosePacket")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -354,7 +354,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.AuthSwitchRequestPacket{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLComStmtClosePacket", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtClosePacket")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -362,7 +362,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MySQLComChangeUserPacket{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLComChangeUserPacket", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComChangeUserPacket")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -383,7 +383,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MySQLHandshakeResponseOk{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLHandshakeResponseOk ", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeResponseOk")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -391,7 +391,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MySQLHandshakeV10Packet{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLHandshakeV10Packet", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeV10Packet")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -399,7 +399,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MySQLOKPacket{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLOKPacket ", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLOKPacket")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -407,7 +407,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MySQLStmtPrepareOk{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLStmtPrepareOk ", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLStmtPrepareOk")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -415,7 +415,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MySQLResultSet{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLResultSet ", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLResultSet")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -423,7 +423,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			responseMessage := &models.AuthSwitchRequestPacket{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLResultSet ", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into AuthSwitchRequestPacket")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -431,7 +431,7 @@ func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MySQLERRPacket{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error(utils.Emoji+"failed to unmarshal yml document into MySQLERRPacket ", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLERRPacket")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -463,7 +463,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MongoOpMessage{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error("failed to unmarshal yml document into mongo OpMsg request wiremessage", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into mongo OpMsg request wiremessage")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -471,7 +471,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MongoOpReply{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error("failed to unmarshal yml document into mongo OpReply wiremessage", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into mongo OpReply request wiremessage")
 				return nil, err
 			}
 			req.Message = requestMessage
@@ -479,7 +479,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			requestMessage := &models.MongoOpQuery{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
-				logger.Error("failed to unmarshal yml document into mongo OpQuery wiremessage", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into mongo OpQuery request wiremessage")
 				// return fmt.Errorf("failed to decode the mongo OpReply of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}
@@ -503,7 +503,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MongoOpMessage{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error("failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into mongo OpMsg response wiremessage")
 				// return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}
@@ -512,7 +512,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MongoOpReply{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error("failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into mongo OpMsg response wiremessage")
 				return nil, err
 			}
 			resp.Message = responseMessage
@@ -520,7 +520,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 			responseMessage := &models.MongoOpQuery{}
 			err := v.Message.Decode(responseMessage)
 			if err != nil {
-				logger.Error("failed to unmarshal yml document into mongo OpMsg response wiremessage", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal yml document into mongo OpMsg response wiremessage")
 				// return fmt.Errorf("failed to decode the mongo OpMsg of mock with name: %s.  error: %s", doc.Name, err.Error())
 				return nil, err
 			}

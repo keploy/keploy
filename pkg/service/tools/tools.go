@@ -49,10 +49,10 @@ func (t *Tools) Update(ctx context.Context) error {
 	releaseInfo, err := utils.GetLatestGitHubRelease(ctx)
 	if err != nil {
 		if errors.Is(err, ErrGitHubAPIUnresponsive) {
-			t.logger.Error("GitHub API is unresponsive. Update process cannot continue.")
+			utils.LogError(t.logger, err, "GitHub API is unresponsive. Update process cannot continue.")
 			return errors.New("gitHub API is unresponsive. Update process cannot continue")
 		}
-		t.logger.Error("failed to fetch latest GitHub release version")
+		utils.LogError(t.logger, err, "failed to fetch latest GitHub release version")
 		return err
 	}
 
@@ -87,12 +87,12 @@ func (t *Tools) Update(ctx context.Context) error {
 
 	renderer, err = glamour.NewTermRenderer(termRendererOpts...)
 	if err != nil {
-		t.logger.Error("failed to initialize renderer", zap.Error(err))
+		utils.LogError(t.logger, err, "failed to initialize renderer")
 		return err
 	}
 	changelog, err = renderer.Render(changelog)
 	if err != nil {
-		t.logger.Error("failed to render release notes", zap.Error(err))
+		utils.LogError(t.logger, err, "failed to render release notes")
 		return err
 	}
 	fmt.Println(changelog)
@@ -217,19 +217,19 @@ func (t *Tools) CreateConfig(ctx context.Context, filePath string, configData st
 	} else {
 		configData, err = config.Merge(config.InternalConfig, config.DefaultConfig)
 		if err != nil {
-			t.logger.Error("Error while creating default config string", zap.Error(err))
+			utils.LogError(t.logger, err, "failed to create default config string")
 			return nil
 		}
 		data = []byte(configData)
 	}
 
 	if err := yaml.Unmarshal(data, &node); err != nil {
-		t.logger.Error("Unmarshalling failed", zap.Error(err))
+		utils.LogError(t.logger, err, "failed to unmarshal the config", zap.String("configData", data))
 		return nil
 	}
 	results, err := yaml.Marshal(node.Content[0])
 	if err != nil {
-		t.logger.Error("Failed to marshal the config", zap.Error(err))
+		utils.LogError(t.logger, err, "failed to marshal the config")
 		return nil
 	}
 
@@ -237,13 +237,13 @@ func (t *Tools) CreateConfig(ctx context.Context, filePath string, configData st
 
 	err = os.WriteFile(filePath, finalOutput, os.ModePerm)
 	if err != nil {
-		t.logger.Error("Failed to write config file", zap.Error(err))
+		utils.LogError(t.logger, err, "failed to write config file")
 		return nil
 	}
 
 	err = os.Chmod(filePath, 0777) // Set permissions to 777
 	if err != nil {
-		t.logger.Error("failed to set the permission of config file", zap.Error(err))
+		utils.LogError(t.logger, err, "failed to set the permission of config file")
 		return nil
 	}
 
