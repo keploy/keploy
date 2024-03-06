@@ -74,19 +74,6 @@ type ProxySet struct {
 	MongoPassword     string // password to mock the mongo connection and pass the authentication requests
 }
 
-type CustomConn struct {
-	net.Conn
-	r      io.Reader
-	logger *zap.Logger
-}
-
-func (c *CustomConn) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		c.logger.Debug("the length is 0 for the reading from customConn")
-	}
-	return c.r.Read(p)
-}
-
 type Conn struct {
 	net.Conn
 	r bufio.Reader
@@ -742,7 +729,7 @@ func extractClientRandom(data []byte) ([32]byte, error) {
 }
 
 func (ps *ProxySet) WrapTLSConnection(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger) (*tlsHandler.TLSPassThroughConnection, *tlsHandler.TLSPassThroughConnection, error) {
-	clientTLSConn, destTLSConn, err := tlsHandler.Handshake(requestBuffer, clientConn, destConn)
+	clientTLSConn, destTLSConn, err := tlsHandler.Handshake(requestBuffer, clientConn, destConn, logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -758,9 +745,13 @@ func (ps *ProxySet) WrapTLSConnection(requestBuffer []byte, clientConn, destConn
 
 		isClientAppTrafficSecretNonZero := bytes.Compare(value.ClientAppTrafficSecret[:], make([]byte, 64)) != 0
 		isServerAppTrafficSecretNonZero := bytes.Compare(value.ServerAppTrafficSecret[:], make([]byte, 64)) != 0
+		isMasterKeyNonZero := bytes.Compare(value.MasterKey[:], make([]byte, 48)) != 0
 
-		if isClientAppTrafficSecretNonZero && isServerAppTrafficSecretNonZero {
+		if value.Version == tlsHandler.VersionTLS13 && isClientAppTrafficSecretNonZero && isServerAppTrafficSecretNonZero {
 			break // Exit loop when both secrets are non-zero
+		}
+		if value.Version != tlsHandler.VersionTLS13 && isMasterKeyNonZero {
+			break // Exit the loop when the master key is non-zero
 		}
 
 		time.Sleep(100 * time.Millisecond) // Wait for a short duration before checking again
@@ -771,6 +762,24 @@ func (ps *ProxySet) WrapTLSConnection(requestBuffer []byte, clientConn, destConn
 		clientTLSConn.Out.SetTrafficSecret(tlsHandler.CipherSuiteTLS13ByID(clientTLSConn.CipherSuite), value.ServerAppTrafficSecret[:])
 		destTLSConn.In.SetTrafficSecret(tlsHandler.CipherSuiteTLS13ByID(clientTLSConn.CipherSuite), value.ServerAppTrafficSecret[:])
 		destTLSConn.Out.SetTrafficSecret(tlsHandler.CipherSuiteTLS13ByID(clientTLSConn.CipherSuite), value.ClientAppTrafficSecret[:])
+	} else {
+		tlsHandler.EstablishKeys(clientTLSConn, destTLSConn, value.MasterKey[:])
+		err := clientTLSConn.In.ChangeCipherSpec()
+		if err != nil {
+			return nil, nil, err
+		}
+		err = clientTLSConn.Out.ChangeCipherSpec()
+		if err != nil {
+			return nil, nil, err
+		}
+		err = destTLSConn.In.ChangeCipherSpec()
+		if err != nil {
+			return nil, nil, err
+		}
+		err = destTLSConn.Out.ChangeCipherSpec()
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	return clientTLSConn, destTLSConn, err
@@ -882,10 +891,10 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 
 		isTLS := isTLSHandshake(testBuffer)
 		multiReader := io.MultiReader(reader, conn)
-		conn = &CustomConn{
+		conn = &util.CustomConn{
 			Conn:   conn,
-			r:      multiReader,
-			logger: ps.logger,
+			R:      multiReader,
+			Logger: ps.logger,
 		}
 		// attempt to read the conn until buffer is either filled or connection is closed
 		var buffer []byte

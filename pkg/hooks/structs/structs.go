@@ -124,8 +124,10 @@ type ProxyInfo struct {
 type MasterSecretEvent struct {
 	Version int32 `json:"version"` // TLS Version
 
+	CipherId uint32 `json:"cipherId"` // cipher ID
+	// TLS 1.2
+	MasterKey [48]byte `json:"masterKey"` // Master Key
 	// TLS 1.3
-	CipherId               uint32   `json:"cipherId"`               // cipher ID
 	HandshakeSecret        [64]byte `json:"handshakeSecret"`        // Handshake Secret
 	HandshakeTrafficHash   [64]byte `json:"handshakeTrafficHash"`   // Handshake Traffic hash
 	ClientAppTrafficSecret [64]byte `json:"clientAppTrafficSecret"` // Client App Traffic Secret

@@ -33,6 +33,19 @@ var sendLogs = true
 // idCounter is used to generate random ID for each request
 var idCounter int64 = -1
 
+type CustomConn struct {
+	net.Conn
+	R      io.Reader
+	Logger *zap.Logger
+}
+
+func (c *CustomConn) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		c.Logger.Debug("the length is 0 for the reading from customConn")
+	}
+	return c.R.Read(p)
+}
+
 func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
