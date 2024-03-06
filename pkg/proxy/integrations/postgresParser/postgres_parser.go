@@ -1,3 +1,4 @@
+// Package postgresparser provides functionality for parsing and processing PostgreSQL requests and responses.
 package postgresparser
 
 import (
@@ -61,10 +62,16 @@ func (p *PostgresParser) OutgoingType(buffer []byte) bool {
 func (p *PostgresParser) ProcessOutgoing(requestBuffer []byte, clientConn, destConn net.Conn, ctx context.Context) {
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		encodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger, ctx)
+		err := encodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, p.logger, ctx)
+		if err != nil {
+			p.logger.Debug("failed to encode the outgoing postgres call", zap.Error(err))
+		}
 	case models.MODE_TEST:
 		logger := p.logger.With(zap.Any("Client IP Address", clientConn.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
-		decodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, logger, ctx)
+		err := decodePostgresOutgoing(requestBuffer, clientConn, destConn, p.hooks, logger, ctx)
+		if err != nil && !p.hooks.IsUserAppTerminateInitiated() {
+			logger.Debug("failed to decode the outgoing postgres call", zap.Error(err))
+		}
 	default:
 		p.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
@@ -134,7 +141,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 		defer utils.HandlePanic()
 
-		ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger, h)
+		err := ReadBuffConn(clientConn, clientBufferChannel, errChannel, logger, h)
+		if err != nil {
+			logger.Error("failed to read the packet message in proxy for pg dependency", zap.Error(err))
+		}
 	}()
 	// read response from destination
 	go func() {
@@ -143,7 +153,10 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 
 		defer utils.HandlePanic()
 
-		ReadBuffConn(destConn, destBufferChannel, errChannel, logger, h)
+		err := ReadBuffConn(destConn, destBufferChannel, errChannel, logger, h)
+		if err != nil {
+			logger.Error("failed to read the packet message in proxy for pg dependency", zap.Error(err))
+		}
 	}()
 
 	isPreviousChunkRequest := false
@@ -161,7 +174,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
-				h.AppendMocks(&models.Mock{
+				err := h.AppendMocks(&models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
@@ -173,11 +186,20 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						Metadata:          metadata,
 					},
 				}, ctx)
+				if err != nil {
+					logger.Error("failed to append the mocks", zap.Error(err))
+				}
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
 
-				clientConn.Close()
-				destConn.Close()
+				err = clientConn.Close()
+				if err != nil {
+					logger.Error("failed to close the client connection", zap.Error(err))
+				}
+				err = destConn.Close()
+				if err != nil {
+					logger.Error("failed to close the destination connection", zap.Error(err))
+				}
 				return nil
 			}
 		case buffer := <-clientBufferChannel:
@@ -193,7 +215,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 			if !isPreviousChunkRequest && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
-				h.AppendMocks(&models.Mock{
+				err := h.AppendMocks(&models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
@@ -205,6 +227,9 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						Metadata:          metadata,
 					},
 				}, ctx)
+				if err != nil {
+					logger.Error("failed to append the mocks", zap.Error(err))
+				}
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
 			}
@@ -253,7 +278,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						i += (5 + pg.BackendWrapper.BodyLen)
 					}
 
-					pg_mock := &models.Backend{
+					pgMock := &models.Backend{
 						PacketTypes: pg.BackendWrapper.PacketTypes,
 						Identfier:   "ClientRequest",
 						Length:      uint32(len(requestBuffer)),
@@ -284,25 +309,25 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						MsgType:             pg.BackendWrapper.MsgType,
 						AuthType:            pg.BackendWrapper.AuthType,
 					}
-					after_encoded, err := PostgresDecoderBackend(*pg_mock)
+					afterEncoded, err := PostgresDecoderBackend(*pgMock)
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
 
-					if len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "p" {
-						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
-						pg_mock.Payload = bufStr
+					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "p" {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("afterEncoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
+						pgMock.Payload = bufStr
 					}
-					pgRequests = append(pgRequests, *pg_mock)
+					pgRequests = append(pgRequests, *pgMock)
 
 				}
 
 				if isStartupPacket(buffer) {
-					pg_mock := &models.Backend{
+					pgMock := &models.Backend{
 						Identfier: "StartupRequest",
 						Payload:   bufStr,
 					}
-					pgRequests = append(pgRequests, *pg_mock)
+					pgRequests = append(pgRequests, *pgMock)
 				}
 			}
 			isPreviousChunkRequest = true
@@ -348,7 +373,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 							pg.FrontendWrapper.CommandComplete = *msg.(*pgproto3.CommandComplete)
 							pg.FrontendWrapper.CommandCompletes = append(pg.FrontendWrapper.CommandCompletes, pg.FrontendWrapper.CommandComplete)
 						}
-						if pg.FrontendWrapper.DataRow.RowValues != nil {
+						if pg.FrontendWrapper.MsgType == 'D' && pg.FrontendWrapper.DataRow.RowValues != nil {
 							// Create a new slice for each DataRow
 							valuesCopy := make([]string, len(pg.FrontendWrapper.DataRow.RowValues))
 							copy(valuesCopy, pg.FrontendWrapper.DataRow.RowValues)
@@ -356,7 +381,6 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 							row := pgproto3.DataRow{
 								RowValues: valuesCopy, // Use the copy of the values
 							}
-							// fmt.Println("row is ", row)
 							dataRows = append(dataRows, row)
 						}
 					}
@@ -369,7 +393,7 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 					}
 
 					// from here take the msg and append its readabable form to the pgResponses
-					pg_mock := &models.Frontend{
+					pgMock := &models.Frontend{
 						PacketTypes: pg.FrontendWrapper.PacketTypes,
 						Identfier:   "ServerResponse",
 						Length:      uint32(len(requestBuffer)),
@@ -409,23 +433,24 @@ func encodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						AuthType:                        pg.FrontendWrapper.AuthType,
 					}
 
-					after_encoded, err := PostgresDecoderFrontend(*pg_mock)
+					afterEncoded, err := PostgresDecoderFrontend(*pgMock)
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
-					if (len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R") || len(pg_mock.DataRows) > 0 {
-						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
-						pg_mock.Payload = bufStr
+
+					if (len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "R") || len(pgMock.DataRows) > 0 {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("afterEncoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
+						pgMock.Payload = bufStr
 					}
-					pgResponses = append(pgResponses, *pg_mock)
+					pgResponses = append(pgResponses, *pgMock)
 				}
 
 				if bufStr == "Tg==" || len(buffer) <= 5 {
 
-					pg_mock := &models.Frontend{
+					pgMock := &models.Frontend{
 						Payload: bufStr,
 					}
-					pgResponses = append(pgResponses, *pg_mock)
+					pgResponses = append(pgResponses, *pgMock)
 				}
 			}
 
@@ -481,7 +506,7 @@ func decodePostgresOutgoing(requestBuffer []byte, clientConn, destConn net.Conn,
 						logger.Debug("EOF error received from client. Closing connection in postgres !!")
 						return err
 					}
-					logger.Error("failed to read the request message in proxy for postgres dependency", zap.Error(err))
+					logger.Debug("failed to read the request message in proxy for postgres dependency", zap.Error(err))
 					return err
 				}
 			}

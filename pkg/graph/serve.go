@@ -68,6 +68,12 @@ func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPa
 		return
 	}
 
+	err = proxy.SetupCA(g.logger, pid, lang)
+	if err != nil {
+		g.logger.Error("error while setting up CA", zap.Error(err))
+		return
+	}
+
 	// Recover from panic and gracefully shutdown
 	defer loadedHooks.Recover(routineId)
 
