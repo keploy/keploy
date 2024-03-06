@@ -32,6 +32,7 @@ test:
   mongoPassword: "default@123"
   language: ""
 record:
+  recordTimer: 0
   filters: []
 configPath: ""
 bypassRules: []

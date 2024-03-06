@@ -23,7 +23,8 @@ type Config struct {
 }
 
 type Record struct {
-	Filters []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
+	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 }
 
 type BypassRule struct {

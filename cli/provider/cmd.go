@@ -195,6 +195,8 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			cmd.Flags().StringP("language", "l", cfg.Test.Language, "application programming language")
 			cmd.Flags().Bool("ignoreOrdering", cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
+		} else {
+			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", cfg.Debug, "Run in debug mode")
