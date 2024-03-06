@@ -31,8 +31,8 @@ func ConvertIPToUint32(ipStr string) (uint32, error) {
 	}
 }
 
-// getContainerFromComposeFile parses docker-compose file to get all container names
-func getContainerFromComposeFile(filePath string) ([]string, error) {
+// getContainersFromComposeFile parses docker-compose file to get all container names
+func getContainersFromComposeFile(filePath string) ([]string, error) {
 
 	yamlFile, err := os.ReadFile(filePath)
 	if err != nil {
