@@ -43,7 +43,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			}
 			buffer, err := ReadBytes(ctx, conn)
 			if err != nil {
-				logger.Error("failed to read the packet message in proxy", zap.Error(err))
+				utils.LogError(logger, err, "failed to read the packet message in proxy")
 				errChannel <- err
 				return
 			}
@@ -57,7 +57,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	initialBuf, err := ReadBytes(ctx, conn)
 	if err != nil && err != io.EOF {
-		logger.Error("failed to read the request message in proxy", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the request message in proxy")
 		return nil, readErr
 	}
 
@@ -68,7 +68,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
 	if err != nil {
-		logger.Error("failed to read the request message in proxy", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the request message in proxy")
 		return nil, readErr
 	}
 	return initialBuf, nil
@@ -166,7 +166,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
 		if err != nil {
-			logger.Error("failed to close the destination connection", zap.Error(err))
+			utils.LogError(logger, err, "failed to close the destination connection")
 		}
 	}(destConn)
 
@@ -174,7 +174,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	for _, v := range requestBuffer {
 		_, err := destConn.Write(v)
 		if err != nil {
-			logger.Error("failed to write request message to the destination server", zap.Error(err), zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+			utils.LogError(logger, err, "failed to write request message to the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 			return nil, err
 		}
 	}
@@ -193,7 +193,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 		// Write the response message to the client
 		_, err := clientConn.Write(buffer)
 		if err != nil {
-			logger.Error("failed to write response to the client", zap.Error(err))
+			utils.LogError(logger, err, "failed to write response to the client")
 			return nil, err
 		}
 

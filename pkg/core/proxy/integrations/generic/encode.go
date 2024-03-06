@@ -18,7 +18,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
 		if err != nil {
-			logger.Error("failed to close the destination connection", zap.Error(err))
+			utils.LogError(logger, err, "failed to close the destination connection")
 		}
 	}(destConn)
 
@@ -44,7 +44,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	}
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
-		logger.Error("failed to write request message to the destination server", zap.Error(err))
+		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
 	var genericResponses []models.GenericPayload
@@ -100,7 +100,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// Write the request message to the destination
 			_, err := destConn.Write(buffer)
 			if err != nil {
-				logger.Error("failed to write request message to the destination server", zap.Error(err))
+				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
 
@@ -160,7 +160,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
-				logger.Error("failed to write response to the client", zap.Error(err))
+				utils.LogError(logger, err, "failed to write response message to the client")
 				return err
 			}
 

@@ -3,10 +3,12 @@ package mongo
 import (
 	"context"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.mongodb.org/mongo-driver/bson"
 	"reflect"
 	"strings"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/utils"
+	"go.mongodb.org/mongo-driver/bson"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -51,7 +53,7 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 								bestMatchIndex = tcsIndx
 							}
 						default:
-							logger.Error("the OpCode of the mongo wiremessage is invalid.")
+							utils.LogError(logger, nil, "the OpCode of the mongo wiremessage is invalid.")
 						}
 					}
 				}
@@ -86,7 +88,7 @@ func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection stri
 		expectedIdentifier, expectedMsgsStr, err := decodeOpMsgSectionSequence(expectedSection)
 		if err != nil {
 			logger.Debug(fmt.Sprintf("the section in mongo OpMsg wiremessage: %v", expectedSection))
-			logger.Error("failed to fetch the identifier/msgs from the section sequence of recorded OpMsg", zap.Error(err), zap.Any("identifier", expectedIdentifier))
+			utils.LogError(logger, err, "failed to fetch the identifier/msgs from the section single of recorded OpMsg", zap.Any("identifier", expectedIdentifier))
 			return 0
 		}
 
@@ -95,7 +97,7 @@ func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection stri
 		// _, err = fmt.Sscanf(actualSection, "{ SectionSingle identifier: %s , msgs: [ %s ] }", &actualIdentifier, &actualMsgsStr)
 		actualIdentifier, actualMsgsStr, err = decodeOpMsgSectionSequence(actualSection)
 		if err != nil {
-			logger.Error("failed to fetch the identifier/msgs from the section sequence of incoming OpMsg", zap.Error(err), zap.Any("identifier", actualIdentifier))
+			utils.LogError(logger, err, "failed to fetch the identifier/msgs from the section single of incoming OpMsg", zap.Any("identifier", actualIdentifier))
 			return 0
 		}
 
@@ -116,12 +118,12 @@ func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection stri
 			actual := map[string]interface{}{}
 			err := bson.UnmarshalExtJSON([]byte(expectedMsgs[i]), true, &expected)
 			if err != nil {
-				logger.Error("failed to unmarshal the section of recorded request to bson document", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal the section of recorded request to bson document")
 				return 0
 			}
 			err = bson.UnmarshalExtJSON([]byte(actualMsgs[i]), true, &actual)
 			if err != nil {
-				logger.Error("failed to unmarshal the section of incoming request to bson document", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal the section of incoming request to bson document")
 				return 0
 			}
 			score += calculateMatchingScore(expected, actual)
@@ -132,7 +134,7 @@ func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection stri
 		var expectedMsgsStr string
 		expectedMsgsStr, err := extractSectionSingle(expectedSection)
 		if err != nil {
-			logger.Error("failed to fetch the msgs from the single section of recorded OpMsg", zap.Error(err))
+			utils.LogError(logger, err, "failed to fetch the msgs from the single section of recorded OpMsg")
 			return 0
 		}
 		// // Define the regular expression pattern
@@ -142,7 +144,7 @@ func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection stri
 		var actualMsgsStr string
 		actualMsgsStr, err = extractSectionSingle(actualSection)
 		if err != nil {
-			logger.Error("failed to fetch the msgs from the single section of incoming OpMsg", zap.Error(err))
+			utils.LogError(logger, err, "failed to fetch the msgs from the single section of incoming OpMsg")
 			return 0
 		}
 		// // Compile the regular expression
@@ -153,19 +155,19 @@ func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection stri
 
 		err = bson.UnmarshalExtJSON([]byte(expectedMsgsStr), true, &expected)
 		if err != nil {
-			logger.Error("failed to unmarshal the section of recorded request to bson document", zap.Error(err))
+			utils.LogError(logger, err, "failed to unmarshal the section of recorded request to bson document")
 			return 0
 		}
 		err = bson.UnmarshalExtJSON([]byte(actualMsgsStr), true, &actual)
 		if err != nil {
-			logger.Error("failed to unmarshal the section of incoming request to bson document", zap.Error(err))
+			utils.LogError(logger, err, "failed to unmarshal the section of incoming request to bson document")
 			return 0
 		}
 		logger.Debug("the expected and actual msg in the single section.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", calculateMatchingScore(expected, actual)))
 		return calculateMatchingScore(expected, actual)
 
 	default:
-		logger.Error("failed to detect the OpMsg section into mongo request wiremessage due to invalid format")
+		utils.LogError(logger, nil, "failed to detect the OpMsg section into mongo request wiremessage due to invalid format")
 		return 0
 	}
 }

@@ -4,16 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
-	"go.uber.org/zap"
 	"io"
 	"net"
 	"strconv"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
+	"go.uber.org/zap"
 )
 
 func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -28,7 +30,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		default:
 			configMocks, err := mockDb.GetUnFilteredMocks()
 			if err != nil {
-				logger.Error("error while getting config mock", zap.Error(err))
+				utils.LogError(logger, err, "error while getting config mock")
 			}
 			logger.Debug(fmt.Sprintf("the config mocks are: %v", configMocks))
 
@@ -43,7 +45,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						logger.Debug("recieved request buffer is empty in test mode for mongo calls")
 						return err
 					}
-					logger.Error("failed to read request from the mongo client", zap.Error(err))
+					utils.LogError(logger, err, "failed to read request from the mongo client")
 					return err
 				}
 				requestBuffers = append(requestBuffers, reqBuf)
@@ -56,7 +58,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			logger.Debug(fmt.Sprintf("the loop starts with the time delay: %v", time.Since(startedDecoding)))
 			opReq, requestHeader, mongoRequest, err := Decode(reqBuf, logger)
 			if err != nil {
-				logger.Error("failed to decode the mongo wire message from the client", zap.Error(err))
+				utils.LogError(logger, err, "failed to decode the mongo wire message from the client")
 				return err
 			}
 			mongoRequests = append(mongoRequests, models.MongoRequest{
@@ -74,7 +76,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 							logger.Debug("recieved request buffer is empty for streaming mongo request call")
 							return err
 						}
-						logger.Error("failed to read reply from the mongo server", zap.Error(err), zap.String("mongo server address", dstCfg.Addr))
+						utils.LogError(logger, err, "failed to read request from the mongo client", zap.String("mongo server address", dstCfg.Addr))
 						return err
 					}
 					requestBuffers = append(requestBuffers, reqBuf)
@@ -86,7 +88,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					}
 					_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 					if err != nil {
-						logger.Error("failed to decode the mongo wire message from the mongo client", zap.Error(err))
+						utils.LogError(logger, err, "failed to decode the mongo wire message from the mongo client")
 						return err
 					}
 					if mongoReqVal, ok := mongoReq.(models.MongoOpMessage); ok && !hasSecondSetBit(mongoReqVal.FlagBits) {
@@ -127,12 +129,12 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 								actual := map[string]interface{}{}
 								err = bson.UnmarshalExtJSON([]byte(expectedQuery.Query), true, &expected)
 								if err != nil {
-									logger.Error("failed to unmarshal the section of recorded request to bson document", zap.Error(err))
+									utils.LogError(logger, err, "failed to unmarshal the section of recorded request to bson document")
 									continue
 								}
 								err = bson.UnmarshalExtJSON([]byte(actualQuery.Query), true, &actual)
 								if err != nil {
-									logger.Error("failed to unmarshal the section of incoming request to bson document", zap.Error(err))
+									utils.LogError(logger, err, "failed to unmarshal the section of incoming request to bson document")
 									continue
 								}
 								score := calculateMatchingScore(expected, actual)
@@ -163,7 +165,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 									bestMatchIndex = configIndex
 								}
 							default:
-								logger.Error("the OpCode of the mongo wiremessage is invalid.")
+								utils.LogError(logger, err, "the OpCode of the mongo wiremessage is invalid.")
 							}
 						}
 					}
@@ -179,7 +181,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						replySpec := mongoResponse.Message.(*models.MongoOpReply)
 						replyMessage, err := encodeOpReply(replySpec, logger)
 						if err != nil {
-							logger.Error("failed to encode the recorded OpReply yaml", zap.Error(err), zap.Any("for request with id", responseTo))
+							utils.LogError(logger, err, "failed to encode the recorded OpReply yaml", zap.Any("for request with id", responseTo))
 							return err
 						}
 						requestId := wiremessage.NextRequestID()
@@ -188,7 +190,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						logger.Debug(fmt.Sprintf("the bufffer response is: %v", string(heathCheckReplyBuffer)))
 						_, err = clientConn.Write(heathCheckReplyBuffer)
 						if err != nil {
-							logger.Error("failed to write the health check reply to mongo client", zap.Error(err))
+							utils.LogError(logger, err, "failed to write the health check reply to mongo client")
 							return err
 						}
 					case wiremessage.OpMsg:
@@ -200,7 +202,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						}
 						message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, logger)
 						if err != nil {
-							logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", responseTo))
+							utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 							return err
 						}
 						if hasSecondSetBit(respMessage.FlagBits) {
@@ -212,7 +214,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 								_, err := clientConn.Write(message.Encode(responseTo, requestId))
 								logger.Debug("the response lifecycle ended.")
 								if err != nil {
-									logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
+									utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
 									return err
 								}
 								// the 'responseTo' field of response wiremessage is set to requestId of currently sent wiremessage
@@ -221,7 +223,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						} else {
 							_, err := clientConn.Write(message.Encode(responseTo, wiremessage.NextRequestID()))
 							if err != nil {
-								logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err))
+								utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
 								return err
 							}
 						}
@@ -230,20 +232,20 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			} else {
 				matched, matchedMock, err := match(ctx, logger, mongoRequests, mockDb)
 				if err != nil {
-					logger.Error("failed to match the mongo request with recorded tcsMocks", zap.Error(err))
+					utils.LogError(logger, err, "error while matching mongo mocks")
 				}
 				if !matched {
 					// making destConn
 					destConn, err := net.Dial("tcp", dstCfg.Addr)
 					if err != nil {
-						logger.Error("failed to dial the destination server", zap.Error(err))
+						utils.LogError(logger, err, "failed to dial the destination server")
 						return err
 					}
 
 					logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
 					reqBuf, err = util.PassThrough(ctx, logger, clientConn, destConn, requestBuffers)
 					if err != nil {
-						logger.Error("failed to passthrough the mongo request to the actual database server", zap.Error(err))
+						utils.LogError(logger, err, "failed to passthrough the mongo request to the actual database server")
 						return err
 					}
 					continue
@@ -260,13 +262,13 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					}
 					message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, logger)
 					if err != nil {
-						logger.Error("failed to encode the recorded OpMsg response", zap.Error(err), zap.Any("for request with id", responseTo))
+						utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 						return err
 					}
 					requestId := wiremessage.NextRequestID()
 					_, err = clientConn.Write(message.Encode(responseTo, requestId))
 					if err != nil {
-						logger.Error("failed to write the health check opmsg to mongo client", zap.Error(err), zap.Any("for request with id", responseTo))
+						utils.LogError(logger, err, "failed to write the health check opmsg to mongo client", zap.Any("for request with id", responseTo))
 						return err
 					}
 					responseTo = requestId

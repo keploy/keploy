@@ -6,15 +6,17 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.uber.org/zap"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
+
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 type matchParams struct {
@@ -35,13 +37,13 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				//Send the 100 continue response
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
-					logger.Error("failed to write the 100 continue response to the user application", zap.Error(err))
+					utils.LogError(logger, err, "failed to write the 100 continue response to the user application")
 					return err
 				}
 				//Read the request buffer again
 				newRequest, err := util.ReadBytes(ctx, clientConn)
 				if err != nil {
-					logger.Error("failed to read the request buffer from the user application", zap.Error(err))
+					utils.LogError(logger, err, "failed to read the request buffer from the user application")
 					return err
 				}
 				//Append the new request buffer to the old request buffer
@@ -50,7 +52,7 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 			err := handleChunkedRequests(ctx, logger, &reqBuf, clientConn, nil)
 			if err != nil {
-				logger.Error("failed to handle chunk request", zap.Error(err))
+				utils.LogError(logger, err, "failed to handle chunked requests")
 				return err
 			}
 
@@ -59,13 +61,13 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
 			if err != nil {
-				logger.Error("failed to parse the http request message", zap.Error(err))
+				utils.LogError(logger, err, "failed to parse the http request message")
 				return err
 			}
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
-				logger.Error("failed to read from request body", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
+				utils.LogError(logger, err, "failed to read from request body", zap.Any("metadata", getReqMeta(request)))
 				return err
 			}
 
@@ -78,22 +80,22 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			}
 			match, stub, err := match(ctx, logger, param, mockDb)
 			if err != nil {
-				logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
+				utils.LogError(logger, err, "error while matching http mocks", zap.Any("metadata", getReqMeta(request)))
 			}
 
 			if !match {
 				if !isPassThrough(logger, request, dstCfg.Port, opts) {
-					logger.Error("Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
+					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
 				// making destConn
 				destConn, err := net.Dial("tcp", dstCfg.Addr)
 				if err != nil {
-					logger.Error("failed to dial the destination server", zap.Error(err))
+					utils.LogError(logger, err, "failed to dial the destination server")
 					return err
 				}
 				_, err = util.PassThrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf})
 				if err != nil {
-					logger.Error("failed to passThrough http request", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
+					utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
 					return err
 				}
 			}
@@ -113,12 +115,12 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				gw := gzip.NewWriter(&compressedBuffer)
 				_, err := gw.Write([]byte(body))
 				if err != nil {
-					logger.Error("failed to compress the response body", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
+					utils.LogError(logger, err, "failed to compress the response body", zap.Any("metadata", getReqMeta(request)))
 					return err
 				}
 				err = gw.Close()
 				if err != nil {
-					logger.Error("failed to close the gzip writer", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
+					utils.LogError(logger, err, "failed to close the gzip writer", zap.Any("metadata", getReqMeta(request)))
 					return err
 				}
 				logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
@@ -145,7 +147,7 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 			_, err = clientConn.Write([]byte(responseString))
 			if err != nil {
-				logger.Error("failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(request)), zap.Error(err))
+				utils.LogError(logger, err, "failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(request)))
 				return err
 			}
 

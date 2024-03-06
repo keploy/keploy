@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"net"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -46,13 +48,13 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial mongo message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial mongo message")
 		return errors.New("failed to record the outgoing mongo call")
 	}
 
 	err = encodeMongo(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
-		logger.Error("failed to encode the mongo message into the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to encode the mongo message into the yaml")
 		return errors.New("failed to record the outgoing mongo call")
 	}
 	return nil
@@ -63,13 +65,13 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
-		logger.Error("failed to read the initial mongo message", zap.Error(err))
+		utils.LogError(logger, err, "failed to read the initial mongo message")
 		return errors.New("failed to mock the outgoing mongo call")
 	}
 
 	err = decodeMongo(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		logger.Error("failed to decode the mongo message from the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to decode the mongo message from the yaml")
 		return errors.New("failed to mock the outgoing mongo call")
 	}
 	return nil

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/utils"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -51,8 +53,7 @@ func (srv *transcoder) ProcessPingFrame(pingFrame *http2.PingFrame) error {
 		// identifier field value other than 0x0, the recipient MUST
 		// respond with a conn error (Section 5.4.1) of type
 		// PROTOCOL_ERROR."
-		srv.logger.Error("As per HTTP/2 spec, stream ID for PING frame should be zero.",
-			zap.Any("stream_id", pingFrame.StreamID))
+		utils.LogError(srv.logger, nil, "As per HTTP/2 spec, stream ID for PING frame should be zero.", zap.Any("stream_id", pingFrame.StreamID))
 		return http2.ConnectionError(http2.ErrCodeProtocol)
 	}
 
@@ -65,8 +66,7 @@ func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	id := dataFrame.Header().StreamID
 	// DATA frame must be associated with a stream
 	if id == 0 {
-		srv.logger.Error("As per HTTP/2 spec, DATA frame must be associated with a stream.",
-			zap.Any("stream_id", id))
+		utils.LogError(srv.logger, nil, "As per HTTP/2 spec, DATA frame must be associated with a stream.", zap.Any("stream_id", id))
 		return http2.ConnectionError(http2.ErrCodeProtocol)
 	}
 	srv.sic.AddPayloadForRequest(id, dataFrame.Data())
@@ -99,8 +99,7 @@ func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 			Value: value,
 		})
 		if err != nil {
-			srv.logger.Error("could not encode pseudo header", zap.Error(err),
-				zap.Any("key", key), zap.Any("value", value))
+			utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
 			return err
 		}
 	}
@@ -110,8 +109,7 @@ func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 			Value: value,
 		})
 		if err != nil {
-			srv.logger.Error("could not encode ordinary header", zap.Error(err),
-				zap.Any("key", key), zap.Any("value", value))
+			utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
 			return err
 		}
 	}
@@ -125,20 +123,20 @@ func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		EndHeaders:    true,
 	})
 	if err != nil {
-		srv.logger.Error("could not write the first set of headers onto client", zap.Error(err))
+		utils.LogError(srv.logger, err, "could not write the first set of headers onto client")
 		return err
 	}
 
 	payload, err := createPayloadFromLengthPrefixedMessage(grpcMockResp.Body)
 	if err != nil {
-		srv.logger.Error("could not create grpc payload from mocks", zap.Error(err))
+		utils.LogError(srv.logger, err, "could not create grpc payload from mocks")
 		return err
 	}
 
 	// Write the DATA frame with the payload.
 	err = srv.framer.WriteData(id, false, payload)
 	if err != nil {
-		srv.logger.Error("could not write the data frame onto the client", zap.Error(err))
+		utils.LogError(srv.logger, err, "could not write the data frame onto the client")
 		return err
 	}
 
@@ -154,8 +152,7 @@ func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 			Value: value,
 		})
 		if err != nil {
-			srv.logger.Error("could not encode pseudo header", zap.Error(err),
-				zap.Any("key", key), zap.Any("value", value))
+			utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
 			return err
 		}
 	}
@@ -165,8 +162,7 @@ func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 			Value: value,
 		})
 		if err != nil {
-			srv.logger.Error("could not encode ordinary header", zap.Error(err),
-				zap.Any("key", key), zap.Any("value", value))
+			utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
 			return err
 		}
 	}
@@ -180,7 +176,7 @@ func (srv *transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		EndHeaders:    true,
 	})
 	if err != nil {
-		srv.logger.Error("could not write trailer on to the client", zap.Error(err))
+		utils.LogError(srv.logger, err, "could not write the trailers onto client")
 		return err
 	}
 
@@ -226,14 +222,13 @@ func (srv *transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) err
 	id := headersFrame.StreamID
 	// Streams initiated by a client MUST use odd-numbered stream identifiers
 	if id%2 != 1 {
-		srv.logger.Error("As per HTTP/2 spec, stream_id must be odd for a client if conn init by client.",
-			zap.Any("stream_id", id))
+		utils.LogError(srv.logger, nil, "As per HTTP/2 spec, stream_id must be odd for a client if conn init by client.", zap.Any("stream_id", id))
 		return http2.ConnectionError(http2.ErrCodeProtocol)
 	}
 
 	pseudoHeaders, ordinaryHeaders, err := extractHeaders(headersFrame, srv.decoder)
 	if err != nil {
-		srv.logger.Error("could not extract headers from frame", zap.Error(err))
+		utils.LogError(srv.logger, err, "could not extract headers from frame")
 	}
 
 	srv.sic.AddHeadersForRequest(id, pseudoHeaders, true)
@@ -244,7 +239,7 @@ func (srv *transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) err
 func (srv *transcoder) ProcessPushPromise(pushPromiseFrame *http2.PushPromiseFrame) error {
 	// A client cannot push. Thus, servers MUST treat the receipt of a PUSH_PROMISE
 	// frame as a conn error (Section 5.4.1) of type PROTOCOL_ERROR.
-	srv.logger.Error("As per HTTP/2 spec, client cannot send PUSH_PROMISE.")
+	utils.LogError(srv.logger, nil, "As per HTTP/2 spec, client cannot send PUSH_PROMISE.")
 	return http2.ConnectionError(http2.ErrCodeProtocol)
 }
 
@@ -252,7 +247,7 @@ func (srv *transcoder) ProcessContinuationFrame(ContinuationFrame *http2.Continu
 	// Continuation frame support is overkill currently because the headers won't exceed the frame size
 	// used by our mock server.
 	// However, if we really need this feature, we can implement it later.
-	srv.logger.Error("Continuation Frame received. This is unsupported currently")
+	utils.LogError(srv.logger, nil, "Continuation Frame received. This is unsupported currently")
 	return fmt.Errorf("continuation frame is unsupported in the current implementation")
 }
 
@@ -291,7 +286,7 @@ func (srv *transcoder) ProcessGenericFrame(ctx context.Context, frame http2.Fram
 func (srv *transcoder) ListenAndServe(ctx context.Context) error {
 	err := srv.WriteInitialSettingsFrame()
 	if err != nil {
-		srv.logger.Error("error writing initial settings frame", zap.Error(err))
+		utils.LogError(srv.logger, err, "could not write initial settings frame")
 		return err
 	}
 
@@ -302,7 +297,7 @@ func (srv *transcoder) ListenAndServe(ctx context.Context) error {
 		default:
 			frame, err := srv.framer.ReadFrame()
 			if err != nil {
-				srv.logger.Error("Failed to read frame", zap.Error(err))
+				utils.LogError(srv.logger, err, "Failed to read frame")
 				return err
 			}
 			err = srv.ProcessGenericFrame(ctx, frame)

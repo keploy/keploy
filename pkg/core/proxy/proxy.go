@@ -80,7 +80,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
 	if err != nil {
-		p.logger.Error("failed to initialize the integrations", zap.Error(err))
+		utils.LogError(p.logger, err, "failed to initialize the integrations")
 		return err
 	}
 
@@ -91,7 +91,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 			println("context error in setup up CA")
 			return err
 		}
-		p.logger.Error("failed to setup CA", zap.Error(err))
+		utils.LogError(p.logger, err, "failed to setup CA")
 		return err
 	}
 
@@ -142,7 +142,7 @@ func (p *Proxy) start(ctx context.Context) {
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
 	if err != nil {
-		p.logger.Error(fmt.Sprintf("failed to start proxy on port:%v", p.Port), zap.Error(err))
+		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
 		return
 	}
 	p.Listener = listener
@@ -154,7 +154,7 @@ func (p *Proxy) start(ctx context.Context) {
 			if strings.Contains(err.Error(), "use of closed network connection") {
 				break
 			}
-			p.logger.Error("failed to accept connection to the proxy", zap.Error(err))
+			utils.LogError(p.logger, err, "failed to accept connection to the proxy")
 			break
 		}
 
@@ -178,7 +178,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	defer func(start time.Time, srcConn net.Conn) {
 		err := srcConn.Close()
 		if err != nil {
-			p.logger.Error("failed to close the source connection", zap.Error(err))
+			utils.LogError(p.logger, err, "failed to close the source connection")
 			return
 		}
 		duration := time.Since(start)
@@ -196,21 +196,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-		p.logger.Error("failed to fetch the destination info", zap.Any("Source port", sourcePort), zap.Any("err:", err))
+		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Any("Source port", sourcePort))
 		return
 	}
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
 	if err != nil {
-		p.logger.Error("failed to delete the destination info", zap.Any("Source port", sourcePort), zap.Any("err:", err))
+		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Any("Source port", sourcePort))
 		return
 	}
 
 	//get the session rule
 	rule, ok := p.sessions.Get(destInfo.AppID)
 	if !ok {
-		p.logger.Error("failed to fetch the session rule", zap.Any("AppID", destInfo.AppID))
+		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Any("AppID", destInfo.AppID))
 		return
 	}
 
@@ -233,14 +233,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
 				depsErrChan <- err
-				p.logger.Error("failed to dial the conn to destination server", zap.Error(err), zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 				return
 			}
 			// Record the outgoing message into a mock
 			err := p.Integrations["mysql"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				depsErrChan <- err
-				p.logger.Error("failed to record the outgoing message", zap.Error(err))
+				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return
 			}
 			return
@@ -249,7 +249,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		m, ok := p.MockManagers.Load(destInfo.AppID)
 		if !ok {
 			depsErrChan <- err
-			p.logger.Error("failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
 			return
 		}
 
@@ -257,7 +257,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		err := p.Integrations["mysql"].MockOutgoing(ctx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
 			depsErrChan <- err
-			p.logger.Error("failed to mock the outgoing message", zap.Error(err))
+			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			return
 		}
 		return
@@ -273,7 +273,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			return
 		}
 		depsErrChan <- err
-		p.logger.Error("failed to peek the request message in proxy", zap.Any("proxy port", p.Port), zap.Error(err))
+		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Any("proxy port", p.Port))
 		return
 	}
 
@@ -288,7 +288,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	if isTLS {
 		srcConn, err = p.handleTLSConnection(srcConn)
 		if err != nil {
-			p.logger.Error("failed to handle TLS conn", zap.Error(err))
+			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			depsErrChan <- err
 			return
 		}
@@ -298,7 +298,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	initialBuf, err := util.ReadInitialBuf(ctx, p.logger, srcConn)
 	if err != nil {
 		depsErrChan <- err
-		p.logger.Error("failed to read the initial buffer", zap.Error(err))
+		utils.LogError(p.logger, err, "failed to read the initial buffer")
 		return
 	}
 
@@ -333,7 +333,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		dstConn, err = tls.Dial("tcp", addr, cfg)
 		if err != nil {
 			depsErrChan <- err
-			logger.Error("failed to dial the conn to destination server", zap.Error(err), zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 			return
 		}
 
@@ -344,7 +344,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
 			depsErrChan <- err
-			logger.Error("failed to dial the conn to destination server", zap.Error(err), zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 			return
 		}
 		dstCfg.Addr = dstAddr
@@ -354,7 +354,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	m, ok := p.MockManagers.Load(destInfo.AppID)
 	if !ok {
 		depsErrChan <- errors.New(fmt.Sprintf("failed to fetch the mock manager for the app:%v", destInfo.AppID))
-		p.logger.Error("failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+		utils.LogError(logger, nil, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
 		return
 	}
 
@@ -366,14 +366,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 				err := parser.RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 				if err != nil {
 					depsErrChan <- err
-					logger.Error("failed to record the outgoing message", zap.Error(err))
+					utils.LogError(logger, err, "failed to record the outgoing message")
 					return
 				}
 			} else {
 				err := parser.MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 				if err != nil {
 					depsErrChan <- err
-					logger.Error("failed to mock the outgoing message", zap.Error(err))
+					utils.LogError(logger, err, "failed to mock the outgoing message")
 					return
 				}
 			}
@@ -387,14 +387,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			err := p.Integrations["generic"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				depsErrChan <- err
-				logger.Error("failed to record the outgoing message", zap.Error(err))
+				utils.LogError(logger, err, "failed to record the outgoing message")
 				return
 			}
 		} else {
 			err := p.Integrations["generic"].MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
 				depsErrChan <- err
-				logger.Error("failed to mock the outgoing message", zap.Error(err))
+				utils.LogError(logger, err, "failed to mock the outgoing message")
 				return
 			}
 		}
@@ -419,7 +419,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	if p.Listener != nil {
 		err := p.Listener.Close()
 		if err != nil {
-			p.logger.Error("failed to stop proxy server", zap.Error(err))
+			utils.LogError(p.logger, err, "failed to stop proxy server")
 		}
 	}
 

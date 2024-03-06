@@ -2,9 +2,10 @@ package proxy
 
 import (
 	"crypto/tls"
-	"github.com/cloudflare/cfssl/helpers"
-	"go.uber.org/zap"
 	"net"
+
+	"github.com/cloudflare/cfssl/helpers"
+	"go.keploy.io/server/v2/utils"
 )
 
 func isTLSHandshake(data []byte) bool {
@@ -20,12 +21,12 @@ func (p *Proxy) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	var err error
 	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
-		p.logger.Error("Failed to parse CA private key: ", zap.Error(err))
+		utils.LogError(p.logger, err, "Failed to parse CA private key")
 		return nil, err
 	}
 	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
-		p.logger.Error("Failed to parse CA certificate: ", zap.Error(err))
+		utils.LogError(p.logger, err, "Failed to parse CA certificate")
 		return nil, err
 	}
 
@@ -40,7 +41,7 @@ func (p *Proxy) handleTLSConnection(conn net.Conn) (net.Conn, error) {
 	err = tlsConn.Handshake()
 
 	if err != nil {
-		p.logger.Error("failed to complete TLS handshake with the client with error: ", zap.Error(err))
+		utils.LogError(p.logger, err, "failed to complete TLS handshake with the client")
 		return nil, err
 	}
 	// Use the tlsConn for further communication

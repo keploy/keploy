@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
@@ -479,7 +480,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 		case strings.HasPrefix(messageValue, "{ SectionSingle identifier:"):
 			identifier, msgsStr, err := decodeOpMsgSectionSequence(responseOpMsg.Sections[messageIndex])
 			if err != nil {
-				logger.Error("failed to extract the msg section from recorded message", zap.Error(err))
+				utils.LogError(logger, err, "failed to extract the msg section from recorded message")
 				return nil, err
 			}
 			msgs := strings.Split(msgsStr, ", ")
@@ -488,7 +489,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 				var unmarshaledDoc bsoncore.Document
 				err = bson.UnmarshalExtJSON([]byte(msg), true, &unmarshaledDoc)
 				if err != nil {
-					logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
+					utils.LogError(logger, err, "failed to unmarshal the recorded document string of OpMsg")
 					return nil, err
 				}
 				docs = append(docs, unmarshaledDoc)
@@ -500,7 +501,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 		case strings.HasPrefix(messageValue, "{ SectionSingle msg:"):
 			sectionStr, err := extractSectionSingle(responseOpMsg.Sections[messageIndex])
 			if err != nil {
-				logger.Error("failed to extract the msg section from recorded message single section", zap.Error(err))
+				utils.LogError(logger, err, "failed to extract the msg section from recorded message single section")
 				return nil, err
 			}
 
@@ -517,14 +518,14 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 
 			err = bson.UnmarshalExtJSON([]byte(sectionStr), true, &unmarshaledDoc)
 			if err != nil {
-				logger.Error("failed to unmarshal the recorded document string of OpMsg", zap.Error(err))
+				utils.LogError(logger, err, "failed to unmarshal the recorded document string of OpMsg")
 				return nil, err
 			}
 			message.sections = append(message.sections, &opMsgSectionSingle{
 				msg: unmarshaledDoc,
 			})
 		default:
-			logger.Error("failed to encode the OpMsg section into mongo wiremessage because of invalid format", zap.Any("section", messageValue))
+			utils.LogError(logger, nil, "failed to encode the OpMsg section into mongo wiremessage because of invalid format", zap.Any("section", messageValue))
 		}
 	}
 	return message, nil
@@ -734,7 +735,7 @@ func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, er
 
 		err := json.Unmarshal([]byte(v), &result)
 		if err != nil {
-			logger.Error("failed to unmarshal string document of OpReply", zap.Error(err))
+			utils.LogError(logger, err, "failed to unmarshal string document of OpReply")
 			return nil, err
 		}
 		// set the fields for handshake calls at test mode
@@ -742,14 +743,14 @@ func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, er
 
 		v, err := json.Marshal(result)
 		if err != nil {
-			logger.Error("failed to marshal the updated string document of OpReply", zap.Error(err))
+			utils.LogError(logger, err, "failed to marshal the updated string document of OpReply")
 			return nil, err
 		}
 		logger.Debug(fmt.Sprintf("the updated document string is: %v", result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"]))
 
 		err = bson.UnmarshalExtJSON([]byte(v), false, &unmarshaledDoc)
 		if err != nil {
-			logger.Error("failed to decode the recorded document of OpReply", zap.Error(err))
+			utils.LogError(logger, err, "failed to unmarshal the updated document string of OpReply")
 			return nil, err
 		}
 		elements, _ := unmarshaledDoc.Elements()

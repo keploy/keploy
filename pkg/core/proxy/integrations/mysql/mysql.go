@@ -3,9 +3,11 @@ package mysql
 import (
 	"context"
 	"errors"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"net"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -39,7 +41,7 @@ func (m *MySql) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 
 	err := encodeMySql(ctx, logger, src, dst, mocks, opts)
 	if err != nil {
-		logger.Error("failed to encode the mysql message into the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
 		return errors.New("failed to record the outgoing mysql call")
 	}
 	return nil
@@ -50,7 +52,7 @@ func (m *MySql) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 
 	err := decodeMySql(ctx, logger, src, dstCfg, mockDb, opts)
 	if err != nil {
-		logger.Error("failed to decode the mysql message from the yaml", zap.Error(err))
+		utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
 		return errors.New("failed to mock the outgoing mysql call")
 	}
 	return nil

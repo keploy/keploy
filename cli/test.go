@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"log"
 
 	"go.keploy.io/server/v2/pkg/graph"
 	"go.keploy.io/server/v2/utils"

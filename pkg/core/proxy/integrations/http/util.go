@@ -6,9 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.uber.org/zap"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]byte, clientConn, destConn net.Conn) error {
@@ -28,14 +30,14 @@ func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]
 		logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
 		reqHeader, err := util.ReadBytes(ctx, clientConn)
 		if err != nil {
-			logger.Error("failed to read the request message from the client")
+			utils.LogError(logger, nil, "failed to read the request message from the client")
 			return err
 		} else {
 			// destConn is nil in case of test mode
 			if destConn != nil {
 				_, err = destConn.Write(reqHeader)
 				if err != nil {
-					logger.Error("failed to write request message to the destination server")
+					utils.LogError(logger, nil, "failed to write request message to the destination server")
 					return err
 				}
 			}
@@ -61,7 +63,7 @@ func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			logger.Error("failed to get the content-length header", zap.Error(err))
+			utils.LogError(logger, err, "failed to get the content-length header")
 			return fmt.Errorf("failed to handle chunked request")
 		}
 		//Get the length of the body in the request.
@@ -106,21 +108,21 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 					// write the response message to the user client
 					_, err = clientConn.Write(resp)
 					if err != nil {
-						logger.Error("failed to write response message to the user client")
+						utils.LogError(logger, nil, "failed to write response message to the user client")
 						return err
 					}
 					*finalResp = append(*finalResp, respHeader...)
 				}
 				return err
 			} else {
-				logger.Error("failed to read the response message from the destination server")
+				utils.LogError(logger, nil, "failed to read the response message from the destination server")
 				return err
 			}
 		} else {
 			// write the response message to the user client
 			_, err = clientConn.Write(respHeader)
 			if err != nil {
-				logger.Error("failed to write response message to the user client")
+				utils.LogError(logger, nil, "failed to write response message to the user client")
 				return err
 			}
 		}
@@ -145,7 +147,7 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			logger.Error("failed to get the content-length header", zap.Error(err))
+			utils.LogError(logger, err, "failed to get the content-length header")
 			return fmt.Errorf("failed to handle chunked response")
 		}
 		bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
@@ -176,19 +178,19 @@ func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]b
 	for contentLength > 0 {
 		err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if err != nil {
-			logger.Error("failed to set the read deadline for the client conn", zap.Error(err))
+			utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 			return err
 		}
 		requestChunked, err := util.ReadBytes(ctx, clientConn)
 		if err != nil {
 			if err == io.EOF {
-				logger.Error("conn closed by the user client")
+				utils.LogError(logger, nil, "conn closed by the user client")
 				return err
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				logger.Info("Stopped getting data from the conn", zap.Error(err))
 				break
 			} else {
-				logger.Error("failed to read the response message from the destination server")
+				utils.LogError(logger, nil, "failed to read the response message from the destination server")
 				return err
 			}
 		}
@@ -200,7 +202,7 @@ func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]b
 		if destConn != nil {
 			_, err = destConn.Write(requestChunked)
 			if err != nil {
-				logger.Error("failed to write request message to the destination server")
+				utils.LogError(logger, nil, "failed to write request message to the destination server")
 				return err
 			}
 		}
@@ -220,7 +222,7 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 			// because it can happen that some chunks come after 5 seconds.
 			err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			if err != nil {
-				logger.Error("failed to set the read deadline for the client conn", zap.Error(err))
+				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 				return err
 			}
 			requestChunked, err := util.ReadBytes(ctx, clientConn)
@@ -228,7 +230,7 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					break
 				} else {
-					logger.Error("failed to read the response message from the destination server")
+					utils.LogError(logger, nil, "failed to read the response message from the destination server")
 					return err
 				}
 			}
@@ -238,7 +240,7 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 			if destConn != nil {
 				_, err = destConn.Write(requestChunked)
 				if err != nil {
-					logger.Error("failed to write request message to the destination server")
+					utils.LogError(logger, nil, "failed to write request message to the destination server")
 					return err
 				}
 			}
@@ -258,7 +260,7 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 		//Set deadline of 5 seconds
 		err := destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if err != nil {
-			logger.Error("failed to set the read deadline for the destination conn", zap.Error(err))
+			utils.LogError(logger, err, "failed to set the read deadline for the destination conn")
 			return err
 		}
 		resp, err := util.ReadBytes(ctx, destConn)
@@ -273,7 +275,7 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 				logger.Info("Stopped getting data from the conn", zap.Error(err))
 				break
 			} else {
-				logger.Error("failed to read the response message from the destination server")
+				utils.LogError(logger, nil, "failed to read the response message from the destination server")
 				return err
 			}
 		}
@@ -285,7 +287,7 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
-			logger.Error("failed to write response message to the user client")
+			utils.LogError(logger, nil, "failed to write response message to the user client")
 			return err
 		}
 
@@ -307,7 +309,7 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 			resp, err := util.ReadBytes(ctx, destConn)
 			if err != nil {
 				if err != io.EOF {
-					logger.Error("failed to read the response message from the destination server", zap.Error(err))
+					utils.LogError(logger, err, "failed to read the response message from the destination server")
 					return err
 				} else {
 					isEOF = true
@@ -323,7 +325,7 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 			// write the response message to the user client
 			_, err = clientConn.Write(resp)
 			if err != nil {
-				logger.Error("failed to write response message to the user client")
+				utils.LogError(logger, nil, "failed to write response message to the user client")
 				return err
 			}
 
@@ -393,7 +395,7 @@ func isPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
 			if err != nil {
-				logger.Error("failed to compile the host regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				utils.LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", getReqMeta(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.Host)
@@ -404,7 +406,7 @@ func isPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Path != "" {
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
-				logger.Error("failed to compile the path regex", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
+				utils.LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", getReqMeta(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.URL.String())

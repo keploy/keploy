@@ -9,6 +9,7 @@ import (
 	"github.com/xdg-go/pbkdf2"
 	"github.com/xdg-go/scram"
 	"github.com/xdg-go/stringprep"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -78,12 +79,12 @@ func GenerateServerFinalMessage(authMessage, mechanism, password, salt string, i
 func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstResponseMsg []byte, logger *zap.Logger) (string, error) {
 	expectedNonce, err := extractClientNonce(string(recordedRequestMsg))
 	if err != nil {
-		logger.Error("failed to extract the client nonce from the recorded first message", zap.Error(err))
+		utils.LogError(logger, err, "failed to extract the client nonce from the recorded first message")
 		return "", err
 	}
 	actualNonce, err := extractClientNonce(string(recievedRequestMsg))
 	if err != nil {
-		logger.Error("failed to extract the client nonce from the recieved first message", zap.Error(err))
+		utils.LogError(logger, err, "failed to extract the client nonce from the recieved first message")
 		return "", err
 	}
 	// Since, the nonce are randomlly generated string. so, each session have unique nonce.
@@ -108,13 +109,13 @@ func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstRes
 func GenerateAuthMessage(firstRequest, firstResponse string, logger *zap.Logger) string {
 	gs2, err := extractAuthId(firstRequest)
 	if err != nil {
-		logger.Error("failed to extract the client gs2 header from the recieved first message", zap.Error(err))
+		utils.LogError(logger, err, "failed to extract the client gs2 header from the recieved first message")
 		return ""
 	}
 	authMsg := firstRequest[len(gs2):] + "," + firstResponse + ","
 	nonce, err := extractClientNonce(firstResponse)
 	if err != nil {
-		logger.Error("failed to extract the client nonce from the recorded first message", zap.Error(err))
+		utils.LogError(logger, err, "failed to extract the client nonce from the recorded first message")
 		return ""
 	}
 
