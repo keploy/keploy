@@ -3,11 +3,12 @@ package models
 import "time"
 
 type Mock struct {
-	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
-	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
-	Kind         Kind         `json:"Kind,omitempty" bson:"Kind,omitempty"`
-	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
-	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
+	Version       Version      `json:"Version,omitempty" bson:"Version,omitempty"`
+	Name          string       `json:"Name,omitempty" bson:"Name,omitempty"`
+	Kind          Kind         `json:"Kind,omitempty" bson:"Kind,omitempty"`
+	Spec          MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
+	TestModeInfo  TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
+	MssqlRequests []TDSPacket  `json:"MssqlRequests,omitempty" bson:"mssql_requests,omitempty"`
 }
 
 type TestModeInfo struct {
@@ -26,6 +27,8 @@ type MockSpec struct {
 	GenericResponses  []GenericPayload  `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
 	HttpReq           *HttpReq          `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HttpResp          *HttpResp         `json:"Res,omitempty" bson:"http_resp,omitempty"`
+	MssqlRequests     []TDSPacket       `json:"MssqlRequests,omitempty" bson:"mssql_requests,omitempty"`
+	MssqlResponses    []TDSPacket       `json:"MssqlResponses,omitempty" bson:"mssql_responses,omitempty"`
 	Created           int64             `json:"Created,omitempty" bson:"created,omitempty"`
 	MongoRequests     []MongoRequest    `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
 	MongoResponses    []MongoResponse   `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`

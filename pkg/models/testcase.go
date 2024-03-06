@@ -30,6 +30,7 @@ const (
 	BodyTypePlain  BodyType = "PLAIN"
 	BodyTypeJSON   BodyType = "JSON"
 	BodyTypeError  BodyType = "ERROR"
+	MSSQL          Kind     = "MSSQL"
 )
 
 type TestCase struct {
