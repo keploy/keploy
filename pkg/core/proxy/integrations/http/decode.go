@@ -30,7 +30,7 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			//Check if the expected header is present
 			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {

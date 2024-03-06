@@ -33,7 +33,7 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 
 			//log.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))

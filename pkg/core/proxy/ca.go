@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -149,9 +148,6 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		javaHome, err := util.GetJavaHome(ctx)
 
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
 			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
 			return err
 		}
@@ -221,10 +217,6 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 		// install CA in the java keystore if java is installed
 		err = installJavaCA(ctx, logger, caPath)
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				println("context is canceled in installJavaCA")
-				return err
-			}
 			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
 		}
@@ -233,10 +225,6 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 	// Update the trusted CAs store
 	err = updateCaStore(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			println("context is canceled in updateCaStore")
-			return err
-		}
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}

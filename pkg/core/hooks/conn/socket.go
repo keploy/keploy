@@ -41,9 +41,11 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 			case <-ctx.Done():
 				close(t)
 				errCh <- ctx.Err()
+				close(errCh)
 				return
 			default:
 				// TODO refactor this to directly consume the events from the maps
+				//TODO: pass errCh to this function
 				c.ProcessActiveTrackers(ctx, t)
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -71,6 +73,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 	for {
 		select {
 		case <-ctx.Done(): // Check for context cancellation
+			errCh <- ctx.Err()
 			return
 		default:
 			rec, err := r.Read()
@@ -113,6 +116,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 	for {
 		select {
 		case <-ctx.Done(): // Check for context cancellation
+			errCh <- ctx.Err()
 			return
 		default:
 			record, err := r.Read()
@@ -166,6 +170,7 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 	for {
 		select {
 		case <-ctx.Done(): // Check for context cancellation
+			errCh <- ctx.Err()
 			return
 		default:
 			rec, err := r.Read()

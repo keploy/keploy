@@ -94,7 +94,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						Metadata:         metadata,
 					},
 				}
-				return nil
+				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
 			// Write the request message to the destination

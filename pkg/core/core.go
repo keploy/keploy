@@ -83,7 +83,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	default:
 	}
 
-	// TODO: ensure right values are passed to the hook
 	//load hooks
 	err = c.hook.Load(ctx, id, HookCfg{
 		AppID:      id,

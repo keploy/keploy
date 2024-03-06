@@ -61,6 +61,8 @@ func (g *Graph) Serve(ctx context.Context) error {
 		g.stopGraphqlServer(ctx, httpSrv)
 	}()
 
+	//TODO: start the test cmd like "mvn test" and use select statement to listen for error channel
+
 	log.Printf(utils.Emoji+"connect to http://localhost:%d/ for GraphQL playground", g.config.Port)
 	if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf(utils.Emoji+"listen: %s\n", err)

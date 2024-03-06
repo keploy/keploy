@@ -27,7 +27,7 @@ func encodeMySql(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			lastCommand = 0x00 //resetting last command for new loop
 			data, source, err := readFirstBuffer(ctx, clientConn, destConn)

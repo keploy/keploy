@@ -2,7 +2,6 @@ package generic
 
 import (
 	"context"
-	"errors"
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -37,13 +36,13 @@ func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial generic message")
-		return errors.New("failed to record the outgoing generic call")
+		return err
 	}
 
 	err = encodeGeneric(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the generic message into the yaml")
-		return errors.New("failed to record the outgoing generic call")
+		return err
 	}
 	return nil
 }
@@ -54,13 +53,13 @@ func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integr
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial generic message")
-		return errors.New("failed to mock the outgoing generic call")
+		return err
 	}
 
 	err = decodeGeneric(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the generic message")
-		return errors.New("failed to mock the outgoing generic call")
+		return err
 	}
 	return nil
 }

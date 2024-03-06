@@ -44,166 +44,171 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 	//for keeping conn alive
 	for {
-		//check if expect : 100-continue header is present
-		lines := strings.Split(string(finalReq), "\n")
-		var expectHeader string
-		for _, line := range lines {
-			if strings.HasPrefix(line, "Expect:") {
-				expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
-				break
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			//check if expect : 100-continue header is present
+			lines := strings.Split(string(finalReq), "\n")
+			var expectHeader string
+			for _, line := range lines {
+				if strings.HasPrefix(line, "Expect:") {
+					expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
+					break
+				}
 			}
-		}
-		if expectHeader == "100-continue" {
-			//Read if the response from the server is 100-continue
-			resp, err = util.ReadBytes(ctx, destConn)
+			if expectHeader == "100-continue" {
+				//Read if the response from the server is 100-continue
+				resp, err = util.ReadBytes(ctx, destConn)
+				if err != nil {
+					utils.LogError(logger, err, "failed to read the response message from the server after 100-continue request")
+					return err
+				}
+
+				// write the response message to the client
+				_, err = clientConn.Write(resp)
+				if err != nil {
+					utils.LogError(logger, err, "failed to write response message to the user client")
+					return err
+				}
+
+				logger.Debug("This is the response from the server after the expect header" + string(resp))
+
+				if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
+					utils.LogError(logger, nil, "failed to get the 100 continue response from the user client")
+					return err
+				}
+				//Reading the request buffer again
+				reqBuf, err = util.ReadBytes(ctx, clientConn)
+				if err != nil {
+					utils.LogError(logger, err, "failed to read the request buffer from the user client")
+					return err
+				}
+				// write the request message to the actual destination server
+				_, err = destConn.Write(reqBuf)
+				if err != nil {
+					utils.LogError(logger, err, "failed to write request message to the destination server")
+					return err
+				}
+				finalReq = append(finalReq, reqBuf...)
+			}
+
+			// Capture the request timestamp
+			reqTimestampMock := time.Now()
+
+			err := handleChunkedRequests(ctx, logger, &finalReq, clientConn, destConn)
 			if err != nil {
-				utils.LogError(logger, err, "failed to read the response message from the server after 100-continue request")
+				utils.LogError(logger, err, "failed to handle chunked requests")
 				return err
 			}
 
-			// write the response message to the client
+			logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
+			// read the response from the actual server
+			resp, err = util.ReadBytes(ctx, destConn)
+			if err != nil {
+				if err == io.EOF {
+					logger.Debug("Response complete, exiting the loop.")
+					// if there is any buffer left before EOF, we must send it to the client and save this as mock
+					if len(resp) != 0 {
+
+						// Capturing the response timestamp
+						resTimestampMock := time.Now()
+						// write the response message to the user client
+						_, err = clientConn.Write(resp)
+						if err != nil {
+							utils.LogError(logger, err, "failed to write response message to the user client")
+							return err
+						}
+
+						// saving last request/response on this conn.
+						m := &finalHttp{
+							req:              finalReq,
+							resp:             resp,
+							reqTimestampMock: reqTimestampMock,
+							resTimestampMock: resTimestampMock,
+						}
+						err := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
+						if err != nil {
+							utils.LogError(logger, err, "failed to parse the final http request and response")
+							return err
+						}
+					}
+					break
+				} else {
+					utils.LogError(logger, err, "failed to read the response message from the destination server")
+					return err
+				}
+			}
+
+			// Capturing the response timestamp
+			resTimestampMock := time.Now()
+
+			// write the response message to the user client
 			_, err = clientConn.Write(resp)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write response message to the user client")
 				return err
 			}
 
-			logger.Debug("This is the response from the server after the expect header" + string(resp))
+			finalResp = append(finalResp, resp...)
+			logger.Debug("This is the initial response: " + string(resp))
 
-			if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
-				utils.LogError(logger, nil, "failed to get the 100 continue response from the user client")
+			err = handleChunkedResponses(ctx, logger, &finalResp, clientConn, destConn, resp)
+			if err != nil {
+				if err == io.EOF {
+					logger.Debug("conn closed by the server", zap.Error(err))
+					//check if before EOF complete response came, and try to parse it.
+					m := &finalHttp{
+						req:              finalReq,
+						resp:             finalResp,
+						reqTimestampMock: reqTimestampMock,
+						resTimestampMock: resTimestampMock,
+					}
+					parseErr := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
+					if parseErr != nil {
+						utils.LogError(logger, parseErr, "failed to parse the final http request and response")
+						return parseErr
+					}
+					return nil
+				} else {
+					utils.LogError(logger, err, "failed to handle chunk response")
+					return err
+				}
+			}
+
+			logger.Debug("This is the final response: " + string(finalResp))
+
+			m := &finalHttp{
+				req:              finalReq,
+				resp:             finalResp,
+				reqTimestampMock: reqTimestampMock,
+				resTimestampMock: resTimestampMock,
+			}
+
+			err = ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
+			if err != nil {
+				utils.LogError(logger, err, "failed to parse the final http request and response")
 				return err
 			}
-			//Reading the request buffer again
-			reqBuf, err = util.ReadBytes(ctx, clientConn)
+
+			//resetting for the new request and response.
+			finalReq = []byte("")
+			finalResp = []byte("")
+
+			finalReq, err = util.ReadBytes(ctx, clientConn)
 			if err != nil {
-				utils.LogError(logger, err, "failed to read the request buffer from the user client")
-				return err
+				if err != io.EOF {
+					logger.Debug("failed to read the request message from the user client", zap.Error(err))
+					logger.Debug("This was the last response from the server: " + string(resp))
+				}
+				break
 			}
 			// write the request message to the actual destination server
-			_, err = destConn.Write(reqBuf)
+			_, err = destConn.Write(finalReq)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
-			finalReq = append(finalReq, reqBuf...)
-		}
-
-		// Capture the request timestamp
-		reqTimestampMock := time.Now()
-
-		err := handleChunkedRequests(ctx, logger, &finalReq, clientConn, destConn)
-		if err != nil {
-			utils.LogError(logger, err, "failed to handle chunked requests")
-			return err
-		}
-
-		logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
-		// read the response from the actual server
-		resp, err = util.ReadBytes(ctx, destConn)
-		if err != nil {
-			if err == io.EOF {
-				logger.Debug("Response complete, exiting the loop.")
-				// if there is any buffer left before EOF, we must send it to the client and save this as mock
-				if len(resp) != 0 {
-
-					// Capturing the response timestamp
-					resTimestampMock := time.Now()
-					// write the response message to the user client
-					_, err = clientConn.Write(resp)
-					if err != nil {
-						utils.LogError(logger, err, "failed to write response message to the user client")
-						return err
-					}
-
-					// saving last request/response on this conn.
-					m := &finalHttp{
-						req:              finalReq,
-						resp:             resp,
-						reqTimestampMock: reqTimestampMock,
-						resTimestampMock: resTimestampMock,
-					}
-					err := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
-					if err != nil {
-						utils.LogError(logger, err, "failed to parse the final http request and response")
-						return err
-					}
-				}
-				break
-			} else {
-				utils.LogError(logger, err, "failed to read the response message from the destination server")
-				return err
-			}
-		}
-
-		// Capturing the response timestamp
-		resTimestampMock := time.Now()
-
-		// write the response message to the user client
-		_, err = clientConn.Write(resp)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write response message to the user client")
-			return err
-		}
-
-		finalResp = append(finalResp, resp...)
-		logger.Debug("This is the initial response: " + string(resp))
-
-		err = handleChunkedResponses(ctx, logger, &finalResp, clientConn, destConn, resp)
-		if err != nil {
-			if err == io.EOF {
-				logger.Debug("conn closed by the server", zap.Error(err))
-				//check if before EOF complete response came, and try to parse it.
-				m := &finalHttp{
-					req:              finalReq,
-					resp:             finalResp,
-					reqTimestampMock: reqTimestampMock,
-					resTimestampMock: resTimestampMock,
-				}
-				parseErr := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
-				if parseErr != nil {
-					utils.LogError(logger, parseErr, "failed to parse the final http request and response")
-					return parseErr
-				}
-				return nil
-			} else {
-				utils.LogError(logger, err, "failed to handle chunk response")
-				return err
-			}
-		}
-
-		logger.Debug("This is the final response: " + string(finalResp))
-
-		m := &finalHttp{
-			req:              finalReq,
-			resp:             finalResp,
-			reqTimestampMock: reqTimestampMock,
-			resTimestampMock: resTimestampMock,
-		}
-
-		err = ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
-		if err != nil {
-			utils.LogError(logger, err, "failed to parse the final http request and response")
-			return err
-		}
-
-		//resetting for the new request and response.
-		finalReq = []byte("")
-		finalResp = []byte("")
-
-		finalReq, err = util.ReadBytes(ctx, clientConn)
-		if err != nil {
-			if err != io.EOF {
-				logger.Debug("failed to read the request message from the user client", zap.Error(err))
-				logger.Debug("This was the last response from the server: " + string(resp))
-			}
-			break
-		}
-		// write the request message to the actual destination server
-		_, err = destConn.Write(finalReq)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write request message to the destination server")
-			return err
 		}
 	}
 	return nil

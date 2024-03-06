@@ -36,6 +36,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 	for {
 		select {
 		case <-ctx.Done():
+			errChannel <- ctx.Err()
 			return
 		default:
 			if conn == nil {
@@ -84,7 +85,7 @@ func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return buffer, nil
+			return buffer, ctx.Err()
 		default:
 			buf := make([]byte, 1024)
 			n, err := reader.Read(buf)
@@ -123,7 +124,7 @@ func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]b
 	for {
 		select {
 		case <-ctx.Done():
-			return buffer, nil
+			return buffer, ctx.Err()
 		default:
 			buf := make([]byte, numBytes)
 
@@ -205,7 +206,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 		return nil, nil
 
 	case <-ctx.Done():
-		return nil, nil
+		return nil, ctx.Err()
 	}
 
 	return nil, nil

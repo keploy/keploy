@@ -216,7 +216,7 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			//TODO: we have to implement a way to read the buffer chunk wise according to the chunk size (chunk size comes in hexadecimal)
 			// because it can happen that some chunks come after 5 seconds.

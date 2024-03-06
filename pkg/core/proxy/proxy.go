@@ -87,10 +87,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	// set up the CA for tls connections
 	err = SetupCA(ctx, p.logger)
 	if err != nil {
-		if errors.Is(err, ctx.Err()) {
-			println("context error in setup up CA")
-			return err
-		}
 		utils.LogError(p.logger, err, "failed to setup CA")
 		return err
 	}
@@ -149,24 +145,29 @@ func (p *Proxy) start(ctx context.Context) {
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if strings.Contains(err.Error(), "use of closed network connection") {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			conn, err := listener.Accept()
+			if err != nil {
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					break
+				}
+				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
 				break
 			}
-			utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-			break
+
+			// collecting the client connections for cleanup
+			p.connMutex.Lock()
+			p.clientConnections = append(p.clientConnections, conn)
+			p.connMutex.Unlock()
+
+			go func() {
+				utils.Recover(p.logger)
+				p.handleConnection(ctx, conn)
+			}()
 		}
-
-		// collecting the client connections for cleanup
-		p.connMutex.Lock()
-		p.clientConnections = append(p.clientConnections, conn)
-		p.connMutex.Unlock()
-
-		go func() {
-			utils.Recover(p.logger)
-			p.handleConnection(ctx, conn)
-		}()
 	}
 }
 

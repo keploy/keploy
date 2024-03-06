@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"context"
-	"errors"
 	"net"
 	"time"
 
@@ -42,7 +41,7 @@ func (m *MySql) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 	err := encodeMySql(ctx, logger, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
-		return errors.New("failed to record the outgoing mysql call")
+		return err
 	}
 	return nil
 }
@@ -53,7 +52,7 @@ func (m *MySql) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	err := decodeMySql(ctx, logger, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
-		return errors.New("failed to mock the outgoing mysql call")
+		return err
 	}
 	return nil
 }

@@ -15,7 +15,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 	for {
 		select {
 		case <-ctx.Done():
-			return false, nil, nil
+			return false, nil, ctx.Err()
 		default:
 
 			tcsMocks, err := mockDb.GetUnFilteredMocks()

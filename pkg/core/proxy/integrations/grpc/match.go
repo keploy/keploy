@@ -32,7 +32,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("context cancelled")
+			return nil, ctx.Err()
 		default:
 
 			mocks, err := mockDb.GetFilteredMocks()

@@ -19,7 +19,7 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 	for {
 		select {
 		case <-ctx.Done():
-			return false, nil, nil
+			return false, nil, ctx.Err()
 		default:
 			tcsMocks, err := mockDb.GetFilteredMocks()
 			if err != nil {

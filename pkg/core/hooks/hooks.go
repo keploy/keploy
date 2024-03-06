@@ -429,9 +429,17 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		h.SetKeployModeInKernel(1)
+		err := h.SetKeployModeInKernel(1)
+		if err != nil {
+			utils.LogError(h.logger, nil, "failed to send the keploy mode to the ebpf program")
+			return err
+		}
 	case models.MODE_TEST:
-		h.SetKeployModeInKernel(2)
+		err := h.SetKeployModeInKernel(2)
+		if err != nil {
+			utils.LogError(h.logger, nil, "failed to send the keploy mode to the ebpf program")
+			return err
+		}
 	}
 
 	//sending keploy pid to kernel to get filtered

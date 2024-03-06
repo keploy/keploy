@@ -18,7 +18,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 	for {
 		select {
 		case <-ctx.Done():
-			return false, nil, nil
+			return false, nil, ctx.Err()
 		default:
 			tcsMocks, err := mockDb.GetFilteredMocks()
 

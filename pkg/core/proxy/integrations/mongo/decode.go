@@ -23,10 +23,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	requestBuffers := [][]byte{reqBuf}
 	var readRequestDelay time.Duration
 	for {
-
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			configMocks, err := mockDb.GetUnFilteredMocks()
 			if err != nil {

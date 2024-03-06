@@ -293,7 +293,7 @@ func (srv *transcoder) ListenAndServe(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			frame, err := srv.framer.ReadFrame()
 			if err != nil {

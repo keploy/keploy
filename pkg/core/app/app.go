@@ -348,6 +348,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				errCh <- errors.New("timeout waiting for the container to start")
 			case <-ctx.Done():
 				a.logger.Debug("context cancelled, stopping the listener for container creation event.")
+				errCh <- ctx.Err()
 			case e := <-messages:
 				err := a.handleDockerEvents(ctx, e)
 				if err != nil {
@@ -387,8 +388,14 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}(ctx)
 	select {
 	case err := <-errCh:
+		if err != nil && errors.Is(err, context.Canceled) {
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case err := <-errCh2:
+		if err != nil && errors.Is(err, context.Canceled) {
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}

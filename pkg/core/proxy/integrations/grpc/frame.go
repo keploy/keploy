@@ -18,7 +18,7 @@ func transferFrame(ctx context.Context, lhs net.Conn, rhs net.Conn, sic *StreamI
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 			frame, err := framer.ReadFrame()
 			if err != nil {

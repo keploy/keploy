@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -62,13 +61,13 @@ func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
-		return errors.New("failed to record the outgoing http call")
+		return err
 	}
 
 	err = encodeHttp(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
-		return errors.New("failed to record the outgoing http call")
+		return err
 	}
 	return nil
 }
@@ -79,13 +78,13 @@ func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrati
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
-		return errors.New("failed to mock the outgoing http call")
+		return err
 	}
 
 	err = decodeHttp(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the http message from the yaml")
-		return errors.New("failed to mock the outgoing http call")
+		return err
 	}
 	return nil
 }

@@ -118,7 +118,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
-				return nil
+				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
 

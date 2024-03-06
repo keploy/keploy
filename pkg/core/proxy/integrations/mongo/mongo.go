@@ -3,7 +3,6 @@ package mongo
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"net"
 	"time"
 
@@ -49,13 +48,13 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial mongo message")
-		return errors.New("failed to record the outgoing mongo call")
+		return err
 	}
 
 	err = encodeMongo(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mongo message into the yaml")
-		return errors.New("failed to record the outgoing mongo call")
+		return err
 	}
 	return nil
 }
@@ -66,13 +65,13 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial mongo message")
-		return errors.New("failed to mock the outgoing mongo call")
+		return err
 	}
 
 	err = decodeMongo(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the mongo message from the yaml")
-		return errors.New("failed to mock the outgoing mongo call")
+		return err
 	}
 	return nil
 }
