@@ -62,13 +62,13 @@ func NewHttpParser(logger *zap.Logger, h *hooks.Hook) *HttpParser {
 // message format with that of an HTTP text message.
 func (h *HttpParser) OutgoingType(buffer []byte) bool {
 	isHttp := bytes.HasPrefix(buffer[:], []byte("HTTP/")) ||
-	bytes.HasPrefix(buffer[:], []byte("GET ")) ||
-	bytes.HasPrefix(buffer[:], []byte("POST ")) ||
-	bytes.HasPrefix(buffer[:], []byte("PUT ")) ||
-	bytes.HasPrefix(buffer[:], []byte("PATCH ")) ||
-	bytes.HasPrefix(buffer[:], []byte("DELETE ")) ||
-	bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) ||
-	bytes.HasPrefix(buffer[:], []byte("HEAD "))
+		bytes.HasPrefix(buffer[:], []byte("GET ")) ||
+		bytes.HasPrefix(buffer[:], []byte("POST ")) ||
+		bytes.HasPrefix(buffer[:], []byte("PUT ")) ||
+		bytes.HasPrefix(buffer[:], []byte("PATCH ")) ||
+		bytes.HasPrefix(buffer[:], []byte("DELETE ")) ||
+		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) ||
+		bytes.HasPrefix(buffer[:], []byte("HEAD "))
 	h.logger.Debug("checking if the outgoing network call is HTTP", zap.Any("is Http Protocol", isHttp))
 	return isHttp
 }
@@ -437,7 +437,7 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
 	logger.Debug("into the decodeOutgoingHttp function to mock the external Http call", zap.Any("requestBuffer", string(requestBuffer)))
-	
+
 	//Matching algorithmm
 	//Get the mocks
 	for {
