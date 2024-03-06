@@ -72,7 +72,7 @@ Ready for the magic? Here are Keploy's core features:
 
 - 🤖 **EBPF Instrumentation:** Keploy uses EBPF like a secret sauce to make integration code-less, language-agnostic, and oh-so-lightweight.
 
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="100%" alt="Convert API calls to test cases"/>
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="80%" alt="Convert API calls to test cases"/>
 
 - 🌐 **CI/CD Integration:** Run tests with mocks anywhere you like—locally on the CLI, in your CI pipeline, or even across a Kubernetes cluster. It's testing wherever you want it!
 
