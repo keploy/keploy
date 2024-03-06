@@ -271,7 +271,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 	stopListenContainer := make(chan bool)
 	stopApplicationErrors := false
 	abortStopListenContainerChan := false
-	isContainerCreated := false
+	containerCreatedNotStarted := false
 
 	dockerClient := h.idc
 	appErrCh := make(chan error, 1)
@@ -287,7 +287,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 			composeFile := findDockerComposeFile()
 
-			if isContainerCreated && len(composeFile) != 0 {
+			if containerCreatedNotStarted && len(composeFile) != 0 {
 
 				containerNames, composeErr := getContainersFromComposeFile(composeFile)
 				if composeErr != nil {
@@ -365,7 +365,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 					// Set Docker Container ID
 					h.idc.SetContainerID(e.ID)
 
-					isContainerCreated = true
+					containerCreatedNotStarted = true
 
 					// Fetch container details by inspecting using container ID to check if container is created
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
@@ -409,6 +409,9 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 					}
 
 					if containerFound {
+
+						containerCreatedNotStarted = false
+
 						h.logger.Debug(fmt.Sprintf("the user application container pid: %v", containerPid))
 						inode := getInodeNumber(containerPid)
 						h.logger.Debug("", zap.Any("user inode", inode))
