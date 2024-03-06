@@ -39,7 +39,7 @@ func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) 
 		DockerNetwork: opts.DockerNetwork,
 	})
 	if err != nil {
-		c.logger.Error("failed to create app", zap.Error(err))
+		utils.LogError(c.logger, err, "failed to setup app")
 		return 0, err
 	}
 	return id, nil
@@ -65,7 +65,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	a, err := c.getApp(id)
 	if err != nil {
-		c.logger.Error("failed to get app", zap.Error(err))
+		utils.LogError(c.logger, err, "failed to get app")
 		return hookErr
 	}
 
@@ -92,7 +92,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		KeployIPV4: a.KeployIPv4Addr(),
 	})
 	if err != nil {
-		c.logger.Error("Failed to load hooks", zap.Error(err))
+		utils.LogError(c.logger, err, "failed to load hooks")
 		return hookErr
 	}
 
@@ -117,11 +117,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		//DnsIPv6Addr: ""
 	})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			println("context cancelled in proxy")
-			return err
-		}
-		c.logger.Error("Failed to start proxy", zap.Error(err))
+		utils.LogError(c.logger, err, "failed to start proxy")
 		return hookErr
 	}
 
@@ -132,7 +128,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
 	a, err := c.getApp(id)
 	if err != nil {
-		c.logger.Error("failed to get app", zap.Error(err))
+		utils.LogError(c.logger, err, "failed to get app")
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	}
 
@@ -145,7 +141,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		inode := <-inodeChan
 		err := c.hook.SendInode(ctx, id, inode)
 		if err != nil {
-			c.logger.Error("Failed to send inode", zap.Error(err))
+			utils.LogError(c.logger, err, "failed to send inode")
 		}
 	}(inodeChan)
 
@@ -156,7 +152,7 @@ func (c *Core) GetAppIp(ctx context.Context, id uint64) (string, error) {
 
 	a, err := c.getApp(id)
 	if err != nil {
-		c.logger.Error("failed to get app", zap.Error(err))
+		utils.LogError(c.logger, err, "failed to get app")
 		return "", err
 	}
 

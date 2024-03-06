@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
 	recordSvc "go.keploy.io/server/v2/pkg/service/record"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -24,16 +25,16 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
 			if err != nil {
-				logger.Error("failed to get service", zap.Error(err))
+				utils.LogError(logger, err, "failed to get service")
 				return nil
 			}
 			if record, ok := svc.(recordSvc.Service); !ok {
-				logger.Error("service doesn't satisfy record service interface")
+				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
 				return nil
 			} else {
 				err := record.Start(ctx)
 				if err != nil {
-					logger.Error("error occured while recording", zap.Error(err))
+					utils.LogError(logger, err, "failed to start recording")
 					return nil
 				}
 			}
@@ -43,7 +44,7 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 
 	err := cmdConfigurator.AddFlags(cmd, cfg)
 	if err != nil {
-		logger.Error("failed to add record flags", zap.Error(err))
+		utils.LogError(logger, err, "failed to add record flags")
 		return nil
 	}
 	cmd.SilenceUsage = true

@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"log"
 
 	"go.keploy.io/server/v2/pkg/graph"
+	"go.keploy.io/server/v2/utils"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
@@ -27,24 +29,24 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 
 			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
 			if err != nil {
-				logger.Error("failed to get service", zap.Error(err))
+				utils.LogError(logger, err, "failed to get service")
 				return nil
 			}
 			if replay, ok := svc.(replaySvc.Service); !ok {
-				logger.Error("service doesn't satisfy replay service interface")
+				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			} else {
 				if cfg.Test.Coverage {
 					g := graph.NewGraph(logger, replay, *cfg)
 					err := g.Serve(ctx)
 					if err != nil {
-						logger.Error("failed to start graph service", zap.Error(err))
+						utils.LogError(logger, err, "failed to start graph service")
 						return nil
 					}
 				}
 				err := replay.Start(ctx)
 				if err != nil {
-					logger.Error("failed to replay", zap.Error(err))
+					utils.LogError(logger, err, "failed to start replaying")
 					return nil
 				}
 			}
@@ -54,7 +56,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 
 	err := cmdConfigurator.AddFlags(testCmd, cfg)
 	if err != nil {
-		logger.Error("failed to add test flags", zap.Error(err))
+		utils.LogError(logger, err, "failed to add test flags")
 		return nil
 	}
 

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/araddon/dateparse"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -71,7 +71,7 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
 	if err != nil {
-		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
+		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
 	req.Header = ToHttpHeader(tc.HttpReq.Header)
@@ -119,32 +119,21 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 	}
 
 	httpResp, errHttpReq := client.Do(req)
-	if httpResp != nil {
-		// Cases covered, non-nil httpResp with non-nil errHttpReq and non-nil httpResp
-		// with nil errHttpReq
-		respBody, errReadRespBody := io.ReadAll(httpResp.Body)
-		if errReadRespBody != nil {
-			logger.Error("failed reading response body", zap.Error(errReadRespBody))
-			return nil, err
-		}
+	if errHttpReq != nil {
+		utils.LogError(logger, errHttpReq, "failed to send testcase request to app")
+		return nil, errHttpReq
+	}
 
-		resp = &models.HttpResp{
-			StatusCode: httpResp.StatusCode,
-			Body:       string(respBody),
-			Header:     ToYamlHttpHeader(httpResp.Header),
-		}
-	} else if errHttpReq != nil {
-		if errors.Is(errHttpReq, context.Canceled) {
-			resp = nil
-		} else {
-			fmt.Println("Error:", errHttpReq)
-			// Case covered, nil HTTP response with non-nil error
-			logger.Error("failed sending testcase request to app", zap.Error(err))
+	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
+	if errReadRespBody != nil {
+		utils.LogError(logger, errReadRespBody, "failed reading response body")
+		return nil, err
+	}
 
-			resp = &models.HttpResp{
-				Body: errHttpReq.Error(),
-			}
-		}
+	resp = &models.HttpResp{
+		StatusCode: httpResp.StatusCode,
+		Body:       string(respBody),
+		Header:     ToYamlHttpHeader(httpResp.Header),
 	}
 
 	return resp, errHttpReq

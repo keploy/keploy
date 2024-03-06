@@ -29,7 +29,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 
 	err := cmdConfigurator.AddFlags(rootCmd, conf)
 	if err != nil {
-		logger.Error("failed to set flags", zap.Error(err))
+		utils.LogError(logger, err, "failed to set flags")
 		return nil
 	}
 

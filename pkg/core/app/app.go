@@ -92,7 +92,7 @@ func (a *App) SetupDocker() error {
 	var err error
 	cont, net, err := parseDockerCmd(a.cmd)
 	if err != nil {
-		a.logger.Error("failed to parse container name from given docker command", zap.Error(err), zap.Any("cmd", a.cmd))
+		utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
 		return err
 	}
 	if a.container == "" {
@@ -110,7 +110,7 @@ func (a *App) SetupDocker() error {
 	//injecting appNetwork to keploy.
 	err = a.injectNetwork(a.containerNetwork)
 	if err != nil {
-		a.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
+		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
 		return err
 	}
 	return nil
@@ -118,7 +118,7 @@ func (a *App) SetupDocker() error {
 
 func (a *App) SetupCompose() error {
 	if a.container == "" {
-		a.logger.Error("please provide container name in case of docker-compose file", zap.Any("AppCmd", a.cmd))
+		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
 		return errors.New("container name not found")
 	}
 	a.logger.Info("keploy requires docker compose containers to be run with external network")
@@ -141,7 +141,7 @@ func (a *App) SetupCompose() error {
 	if ok {
 		err = a.docker.ForceAbsolutePath(compose, path)
 		if err != nil {
-			a.logger.Error("failed to convert relative paths to absolute paths in volume mounts in docker compose file")
+			utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
 			return err
 		}
 		composeChanged = true
@@ -153,7 +153,7 @@ func (a *App) SetupCompose() error {
 	if info == nil {
 		err = a.docker.SetKeployNetwork(compose)
 		if err != nil {
-			a.logger.Error("failed to set default network in the compose file", zap.String("network", a.keployNetwork))
+			utils.LogError(a.logger, nil, "failed to set default network in the compose file", zap.String("network", a.keployNetwork))
 			return err
 		}
 		composeChanged = true
@@ -162,7 +162,7 @@ func (a *App) SetupCompose() error {
 	if !info.External {
 		err = a.docker.MakeNetworkExternal(compose)
 		if err != nil {
-			a.logger.Error("failed to make the network external in the compose file", zap.String("network", info.Name))
+			utils.LogError(a.logger, nil, "failed to make the network external in the compose file", zap.String("network", info.Name))
 			return fmt.Errorf("error while updating network to external: %v", err)
 		}
 		a.keployNetwork = info.Name
@@ -172,7 +172,7 @@ func (a *App) SetupCompose() error {
 
 	ok, err = a.docker.NetworkExists(a.keployNetwork)
 	if err != nil {
-		a.logger.Error("failed to find default network", zap.String("network", a.keployNetwork))
+		utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.keployNetwork))
 		return err
 	}
 
@@ -180,7 +180,7 @@ func (a *App) SetupCompose() error {
 	if !ok {
 		err = a.docker.CreateNetwork(a.keployNetwork)
 		if err != nil {
-			a.logger.Error("failed to create default network", zap.String("network", a.keployNetwork))
+			utils.LogError(a.logger, nil, "failed to create default network", zap.String("network", a.keployNetwork))
 			return err
 		}
 	}
@@ -188,7 +188,7 @@ func (a *App) SetupCompose() error {
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {
-			a.logger.Error("failed to write the compose file", zap.String("path", newPath))
+			utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 		}
 		a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
 		//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
@@ -197,7 +197,7 @@ func (a *App) SetupCompose() error {
 
 	err = a.injectNetwork(a.containerNetwork)
 	if err != nil {
-		a.logger.Error(fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
+		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
 		return err
 	}
 	return nil
@@ -214,7 +214,7 @@ func (a *App) injectNetwork(network string) error {
 	a.logger.Info(fmt.Sprintf("trying to inject network:%v to the keploy container", network))
 	err := a.docker.AttachNetwork(a.keployContainer, []string{network})
 	if err != nil {
-		a.logger.Error("could not inject application network to the keploy container")
+		utils.LogError(a.logger, nil, "failed to inject network to the keploy container")
 		return err
 	}
 
@@ -223,7 +223,7 @@ func (a *App) injectNetwork(network string) error {
 	//sending new proxy ip to kernel, since dynamically injected new network has different ip for keploy.
 	kInspect, err := a.docker.ContainerInspect(context.Background(), a.keployContainer)
 	if err != nil {
-		a.logger.Error(fmt.Sprintf("failed to get inspect keploy container:%v", kInspect))
+		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", kInspect))
 		return err
 	}
 
@@ -381,7 +381,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		defer cancel()
 		err := a.run(ctx)
 		if err.Err != nil {
-			a.logger.Error("Application stopped with the error", zap.Error(err))
+			utils.LogError(a.logger, err.Err, "Application stopped with the error")
 			errCh <- err.Err
 		}
 	}(ctx)
@@ -430,7 +430,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// Switch to the user who invoked sudo
 		u, err := user.Lookup(uname)
 		if err != nil {
-			a.logger.Error("failed to lookup user", zap.Error(err))
+			utils.LogError(a.logger, err, "failed to lookup user")
 			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 		}
 
@@ -438,7 +438,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		gid, err := strconv.ParseUint(u.Gid, 10, 32)
 
 		if err != nil {
-			a.logger.Error("failed to parse user or group id", zap.Error(err))
+			utils.LogError(a.logger, err, "failed to parse user or group id")
 			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 		}
 		// Switch the user

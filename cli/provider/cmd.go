@@ -166,7 +166,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		err := cmd.MarkFlagRequired("pid")
 		if err != nil {
 			errMsg := "failed to mark pid as required flag"
-			c.logger.Error(errMsg, zap.Error(err))
+			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 	case "record", "test":
@@ -183,7 +183,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
-			c.logger.Error(errMsg, zap.Error(err))
+			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		if cmd.Name() == "test" {
@@ -202,13 +202,13 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
-			c.logger.Error(errMsg, zap.Error(err))
+			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
 		if err != nil {
 			errMsg := "failed to bind flag to config"
-			c.logger.Error(errMsg, zap.Error(err))
+			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 	default:
@@ -222,13 +222,13 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 	utils.BindFlagsToViper(c.logger, cmd, "")
 	if err != nil {
 		errMsg := "failed to bind flags to config"
-		c.logger.Error(errMsg, zap.Error(err))
+		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
-			c.logger.Error("failed to read the config path")
+			utils.LogError(c.logger, nil, "failed to read the config path")
 			return err
 		}
 		viper.SetConfigName("keploy")
@@ -237,7 +237,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		if err := viper.ReadInConfig(); err != nil {
 			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 				errMsg := "failed to read config file"
-				c.logger.Error(errMsg, zap.Error(err))
+				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
 			c.logger.Info("config file not found; proceeding with flags only")
@@ -245,7 +245,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 	}
 	if err := viper.Unmarshal(cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
-		c.logger.Error(errMsg, zap.Error(err))
+		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 	if cfg.Debug {
@@ -253,7 +253,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to change log level"
-			c.logger.Error(errMsg, zap.Error(err))
+			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 	}
@@ -263,13 +263,13 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
 		if err != nil {
 			errMsg := "failed to read the ports of outgoing calls to be ignored"
-			c.logger.Error(errMsg, zap.Error(err))
+			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		config.SetByPassPorts(cfg, bypassPorts)
 
 		if cfg.Command == "" {
-			c.logger.Error("missing required -c flag or appCmd in config file")
+			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
 			if cfg.InDocker {
 				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 			} else {
@@ -283,25 +283,25 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 				curDir, err := os.Getwd()
 				if err != nil {
 					errMsg := "failed to get current working directory"
-					c.logger.Error(errMsg, zap.Error(err))
+					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
 				if strings.Contains(cfg.Path, "..") {
 					cfg.Path, err = filepath.Abs(filepath.Clean(cfg.Path))
 					if err != nil {
 						errMsg := "failed to get the absolute path from relative path"
-						c.logger.Error(errMsg, zap.Error(err))
+						utils.LogError(c.logger, err, errMsg)
 						return errors.New(errMsg)
 					}
 					relativePath, err := filepath.Rel(curDir, cfg.Path)
 					if err != nil {
 						errMsg := "failed to get the relative path from absolute path"
-						c.logger.Error(errMsg, zap.Error(err))
+						utils.LogError(c.logger, err, errMsg)
 						return errors.New(errMsg)
 					}
 					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
 						errMsg := "path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories"
-						c.logger.Error(errMsg, zap.String("path:", cfg.Path))
+						utils.LogError(c.logger, err, errMsg, zap.String("path:", cfg.Path))
 						return errors.New(errMsg)
 					}
 				}
@@ -312,7 +312,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			}
 			if strings.Contains(cfg.Command, "--name") {
 				if cfg.ContainerName == "" {
-					c.logger.Error("Couldn't find containerName")
+					utils.LogError(c.logger, nil, "Couldn't find containerName")
 					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
@@ -328,7 +328,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		absPath, err := filepath.Abs(cfg.Path)
 		if err != nil {
 			errMsg := "failed to get the absolute path from relative path"
-			c.logger.Error(errMsg, zap.Error(err))
+			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		cfg.Path = absPath + "/keploy"
@@ -336,7 +336,7 @@ func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
 			if err != nil {
 				errMsg := "failed to get the testsets"
-				c.logger.Error(errMsg, zap.Error(err))
+				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(cfg, testSets)

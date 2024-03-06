@@ -6,6 +6,7 @@ import (
 
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
@@ -23,7 +24,7 @@ func Example(ctx context.Context, logger *zap.Logger, conf *config.Config, servi
 		RunE: func(cmd *cobra.Command, args []string) error {
 			customSetup, err := cmd.Flags().GetBool("customSetup")
 			if err != nil {
-				logger.Error("failed to read the customSetup flag")
+				utils.LogError(logger, nil, "failed to read the customSetup flag")
 				return err
 			}
 			if customSetup {

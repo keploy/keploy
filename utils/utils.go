@@ -103,6 +103,17 @@ func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentr
 	return logger
 }
 
+// LogError logs the error with the provided fields if the error is not context.Canceled.
+func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
+	if logger == nil {
+		fmt.Println("Failed to log error. Logger is nil.")
+		return
+	}
+	if !errors.Is(err, context.Canceled) {
+		logger.Error(msg, append(fields, zap.Error(err))...)
+	}
+}
+
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
 	Body    string `json:"body"`

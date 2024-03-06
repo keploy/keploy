@@ -30,7 +30,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 
 			isGenerate, err := cmd.Flags().GetBool("generate")
 			if err != nil {
-				logger.Error("Failed to get generate flag", zap.Error(err))
+				utils.LogError(logger, err, "failed to get generate flag")
 				return err
 			}
 
@@ -39,7 +39,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				if utils.CheckFileExists(filePath) {
 					override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
 					if err != nil {
-						logger.Error("Failed to ask for confirmation", zap.Error(err))
+						utils.LogError(logger, err, "failed to ask for confirmation")
 						return err
 					}
 					if !override {
@@ -48,15 +48,15 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				}
 				svc, err := servicefactory.GetService(ctx, cmd.Name(), *cfg)
 				if err != nil {
-					logger.Error("failed to get service", zap.Error(err))
+					utils.LogError(logger, err, "failed to get service")
 					return err
 				}
 				if tools, ok := svc.(toolsSvc.Service); !ok {
-					logger.Error("service doesn't satisfy tools service interface")
+					utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
 					return err
 				} else {
 					if err := tools.CreateConfig(ctx, filePath, ""); err != nil {
-						logger.Error("failed to create config", zap.Error(err))
+						utils.LogError(logger, err, "failed to create config")
 						return err
 					}
 				}
@@ -67,7 +67,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		},
 	}
 	if err := cmdConfigurator.AddFlags(cmd, cfg); err != nil {
-		logger.Error("Failed to add flags", zap.Error(err))
+		utils.LogError(logger, err, "failed to add flags")
 		return nil
 	}
 	return cmd
