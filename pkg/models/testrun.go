@@ -13,7 +13,7 @@ type TestReport struct {
 	Total   int          `json:"total" yaml:"total"`
 	Tests   []TestResult `json:"tests" yaml:"tests,omitempty"`
 	TestSet string       `json:"testSet" yaml:"test_set"`
-	ID      string       `-`
+	ID      string       `json:"id" yaml:"id, omitempty"`
 }
 
 func (tr *TestReport) GetKind() string {
