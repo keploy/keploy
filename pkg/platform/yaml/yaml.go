@@ -158,7 +158,7 @@ func ReadSessionIndices(ctx context.Context, path string, Logger *zap.Logger) ([
 	}
 
 	for _, v := range files {
-		if v.Name() != "testReports" {
+		if v.Name() != "reports" {
 			indices = append(indices, v.Name())
 		}
 	}
