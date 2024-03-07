@@ -63,7 +63,6 @@ func (r *recorder) Start(ctx context.Context) error {
 	var appErrChan = make(chan models.AppError)
 	var incomingChan <-chan *models.TestCase
 	var outgoingChan <-chan *models.Mock
-	var incomingErrChan <-chan error
 	var outgoingErrChan <-chan error
 	var insertTestErrChan = make(chan error)
 	var insertMockErrChan = make(chan error)
@@ -105,7 +104,13 @@ func (r *recorder) Start(ctx context.Context) error {
 	}
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appID, models.IncomingOptions{})
+	incomingChan, err = r.instrumentation.GetIncoming(ctx, appID, models.IncomingOptions{})
+	if err != nil {
+		stopReason = "failed to get incoming frames"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
+
 	g.Go(func() error {
 		for testCase := range incomingChan {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
@@ -179,8 +184,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		default:
 			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
-	case err = <-incomingErrChan:
-		stopReason = "error while fetching incoming frame, hence stopping keploy"
+
 	case err = <-outgoingErrChan:
 		stopReason = "error while fetching outgoing frame, hence stopping keploy"
 	case err = <-insertTestErrChan:

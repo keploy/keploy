@@ -15,7 +15,7 @@ type Hooks interface {
 	DestInfo
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
-	Record(ctx context.Context, id uint64) (<-chan *models.TestCase, <-chan error)
+	Record(ctx context.Context, id uint64) (<-chan *models.TestCase, error)
 }
 
 type HookCfg struct {

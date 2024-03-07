@@ -6,7 +6,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func (c *Core) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, <-chan error) {
+func (c *Core) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	return c.hook.Record(ctx, id)
 }
 

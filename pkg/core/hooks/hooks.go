@@ -2,7 +2,9 @@ package hooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"os"
 	"sync"
 
@@ -97,10 +99,15 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		return err
 	}
 
-	go func() {
+	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g.Go(func() error {
+		defer utils.Recover(h.logger)
 		<-ctx.Done()
-		h.unLoad(ctx)
-	}()
+		if err := h.unLoad(ctx); err != nil {
+			utils.LogError(h.logger, err, "failed to unload hooks")
+		}
+		return errors.New("failed to release ebpf resources")
+	})
 
 	if opts.IsDocker {
 		h.proxyIp = opts.KeployIPV4
@@ -474,49 +481,141 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) Record(ctx context.Context, id uint64) (<-chan *models.TestCase, <-chan error) {
+func (h *Hooks) Record(ctx context.Context, id uint64) (<-chan *models.TestCase, error) {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents)
 }
 
-func (h *Hooks) unLoad(ctx context.Context) {
+func (h *Hooks) unLoad(ctx context.Context) error {
 	// closing all events
 	//other
-	h.socket.Close()
+	err := h.socket.Close()
+	if err != nil {
+		return err
+	}
+
 	//egress
-	h.bind.Close()
-	h.udpp4.Close()
+	err = h.bind.Close()
+	if err != nil {
+		return err
+	}
+	err = h.udpp4.Close()
+	if err != nil {
+		return err
+	}
 	//ipv4
-	h.connect4.Close()
-	h.gp4.Close()
-	h.tcppv4.Close()
-	h.tcpv4.Close()
-	h.tcpv4Ret.Close()
+	err = h.connect4.Close()
+	if err != nil {
+		return err
+	}
+	err = h.gp4.Close()
+	if err != nil {
+		return err
+	}
+	err = h.tcppv4.Close()
+	if err != nil {
+		return err
+	}
+	err = h.tcpv4.Close()
+	if err != nil {
+		return err
+	}
+	err = h.tcpv4Ret.Close()
+	if err != nil {
+		return err
+	}
 	//ipv6
-	h.connect6.Close()
-	h.gp6.Close()
-	h.tcppv6.Close()
-	h.tcpv6.Close()
-	h.tcpv6Ret.Close()
+	err = h.connect6.Close()
+	if err != nil {
+		return err
+	}
+	err = h.gp6.Close()
+	if err != nil {
+		return err
+	}
+	err = h.tcppv6.Close()
+	if err != nil {
+		return err
+	}
+	err = h.tcpv6.Close()
+	if err != nil {
+		return err
+	}
+	err = h.tcpv6Ret.Close()
+	if err != nil {
+		return err
+	}
 	//ingress
-	h.accept.Close()
-	h.acceptRet.Close()
-	h.accept4.Close()
-	h.accept4Ret.Close()
-	h.close.Close()
-	h.closeRet.Close()
-	h.read.Close()
-	h.readRet.Close()
-	h.write.Close()
-	h.writeRet.Close()
-	h.writev.Close()
-	h.writevRet.Close()
-	h.sendto.Close()
-	h.sendtoRet.Close()
-	h.recvfrom.Close()
-	h.recvfromRet.Close()
-	h.objects.Close()
+	err = h.accept.Close()
+	if err != nil {
+		return err
+	}
+	err = h.acceptRet.Close()
+	if err != nil {
+		return err
+	}
+	err = h.accept4.Close()
+	if err != nil {
+		return err
+	}
+	err = h.accept4Ret.Close()
+	if err != nil {
+		return err
+	}
+	err = h.close.Close()
+	if err != nil {
+		return err
+	}
+	err = h.closeRet.Close()
+	if err != nil {
+		return err
+	}
+	err = h.read.Close()
+	if err != nil {
+		return err
+	}
+	err = h.readRet.Close()
+	if err != nil {
+		return err
+	}
+	err = h.write.Close()
+	if err != nil {
+		return err
+	}
+	err = h.writeRet.Close()
+	if err != nil {
+		return err
+	}
+	err = h.writev.Close()
+	if err != nil {
+		return err
+	}
+	err = h.writevRet.Close()
+	if err != nil {
+		return err
+	}
+	err = h.sendto.Close()
+	if err != nil {
+		return err
+	}
+	err = h.sendtoRet.Close()
+	if err != nil {
+		return err
+	}
+	err = h.recvfrom.Close()
+	if err != nil {
+		return err
+	}
+	err = h.recvfromRet.Close()
+	if err != nil {
+		return err
+	}
+	err = h.objects.Close()
+	if err != nil {
+		return err
+	}
 	h.logger.Info("eBPF resources released successfully...")
+	return nil
 }
