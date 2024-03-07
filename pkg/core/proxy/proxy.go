@@ -219,6 +219,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	depsErrChan := rule.DepsErrChan
 	var dstAddr string
 
+	// close the mock channel and depsErrChan when the context is done
+	select {
+	case <-ctx.Done():
+		close(rule.MC)
+		close(depsErrChan)
+	default:
+	}
+
 	if destInfo.Version == 4 {
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp4", destInfo.IPv4Addr), zap.Any("DestPort", destInfo.Port))
