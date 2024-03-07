@@ -46,7 +46,7 @@ func (t *Tools) Update(ctx context.Context) error {
 		return errors.New("you are using a development version of Keploy. Skipping update check")
 	}
 
-	releaseInfo, err := utils.GetLatestGitHubRelease(ctx)
+	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, t.logger)
 	if err != nil {
 		if errors.Is(err, ErrGitHubAPIUnresponsive) {
 			utils.LogError(t.logger, err, "GitHub API is unresponsive. Update process cannot continue.")

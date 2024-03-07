@@ -3,8 +3,6 @@ package utils
 import (
 	"context"
 	"os"
-	_ "os/exec"
-	_ "path/filepath"
 	"strings"
 
 	"go.keploy.io/server/v2/config"

@@ -26,7 +26,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// var ErrFileNotFound = errors.New("file Not found")
 var WarningSign = "\U000026A0"
 
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) {
@@ -211,16 +210,20 @@ func CheckFileExists(path string) bool {
 
 var Version string
 
-func attachLogFileToSentry(logFilePath string) error {
+func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error opening log file: %s", err.Error()))
+		return fmt.Errorf("Error opening log file: %s", err.Error())
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			LogError(logger, err, "Error closing log file")
+		}
+	}()
 
 	content, err := io.ReadAll(file)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error reading log file: %s", err.Error()))
+		return fmt.Errorf("Error reading log file: %s", err.Error())
 	}
 
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
@@ -239,7 +242,7 @@ func Recover(logger *zap.Logger) {
 	}
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
-		err := attachLogFileToSentry("./keploy-logs.txt")
+		err := attachLogFileToSentry(logger, "./keploy-logs.txt")
 		if err != nil {
 			LogError(logger, err, "failed to attach log file to sentry")
 		}
@@ -257,8 +260,8 @@ func Recover(logger *zap.Logger) {
 	}
 }
 
-// getLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
-func GetLatestGitHubRelease(ctx context.Context) (GitHubRelease, error) {
+// GetLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
+func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRelease, error) {
 	// GitHub repository details
 	repoOwner := "keploy"
 	repoName := "keploy"
@@ -281,7 +284,11 @@ func GetLatestGitHubRelease(ctx context.Context) (GitHubRelease, error) {
 		}
 		return GitHubRelease{}, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			LogError(logger, err, "failed to close response body")
+		}
+	}()
 
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
@@ -290,7 +297,7 @@ func GetLatestGitHubRelease(ctx context.Context) (GitHubRelease, error) {
 	return release, nil
 }
 
-// It checks if the cli is related to docker or not, it also returns if it is a docker compose file
+// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
 func FindDockerCmd(cmd string) CmdType {
 	// Convert command to lowercase for case-insensitive comparison
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
@@ -316,6 +323,7 @@ func FindDockerCmd(cmd string) CmdType {
 
 type CmdType string
 
+// CmdType constants
 const (
 	Docker        CmdType = "docker"
 	DockerCompose CmdType = "docker-compose"
@@ -344,7 +352,7 @@ type TestFlags struct {
 	NetworkName        string
 	Delay              uint64
 	BuildDelay         time.Duration
-	ApiTimeout         uint64
+	APITimeout         uint64
 	PassThroughPorts   []uint
 	ConfigPath         string
 	MongoPassword      string

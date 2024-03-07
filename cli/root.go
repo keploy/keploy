@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	_ "net/http/pprof"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli/provider"

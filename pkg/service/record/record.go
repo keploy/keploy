@@ -107,14 +107,10 @@ func (r *recorder) Start(ctx context.Context) error {
 	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appId, models.IncomingOptions{})
 	g.Go(func() error {
 		for testCase := range incomingChan {
-			testCase := testCase // capture range variable
-			g.Go(func() error {
-				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetId)
-				if err != nil {
-					insertTestErrChan <- err
-				}
-				return nil
-			})
+			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetId)
+			if err != nil {
+				insertTestErrChan <- err
+			}
 		}
 		return nil
 	})
@@ -122,14 +118,10 @@ func (r *recorder) Start(ctx context.Context) error {
 	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
 	g.Go(func() error {
 		for mock := range outgoingChan {
-			mock := mock // capture range variable
-			g.Go(func() error {
-				err := r.mockDB.InsertMock(ctx, mock, newTestSetId)
-				if err != nil {
-					insertMockErrChan <- err
-				}
-				return nil
-			})
+			err := r.mockDB.InsertMock(ctx, mock, newTestSetId)
+			if err != nil {
+				insertMockErrChan <- err
+			}
 		}
 		return nil
 	})

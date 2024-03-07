@@ -21,7 +21,7 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		Use:     "mock",
 		Short:   "Record and replay ougoung network traffic for the user application",
 		Example: `keploy mock -c "/path/to/user/app" --delay 10`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			record, err := cmd.Flags().GetBool("record")
 			if err != nil {
 				utils.LogError(logger, nil, "failed to read the record flag")
@@ -44,12 +44,14 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 					utils.LogError(logger, err, "failed to get service")
 					return err
 				}
-				if recordService, ok := svc.(recordSvc.Service); ok {
+				var recordService recordSvc.Service
+				var ok bool
+				if recordService, ok = svc.(recordSvc.Service); ok {
 					return recordService.StartMock(ctx)
-				} else {
-					utils.LogError(logger, nil, "service doesn't satisfy record service interface")
-					return err
 				}
+				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
+				return err
+
 			}
 			if replay {
 				svc, err := serviceFactory.GetService(ctx, "replay", *cfg)
@@ -57,12 +59,13 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 					utils.LogError(logger, err, "failed to get service")
 					return err
 				}
-				if replayService, ok := svc.(replaySvc.Service); ok {
+				var replayService replaySvc.Service
+				var ok bool
+				if replayService, ok = svc.(replaySvc.Service); ok {
 					return replayService.ProvideMocks(ctx)
-				} else {
-					utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
-					return err
 				}
+				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+				return err
 			}
 			return nil
 

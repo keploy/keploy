@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
 	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -20,18 +21,22 @@ func Update(ctx context.Context, logger *zap.Logger, conf *config.Config, servic
 		Use:     "update",
 		Short:   "Update Keploy ",
 		Example: "keploy tools",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "tools", *conf)
 			if err != nil {
 				return err
 			}
-			if tools, ok := svc.(toolsSvc.Service); !ok {
+			var tools toolsSvc.Service
+			var ok bool
+			if tools, ok = svc.(toolsSvc.Service); !ok {
 				return fmt.Errorf("svc is not of type tools")
-			} else {
-				return tools.Update(ctx)
 			}
+			return tools.Update(ctx)
 		},
 	}
-	cmdConfigurator.AddFlags(updateCmd, conf)
+	if err := cmdConfigurator.AddFlags(updateCmd, conf); err != nil {
+		utils.LogError(logger, err, "failed to add update cmd flags")
+		return nil
+	}
 	return updateCmd
 }

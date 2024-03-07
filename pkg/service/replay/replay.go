@@ -485,7 +485,7 @@ func (r *replayer) SimulateRequest(ctx context.Context, appId uint64, tc *models
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
 		}
 		r.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
-		resp, err := pkg.SimulateHttp(ctx, *tc, testSetId, r.logger, r.config.Test.ApiTimeout)
+		resp, err := pkg.SimulateHttp(ctx, *tc, testSetId, r.logger, r.config.Test.APITimeout)
 		r.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 		r.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
 		return resp, err

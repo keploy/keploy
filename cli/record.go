@@ -19,25 +19,27 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		Use:     "record",
 		Short:   "record the keploy testcases from the API calls",
 		Example: `keploy record -c "/path/to/user/app"`,
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.ValidateFlags(ctx, cmd, cfg)
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
 			}
-			if record, ok := svc.(recordSvc.Service); !ok {
+			var record recordSvc.Service
+			var ok bool
+			if record, ok = svc.(recordSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
 				return nil
-			} else {
-				err := record.Start(ctx)
-				if err != nil {
-					utils.LogError(logger, err, "failed to start recording")
-					return nil
-				}
 			}
+			err = record.Start(ctx)
+			if err != nil {
+				utils.LogError(logger, err, "failed to start recording")
+				return nil
+			}
+
 			return nil
 		},
 	}

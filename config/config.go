@@ -1,3 +1,4 @@
+// Package config provides configuration structures for the application.
 package config
 
 import "time"
@@ -6,7 +7,7 @@ type Config struct {
 	Path            string        `json:"path" yaml:"path" mapstructure:"path" `
 	Command         string        `json:"command" yaml:"command" mapstructure:"command"`
 	Port            uint32        `json:"port" yaml:"port" mapstructure:"port"`
-	DnsPort         uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	DNSPort         uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort       uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug           bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele     bool          `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
@@ -35,7 +36,7 @@ type BypassRule struct {
 
 type Filter struct {
 	BypassRule `mapstructure:",squash"`
-	UrlMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
+	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
 	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
 }
 
@@ -43,7 +44,7 @@ type Test struct {
 	SelectedTests      map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	Delay              uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	ApiTimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	Coverage           bool                `json:"coverage" yaml:"coverage" mapstructure:"coverage"`                                // boolean to capture the coverage in test
 	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath " mapstructure:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering     bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`

@@ -1,3 +1,4 @@
+// Package cli provides functionality for the command-line interface of the application.
 package cli
 
 import (

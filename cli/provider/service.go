@@ -21,27 +21,27 @@ import (
 	"go.uber.org/zap"
 )
 
-type serviceProvider struct {
+type ServiceProvider struct {
 	logger   *zap.Logger
 	configDb *configdb.ConfigDb
 }
 
-type commonInternalService struct {
+type CommonInternalService struct {
 	YamlTestDB      *testdb.TestYaml
 	YamlMockDb      *mockdb.MockYaml
 	YamlReportDb    *reportdb.TestReport
 	Instrumentation *core.Core
 }
 
-func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb) *serviceProvider {
-	return &serviceProvider{
+func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb) *ServiceProvider {
+	return &ServiceProvider{
 		logger:   logger,
 		configDb: configDb,
 	}
 }
 
-func (n *serviceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
-	installtionId, err := n.configDb.GetInstallationId(ctx)
+func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
+	installtionID, err := n.configDb.GetInstallationId(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
 	}
@@ -49,19 +49,19 @@ func (n *serviceProvider) GetTelemetryService(ctx context.Context, config config
 		Enabled:        config.DisableTele,
 		Version:        utils.Version,
 		GlobalMap:      map[string]interface{}{},
-		InstallationID: installtionId,
+		InstallationID: installtionID,
 	},
 	), nil
 }
 
-func (n *serviceProvider) GetCommonServices(config config.Config) *commonInternalService {
+func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInternalService {
 	h := hooks.NewHooks(n.logger, config)
 	p := proxy.New(n.logger, h, config)
 	instrumentation := core.New(n.logger, h, p)
 	testDB := testdb.New(n.logger, config.Path)
 	mockDB := mockdb.New(n.logger, config.Path, "")
 	reportDB := reportdb.New(n.logger, config.Path+"/reports")
-	return &commonInternalService{
+	return &CommonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
 		YamlMockDb:      mockDB,
@@ -69,7 +69,7 @@ func (n *serviceProvider) GetCommonServices(config config.Config) *commonInterna
 	}
 }
 
-func (n *serviceProvider) GetService(ctx context.Context, cmd string, config config.Config) (interface{}, error) {
+func (n *ServiceProvider) GetService(ctx context.Context, cmd string, config config.Config) (interface{}, error) {
 	tel, err := n.GetTelemetryService(ctx, config)
 	if err != nil {
 		return nil, err

@@ -27,7 +27,7 @@ func NewHooks(logger *zap.Logger, cfg config.Config) *Hooks {
 		m:         sync.Mutex{},
 		proxyIp:   "127.0.0.1",
 		proxyPort: cfg.ProxyPort,
-		dnsPort:   cfg.DnsPort,
+		dnsPort:   cfg.DNSPort,
 	}
 }
 

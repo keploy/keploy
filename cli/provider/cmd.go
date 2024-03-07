@@ -1,3 +1,4 @@
+// Package provider provides functionality for the keploy provider.\
 package provider
 
 import (
@@ -139,17 +140,17 @@ var RootExamples = `
 
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 
-type cmdConfigurator struct {
+type CmdConfigurator struct {
 	logger *zap.Logger
 }
 
-func NewCmdConfigurator(logger *zap.Logger) *cmdConfigurator {
-	return &cmdConfigurator{
+func NewCmdConfigurator(logger *zap.Logger) *CmdConfigurator {
+	return &CmdConfigurator{
 		logger: logger,
 	}
 }
 
-func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error {
+func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error {
 	var err error
 	switch cmd.Name() {
 	case "update":
@@ -174,7 +175,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
-		cmd.Flags().Uint32("dnsPort", cfg.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+		cmd.Flags().Uint32("dnsPort", cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", cfg.Command, "Command to start the user application")
 		cmd.Flags().DurationP("buildDelay", "b", cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", cfg.ContainerName, "Name of the application's docker container")
@@ -189,7 +190,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 		if cmd.Name() == "test" {
 			cmd.Flags().StringSliceP("testsets", "t", utils.Keys(cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
-			cmd.Flags().Uint64("apiTimeout", cfg.Test.ApiTimeout, "User provided timeout for calling its application")
+			cmd.Flags().Uint64("apiTimeout", cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongoPassword", cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverageReportPath", cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
 			cmd.Flags().StringP("language", "l", cfg.Test.Language, "application programming language")
@@ -219,7 +220,7 @@ func (c *cmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 	return nil
 }
 
-func (c cmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
+func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
 	err := viper.BindPFlags(cmd.Flags())
 	utils.BindFlagsToViper(c.logger, cmd, "")
 	if err != nil {

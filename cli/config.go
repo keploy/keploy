@@ -23,10 +23,10 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		Use:     "config",
 		Short:   "manage keploy configuration file",
 		Example: "keploy config --generate --path /path/to/localdir",
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.ValidateFlags(ctx, cmd, cfg)
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 
 			isGenerate, err := cmd.Flags().GetBool("generate")
 			if err != nil {
@@ -51,19 +51,19 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 					utils.LogError(logger, err, "failed to get service")
 					return err
 				}
-				if tools, ok := svc.(toolsSvc.Service); !ok {
+				var tools toolsSvc.Service
+				var ok bool
+				if tools, ok = svc.(toolsSvc.Service); !ok {
 					utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
 					return err
-				} else {
-					if err := tools.CreateConfig(ctx, filePath, ""); err != nil {
-						utils.LogError(logger, err, "failed to create config")
-						return err
-					}
+				}
+				if err := tools.CreateConfig(ctx, filePath, ""); err != nil {
+					utils.LogError(logger, err, "failed to create config")
+					return err
 				}
 				return nil
-			} else {
-				return errors.New("only generate flag is supported in the config command")
 			}
+			return errors.New("only generate flag is supported in the config command")
 		},
 	}
 	if err := cmdConfigurator.AddFlags(cmd, cfg); err != nil {
