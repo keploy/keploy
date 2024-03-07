@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{reqBuf}
 	var readRequestDelay time.Duration
@@ -183,9 +183,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 							utils.LogError(logger, err, "failed to encode the recorded OpReply yaml", zap.Any("for request with id", responseTo))
 							return err
 						}
-						requestId := wiremessage.NextRequestID()
-						heathCheckReplyBuffer := replyMessage.Encode(responseTo, requestId)
-						responseTo = requestId
+						requestID := wiremessage.NextRequestID()
+						heathCheckReplyBuffer := replyMessage.Encode(responseTo, requestID)
+						responseTo = requestID
 						logger.Debug(fmt.Sprintf("the bufffer response is: %v", string(heathCheckReplyBuffer)))
 						_, err = clientConn.Write(heathCheckReplyBuffer)
 						if err != nil {
@@ -208,16 +208,16 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 							// the first response wiremessage have
 							for {
 								time.Sleep(time.Duration(mongoResponse.ReadDelay))
-								// generate requestId for the mongo wiremessage
-								requestId := wiremessage.NextRequestID()
-								_, err := clientConn.Write(message.Encode(responseTo, requestId))
+								// generate requestID for the mongo wiremessage
+								requestID := wiremessage.NextRequestID()
+								_, err := clientConn.Write(message.Encode(responseTo, requestID))
 								logger.Debug("the response lifecycle ended.")
 								if err != nil {
 									utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
 									return err
 								}
 								// the 'responseTo' field of response wiremessage is set to requestId of currently sent wiremessage
-								responseTo = requestId
+								responseTo = requestID
 							}
 						} else {
 							_, err := clientConn.Write(message.Encode(responseTo, wiremessage.NextRequestID()))
@@ -264,13 +264,13 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 						return err
 					}
-					requestId := wiremessage.NextRequestID()
-					_, err = clientConn.Write(message.Encode(responseTo, requestId))
+					requestID := wiremessage.NextRequestID()
+					_, err = clientConn.Write(message.Encode(responseTo, requestID))
 					if err != nil {
 						utils.LogError(logger, err, "failed to write the health check opmsg to mongo client", zap.Any("for request with id", responseTo))
 						return err
 					}
-					responseTo = requestId
+					responseTo = requestID
 				}
 			}
 			logger.Debug("the length of the requestBuffer after matching: " + strconv.Itoa(len(reqBuf)) + strconv.Itoa(len(requestBuffers[0])))

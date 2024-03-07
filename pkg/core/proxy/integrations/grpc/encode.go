@@ -10,7 +10,7 @@ import (
 	"sync"
 )
 
-func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()

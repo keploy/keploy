@@ -35,7 +35,7 @@ func NewMongo(logger *zap.Logger) integrations.Integrations {
 
 // MatchType determines if the outgoing network call is Mongo by comparing the
 // message format with that of a mongo wire message.
-func (m *Mongo) MatchType(ctx context.Context, buffer []byte) bool {
+func (m *Mongo) MatchType(_ context.Context, buffer []byte) bool {
 	if len(buffer) < 4 {
 		return false
 	}
@@ -76,7 +76,7 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	return nil
 }
 
-func recordMessage(ctx context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, reqTimestampMock time.Time, mocks chan<- *models.Mock) {
+func recordMessage(_ context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, reqTimestampMock time.Time, mocks chan<- *models.Mock) {
 	// capture if the wiremessage is a mongo operation call
 
 	shouldRecordCalls := true

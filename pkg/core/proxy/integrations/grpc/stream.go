@@ -103,7 +103,7 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	sic.StreamInfo[streamID] = info
 }
 
-func (sic *StreamInfoCollection) PersistMockForStream(ctx context.Context, streamID uint32, mocks chan<- *models.Mock) {
+func (sic *StreamInfoCollection) PersistMockForStream(_ context.Context, streamID uint32, mocks chan<- *models.Mock) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 	grpcReq := sic.StreamInfo[streamID].GrpcReq

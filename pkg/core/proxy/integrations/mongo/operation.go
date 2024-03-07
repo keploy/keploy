@@ -32,7 +32,7 @@ type TransactionDetails struct {
 type Operation interface {
 	fmt.Stringer
 	OpCode() wiremessage.OpCode
-	Encode(responseTo, requestId int32) []byte
+	Encode(responseTo, requestID int32) []byte
 	IsIsMaster() bool
 	IsIsAdminDB() bool
 	CursorID() (cursorID int64, ok bool)
@@ -156,7 +156,7 @@ func (o *opUnknown) OpCode() wiremessage.OpCode {
 	return o.opCode
 }
 
-func (o *opUnknown) Encode(responseTo, requestId int32) []byte {
+func (o *opUnknown) Encode(_, _ int32) []byte {
 	return o.wm
 }
 
@@ -254,7 +254,7 @@ func (q *opQuery) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation_legacy.go#L179-L189
-func (q *opQuery) Encode(responseTo, requestId int32) []byte {
+func (q *opQuery) Encode(responseTo, _ int32) []byte {
 	var buffer []byte
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, 0, responseTo, wiremessage.OpQuery)
 	buffer = wiremessage.AppendQueryFlags(buffer, q.flags)
@@ -588,11 +588,11 @@ func (m *opMsg) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L898-L904
-func (m *opMsg) Encode(responseTo, requestId int32) []byte {
+func (m *opMsg) Encode(responseTo, requestID int32) []byte {
 	var buffer []byte
 	lOgger.Debug(fmt.Sprintf("the responseTo for the OpMsg: %v, for requestId: %v", responseTo, wiremessage.NextRequestID()))
 
-	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestId, responseTo, wiremessage.OpMsg)
+	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestID, responseTo, wiremessage.OpMsg)
 	buffer = wiremessage.AppendMsgFlags(buffer, m.flags)
 	for _, section := range m.sections {
 		buffer = section.append(buffer)
@@ -807,9 +807,9 @@ func (r *opReply) OpCode() wiremessage.OpCode {
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/drivertest/channel_conn.go#L73-L82
-func (r *opReply) Encode(responseTo, requestId int32) []byte {
+func (r *opReply) Encode(responseTo, requestID int32) []byte {
 	var buffer []byte
-	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestId, responseTo, wiremessage.OpReply)
+	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestID, responseTo, wiremessage.OpReply)
 	buffer = wiremessage.AppendReplyFlags(buffer, r.flags)
 	buffer = wiremessage.AppendReplyCursorID(buffer, r.cursorID)
 	buffer = wiremessage.AppendReplyStartingFrom(buffer, r.startingFrom)

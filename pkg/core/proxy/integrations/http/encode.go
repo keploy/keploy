@@ -14,8 +14,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// encodeHttp function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+// encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
+func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
@@ -121,23 +121,22 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 						}
 
 						// saving last request/response on this conn.
-						m := &finalHttp{
+						m := &finalHTTP{
 							req:              finalReq,
 							resp:             resp,
 							reqTimestampMock: reqTimestampMock,
 							resTimestampMock: resTimestampMock,
 						}
-						err := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
+						err := ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
 						if err != nil {
 							utils.LogError(logger, err, "failed to parse the final http request and response")
 							return err
 						}
 					}
 					break
-				} else {
-					utils.LogError(logger, err, "failed to read the response message from the destination server")
-					return err
 				}
+				utils.LogError(logger, err, "failed to read the response message from the destination server")
+				return err
 			}
 
 			// Capturing the response timestamp
@@ -158,34 +157,33 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if err == io.EOF {
 					logger.Debug("conn closed by the server", zap.Error(err))
 					//check if before EOF complete response came, and try to parse it.
-					m := &finalHttp{
+					m := &finalHTTP{
 						req:              finalReq,
 						resp:             finalResp,
 						reqTimestampMock: reqTimestampMock,
 						resTimestampMock: resTimestampMock,
 					}
-					parseErr := ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
+					parseErr := ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
 					if parseErr != nil {
 						utils.LogError(logger, parseErr, "failed to parse the final http request and response")
 						return parseErr
 					}
 					return nil
-				} else {
-					utils.LogError(logger, err, "failed to handle chunk response")
-					return err
 				}
+				utils.LogError(logger, err, "failed to handle chunk response")
+				return err
 			}
 
 			logger.Debug("This is the final response: " + string(finalResp))
 
-			m := &finalHttp{
+			m := &finalHTTP{
 				req:              finalReq,
 				resp:             finalResp,
 				reqTimestampMock: reqTimestampMock,
 				resTimestampMock: resTimestampMock,
 			}
 
-			err = ParseFinalHttp(ctx, logger, m, destPort, mocks, opts)
+			err = ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
 			if err != nil {
 				utils.LogError(logger, err, "failed to parse the final http request and response")
 				return err
@@ -211,5 +209,4 @@ func encodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			}
 		}
 	}
-	return nil
 }

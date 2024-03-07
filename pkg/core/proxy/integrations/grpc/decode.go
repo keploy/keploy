@@ -1,3 +1,4 @@
+// Package grpc provides functionality for integrating with gRPC outgoing calls.
 package grpc
 
 import (
@@ -11,7 +12,7 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func decodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeGrpc(ctx context.Context, logger *zap.Logger, _ []byte, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	framer := http2.NewFramer(clientConn, clientConn)
 	srv := NewTranscoder(logger, framer, mockDb)
 	// fake server in the test mode

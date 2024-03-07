@@ -1,3 +1,4 @@
+// Package mongo provides functionality for working with MongoDB outgoing calls.
 package mongo
 
 import (
@@ -6,6 +7,7 @@ import (
 
 type Command string
 
+// constants for all the commands that can be proxied
 const (
 	Unknown           Command = "unknown"
 	AbortTransaction  Command = "abortTransaction"

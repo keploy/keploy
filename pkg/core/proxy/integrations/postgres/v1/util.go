@@ -3,12 +3,9 @@ package v1
 import (
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.uber.org/zap"
 )
 
 func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
@@ -287,81 +284,4 @@ func postgresDecoderBackend(request models.Backend) ([]byte, error) {
 		reqbuffer = append(reqbuffer, encoded...)
 	}
 	return reqbuffer, nil
-}
-
-func checkValidEncode(logger *zap.Logger, filteredMocks []*models.Mock, mockDb integrations.MockMemDb) {
-	for _, mock := range filteredMocks {
-		for _, reqBuff := range mock.Spec.PostgresRequests {
-			encode, err := postgresDecoderBackend(reqBuff)
-			if err != nil {
-				logger.Debug("Error in decoding")
-			}
-			actual_encode, err := util.DecodeBase64(reqBuff.Payload)
-			if err != nil {
-				logger.Debug("Error in decoding")
-			}
-
-			if len(encode) != len(actual_encode) {
-				logger.Debug("Not Equal Length of buffer in request", zap.Any("payload", reqBuff.Payload))
-				logger.Debug("Length of encode", zap.Int("length", len(encode)), zap.Int("length", len(actual_encode)))
-				logger.Debug("Encode via readable", zap.Any("encode", encode))
-				logger.Debug("Actual Encode", zap.Any("actual_encode", actual_encode))
-				logger.Debug("Payload", zap.Any("payload", reqBuff.Payload))
-				continue
-			}
-			logger.Debug("Matched")
-
-		}
-		for _, resBuff := range mock.Spec.PostgresResponses {
-			encode, err := postgresDecoderFrontend(resBuff)
-			if err != nil {
-				logger.Debug("Error in decoding")
-			}
-			actual_encode, err := util.DecodeBase64(resBuff.Payload)
-			if err != nil {
-				logger.Debug("Error in decoding")
-			}
-			if len(encode) != len(actual_encode) {
-				logger.Debug("Not Equal Length of buffer in response")
-				logger.Debug("Length of encode", zap.Any("length", len(encode)), zap.Any("length", len(actual_encode)))
-				logger.Debug("Encode via readable", zap.Any("encode", encode))
-				logger.Debug("Actual Encode", zap.Any("actual_encode", actual_encode))
-				logger.Debug("Payload", zap.Any("payload", resBuff.Payload))
-				continue
-			}
-			logger.Debug("Matched")
-		}
-	}
-
-	//TODO: SetFilteredMocks is not available in MockMemDb
-	//mockdb.SetFilteredMocks(filteredMocks)
-	//h.SetTcsMocks(tcsMocks)
-}
-
-func isBeginOnlyQuery(logger *zap.Logger, reqBuf []byte, expectedPgReq *models.Backend) (*models.Backend, bool) {
-	actualreq := decodePgRequest(logger, reqBuf)
-	if actualreq == nil {
-		return nil, false
-	}
-	actualPgReq := *actualreq
-
-	if len(actualPgReq.Parses) > 0 && len(expectedPgReq.Parses) > 0 && len(expectedPgReq.Parses) == len(actualPgReq.Parses) {
-
-		if expectedPgReq.Parses[0].Query == "BEGIN READ ONLY" || expectedPgReq.Parses[0].Query == "BEGIN" {
-			expectedPgReq.Parses = expectedPgReq.Parses[1:]
-			if expectedPgReq.PacketTypes[0] == "P" {
-				expectedPgReq.PacketTypes = expectedPgReq.PacketTypes[1:]
-			}
-		}
-
-		if actualPgReq.Parses[0].Query == "BEGIN READ ONLY" || actualPgReq.Parses[0].Query == "BEGIN" {
-			actualPgReq.Parses = actualPgReq.Parses[1:]
-			if actualPgReq.PacketTypes[0] == "P" {
-				actualPgReq.PacketTypes = actualPgReq.PacketTypes[1:]
-			}
-		}
-		return &actualPgReq, true
-	}
-
-	return nil, false
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/models"
@@ -151,7 +150,7 @@ func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBod
 
 	err := msg.Decode(msgBody[5:])
 	if err != nil {
-		utils.LogError(logger, err, "Error from decoding request message ..")	
+		utils.LogError(logger, err, "Error from decoding request message")
 	}
 
 	bits := msg.Encode([]byte{})
@@ -171,7 +170,8 @@ const (
 	gssEncReqNumber     = 80877104
 )
 
-const ProtocolVersionNumber uint32 = 196608 // Replace with actual version number if different
+// ProtocolVersionNumber Replace with actual version number if different
+const ProtocolVersionNumber uint32 = 196608
 
 func (b *BackendWrapper) decodeStartupMessage(buf []byte) (pgproto3.FrontendMessage, error) {
 
@@ -224,6 +224,7 @@ func (b *BackendWrapper) decodeStartupMessage(buf []byte) (pgproto3.FrontendMess
 	}
 }
 
+// constants for the authentication message types
 const (
 	AuthTypeOk                = 0
 	AuthTypeCleartextPassword = 3
@@ -309,29 +310,4 @@ func isStartupPacket(packet []byte) bool {
 	protocolVersion := binary.BigEndian.Uint32(packet[4:8])
 	// printStartupPacketDetails(packet)
 	return protocolVersion == 196608 // 3.0 in PostgreSQL
-}
-
-func isRegularPacket(packet []byte) bool {
-	messageType := packet[0]
-	return messageType == 'Q' || messageType == 'P' || messageType == 'D' || messageType == 'C' || messageType == 'E'
-}
-
-func checkScram(logger *zap.Logger, encoded []byte) bool {
-	// encoded, err := PostgresDecoder(packet)
-
-	// check if payload contains SCRAM-SHA-256
-	messageType := encoded[0]
-	logger.Debug("Message Type: %c\n", zap.String("messageType", string(messageType)))
-	if messageType == 'N' {
-		return false
-	}
-	// Print the message payload (for simplicity, the payload is printed as a string)
-	payload := string(encoded[5:])
-	if messageType == 'R' {
-		if strings.Contains(payload, "SCRAM-SHA") {
-			logger.Debug("scram packet")
-			return true
-		}
-	}
-	return false
 }

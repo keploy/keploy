@@ -9,14 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-)
 
-const mockTable string = "mock"
-const configMockTable string = "configMock"
-const mockTableIndex string = "id"
-const configMockTableIndex string = "id"
-const mockTableIndexField string = "Id"
-const configMockTableIndexField string = "Id"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
+)
 
 // IPv4ToUint32 converts a string representation of an IPv4 address to a 32-bit integer.
 func IPv4ToUint32(ipStr string) (uint32, error) {
@@ -25,22 +21,25 @@ func IPv4ToUint32(ipStr string) (uint32, error) {
 		ipAddr = ipAddr.To4()
 		if ipAddr != nil {
 			return binary.BigEndian.Uint32(ipAddr), nil
-		} else {
-			return 0, errors.New("not a valid IPv4 address")
 		}
-	} else {
-		return 0, errors.New("failed to parse IP address")
+		return 0, errors.New("not a valid IPv4 address")
 	}
+	return 0, errors.New("failed to parse IP address")
 }
 
 // detectCgroupPath returns the first-found mount point of type cgroup2
 // and stores it in the cgroupPath global variable.
-func detectCgroupPath() (string, error) {
+func detectCgroupPath(logger *zap.Logger) (string, error) {
 	f, err := os.Open("/proc/mounts")
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() {
+		err := f.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close /proc/mounts file")
+		}
+	}()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

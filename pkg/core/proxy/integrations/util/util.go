@@ -1,3 +1,4 @@
+// Package util provides utility functions for the integration package.
 package util
 
 import (
@@ -5,7 +6,7 @@ import (
 	"unicode"
 )
 
-func IsAsciiPrintable(s string) bool {
+func IsASCIIPrintable(s string) bool {
 	for _, r := range s {
 		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
 			return false

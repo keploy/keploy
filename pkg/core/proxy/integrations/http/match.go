@@ -33,7 +33,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					isMockBodyJSON := isJSON([]byte(mock.Spec.HTTPReq.Body))
 
 					//the body of mock and request aren't of same type
-					if isMockBodyJSON != matchParams.reqBodyIsJson {
+					if isMockBodyJSON != matchParams.reqBodyIsJSON {
 						continue
 					}
 
@@ -107,11 +107,11 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	return true
 }
 
-func findStringMatch(req string, mockString []string) int {
+func findStringMatch(_ string, mockString []string) int {
 	minDist := int(^uint(0) >> 1) // Initialize with max int value
 	bestMatch := -1
 	for idx, req := range mockString {
-		if !util.IsAsciiPrintable(mockString[idx]) {
+		if !util.IsASCIIPrintable(mockString[idx]) {
 			continue
 		}
 
@@ -176,7 +176,7 @@ func fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 		mockString[i] = tcsMocks[i].Spec.HTTPReq.Body
 	}
 	// find the closest match
-	if util.IsAsciiPrintable(string(reqBuff)) {
+	if util.IsASCIIPrintable(string(reqBuff)) {
 		idx := findStringMatch(string(reqBuff), mockString)
 		if idx != -1 {
 			return true, tcsMocks[idx]

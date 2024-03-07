@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
@@ -115,9 +115,6 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						Metadata:          metadata,
 					},
 				}
-
-				pgRequests = []models.Backend{}
-				pgResponses = []models.Frontend{}
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
@@ -193,7 +190,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						i += 5 + pg.BackendWrapper.BodyLen
 					}
 
-					pg_mock := &models.Backend{
+					pgMock := &models.Backend{
 						PacketTypes: pg.BackendWrapper.PacketTypes,
 						Identfier:   "ClientRequest",
 						Length:      uint32(len(reqBuf)),
@@ -224,25 +221,25 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						MsgType:             pg.BackendWrapper.MsgType,
 						AuthType:            pg.BackendWrapper.AuthType,
 					}
-					after_encoded, err := postgresDecoderBackend(*pg_mock)
+					afterEncoded, err := postgresDecoderBackend(*pgMock)
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
 
-					if len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "p" {
-						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
-						pg_mock.Payload = bufStr
+					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "p" {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
+						pgMock.Payload = bufStr
 					}
-					pgRequests = append(pgRequests, *pg_mock)
+					pgRequests = append(pgRequests, *pgMock)
 
 				}
 
 				if isStartupPacket(buffer) {
-					pg_mock := &models.Backend{
+					pgMock := &models.Backend{
 						Identfier: "StartupRequest",
 						Payload:   bufStr,
 					}
-					pgRequests = append(pgRequests, *pg_mock)
+					pgRequests = append(pgRequests, *pgMock)
 				}
 			}
 			prevChunkWasReq = true
@@ -310,7 +307,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					}
 
 					// from here take the msg and append its readable form to the pgResponses
-					pg_mock := &models.Frontend{
+					pgMock := &models.Frontend{
 						PacketTypes: pg.FrontendWrapper.PacketTypes,
 						Identfier:   "ServerResponse",
 						Length:      uint32(len(reqBuf)),
@@ -350,23 +347,23 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						AuthType:                        pg.FrontendWrapper.AuthType,
 					}
 
-					after_encoded, err := postgresDecoderFrontend(*pg_mock)
+					afterEncoded, err := postgresDecoderFrontend(*pgMock)
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
-					if (len(after_encoded) != len(buffer) && pg_mock.PacketTypes[0] != "R") || len(pg_mock.DataRows) > 0 {
-						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(after_encoded)), zap.Any("buffer", len(buffer)))
-						pg_mock.Payload = bufStr
+					if (len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "R") || len(pgMock.DataRows) > 0 {
+						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
+						pgMock.Payload = bufStr
 					}
-					pgResponses = append(pgResponses, *pg_mock)
+					pgResponses = append(pgResponses, *pgMock)
 				}
 
 				if bufStr == "Tg==" || len(buffer) <= 5 {
 
-					pg_mock := &models.Frontend{
+					pgMock := &models.Frontend{
 						Payload: bufStr,
 					}
-					pgResponses = append(pgResponses, *pg_mock)
+					pgResponses = append(pgResponses, *pgMock)
 				}
 			}
 

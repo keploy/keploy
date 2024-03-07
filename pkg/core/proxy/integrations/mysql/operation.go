@@ -6,24 +6,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 
-// common
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
 	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
 }
 
-type MySQLPacketHeader struct {
+type CustomPacketHeader struct {
 	PayloadLength uint32 `yaml:"payload_length"` // MySQL packet payload length
 	SequenceID    uint8  `yaml:"sequence_id"`    // MySQL packet sequence ID
 }
 
-type MySQLPacket struct {
-	Header  MySQLPacketHeader `yaml:"header"`
-	Payload []byte            `yaml:"payload"`
+type CustomPacket struct {
+	Header  CustomPacketHeader `yaml:"header"`
+	Payload []byte             `yaml:"payload"`
 }
 
 type ColumnDefinition struct {
@@ -124,12 +124,11 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		binary.LittleEndian.PutUint32(header, uint32(len(data)))
 		header[3] = byte(sequence)
 		return append(header, data...), nil
-	} else {
-		return data, nil
 	}
+	return data, nil
 }
 
-func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPacketHeader, interface{}, error) {
+func DecodeMySQLPacket(logger *zap.Logger, packet CustomPacket) (string, CustomPacketHeader, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
 	var packetData interface{}
@@ -137,7 +136,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPac
 	var err error
 
 	if len(data) < 1 {
-		return "", MySQLPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
+		return "", CustomPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
 	}
 
 	switch {
@@ -265,7 +264,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPac
 	}
 
 	if err != nil {
-		return "", MySQLPacketHeader{}, nil, err
+		return "", CustomPacketHeader{}, nil, err
 	}
 	if models.GetMode() != "test" {
 		logger.Debug("Packet Info",
@@ -282,7 +281,7 @@ func isLengthEncodedInteger(b byte) bool {
 	return b != 0x00 && b != 0xFF
 }
 
-func (p *MySQLPacket) Encode() ([]byte, error) {
+func (p *CustomPacket) Encode() ([]byte, error) {
 	packet := make([]byte, 4)
 
 	binary.LittleEndian.PutUint32(packet[:3], p.Header.PayloadLength)
@@ -295,8 +294,8 @@ func (p *MySQLPacket) Encode() ([]byte, error) {
 			"command": "COM_QUERY",
 			"query":   query,
 		}
-		queryJson, _ := json.Marshal(queryObj)
-		packet = append(packet, queryJson...)
+		queryJSON, _ := json.Marshal(queryObj)
+		packet = append(packet, queryJSON...)
 	}
 
 	return packet, nil
@@ -320,29 +319,36 @@ func encodeLengthEncodedInteger(n uint64) []byte {
 	return buf
 }
 
-func writeLengthEncodedString(buf *bytes.Buffer, s string) {
+func writeLengthEncodedString(buf *bytes.Buffer, s string) error {
 	length := len(s)
 	switch {
 	case length <= 250:
 		buf.WriteByte(byte(length))
 	case length <= 0xFFFF:
 		buf.WriteByte(0xFC)
-		binary.Write(buf, binary.LittleEndian, uint16(length))
+		if err := binary.Write(buf, binary.LittleEndian, uint16(length)); err != nil {
+			return err
+		}
 	case length <= 0xFFFFFF:
 		buf.WriteByte(0xFD)
-		binary.Write(buf, binary.LittleEndian, uint32(length)&0xFFFFFF)
+		if err := binary.Write(buf, binary.LittleEndian, uint32(length)&0xFFFFFF); err != nil {
+			return err
+		}
 	default:
 		buf.WriteByte(0xFE)
-		binary.Write(buf, binary.LittleEndian, uint64(length))
+		if err := binary.Write(buf, binary.LittleEndian, uint64(length)); err != nil {
+			return err
+		}
 	}
 	buf.WriteString(s)
+	return nil
 }
 
-func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) {
+func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) error {
 	if val == nil {
 		// Write 0xFB to represent NULL
 		buf.WriteByte(0xFB)
-		return
+		return nil
 	}
 
 	switch {
@@ -350,45 +356,21 @@ func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) {
 		buf.WriteByte(byte(*val))
 	case *val <= 0xFFFF:
 		buf.WriteByte(0xFC)
-		binary.Write(buf, binary.LittleEndian, uint16(*val))
+		if err := binary.Write(buf, binary.LittleEndian, uint16(*val)); err != nil {
+			return err
+		}
 	case *val <= 0xFFFFFF:
 		buf.WriteByte(0xFD)
-		binary.Write(buf, binary.LittleEndian, uint32(*val)&0xFFFFFF)
+		if err := binary.Write(buf, binary.LittleEndian, uint32(*val)&0xFFFFFF); err != nil {
+			return err
+		}
 	default:
 		buf.WriteByte(0xFE)
-		binary.Write(buf, binary.LittleEndian, *val)
+		if err := binary.Write(buf, binary.LittleEndian, *val); err != nil {
+			return err
+		}
 	}
-}
-
-func writeLengthEncodedIntegers(buf *bytes.Buffer, value *uint64) {
-	if value == nil {
-		// Write 0xFB to represent NULL
-		buf.WriteByte(0xFB)
-		return
-	}
-
-	if *value <= 250 {
-		buf.WriteByte(byte(*value))
-	} else if *value <= 0xffff {
-		buf.WriteByte(0xfc)
-		buf.WriteByte(byte(*value))
-		buf.WriteByte(byte(*value >> 8))
-	} else if *value <= 0xffffff {
-		buf.WriteByte(0xfd)
-		buf.WriteByte(byte(*value))
-		buf.WriteByte(byte(*value >> 8))
-		buf.WriteByte(byte(*value >> 16))
-	} else {
-		buf.WriteByte(0xfe)
-		binary.Write(buf, binary.LittleEndian, *value)
-	}
-}
-
-func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
-	data := []byte(value)
-	length := uint64(len(data))
-	writeLengthEncodedIntegers(buf, &length)
-	buf.Write(data)
+	return nil
 }
 
 func readLengthEncodedString(data []byte, offset *int) (string, error) {
@@ -435,17 +417,8 @@ func ReadLengthEncodedIntegers(data []byte, offset int) (uint64, int) {
 		return uint64(binary.LittleEndian.Uint16(data[offset+1 : offset+3])), offset + 3
 	} else if data[offset] == 0xfd {
 		return uint64(data[offset+1]) | uint64(data[offset+2])<<8 | uint64(data[offset+3])<<16, offset + 4
-	} else {
-		return binary.LittleEndian.Uint64(data[offset+1 : offset+9]), offset + 9
 	}
-}
-
-func nullTerminatedString(data []byte) (string, int, error) {
-	pos := bytes.IndexByte(data, 0)
-	if pos == -1 {
-		return "", 0, errors.New("null-terminated string not found")
-	}
-	return string(data[:pos]), pos, nil
+	return binary.LittleEndian.Uint64(data[offset+1 : offset+9]), offset + 9
 }
 
 func readLengthEncodedInteger(b []byte) (uint64, bool, int) {
@@ -467,31 +440,6 @@ func readLengthEncodedInteger(b []byte) (uint64, bool, int) {
 	default:
 		return uint64(b[0]), false, 1
 	}
-}
-
-func readLengthEncodedStringUpdated(data []byte) (string, []byte, error) {
-	// First, determine the length of the string
-	strLength, isNull, bytesRead := readLengthEncodedInteger(data)
-	if isNull {
-		return "", nil, errors.New("NULL value encountered")
-	}
-
-	// Adjust data to point to the next bytes after the integer
-	data = data[bytesRead:]
-
-	// Check if we have enough data left to read the string
-	if len(data) < int(strLength) {
-		return "", nil, errors.New("not enough data to read string")
-	}
-
-	// Read the string
-	strData := data[:strLength]
-	remainingData := data[strLength:]
-
-	// Convert the byte array to a string
-	str := string(strData)
-
-	return str, remainingData, nil
 }
 
 func readUint24(b []byte) uint32 {
@@ -570,42 +518,5 @@ func readLengthEncodedIntegerOff(data []byte, offset *int) (uint64, error) {
 		*offset += 9
 	}
 	result := uint64(length)
-	return result, nil
-}
-
-func readLengthEncodedStringOff(data []byte, offset *int) (string, error) {
-	if *offset >= len(data) {
-		return "", errors.New("data length is not enough")
-	}
-	var length int
-	firstByte := data[*offset]
-	switch {
-	case firstByte < 0xfb:
-		length = int(firstByte)
-		*offset++
-	case firstByte == 0xfb:
-		*offset++
-		return "", nil
-	case firstByte == 0xfc:
-		if *offset+3 > len(data) {
-			return "", errors.New("data length is not enough 1")
-		}
-		length = int(binary.LittleEndian.Uint16(data[*offset+1 : *offset+3]))
-		*offset += 3
-	case firstByte == 0xfd:
-		if *offset+4 > len(data) {
-			return "", errors.New("data length is not enough 2")
-		}
-		length = int(data[*offset+1]) | int(data[*offset+2])<<8 | int(data[*offset+3])<<16
-		*offset += 4
-	case firstByte == 0xfe:
-		if *offset+9 > len(data) {
-			return "", errors.New("data length is not enough 3")
-		}
-		length = int(binary.LittleEndian.Uint64(data[*offset+1 : *offset+9]))
-		*offset += 9
-	}
-	result := string(data[*offset : *offset+length])
-	*offset += length
 	return result, nil
 }

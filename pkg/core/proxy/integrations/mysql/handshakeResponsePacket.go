@@ -7,6 +7,7 @@ import (
 	"errors"
 )
 
+// constants for capability flags
 const (
 	CLIENT_PLUGIN_AUTH                = 0x00080000
 	CLIENT_CONNECT_WITH_DB            = 0x00000008
@@ -132,7 +133,6 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 				return nil, errors.New("handshake response packet too short for ZSTD compression level")
 			}
 			packet.ZstdCompressionLevel = data[0]
-			data = data[1:]
 		}
 	}
 	packet.AuthData = base64.StdEncoding.EncodeToString(authDataByte)

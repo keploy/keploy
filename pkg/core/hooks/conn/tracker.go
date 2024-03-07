@@ -13,13 +13,9 @@ import (
 	// "log"
 )
 
-const (
-	maxBufferSize = 16 * 1024 * 1024 // 16MB
-)
-
 // Tracker is a routine-safe container that holds a conn with unique ID, and able to create new conn.
 type Tracker struct {
-	connID         ConnID
+	connID         ID
 	addr           SockAddrIn
 	openTimestamp  uint64
 	closeTimestamp uint64
@@ -70,7 +66,7 @@ type Tracker struct {
 	isNewRequest  bool
 }
 
-func NewTracker(connID ConnID, logger *zap.Logger) *Tracker {
+func NewTracker(connID ID, logger *zap.Logger) *Tracker {
 	return &Tracker{
 		connID:          connID,
 		req:             []byte{},
@@ -108,8 +104,7 @@ func (conn *Tracker) decRecordTestCount() {
 	atomic.AddInt32(&conn.recTestCounter, -1)
 }
 
-// IsComplete() checks if the current conn has valid request & response info to capture
-// and also returns the request and response data buffer.
+// IsComplete checks if the current conn has valid request & response info to capture and also returns the request and response data buffer.
 func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
@@ -150,7 +145,6 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 				validReq = true
 			} else {
 				conn.logger.Debug("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
-				recordTraffic = false
 			}
 
 			expectedSentBytes := conn.userRespSizes[0]
@@ -165,7 +159,6 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 				respTimestamp = time.Now()
 			} else {
 				conn.logger.Debug("Malformed response", zap.Any("ExpectedSentBytes", expectedSentBytes), zap.Any("ActualSentBytes", actualSentBytes))
-				recordTraffic = false
 			}
 
 			if len(conn.userReqs) > 0 && len(conn.userResps) > 0 { //validated request, response
@@ -177,12 +170,11 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 				conn.userResps = conn.userResps[1:]
 			} else {
 				conn.logger.Debug("no data buffer for request or response", zap.Any("Length of RecvBufQueue", len(conn.userReqs)), zap.Any("Length of SentBufQueue", len(conn.userResps)))
-				recordTraffic = false
 			}
 
 			recordTraffic = validReq && validRes
 		} else {
-			utils.LogError(conn.logger,nil, "malformed request or response")
+			utils.LogError(conn.logger, nil, "malformed request or response")
 			recordTraffic = false
 		}
 

@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -254,7 +253,9 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	buf.Write([]byte{0x01, 0x00, 0x00, 0x01})
 	// Write column count
 	lengthColumns := uint64(len(resultSet.Columns))
-	writeLengthEncodedInteger(buf, &lengthColumns)
+	if err := writeLengthEncodedInteger(buf, &lengthColumns); err != nil {
+		return nil, err
+	}
 
 	if len(resultSet.Columns) > 0 {
 		for _, column := range resultSet.Columns {
@@ -264,17 +265,42 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 			buf.WriteByte(byte(column.PacketHeader.PacketLength >> 16))
 			buf.WriteByte(sequenceID)
 
-			writeLengthEncodedString(buf, column.Catalog)
-			writeLengthEncodedString(buf, column.Schema)
-			writeLengthEncodedString(buf, column.Table)
-			writeLengthEncodedString(buf, column.OrgTable)
-			writeLengthEncodedString(buf, column.Name)
-			writeLengthEncodedString(buf, column.OrgName)
+			var err error
+			err = writeLengthEncodedString(buf, column.Catalog)
+			if err != nil {
+				return nil, err
+			}
+			err = writeLengthEncodedString(buf, column.Schema)
+			if err != nil {
+				return nil, err
+			}
+			err = writeLengthEncodedString(buf, column.Table)
+			if err != nil {
+				return nil, err
+			}
+			err = writeLengthEncodedString(buf, column.OrgTable)
+			if err != nil {
+				return nil, err
+			}
+			err = writeLengthEncodedString(buf, column.Name)
+			if err != nil {
+				return nil, err
+			}
+			err = writeLengthEncodedString(buf, column.OrgName)
+			if err != nil {
+				return nil, err
+			}
 			buf.WriteByte(0x0c) // Length of the fixed-length fields (12 bytes)
-			binary.Write(buf, binary.LittleEndian, column.CharacterSet)
-			binary.Write(buf, binary.LittleEndian, column.ColumnLength)
+			if err := binary.Write(buf, binary.LittleEndian, column.CharacterSet); err != nil {
+				return nil, err
+			}
+			if err := binary.Write(buf, binary.LittleEndian, column.ColumnLength); err != nil {
+				return nil, err
+			}
 			buf.WriteByte(column.ColumnType)
-			binary.Write(buf, binary.LittleEndian, column.Flags)
+			if err := binary.Write(buf, binary.LittleEndian, column.Flags); err != nil {
+				return nil, err
+			}
 			buf.WriteByte(column.Decimals)
 			buf.Write([]byte{0x00, 0x00}) // Filler
 		}
@@ -303,7 +329,6 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 		bytes, _ := encodeRow(row, row.Columns)
 		buf.Write(bytes)
 	}
-	sequenceID++
 	// Write EOF packet header again
 	// buf.Write([]byte{5, 0, 0, sequenceID})
 	OptionalEOFBytesValue, _ := base64.StdEncoding.DecodeString(resultSet.OptionalEOFBytes)
@@ -314,7 +339,7 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]byte, error) {
+func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte, error) {
 	var buf bytes.Buffer
 
 	// Write the header
@@ -377,7 +402,9 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 			} else {
 				length := uint64(len(strValue))
 				// Now pass a pointer to length
-				writeLengthEncodedInteger(&buf, &length)
+				if err := writeLengthEncodedInteger(&buf, &length); err != nil {
+					return nil, err
+				}
 				// Write the string value
 				buf.WriteString(strValue)
 			}
@@ -386,22 +413,4 @@ func encodeRow(row *models.Row, columnValues []models.RowColumnDefinition) ([]by
 	}
 
 	return buf.Bytes(), nil
-}
-
-func encodeInt32(val int32) []byte {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, uint32(val))
-	return buf
-}
-
-func encodeFloat32(val float32) []byte {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, math.Float32bits(val))
-	return buf
-}
-
-func encodeFloat64(val float64) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, math.Float64bits(val))
-	return buf
 }

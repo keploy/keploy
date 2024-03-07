@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	firstLoop := true
 	doHandshakeAgain := true
 	prevRequest := ""
@@ -91,11 +91,10 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 						// Re-initiate handshake without logging an error
 						doHandshakeAgain = true
 						continue
-					} else {
-						// Handle other errors
-						// log.Error("Failed to read bytes from clientConn", zap.Error(err))
-						return err
 					}
+					// Handle other errors
+					// log.Error("Failed to read bytes from clientConn", zap.Error(err))
+					return err
 				}
 
 				// Reset the read deadline

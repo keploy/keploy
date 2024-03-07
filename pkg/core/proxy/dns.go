@@ -89,7 +89,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				answers = resolveDNSQuery(p.logger, question.Name)
 			}
 
-			if answers == nil || len(answers) == 0 {
+			if len(answers) == 0 {
 				// If the resolution failed, return a default A record with Proxy IP
 				if question.Qtype == dns.TypeA {
 					answers = []dns.RR{&dns.A{

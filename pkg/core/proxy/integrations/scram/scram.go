@@ -1,3 +1,4 @@
+// Package scram provides functionality for SCRAM authentication.
 package scram
 
 import (
@@ -107,7 +108,7 @@ func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstRes
 //     error during extraction or message creation, the function logs the error
 //     and returns an empty string.
 func GenerateAuthMessage(firstRequest, firstResponse string, logger *zap.Logger) string {
-	gs2, err := extractAuthId(firstRequest)
+	gs2, err := extractAuthID(firstRequest)
 	if err != nil {
 		utils.LogError(logger, err, "failed to extract the client gs2 header from the recieved first message")
 		return ""

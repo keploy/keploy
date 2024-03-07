@@ -1,3 +1,4 @@
+// Package docker provides functionality for working with Docker containers.
 package docker
 
 import (
@@ -42,12 +43,12 @@ func New(logger *zap.Logger) (Client, error) {
 	}, nil
 }
 
-// Getter function for containerID
+// GetContainerID is a Getter function for containerID
 func (idc *Impl) GetContainerID() string {
 	return idc.containerID
 }
 
-// Setter function for containerID
+// SetContainerID is a Setter function for containerID
 func (idc *Impl) SetContainerID(containerID string) {
 	idc.containerID = containerID
 }
@@ -67,13 +68,12 @@ func (idc *Impl) ExtractNetworksForContainer(containerName string) (map[string]*
 
 	if settings := containerJSON.NetworkSettings; settings != nil {
 		return settings.Networks, nil
-	} else {
-		// Docker attaches the container to "bridge" network by default.
-		// If the network list is empty, the docker daemon is possibly misbehaving,
-		// or the container is in a bad state.
-		utils.LogError(idc.logger, nil, "The network list for the given container is empty. This is unexpected.", zap.String("containerName", containerName))
-		return nil, fmt.Errorf("the container is not attached to any network")
 	}
+	// Docker attaches the container to "bridge" network by default.
+	// If the network list is empty, the docker daemon is possibly misbehaving,
+	// or the container is in a bad state.
+	utils.LogError(idc.logger, nil, "The network list for the given container is empty. This is unexpected.", zap.String("containerName", containerName))
+	return nil, fmt.Errorf("the container is not attached to any network")
 }
 
 func (idc *Impl) ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error {
@@ -135,7 +135,7 @@ func (idc *Impl) AttachNetwork(containerName string, networkNames []string) erro
 	return nil
 }
 
-// Stop and Remove the docker container
+// StopAndRemoveDockerContainer will Stop and Remove the docker container
 func (idc *Impl) StopAndRemoveDockerContainer() error {
 	dockerClient := idc
 	containerID := idc.containerID
@@ -338,7 +338,7 @@ func (idc *Impl) GetNetworkInfo(compose *Compose) *NetworkInfo {
 	return nil
 }
 
-// Inspect Keploy docker container to get bind mount for current directory
+// GetHostWorkingDirectory Inspects Keploy docker container to get bind mount for current directory
 func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
@@ -476,16 +476,7 @@ func (idc *Impl) SetKeployNetwork(c *Compose) error {
 
 	if !exists {
 		// Add the keploy-network with external: true
-		c.Networks.Content = append(c.Networks.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-network"},
-			&yaml.Node{
-				Kind: yaml.MappingNode,
-				Content: []*yaml.Node{
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "external"},
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "true"},
-				},
-			},
-		)
+		c.Networks.Content = append(c.Networks.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-network"}, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{&yaml.Node{Kind: yaml.ScalarNode, Value: "external"}, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"}}})
 	}
 
 	// Add or modify network for each service

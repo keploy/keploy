@@ -3,17 +3,18 @@ package generic
 import (
 	"context"
 	"encoding/base64"
+	"net"
+	"strconv"
+	"time"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"net"
-	"strconv"
-	"time"
 )
 
-func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
@@ -26,7 +27,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 	bufStr := string(reqBuf)
 	dataType := models.String
-	if !util.IsAsciiPrintable(string(reqBuf)) {
+	if !util.IsASCIIPrintable(string(reqBuf)) {
 		bufStr = util.EncodeBase64(reqBuf)
 		dataType = "binary"
 	}
@@ -134,7 +135,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			bufStr := string(buffer)
 			buffDataType := models.String
-			if !util.IsAsciiPrintable(string(buffer)) {
+			if !util.IsASCIIPrintable(string(buffer)) {
 				bufStr = util.EncodeBase64(buffer)
 				buffDataType = "binary"
 			}
@@ -166,7 +167,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			bufStr := string(buffer)
 			buffDataType := models.String
-			if !util.IsAsciiPrintable(string(buffer)) {
+			if !util.IsASCIIPrintable(string(buffer)) {
 				bufStr = base64.StdEncoding.EncodeToString(buffer)
 				buffDataType = "binary"
 			}

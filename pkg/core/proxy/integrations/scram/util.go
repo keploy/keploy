@@ -78,7 +78,7 @@ func extractUsername(authMessage string) (string, error) {
 	return "", fmt.Errorf("no username found in the auth message")
 }
 
-func extractAuthId(input string) (string, error) {
+func extractAuthID(input string) (string, error) {
 	re := regexp.MustCompile(`n,([^,]*),`) // Regular expression to match "n,," or "n,SOMETHING,"
 	matches := re.FindStringSubmatch(input)
 	if len(matches) >= 2 {

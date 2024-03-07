@@ -13,8 +13,8 @@ import (
 
 //TODO: rename this file.
 
-// Used by proxy
-func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*core.NetworkAddress, error) {
+// Get Used by proxy
+func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, error) {
 	d, err := h.GetDestinationInfo(srcPort)
 	if err != nil {
 		return nil, err
@@ -27,9 +27,9 @@ func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*core.NetworkAddress, 
 
 	return &core.NetworkAddress{
 		AppID:    s.ID,
-		Version:  d.IpVersion,
-		IPv4Addr: d.DestIp4,
-		IPv6Addr: d.DestIp6,
+		Version:  d.IPVersion,
+		IPv4Addr: d.DestIP4,
+		IPv6Addr: d.DestIP6,
 		Port:     d.DestPort,
 	}, nil
 }
@@ -45,7 +45,7 @@ func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	return &destInfo, nil
 }
 
-func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
+func (h *Hooks) Delete(_ context.Context, srcPort uint16) error {
 	return h.CleanProxyEntry(srcPort)
 }
 
@@ -93,10 +93,10 @@ func (h *Hooks) SetKeployModeInKernel(mode uint32) error {
 	return nil
 }
 
-// This function sends the IP and Port of the running proxy in the eBPF program.
+// SendProxyInfo sends the IP and Port of the running proxy in the eBPF program.
 func (h *Hooks) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
 	key := 0
-	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP4: ip4, Ip6: ip6, Port: port}, ebpf.UpdateAny)
+	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP4: ip4, IP6: ip6, Port: port}, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the proxy IP & Port to the epbf program")
 		return err
@@ -105,12 +105,12 @@ func (h *Hooks) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
 }
 
 // SendInode sends the inode of the container to ebpf hooks to filter the network traffic
-func (h *Hooks) SendInode(ctx context.Context, id uint64, inode uint64) error {
-	return h.SendNameSpaceId(0, inode)
+func (h *Hooks) SendInode(_ context.Context, _ uint64, inode uint64) error {
+	return h.SendNameSpaceID(0, inode)
 }
 
-// This function is helpful when user application in running inside a docker container.
-func (h *Hooks) SendNameSpaceId(key uint32, inode uint64) error {
+// SendNameSpaceID function is helpful when user application in running inside a docker container.
+func (h *Hooks) SendNameSpaceID(key uint32, inode uint64) error {
 	err := h.inodeMap.Update(key, &inode, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the namespace id to the epbf program", zap.Any("key", key), zap.Any("Inode", inode))
@@ -129,10 +129,10 @@ func (h *Hooks) SendCmdType(isDocker bool) error {
 	return nil
 }
 
-func (h *Hooks) SendDnsPort(port uint32) error {
+func (h *Hooks) SendDNSPort(port uint32) error {
 	h.logger.Debug("sending dns server port", zap.Any("port", port))
 	key := 0
-	err := h.DnsPort.Update(uint32(key), &port, ebpf.UpdateAny)
+	err := h.DNSPort.Update(uint32(key), &port, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send dns server port to the epbf program", zap.Any("dns server port", port))
 		return err
@@ -140,7 +140,7 @@ func (h *Hooks) SendDnsPort(port uint32) error {
 	return nil
 }
 
-func (h *Hooks) PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error {
+func (h *Hooks) PassThroughPortsInKernel(_ context.Context, _ uint64, ports []uint) error {
 	return h.SendPassThroughPorts(ports)
 }
 

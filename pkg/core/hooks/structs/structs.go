@@ -1,6 +1,7 @@
+// Package structs provides data structures for hooks.
 package structs
 
-type Bpf_spin_lock struct{ Val uint32 }
+type BpfSpinLock struct{ Val uint32 }
 
 // struct dest_info_t
 // {
@@ -12,9 +13,9 @@ type Bpf_spin_lock struct{ Val uint32 }
 // };
 
 type DestInfo struct {
-	IpVersion uint32
-	DestIp4   uint32
-	DestIp6   [4]uint32
+	IPVersion uint32
+	DestIP4   uint32
+	DestIP6   [4]uint32
 	DestPort  uint32
 	KernelPid uint32
 }
@@ -28,6 +29,6 @@ type DestInfo struct {
 
 type ProxyInfo struct {
 	IP4  uint32
-	Ip6  [4]uint32
+	IP6  [4]uint32
 	Port uint32
 }

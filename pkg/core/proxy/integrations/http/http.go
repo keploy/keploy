@@ -21,21 +21,21 @@ import (
 )
 
 func init() {
-	integrations.Register("http", NewHttp)
+	integrations.Register("http", NewHTTP)
 }
 
-type Http struct {
+type HTTP struct {
 	logger *zap.Logger
 	//opts  globalOptions //other global options set by the proxy
 }
 
-func NewHttp(logger *zap.Logger) integrations.Integrations {
-	return &Http{
+func NewHTTP(logger *zap.Logger) integrations.Integrations {
+	return &HTTP{
 		logger: logger,
 	}
 }
 
-type finalHttp struct {
+type finalHTTP struct {
 	req              []byte
 	resp             []byte
 	reqTimestampMock time.Time
@@ -44,7 +44,7 @@ type finalHttp struct {
 
 // MatchType function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
-func (h *Http) MatchType(ctx context.Context, buf []byte) bool {
+func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	return bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buf[:], []byte("GET ")) ||
 		bytes.HasPrefix(buf[:], []byte("POST ")) ||
@@ -55,7 +55,7 @@ func (h *Http) MatchType(ctx context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("HEAD "))
 }
 
-func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
@@ -64,7 +64,7 @@ func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 		return err
 	}
 
-	err = encodeHttp(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = encodeHTTP(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -72,7 +72,7 @@ func (h *Http) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 	return nil
 }
 
-func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
@@ -81,7 +81,7 @@ func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrati
 		return err
 	}
 
-	err = decodeHttp(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
+	err = decodeHTTP(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the http message from the yaml")
 		return err
@@ -89,8 +89,8 @@ func (h *Http) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrati
 	return nil
 }
 
-// ParseFinalHttp is used to parse the final http request and response and save it in a yaml file
-func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+// ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
+func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.req)))

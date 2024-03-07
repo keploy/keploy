@@ -3,12 +3,14 @@ package grpc
 import (
 	"context"
 	"fmt"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/models"
 )
 
+// constants for the pseudo headers.
 const (
 	KLabelForAuthority = ":authority"
 	KLabelForMethod    = ":method"
@@ -28,7 +30,7 @@ func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
 	return res
 }
 
-func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpcReq models.GrpcReq, mockDb integrations.MockMemDb) (*models.Mock, error) {
+func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq models.GrpcReq, mockDb integrations.MockMemDb) (*models.Mock, error) {
 	for {
 		select {
 		case <-ctx.Done():

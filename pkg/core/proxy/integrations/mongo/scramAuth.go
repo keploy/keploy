@@ -24,18 +24,18 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 			return false
 		}
 
-		conversationId, _ := extractConversationId(actualMsg)
+		conversationID, _ := extractConversationID(actualMsg)
 		// Check if the message is for starting the SASL (authentication) process
 		if _, exists := actualMsg["saslStart"]; exists {
 			logger.Debug("the recieved request is saslStart",
 				zap.Any("OpMsg", actualMsg),
-				zap.Any("conversationId", conversationId))
+				zap.Any("conversationId", conversationID))
 			return true
 			// Check if the message is for final request of the SASL (authentication) process
 		} else if _, exists := actualMsg["saslContinue"]; exists {
 			logger.Debug("the recieved request is saslContinue",
 				zap.Any("OpMsg", actualMsg),
-				zap.Any("conversationId", conversationId),
+				zap.Any("conversationId", conversationID),
 			)
 			return true
 		}
@@ -46,7 +46,7 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 
 // authMessageMap stores the auth message from the saslStart request for the converstionIds. So, that
 // it can be used in the saslContinue request to generate the new server proof
-var authMessageMap map[string]string = map[string]string{}
+var authMessageMap map[string]string
 
 // handleScramAuth handles the SCRAM authentication requests by generating the
 // appropriate response string.
@@ -131,7 +131,7 @@ func extractAuthPayload(data interface{}) (string, error) {
 	return base64Str, nil
 }
 
-// extractConversationId extracts the 'conversationId' from a given data structure. Example: {"conversationId":{"$numberInt":"113"}}
+// extractConversationID extracts the 'conversationId' from a given data structure. Example: {"conversationId":{"$numberInt":"113"}}
 //
 // Parameters:
 //   - data: The interface{} that should represent a map containing the key 'conversationId'.
@@ -139,26 +139,26 @@ func extractAuthPayload(data interface{}) (string, error) {
 // Returns:
 //   - The extracted conversationId as a string.
 //   - An error if the expected 'conversationId' structure isn't present or if other expected keys are missing.
-func extractConversationId(data interface{}) (string, error) {
+func extractConversationID(data interface{}) (string, error) {
 	// Top-level map
 	topMap, ok := data.(map[string]interface{})
 	if !ok {
 		return "", errors.New("expected top-level data to be a map")
 	}
 
-	conversationId, exists := topMap["conversationId"]
+	conversationID, exists := topMap["conversationId"]
 	if !exists {
 		return "", errors.New("'conversationId' not found")
 	}
 
 	// conversationId map
-	conversationIdMap, ok := conversationId.(map[string]interface{})
+	conversationIDMap, ok := conversationID.(map[string]interface{})
 	if !ok {
 		return "", errors.New("expected 'conversationId' to be a map")
 	}
 
 	// Check presence of "$numberInt"
-	num, exists := conversationIdMap["$numberInt"]
+	num, exists := conversationIDMap["$numberInt"]
 	if !exists {
 		return "", errors.New("'$numberInt' not found")
 	}
@@ -170,28 +170,28 @@ func extractConversationId(data interface{}) (string, error) {
 	return numberIntStr, nil
 }
 
-// updateConversationId updates the 'conversationId' in a given data structure. Example: {"conversationId":{"$numberInt":"113"}}
-func updateConversationId(actualMsg map[string]interface{}, newConversationId int) (map[string]interface{}, error) {
-	// Check if conversationId exists and is a map
-	conversationId, exists := actualMsg["conversationId"]
+// updateConversationID updates the 'conversationId' in a given data structure. Example: {"conversationId":{"$numberInt":"113"}}
+func updateConversationID(actualMsg map[string]interface{}, newConversationID int) (map[string]interface{}, error) {
+	// Check if conversationID exists and is a map
+	conversationID, exists := actualMsg["conversationId"]
 	if !exists {
 		return actualMsg, errors.New("'conversationId' not found")
 	}
 
-	conversationIdMap, ok := conversationId.(map[string]interface{})
+	conversationIDMap, ok := conversationID.(map[string]interface{})
 	if !ok {
 		return actualMsg, errors.New("expected 'conversationId' to be a map")
 	}
 
 	// Update the "$numberInt" field with the new value
-	conversationIdMap["$numberInt"] = fmt.Sprintf("%d", newConversationId)
-	actualMsg["conversationId"] = conversationIdMap
+	conversationIDMap["$numberInt"] = fmt.Sprintf("%d", newConversationID)
+	actualMsg["conversationId"] = conversationIDMap
 	return actualMsg, nil
 }
 
 // decodeBase64Str is a function variable that wraps the standard Base64 decoding method,
 // taking a Base64 encoded string and returning its decoded byte array and any error.
-var decodeBase64Str func(s string) ([]byte, error) = base64.StdEncoding.DecodeString
+var decodeBase64Str = base64.StdEncoding.DecodeString
 
 // extractMsgFromSection decodes an OP_MSG section string, and then
 // unmarshals the resulting string into a map.
@@ -297,23 +297,23 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	logger.Debug("after replacing the new client nonce in auth response", zap.String("first response", newFirstAuthResponse))
 	// replace the payload with new first response auth
 	responseMsg["payload"].(map[string]interface{})["$binary"].(map[string]interface{})["base64"] = base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
-	responseMsg, err = updateConversationId(responseMsg, int(util.GetNextID()))
+	responseMsg, err = updateConversationID(responseMsg, int(util.GetNextID()))
 	if err != nil {
 		utils.LogError(logger, err, "failed to update the conversationId in the sasl start auth message")
 		return "", false, err
 	}
 
 	// fetch the conversation id
-	conversationId, err := extractConversationId(responseMsg)
+	conversationID, err := extractConversationID(responseMsg)
 	if err != nil {
 		utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the recorded first response")
 		return "", false, err
 	}
-	logger.Debug("fetch the conversationId for the SCRAM authentication", zap.String("cid", conversationId))
+	logger.Debug("fetch the conversationId for the SCRAM authentication", zap.String("cid", conversationID))
 	// generate the auth message from the recieved first request and recorded first response
 	authMessage := scram.GenerateAuthMessage(string(decodedActualReqPayload), newFirstAuthResponse, logger)
 	// store the auth message in the global map for the conversationId
-	authMessageMap[conversationId] = authMessage
+	authMessageMap[conversationID] = authMessage
 	logger.Debug("genrate the new auth message for the recieved auth request", zap.String("msg", authMessage))
 
 	// marshal the new first response for the SCRAM authentication
@@ -370,17 +370,17 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 	logger.Debug("the recorded verifier of the auth request", zap.Any("verifier/server-signature", string(verifier)))
 
 	// fetch the conversation id
-	conversationId, err := extractConversationId(actualMsg)
+	conversationID, err := extractConversationID(actualMsg)
 	if err != nil {
 		utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the recieved final response")
 		return "", false, err
 	}
-	logger.Debug("fetched conversationId for the SCRAM authentication", zap.String("cid", conversationId))
+	logger.Debug("fetched conversationId for the SCRAM authentication", zap.String("cid", conversationID))
 
 	salt := ""
 	itr := 0
 	// get the authMessage from the saslStart conversation. Since, saslContinue have the same conversationId
-	authMsg := authMessageMap[conversationId]
+	authMsg := authMessageMap[conversationID]
 
 	// get the salt and iteration from the authMessage to generate salted password
 	fields = strings.Split(authMsg, ",")
@@ -405,7 +405,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection string
 	}
 	// Since, the server proof is the signature generated by the authMessage and salted password.
 	// So, need to return the new server proof according to the new authMessage which is different from the recorded.
-	newVerifier, err := scram.GenerateServerFinalMessage(authMessageMap[conversationId], "SCRAM-SHA-1", password, salt, itr, logger)
+	newVerifier, err := scram.GenerateServerFinalMessage(authMessageMap[conversationID], "SCRAM-SHA-1", password, salt, itr, logger)
 	if err != nil {
 		utils.LogError(logger, err, "failed to get the new server proof")
 		return "", false, err

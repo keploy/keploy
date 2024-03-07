@@ -30,7 +30,7 @@ func NewPostgresV1(logger *zap.Logger) integrations.Integrations {
 
 // MatchType determines if the outgoing network call is Postgres by comparing the
 // message format with that of a Postgres text message.
-func (p *PostgresV1) MatchType(ctx context.Context, reqBuf []byte) bool {
+func (p *PostgresV1) MatchType(_ context.Context, reqBuf []byte) bool {
 	const ProtocolVersion = 0x00030000 // Protocol version 3.0
 
 	if len(reqBuf) < 8 {

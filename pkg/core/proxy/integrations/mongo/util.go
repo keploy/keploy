@@ -1,10 +1,11 @@
 package mongo
 
 import (
+	"strings"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
-	"strings"
 )
 
 func hasSecondSetBit(num int) bool {

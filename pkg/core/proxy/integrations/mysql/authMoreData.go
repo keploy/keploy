@@ -1,3 +1,4 @@
+// Package mysql provides integration with MySQL outgoing.
 package mysql
 
 import (
@@ -15,12 +16,4 @@ func decodeAuthMoreData(data []byte) (*NextAuthPacket, error) {
 	return &NextAuthPacket{
 		PluginData: data[0],
 	}, nil
-}
-
-// Encode function for Next Authentication method Packet
-func encodeAuthMoreData(packet *NextAuthPacket) ([]byte, error) {
-	if packet.PluginData != 0x02 {
-		return nil, errors.New("invalid PluginData value for NextAuthPacket")
-	}
-	return []byte{packet.PluginData}, nil
 }

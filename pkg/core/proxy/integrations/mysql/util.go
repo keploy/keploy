@@ -3,9 +3,10 @@ package mysql
 import (
 	"context"
 	"encoding/binary"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"log"
 	"net"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 )
 
 // TODO:Remove these global variables, and find a better way to handle this if possible
@@ -16,18 +17,18 @@ var (
 	expectingHandshakeResponseTest = false
 )
 
-func bytesToMySQLPacket(buffer []byte) MySQLPacket {
+func bytesToMySQLPacket(buffer []byte) CustomPacket {
 	if buffer == nil || len(buffer) < 4 {
 		log.Fatalf("Error: buffer is nil or too short to be a valid MySQL packet")
-		return MySQLPacket{}
+		return CustomPacket{}
 	}
 	tempBuffer := make([]byte, 4)
 	copy(tempBuffer, buffer[:3])
 	length := binary.LittleEndian.Uint32(tempBuffer)
 	sequenceID := buffer[3]
 	payload := buffer[4:]
-	return MySQLPacket{
-		Header: MySQLPacketHeader{
+	return CustomPacket{
+		Header: CustomPacketHeader{
 			PayloadLength: length,
 			SequenceID:    sequenceID,
 		},

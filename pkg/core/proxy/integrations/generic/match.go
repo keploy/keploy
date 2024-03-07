@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"math"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func fuzzymatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.GenericPayload, error) {
+func fuzzymatch(_ context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.GenericPayload, error) {
 	for {
 		mocks, err := mockDb.GetUnFilteredMocks()
 		if err != nil {
@@ -37,7 +38,7 @@ func fuzzymatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				for requestIndex, reqBuff := range reqBuff {
 
 					bufStr := string(reqBuff)
-					if !util.IsAsciiPrintable(string(reqBuff)) {
+					if !util.IsASCIIPrintable(string(reqBuff)) {
 						bufStr = util.EncodeBase64(reqBuff)
 					}
 

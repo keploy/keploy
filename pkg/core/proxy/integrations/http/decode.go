@@ -1,3 +1,4 @@
+// Package http provides functionality for handling HTTP outgoing calls.
 package http
 
 import (
@@ -21,12 +22,12 @@ import (
 
 type matchParams struct {
 	req           *http.Request
-	reqBodyIsJson bool
+	reqBodyIsJSON bool
 	reqBuf        []byte
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -75,7 +76,7 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 			param := &matchParams{
 				req:           request,
-				reqBodyIsJson: isJSON(reqBody),
+				reqBodyIsJSON: isJSON(reqBody),
 				reqBuf:        reqBuf,
 			}
 			match, stub, err := match(ctx, logger, param, mockDb)
@@ -155,7 +156,7 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			if err != nil {
 				logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				logger.Debug("This was the last response from the server:\n" + string(responseString))
-				break
+				return nil
 			}
 		}
 	}

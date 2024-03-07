@@ -1,3 +1,4 @@
+// Package core provides functionality for managing core functionalities in Keploy.
 package core
 
 import (
@@ -60,7 +61,7 @@ func (c *Core) getApp(id uint64) (*app.App, error) {
 	return h, nil
 }
 
-func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
+func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error {
 	hookErr := errors.New("failed to hook into the app")
 
 	a, err := c.getApp(id)
@@ -147,7 +148,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	return a.Run(ctx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
 }
 
-func (c *Core) GetAppIp(ctx context.Context, id uint64) (string, error) {
+func (c *Core) GetAppIp(_ context.Context, id uint64) (string, error) {
 
 	a, err := c.getApp(id)
 	if err != nil {

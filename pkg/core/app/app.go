@@ -1,3 +1,4 @@
+// Package app provides functionality for managing user applications.
 package app
 
 import (
@@ -57,7 +58,7 @@ type Options struct {
 	DockerNetwork string
 }
 
-func (a *App) Setup(ctx context.Context, opts Options) error {
+func (a *App) Setup(_ context.Context, _ Options) error {
 	d, err := docker.New(a.logger)
 	if err != nil {
 		return err
@@ -134,6 +135,10 @@ func (a *App) SetupCompose() error {
 	newPath := "docker-compose-tmp.yaml"
 
 	compose, err := a.docker.ReadComposeFile(path)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to read the compose file")
+		return err
+	}
 	composeChanged := false
 
 	// Check if docker compose file uses relative file names for bind mounts
@@ -203,7 +208,7 @@ func (a *App) SetupCompose() error {
 	return nil
 }
 
-func (a *App) Kind(ctx context.Context) utils.CmdType {
+func (a *App) Kind(_ context.Context) utils.CmdType {
 	return a.kind
 }
 
@@ -402,7 +407,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}
 }
 
-// TODO: return error rather than AppError, so that nil error can also be returned
 func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) models.AppError {
 	a.containerDelay = opts.DockerDelay
 	a.inodeChan = inodeChan
@@ -451,8 +455,12 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 
 		uid, err := strconv.ParseUint(u.Uid, 10, 32)
-		gid, err := strconv.ParseUint(u.Gid, 10, 32)
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to parse user or user id")
+			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
+		}
 
+		gid, err := strconv.ParseUint(u.Gid, 10, 32)
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to parse user or group id")
 			return models.AppError{AppErrorType: models.ErrInternal, Err: err}

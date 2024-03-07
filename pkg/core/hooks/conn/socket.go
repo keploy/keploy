@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"golang.org/x/sync/errgroup"
 	"os"
-	_ "strings"
 	"time"
 	"unsafe"
 
@@ -19,7 +18,6 @@ import (
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/ringbuf"
 	"go.uber.org/zap"
-	_ "golang.org/x/sys/unix"
 )
 
 var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))

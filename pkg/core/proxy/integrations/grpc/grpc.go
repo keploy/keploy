@@ -29,7 +29,7 @@ func NewGrpc(logger *zap.Logger) integrations.Integrations {
 
 // MatchType function determines if the outgoing network call is gRPC by comparing the
 // message format with that of an gRPC text message.
-func (g *Grpc) MatchType(ctx context.Context, reqBuf []byte) bool {
+func (g *Grpc) MatchType(_ context.Context, reqBuf []byte) bool {
 	return bytes.HasPrefix(reqBuf[:], []byte("PRI * HTTP/2"))
 }
 

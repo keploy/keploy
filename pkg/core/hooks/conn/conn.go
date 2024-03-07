@@ -1,17 +1,19 @@
+// Package conn provides functionality for handling connections.
 package conn
 
+// constant for the maximum size of the event body
 const (
 	EventBodyMaxSize = 16384 // 16 KB
 )
 
-// ConnID is a conversion of the following C-Struct into GO.
+// ID is a conversion of the following C-Struct into GO.
 //
 //	struct conn_id_t {
 //	   uint32_t tgid;
 //	   int32_t fd;
 //	   uint64_t tsid;
 //	};
-type ConnID struct {
+type ID struct {
 	TGID uint32
 	FD   int32
 	TsID uint64
@@ -34,7 +36,7 @@ type ConnID struct {
 type SocketDataEvent struct {
 	EntryTimestampNano   uint64
 	TimestampNano        uint64
-	ConnID               ConnID
+	ConnID               ID
 	Direction            TrafficDirectionEnum
 	MsgSize              uint32
 	Pos                  uint64
@@ -52,7 +54,7 @@ type SocketDataEvent struct {
 //	};.
 type SocketOpenEvent struct {
 	TimestampNano uint64
-	ConnID        ConnID
+	ConnID        ID
 	Addr          SockAddrIn
 }
 
@@ -66,7 +68,7 @@ type SocketOpenEvent struct {
 //	};.
 type SocketCloseEvent struct {
 	TimestampNano uint64
-	ConnID        ConnID
+	ConnID        ID
 	WrittenBytes  int64
 	ReadBytes     int64
 }
@@ -79,6 +81,7 @@ type SocketCloseEvent struct {
 //	};.
 type TrafficDirectionEnum int32
 
+// constants for the TrafficDirectionEnum
 const (
 	EgressTraffic  TrafficDirectionEnum = 0
 	IngressTraffic TrafficDirectionEnum = 1

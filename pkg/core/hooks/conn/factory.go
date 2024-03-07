@@ -19,7 +19,7 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 // Factory is a routine-safe container that holds a trackers with unique ID, and able to create new tracker.
 type Factory struct {
-	connections         map[ConnID]*Tracker
+	connections         map[ID]*Tracker
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
 	logger              *zap.Logger
@@ -28,7 +28,7 @@ type Factory struct {
 // NewFactory creates a new instance of the factory.
 func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory {
 	return &Factory{
-		connections:         make(map[ConnID]*Tracker),
+		connections:         make(map[ID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
 		logger:              logger,
@@ -40,7 +40,7 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *models.TestCase) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
-	var trackersToDelete []ConnID
+	var trackersToDelete []ID
 	for connID, tracker := range factory.connections {
 		select {
 		case <-ctx.Done():
@@ -54,17 +54,17 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					continue
 				}
 
-				parsedHttpReq, err := pkg.ParseHTTPRequest(requestBuf)
+				parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
 				if err != nil {
 					utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
 					continue
 				}
-				parsedHttpRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHttpReq)
+				parsedHTTPRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHTTPReq)
 				if err != nil {
 					utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 					continue
 				}
-				capture(ctx, factory.logger, t, parsedHttpReq, parsedHttpRes, reqTimestampTest, resTimestampTest)
+				capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest)
 
 			} else if tracker.IsInactive(factory.inactivityThreshold) {
 				trackersToDelete = append(trackersToDelete, connID)
@@ -80,7 +80,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 
 // GetOrCreate returns a tracker that related to the given conn and transaction ids. If there is no such tracker
 // we create a new one.
-func (factory *Factory) GetOrCreate(connectionID ConnID) *Tracker {
+func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	tracker, ok := factory.connections[connectionID]
@@ -91,14 +91,20 @@ func (factory *Factory) GetOrCreate(connectionID ConnID) *Tracker {
 	return tracker
 }
 
-func capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time) {
+func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http request body")
 		return
 	}
 
-	defer resp.Body.Close()
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close the http response body")
+		}
+	}()
+
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http response body")

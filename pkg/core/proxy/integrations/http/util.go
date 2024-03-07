@@ -32,14 +32,13 @@ func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]
 		if err != nil {
 			utils.LogError(logger, nil, "failed to read the request message from the client")
 			return err
-		} else {
-			// destConn is nil in case of test mode
-			if destConn != nil {
-				_, err = destConn.Write(reqHeader)
-				if err != nil {
-					utils.LogError(logger, nil, "failed to write request message to the destination server")
-					return err
-				}
+		}
+		// destConn is nil in case of test mode
+		if destConn != nil {
+			_, err = destConn.Write(reqHeader)
+			if err != nil {
+				utils.LogError(logger, nil, "failed to write request message to the destination server")
+				return err
 			}
 		}
 
@@ -114,17 +113,15 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 					*finalResp = append(*finalResp, respHeader...)
 				}
 				return err
-			} else {
-				utils.LogError(logger, nil, "failed to read the response message from the destination server")
-				return err
 			}
-		} else {
-			// write the response message to the user client
-			_, err = clientConn.Write(respHeader)
-			if err != nil {
-				utils.LogError(logger, nil, "failed to write response message to the user client")
-				return err
-			}
+			utils.LogError(logger, nil, "failed to read the response message from the destination server")
+			return err
+		}
+		// write the response message to the user client
+		_, err = clientConn.Write(respHeader)
+		if err != nil {
+			utils.LogError(logger, nil, "failed to write response message to the user client")
+			return err
 		}
 
 		*finalResp = append(*finalResp, respHeader...)
@@ -189,10 +186,9 @@ func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]b
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				logger.Info("Stopped getting data from the conn", zap.Error(err))
 				break
-			} else {
-				utils.LogError(logger, nil, "failed to read the response message from the destination server")
-				return err
 			}
+			utils.LogError(logger, nil, "failed to read the response message from the destination server")
+			return err
 		}
 		logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
 		*finalReq = append(*finalReq, requestChunked...)
@@ -211,7 +207,7 @@ func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]b
 }
 
 // Handled chunked requests when transfer-encoding is given.
-func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, clientConn, destConn net.Conn, transferEncodingHeader string) error {
+func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, clientConn, destConn net.Conn, _ string) error {
 
 	for {
 		select {
@@ -229,10 +225,9 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					break
-				} else {
-					utils.LogError(logger, nil, "failed to read the response message from the destination server")
-					return err
 				}
+				utils.LogError(logger, nil, "failed to read the response message from the destination server")
+				return err
 			}
 
 			*finalReq = append(*finalReq, requestChunked...)
@@ -311,13 +306,12 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the response message from the destination server")
 					return err
-				} else {
-					isEOF = true
-					logger.Debug("received EOF", zap.Error(err))
-					if len(resp) == 0 {
-						logger.Debug("exiting loop as response is complete")
-						break
-					}
+				}
+				isEOF = true
+				logger.Debug("received EOF", zap.Error(err))
+				if len(resp) == 0 {
+					logger.Debug("exiting loop as response is complete")
+					break
 				}
 			}
 
@@ -336,7 +330,7 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 			}
 
 			if string(resp) == "0\r\n\r\n" {
-				break
+				return nil
 			}
 		}
 	}
@@ -355,9 +349,8 @@ func isGZipped(check io.ReadCloser, l *zap.Logger) (bool, *bufio.Reader) {
 	}
 	if peekedBytes[0] == 0x1f && peekedBytes[1] == 0x8b {
 		return true, bufReader
-	} else {
-		return false, nil
 	}
+	return false, nil
 }
 
 // hasCompleteHeaders checks if the given byte slice contains the complete HTTP headers
@@ -418,9 +411,8 @@ func isPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if passThrough {
 			if bypass.Port == 0 || bypass.Port == destPort {
 				return true
-			} else {
-				passThrough = false
 			}
+			passThrough = false
 		}
 	}
 

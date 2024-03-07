@@ -47,11 +47,6 @@ var caStoreUpdateCmd = []string{
 	"certctl rehash",
 }
 
-type certKeyPair struct {
-	cert tls.Certificate
-	host string
-}
-
 func commandExists(cmd string) bool {
 	_, err := exec.LookPath(cmd)
 	return err == nil

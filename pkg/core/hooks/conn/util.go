@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	realTimeOffset uint64 = 0
+	realTimeOffset uint64
 )
 
 // InitRealTimeOffset calculates the offset between the real clock and the monotonic clock used in the BPF.

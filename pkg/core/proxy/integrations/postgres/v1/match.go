@@ -3,12 +3,13 @@ package v1
 import (
 	"context"
 	"fmt"
+	"math"
+
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
-	"math"
 )
 
 func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
@@ -33,7 +34,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 				}
 
 				if sortFlag {
-					if mock.TestModeInfo.IsFiltered == false {
+					if !mock.TestModeInfo.IsFiltered {
 						sortFlag = false
 					} else {
 						sortedTcsMocks = append(sortedTcsMocks, mock)
@@ -125,7 +126,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 
 			logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
-			var matched, sorted = false, false
+			var matched, sorted bool
 			var idx int
 			//use findBinaryMatch twice one for sorted and another for unsorted
 			// give more priority to sorted like if you find more than 0.5 in sorted then return that

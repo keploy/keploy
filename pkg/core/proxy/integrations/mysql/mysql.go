@@ -14,31 +14,31 @@ import (
 )
 
 func init() {
-	integrations.Register("mysql", NewMySql)
+	integrations.Register("mysql", NewMySQL)
 }
 
 //TODO: seggregate the packet types and the operations into meaningful packages.
 //TODO: follow the same pattern for naming the functions and the variables & structs.
 
-type MySql struct {
+type MySQL struct {
 	logger *zap.Logger
 }
 
-func NewMySql(logger *zap.Logger) integrations.Integrations {
-	return &MySql{
+func NewMySQL(logger *zap.Logger) integrations.Integrations {
+	return &MySQL{
 		logger: logger,
 	}
 }
 
-func (m *MySql) MatchType(ctx context.Context, reqBuf []byte) bool {
+func (m *MySQL) MatchType(_ context.Context, _ []byte) bool {
 	//Returning false here because sql parser is using the ports to check if the packet is mysql or not.
 	return false
 }
 
-func (m *MySql) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 
-	err := encodeMySql(ctx, logger, src, dst, mocks, opts)
+	err := encodeMySQL(ctx, logger, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
 		return err
@@ -46,10 +46,10 @@ func (m *MySql) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 	return nil
 }
 
-func (m *MySql) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 
-	err := decodeMySql(ctx, logger, src, dstCfg, mockDb, opts)
+	err := decodeMySQL(ctx, logger, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
 		return err
@@ -57,7 +57,7 @@ func (m *MySql) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	return nil
 }
 
-func recordMySQLMessage(ctx context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock) {
+func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock) {
 
 	meta := map[string]string{
 		"type":              name,

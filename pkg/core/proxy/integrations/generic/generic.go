@@ -25,7 +25,7 @@ func NewGeneric(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
-func (g *Generic) MatchType(ctx context.Context, buffer []byte) bool {
+func (g *Generic) MatchType(_ context.Context, _ []byte) bool {
 	// generic is checked explicitly in the proxy
 	return false
 }

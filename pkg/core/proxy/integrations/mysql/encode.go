@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func encodeMySql(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 	//closing the destination conn
 	defer func(destConn net.Conn) {
 		err := destConn.Close()
@@ -452,6 +452,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				break
 			}
 			operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(queryBuffer))
+			if err != nil {
+				utils.LogError(logger, err, "failed to decode the MySQL packet from the client")
+				return err
+			}
 			mysqlRequests = append([]models.MySQLRequest{}, models.MySQLRequest{
 				Header: &models.MySQLPacketHeader{
 					PacketLength: requestHeader.PayloadLength,

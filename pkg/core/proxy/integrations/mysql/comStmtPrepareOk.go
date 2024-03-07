@@ -191,12 +191,24 @@ func encodeStmtPrepareOk(packet *models.MySQLStmtPrepareOk) ([]byte, error) {
 
 func encodeColumnDefinition(buf *bytes.Buffer, column *models.ColumnDefinition, seqNum *byte) error {
 	tmpBuf := &bytes.Buffer{}
-	writeLengthEncodedString(tmpBuf, column.Catalog)
-	writeLengthEncodedString(tmpBuf, column.Schema)
-	writeLengthEncodedString(tmpBuf, column.Table)
-	writeLengthEncodedString(tmpBuf, column.OrgTable)
-	writeLengthEncodedString(tmpBuf, column.Name)
-	writeLengthEncodedString(tmpBuf, column.OrgName)
+	if err := writeLengthEncodedString(tmpBuf, column.Catalog); err != nil {
+		return err
+	}
+	if err := writeLengthEncodedString(tmpBuf, column.Schema); err != nil {
+		return err
+	}
+	if err := writeLengthEncodedString(tmpBuf, column.Table); err != nil {
+		return err
+	}
+	if err := writeLengthEncodedString(tmpBuf, column.OrgTable); err != nil {
+		return err
+	}
+	if err := writeLengthEncodedString(tmpBuf, column.Name); err != nil {
+		return err
+	}
+	if err := writeLengthEncodedString(tmpBuf, column.OrgName); err != nil {
+		return err
+	}
 	tmpBuf.WriteByte(0x0C)
 	if err := binary.Write(tmpBuf, binary.LittleEndian, column.CharacterSet); err != nil {
 		return err

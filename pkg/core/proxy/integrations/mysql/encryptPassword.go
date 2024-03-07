@@ -1,7 +1,6 @@
 package mysql
 
 import (
-	"encoding/binary"
 	"errors"
 )
 
@@ -29,23 +28,4 @@ func decodeEncryptPassword(data []byte) (string, *PasswordData, error) {
 		SequenceID:    sequenceID,
 		Payload:       data[4:],
 	}, nil
-}
-
-func encodeEncryptPassword(packet *PasswordData) ([]byte, error) {
-	if packet == nil {
-		return nil, errors.New("nil packet provided for encoding")
-	}
-
-	// Convert PayloadLength from uint32 to 3-byte representation
-	lengthBytes := make([]byte, 3)
-	binary.LittleEndian.PutUint32(lengthBytes, packet.PayloadLength)
-	lengthBytes = lengthBytes[:3]
-
-	// Construct the encoded packet
-	encodedPacket := make([]byte, 0, 4+len(packet.Payload))
-	encodedPacket = append(encodedPacket, lengthBytes...)
-	encodedPacket = append(encodedPacket, packet.SequenceID)
-	encodedPacket = append(encodedPacket, packet.Payload...)
-
-	return encodedPacket, nil
 }
