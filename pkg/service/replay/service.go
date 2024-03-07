@@ -18,7 +18,7 @@ type Instrumentation interface {
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 
-	GetAppIp(ctx context.Context, id uint64) (string, error)
+	GetAppIP(ctx context.Context, id uint64) (string, error)
 }
 
 type Service interface {

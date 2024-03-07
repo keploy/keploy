@@ -1,3 +1,4 @@
+// Package pkg provides utility functions for Keploy.
 package pkg
 
 import (
@@ -22,8 +23,8 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
-// UrlParams returns the Url and Query parameters from the request url.
-func UrlParams(r *http.Request) map[string]string {
+// URLParams returns the Url and Query parameters from the request url.
+func URLParams(r *http.Request) map[string]string {
 	qp := r.URL.Query()
 	result := make(map[string]string)
 
@@ -34,8 +35,8 @@ func UrlParams(r *http.Request) map[string]string {
 	return result
 }
 
-// ToYamlHttpHeader converts the http header into yaml format
-func ToYamlHttpHeader(httpHeader http.Header) map[string]string {
+// ToYamlHTTPHeader converts the http header into yaml format
+func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	header := map[string]string{}
 	for i, j := range httpHeader {
 		header[i] = strings.Join(j, ",")
@@ -43,7 +44,7 @@ func ToYamlHttpHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
-func ToHttpHeader(mockHeader map[string]string) http.Header {
+func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
 		match := IsTime(j)
@@ -64,8 +65,8 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
-	resp := &models.HTTPResp{}
+func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+	var resp *models.HTTPResp
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
@@ -73,7 +74,7 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHttpHeader(tc.HTTPReq.Header)
+	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
@@ -88,7 +89,7 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 		logger.Debug("simulating request with conn:keep-alive")
 		client = &http.Client{
 			Timeout: time.Second * time.Duration(apiTimeout),
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		}
@@ -96,7 +97,7 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 		logger.Debug("simulating request with conn:close")
 		client = &http.Client{
 			Timeout: time.Second * time.Duration(apiTimeout),
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
@@ -107,7 +108,7 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 		logger.Debug("simulating request with conn:keep-alive (maxIdleConn=1)")
 		client = &http.Client{
 			Timeout: time.Second * time.Duration(apiTimeout),
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
@@ -117,10 +118,10 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 		}
 	}
 
-	httpResp, errHttpReq := client.Do(req)
-	if errHttpReq != nil {
-		utils.LogError(logger, errHttpReq, "failed to send testcase request to app")
-		return nil, errHttpReq
+	httpResp, errHTTPReq := client.Do(req)
+	if errHTTPReq != nil {
+		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		return nil, errHTTPReq
 	}
 
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
@@ -132,10 +133,10 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 	resp = &models.HTTPResp{
 		StatusCode: httpResp.StatusCode,
 		Body:       string(respBody),
-		Header:     ToYamlHttpHeader(httpResp.Header),
+		Header:     ToYamlHTTPHeader(httpResp.Header),
 	}
 
-	return resp, errHttpReq
+	return resp, errHTTPReq
 }
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
@@ -159,7 +160,7 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 	return response, nil
 }
 
-// Generate unique random id
+// GenerateRandomID Generates unique random id
 func GenerateRandomID() int {
 	rand.Seed(time.Now().UnixNano())
 	id := rand.Intn(1000000000) // Adjust the range as needed
@@ -201,10 +202,10 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	return indices, nil
 }
 
-func NewId(Ids []string, identifier string) string {
+func NewID(IDs []string, identifier string) string {
 	latestIndx := 0
-	for _, Id := range Ids {
-		namePackets := strings.Split(Id, "-")
+	for _, ID := range IDs {
+		namePackets := strings.Split(ID, "-")
 		if len(namePackets) == 3 {
 			Indx, err := strconv.Atoi(namePackets[2])
 			if err != nil {

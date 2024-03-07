@@ -5,9 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"os"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
@@ -481,14 +482,14 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) Record(ctx context.Context, id uint64) (<-chan *models.TestCase, error) {
+func (h *Hooks) Record(ctx context.Context, _ uint64) (<-chan *models.TestCase, error) {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents)
 }
 
-func (h *Hooks) unLoad(ctx context.Context) error {
+func (h *Hooks) unLoad(_ context.Context) error {
 	// closing all events
 	//other
 	if err := h.socket.Close(); err != nil {

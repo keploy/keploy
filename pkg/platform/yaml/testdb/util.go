@@ -20,8 +20,8 @@ import (
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
-	header := pkg.ToHttpHeader(tc.HTTPReq.Header)
-	curl := pkg.MakeCurlCommand(string(tc.HTTPReq.Method), tc.HTTPReq.URL, pkg.ToYamlHttpHeader(header), tc.HTTPReq.Body)
+	header := pkg.ToHTTPHeader(tc.HTTPReq.Header)
+	curl := pkg.MakeCurlCommand(string(tc.HTTPReq.Method), tc.HTTPReq.URL, pkg.ToYamlHTTPHeader(header), tc.HTTPReq.Body)
 	doc := &yaml.NetworkTrafficDoc{
 		Version: tc.Version,
 		Kind:    tc.Kind,
@@ -29,7 +29,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Curl:    curl,
 	}
 	// find noisy fields
-	m, err := FlattenHTTPResponse(pkg.ToHttpHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
 	if err != nil {
 		msg := "error in flattening http response"
 		utils.LogError(logger, err, msg)

@@ -79,7 +79,10 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		for {
 			select {
 			case <-ctx.Done(): // Check for context cancellation
-				r.Close()
+				err := r.Close()
+				if err != nil {
+					utils.LogError(l, err, "failed to close perf socketOpenEvent reader")
+				}
 				return nil
 			default:
 				rec, err := r.Read()
@@ -123,7 +126,10 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		for {
 			select {
 			case <-ctx.Done(): // Check for context cancellation
-				r.Close()
+				err := r.Close()
+				if err != nil {
+					utils.LogError(l, err, "failed to close ringbuf socketDataEvent reader")
+				}
 				return nil
 			default:
 				record, err := r.Read()
@@ -179,7 +185,10 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		for {
 			select {
 			case <-ctx.Done(): // Check for context cancellation
-				r.Close()
+				err := r.Close()
+				if err != nil {
+					utils.LogError(l, err, "failed to close ringbuf socketDataEvent reader")
+				}
 				return nil
 			default:
 				rec, err := r.Read()

@@ -108,7 +108,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			var responseString string
 
 			// Fetching the response headers
-			header := pkg.ToHttpHeader(stub.Spec.HTTPResp.Header)
+			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
 
 			//Check if the gzip encoding is present in the header
 			if header["Content-Encoding"] != nil && header["Content-Encoding"][0] == "gzip" {

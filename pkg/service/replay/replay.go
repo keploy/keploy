@@ -134,7 +134,7 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, error) {
 		return "", 0, fmt.Errorf("failed to get all test run ids: %w", err)
 	}
 
-	newTestRunID := pkg.NewId(testRunIDs, models.TestRunTemplateName)
+	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
 
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
@@ -469,7 +469,7 @@ func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 			var err error
 
-			userIP, err := r.instrumentation.GetAppIp(ctx, appID)
+			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get the app ip")
 				return nil, err
@@ -482,7 +482,7 @@ func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
 		r.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
-		resp, err := pkg.SimulateHttp(ctx, *tc, testSetID, r.logger, r.config.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, r.logger, r.config.Test.APITimeout)
 		r.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 		r.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
 		return resp, err

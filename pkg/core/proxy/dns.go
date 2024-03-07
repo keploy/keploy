@@ -14,7 +14,7 @@ import (
 )
 
 func (p *Proxy) startTcpDnsServer() {
-	addr := fmt.Sprintf(":%v", p.DnsPort)
+	addr := fmt.Sprintf(":%v", p.DNSPort)
 
 	handler := p
 	server := &dns.Server{
@@ -24,7 +24,7 @@ func (p *Proxy) startTcpDnsServer() {
 		ReusePort: true,
 	}
 
-	p.TcpDnsServer = server
+	p.TCPDNSServer = server
 
 	p.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
@@ -35,7 +35,7 @@ func (p *Proxy) startTcpDnsServer() {
 
 func (p *Proxy) startUdpDnsServer() {
 
-	addr := fmt.Sprintf(":%v", p.DnsPort)
+	addr := fmt.Sprintf(":%v", p.DNSPort)
 
 	handler := p
 	server := &dns.Server{
@@ -46,7 +46,7 @@ func (p *Proxy) startUdpDnsServer() {
 		// DisableBackground: true,
 	}
 
-	p.UdpDnsServer = server
+	p.UDPDNSServer = server
 
 	p.logger.Info(fmt.Sprintf("starting UDP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
@@ -169,8 +169,8 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 
 func (p *Proxy) stopDnsServer(ctx context.Context) {
 	// stop udp dns server & tcp dns server
-	if p.UdpDnsServer != nil {
-		err := p.UdpDnsServer.Shutdown()
+	if p.UDPDNSServer != nil {
+		err := p.UDPDNSServer.Shutdown()
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to stop udp dns server")
 		}
@@ -178,8 +178,8 @@ func (p *Proxy) stopDnsServer(ctx context.Context) {
 	}
 
 	// stop tcp dns server & tcp dns server
-	if p.TcpDnsServer != nil {
-		err := p.TcpDnsServer.Shutdown()
+	if p.TCPDNSServer != nil {
+		err := p.TCPDNSServer.Shutdown()
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to stop tcp dns server")
 		}

@@ -114,7 +114,7 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	res.BodyResult[0].Normal = pass
 
-	if !CompareHeaders(pkg.ToHttpHeader(tc.HTTPResp.Header), pkg.ToHttpHeader(actualResponse.Header), hRes, headerNoise) {
+	if !CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
 
 		pass = false
 	}

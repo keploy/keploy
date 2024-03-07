@@ -112,7 +112,7 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 	}
 	t <- &models.TestCase{
 		Version: models.GetVersion(),
-		Name:    pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"],
+		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
 		Created: time.Now().Unix(),
 		HTTPReq: models.HTTPReq{
@@ -123,14 +123,14 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 			// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
 			URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
 			//  URL: string(b),
-			Header:    pkg.ToYamlHttpHeader(req.Header),
+			Header:    pkg.ToYamlHTTPHeader(req.Header),
 			Body:      string(reqBody),
-			URLParams: pkg.UrlParams(req),
+			URLParams: pkg.URLParams(req),
 			Timestamp: reqTimeTest,
 		},
 		HTTPResp: models.HTTPResp{
 			StatusCode: resp.StatusCode,
-			Header:     pkg.ToYamlHttpHeader(resp.Header),
+			Header:     pkg.ToYamlHTTPHeader(resp.Header),
 			Body:       string(respBody),
 			Timestamp:  resTimeTest,
 		},

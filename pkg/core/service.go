@@ -41,10 +41,10 @@ type Proxy interface {
 }
 
 type ProxyOptions struct {
-	// DnsIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
-	DnsIPv4Addr string
-	// DnsIPv6Addr is the proxy IP returned by the DNS server. default is loopback address
-	DnsIPv6Addr string
+	// DNSIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
+	DNSIPv4Addr string
+	// DNSIPv6Addr is the proxy IP returned by the DNS server. default is loopback address
+	DNSIPv6Addr string
 }
 
 type DestInfo interface {

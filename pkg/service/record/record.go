@@ -79,7 +79,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	newTestSetID := pkg.NewId(testSetIDs, models.TestSetPattern)
+	newTestSetID := pkg.NewID(testSetIDs, models.TestSetPattern)
 
 	// setting up the environment for recording
 	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})

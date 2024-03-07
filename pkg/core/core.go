@@ -113,7 +113,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
 	//start proxy
 	err = c.proxy.StartProxy(ctx, ProxyOptions{
-		DnsIPv4Addr: a.KeployIPv4Addr(),
+		DNSIPv4Addr: a.KeployIPv4Addr(),
 		//DnsIPv6Addr: ""
 	})
 	if err != nil {
@@ -148,7 +148,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	return a.Run(ctx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
 }
 
-func (c *Core) GetAppIp(_ context.Context, id uint64) (string, error) {
+func (c *Core) GetAppIP(_ context.Context, id uint64) (string, error) {
 
 	a, err := c.getApp(id)
 	if err != nil {

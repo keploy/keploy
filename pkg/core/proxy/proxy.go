@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -30,7 +29,7 @@ type Proxy struct {
 	IP4     string
 	IP6     string
 	Port    uint32
-	DnsPort uint32
+	DNSPort uint32
 
 	DestInfo     core.DestInfo
 	Integrations map[string]integrations.Integrations
@@ -46,15 +45,15 @@ type Proxy struct {
 
 	Listener net.Listener
 
-	UdpDnsServer *dns.Server
-	TcpDnsServer *dns.Server
+	UDPDNSServer *dns.Server
+	TCPDNSServer *dns.Server
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
-		DnsPort:      opts.DNSPort,   // default: 26789
+		DNSPort:      opts.DNSPort,   // default: 26789
 		IP4:          "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
 		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:      &sync.Mutex{},
@@ -66,7 +65,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
 	}
 }
 
-func (p *Proxy) InitIntegrations(ctx context.Context) error {
+func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
 		prs := parser(p.logger)
@@ -98,12 +97,12 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}()
 
 	//change the ip4 and ip6 if provided in the opts in case of docker environment
-	if len(opts.DnsIPv4Addr) != 0 {
-		p.IP4 = opts.DnsIPv4Addr
+	if len(opts.DNSIPv4Addr) != 0 {
+		p.IP4 = opts.DNSIPv4Addr
 	}
 
-	if len(opts.DnsIPv6Addr) != 0 {
-		p.IP6 = opts.DnsIPv6Addr
+	if len(opts.DNSIPv6Addr) != 0 {
+		p.IP6 = opts.DNSIPv6Addr
 	}
 
 	// start the TCP DNS server
@@ -187,8 +186,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	}(start, srcConn)
 
 	// making a new client connection id for each client connection
-	clientConnId := util.GetNextID()
-	p.logger.Debug("New client connection", zap.Any("connectionID", clientConnId))
+	clientConnID := util.GetNextID()
+	p.logger.Debug("New client connection", zap.Any("connectionID", clientConnID))
 
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
@@ -278,7 +277,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnId), zap.Error(err))
+			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return
 		}
 		depsErrChan <- err
@@ -322,9 +321,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	var dstConn net.Conn
 
 	//Dialing for tls conn
-	destConnId := util.GetNextID()
+	destConnID := util.GetNextID()
 
-	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnId))
+	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
 
 	dstCfg := &integrations.ConditionalDstCfg{
 		Port: uint(destInfo.Port),
@@ -362,7 +361,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.AppID)
 	if !ok {
-		depsErrChan <- errors.New(fmt.Sprintf("failed to fetch the mock manager for the app:%v", destInfo.AppID))
+		depsErrChan <- fmt.Errorf("failed to fetch the mock manager for the app:%v", destInfo.AppID)
 		utils.LogError(logger, nil, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
 		return
 	}
@@ -408,7 +407,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			}
 		}
 	}
-	return
 }
 
 func (p *Proxy) StopProxyServer(ctx context.Context) {
@@ -438,7 +436,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("proxy stopped...")
 }
 
-func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, errChan chan error, opts models.OutgoingOptions) error {
+func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, errChan chan error, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_RECORD,
@@ -458,7 +456,7 @@ func (p *Proxy) Record(ctx context.Context, id uint64, mocks chan<- *models.Mock
 	return nil
 }
 
-func (p *Proxy) Mock(ctx context.Context, id uint64, errChan chan error, opts models.OutgoingOptions) error {
+func (p *Proxy) Mock(_ context.Context, id uint64, errChan chan error, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_TEST,
@@ -476,7 +474,7 @@ func (p *Proxy) Mock(ctx context.Context, id uint64, errChan chan error, opts mo
 	return nil
 }
 
-func (p *Proxy) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	//session, ok := p.sessions.Get(id)
 	//if !ok {
 	//	return fmt.Errorf("session not found")
@@ -487,21 +485,5 @@ func (p *Proxy) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
 	}
 
-	return nil
-}
-
-func (p *Proxy) setProxyIP(ip4, ip6 string) error {
-	p.ipMutex.Lock()
-	defer p.ipMutex.Unlock()
-
-	if len(ip4) == 0 {
-		return errors.New("ip4 is empty")
-	}
-
-	p.IP4 = ip4
-	//set the ip6 if provided
-	if len(ip6) != 0 {
-		p.IP6 = ip6
-	}
 	return nil
 }

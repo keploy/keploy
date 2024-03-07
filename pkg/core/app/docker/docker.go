@@ -476,7 +476,13 @@ func (idc *Impl) SetKeployNetwork(c *Compose) error {
 
 	if !exists {
 		// Add the keploy-network with external: true
-		c.Networks.Content = append(c.Networks.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-network"}, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{&yaml.Node{Kind: yaml.ScalarNode, Value: "external"}, &yaml.Node{Kind: yaml.ScalarNode, Value: "true"}}})
+		c.Networks.Content = append(c.Networks.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-network"},
+			&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "external"},
+				{Kind: yaml.ScalarNode, Value: "true"},
+			}},
+		)
 	}
 
 	// Add or modify network for each service
@@ -495,7 +501,7 @@ func (idc *Impl) SetKeployNetwork(c *Compose) error {
 				&yaml.Node{
 					Kind: yaml.SequenceNode,
 					Content: []*yaml.Node{
-						&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-network"},
+						{Kind: yaml.ScalarNode, Value: "keploy-network"},
 					},
 				},
 			)
