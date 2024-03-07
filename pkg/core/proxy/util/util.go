@@ -1,3 +1,4 @@
+// Package util provides utility functions for the proxy package.
 package util
 
 import (
@@ -21,8 +22,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-var sendLogs = true
 
 // idCounter is used to generate random ID for each request
 var idCounter int64 = -1

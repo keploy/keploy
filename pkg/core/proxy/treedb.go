@@ -27,25 +27,25 @@ var customComparator = func(a, b interface{}) int {
 	return 0
 }
 
-type treeDb struct {
+type TreeDb struct {
 	rbt   *redblacktree.Tree
 	mutex *sync.Mutex
 }
 
-func NewTreeDb(comparator func(a, b interface{}) int) *treeDb {
-	return &treeDb{
+func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
+	return &TreeDb{
 		rbt:   redblacktree.NewWith(comparator),
 		mutex: &sync.Mutex{},
 	}
 }
 
-func (db *treeDb) insert(key interface{}, obj interface{}) {
+func (db *TreeDb) insert(key interface{}, obj interface{}) {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	db.rbt.Put(key, obj)
 }
 
-func (db *treeDb) delete(key interface{}) bool {
+func (db *TreeDb) delete(key interface{}) bool {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	_, found := db.rbt.Get(key)
@@ -56,7 +56,7 @@ func (db *treeDb) delete(key interface{}) bool {
 	return true
 }
 
-func (db *treeDb) update(oldKey interface{}, newKey interface{}, newObj interface{}) bool {
+func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interface{}) bool {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	_, found := db.rbt.Get(oldKey)
@@ -68,13 +68,13 @@ func (db *treeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	return true
 }
 
-func (db *treeDb) deleteAll() {
+func (db *TreeDb) deleteAll() {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	db.rbt.Clear()
 }
 
-func (db *treeDb) getAll() []interface{} {
+func (db *TreeDb) getAll() []interface{} {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	return db.rbt.Values()

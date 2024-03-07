@@ -1,3 +1,4 @@
+// Package proxy provides functionality for handling proxies.
 package proxy
 
 import (
@@ -249,12 +250,12 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 var (
 	caPrivKey    interface{}
 	caCertParsed *x509.Certificate
-	dstUrl       string
+	dstURL       string
 )
 
 func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
-	dstUrl = clientHello.ServerName
+	dstURL = clientHello.ServerName
 
 	cfsslLog.Level = cfsslLog.LevelError
 
@@ -290,10 +291,10 @@ func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	}
 
 	// Load the server certificate and private key
-	serverTlsCert, err := tls.X509KeyPair(serverCert, serverKey)
+	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
 	}
 
-	return &serverTlsCert, nil
+	return &serverTLSCert, nil
 }

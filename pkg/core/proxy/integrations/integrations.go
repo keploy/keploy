@@ -1,17 +1,20 @@
+// Package integrations provides functionality for integrating different types of services.
 package integrations
 
 import (
 	"context"
 	"crypto/tls"
+	"net"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
-	"net"
 )
 
 type Initializer func(logger *zap.Logger) Integrations
 
 type integrationType string
 
+// constants for different types of integrations
 const (
 	HTTP        integrationType = "http"
 	GRPC        integrationType = "grpc"
@@ -22,16 +25,12 @@ const (
 	MONGO       integrationType = "mongo"
 )
 
-// TODO: it should be a map of enum to Initializer
-// replace "http"-> HTTP
 var Registered = make(map[string]Initializer)
 
-// Used to establish destination connection in case of any passThrough.
-// TODO: Change the name of the struct
 type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)
 	Port   uint
-	TlsCfg *tls.Config
+	TLSCfg *tls.Config
 }
 
 type Integrations interface {

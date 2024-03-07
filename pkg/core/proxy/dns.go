@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func (p *Proxy) startTcpDnsServer() {
+func (p *Proxy) startTCPDNSServer() {
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
 	handler := p
@@ -33,7 +33,7 @@ func (p *Proxy) startTcpDnsServer() {
 	}
 }
 
-func (p *Proxy) startUdpDnsServer() {
+func (p *Proxy) startUDPDNSServer() {
 
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
@@ -167,7 +167,7 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 	return answers
 }
 
-func (p *Proxy) stopDnsServer(ctx context.Context) {
+func (p *Proxy) stopDNSServer(_ context.Context) {
 	// stop udp dns server & tcp dns server
 	if p.UDPDNSServer != nil {
 		err := p.UDPDNSServer.Shutdown()

@@ -7,18 +7,17 @@ import (
 )
 
 type MockManager struct {
-	filtered   *treeDb
-	unfiltered *treeDb
+	filtered   *TreeDb
+	unfiltered *TreeDb
 }
 
-func NewMockManager(filtered, unfiltered *treeDb) *MockManager {
+func NewMockManager(filtered, unfiltered *TreeDb) *MockManager {
 	return &MockManager{
 		filtered:   filtered,
 		unfiltered: unfiltered,
 	}
 }
 
-// For proxy
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 	for index, mock := range mocks {
@@ -28,7 +27,6 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	}
 }
 
-// For proxy
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 	for index, mock := range mocks {
@@ -38,7 +36,6 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	}
 }
 
-// For integrations
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	var tcsMocks []*models.Mock
 	mocks := m.filtered.getAll()

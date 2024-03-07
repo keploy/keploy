@@ -109,7 +109,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
 	go func() {
 		utils.Recover(p.logger)
-		p.startTcpDnsServer()
+		p.startTCPDNSServer()
 	}()
 
 	if models.GetMode() == models.MODE_TEST {
@@ -118,7 +118,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		p.logger.Debug("Starting Udp Dns Server in Test mode...")
 		go func() {
 			utils.Recover(p.logger)
-			p.startUdpDnsServer()
+			p.startUDPDNSServer()
 		}()
 	}
 
@@ -334,10 +334,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		logger.Debug("", zap.Any("isTLS connection", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         dstUrl,
+			ServerName:         dstURL,
 		}
 
-		addr := fmt.Sprintf("%v:%v", dstUrl, destInfo.Port)
+		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		dstConn, err = tls.Dial("tcp", addr, cfg)
 		if err != nil {
 			depsErrChan <- err
@@ -345,7 +345,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			return
 		}
 
-		dstCfg.TlsCfg = cfg
+		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
 
 	} else {
@@ -431,7 +431,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	}
 
 	// stop dns servers
-	p.stopDnsServer(ctx)
+	p.stopDNSServer(ctx)
 
 	p.logger.Info("proxy stopped...")
 }
