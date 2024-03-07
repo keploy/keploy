@@ -267,6 +267,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	var dstAddr string
 
+	if destInfo.Version == 4 {
+		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
+		p.logger.Debug("", zap.Any("DestIp4", destInfo.IPv4Addr), zap.Any("DestPort", destInfo.Port))
+	} else if destInfo.Version == 6 {
+		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
+		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
+	}
+
 	// close the mock channel and depsErrChan when the context is done
 	select {
 	case <-ctx.Done():
@@ -275,13 +283,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	default:
 	}
 
-	if destInfo.Version == 4 {
-		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-		p.logger.Debug("", zap.Any("DestIp4", destInfo.IPv4Addr), zap.Any("DestPort", destInfo.Port))
-	} else if destInfo.Version == 6 {
-		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
-		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
-	}
+	// This is used to handle the parser errors
+	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
+	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
+	defer func() {
+		err := parserErrGrp.Wait()
+		if err != nil {
+		}
+	}()
 
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {

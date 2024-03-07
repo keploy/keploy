@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/v2/pkg/models"
+	"golang.org/x/sync/errgroup"
 	"io"
 	"os"
 	"os/exec"
@@ -182,11 +184,17 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	// channels for writing messages from proxy to destination or client
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error)
+	defer close(destBufferChannel)
+	defer close(errChannel)
 
-	go func() {
+	// get the error group from the context
+	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+
+	g.Go(func() error {
 		defer utils.Recover(logger)
 		ReadBuffConn(ctx, logger, destConn, destBufferChannel, errChannel)
-	}()
+		return nil
+	})
 
 	select {
 	case buffer := <-destBufferChannel:

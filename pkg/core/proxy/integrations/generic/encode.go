@@ -3,6 +3,7 @@ package generic
 import (
 	"context"
 	"encoding/base64"
+	"golang.org/x/sync/errgroup"
 	"net"
 	"strconv"
 	"time"
@@ -53,17 +54,24 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
 	errChan := make(chan error)
+	defer close(clientBuffChan)
+	defer close(destBuffChan)
+	defer close(errChan)
 
+	//get the error group from the context
+	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	// read requests from client
-	go func() {
+	g.Go(func() error {
 		defer utils.Recover(logger)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
-	}()
+		return nil
+	})
 	// read responses from destination
-	go func() {
+	g.Go(func() error {
 		defer utils.Recover(logger)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
-	}()
+		return nil
+	})
 
 	prevChunkWasReq := false
 	var reqTimestampMock = time.Now()

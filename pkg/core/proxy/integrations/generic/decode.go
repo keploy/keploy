@@ -51,7 +51,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzymatch(ctx, genericRequests, mockDb)
+			matched, genericResponses, err := fuzzyMatch(ctx, genericRequests, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
 			}
@@ -86,7 +86,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				if len(reqBuffer) > 0 {
 					genericRequests = [][]byte{reqBuffer}
 				}
-				logger.Debug("the length of genericRequests after passthrough ", zap.Any("length", len(genericRequests)))
+				logger.Debug("the length of genericRequests after passThrough ", zap.Any("length", len(genericRequests)))
 				continue
 			}
 			for _, genericResponse := range genericResponses {
