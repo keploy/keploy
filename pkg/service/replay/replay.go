@@ -174,11 +174,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 	defer runTestSetCtxCancel()
 
-	var testLoopCtx, testLoopCtxCancel = context.WithCancel(runTestSetCtx)
-	defer testLoopCtxCancel()
-	testLoopErrGrp, testLoopCtx := errgroup.WithContext(testLoopCtx)
-	testLoopCtx = context.WithValue(testLoopCtx, models.ErrGroupKey, testLoopErrGrp)
-
 	var mockErrChan <-chan error
 	var appErrChan = make(chan models.AppError)
 	var appErr models.AppError
@@ -232,7 +227,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	defer close(exitLoopChan)
 
 	// Checking for errors in the mocking and application
-	go func() {
+	runTestSetErrGrp.Go(func() error {
 		defer utils.Recover(r.logger)
 		select {
 		case err := <-mockErrChan:
@@ -247,7 +242,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			case models.ErrAppStopped:
 				testSetStatusByErrChan = models.TestSetStatusAppHalted
 			case models.ErrCtxCanceled:
-				return
+				return nil
 			case models.ErrInternal:
 				testSetStatusByErrChan = models.TestSetStatusInternalErr
 			default:
@@ -258,12 +253,13 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testSetStatusByErrChan = models.TestSetStatusUserAbort
 		}
 		exitLoopChan <- true
-		testLoopCtxCancel()
-		err := testLoopErrGrp.Wait()
+		runTestSetCtxCancel()
+		err := runTestSetErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
-	}()
+		return nil
+	})
 
 	// Inserting the initial report for the test set
 	testReport := &models.TestReport{
@@ -283,16 +279,11 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	for _, testCase := range testCases {
 
-		// Checking for errors in the loop
-		if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
-			testSetStatus = models.TestSetStatusInternalErr
-			exitLoop = true
-		}
-
 		// Checking for errors in the mocking and application
 		select {
 		case <-exitLoopChan:
 			testSetStatus = testSetStatusByErrChan
+			exitLoop = true
 		default:
 		}
 
@@ -304,24 +295,24 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testResult *models.Result
 		var testPass bool
 
-		filteredMocks, loopErr := r.mockDB.GetFilteredMocks(testLoopCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
+		filteredMocks, loopErr := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to get filtered mocks")
 			continue
 		}
-		unfilteredMocks, loopErr := r.mockDB.GetUnFilteredMocks(testLoopCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
+		unfilteredMocks, loopErr := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 			continue
 		}
-		loopErr = r.instrumentation.SetMocks(testLoopCtx, appID, filteredMocks, unfilteredMocks)
+		loopErr = r.instrumentation.SetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to set mocks")
 			continue
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := r.SimulateRequest(testLoopCtx, appID, testCase, testSetID)
+		resp, loopErr := r.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			continue
@@ -375,7 +366,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
-			loopErr = r.reportDB.InsertTestCaseResult(testLoopCtx, testRunID, testSetID, testCaseResult)
+			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				continue
@@ -389,24 +380,24 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// Checking errors for fina iteration
-	// Checking for errors in the loop
-	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
-		testSetStatus = models.TestSetStatusInternalErr
-	}
-
-	// Checking for errors in the mocking and application
-	select {
-	case <-exitLoopChan:
-		testSetStatus = testSetStatusByErrChan
-	default:
-	}
-
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
 			utils.LogError(r.logger, err, "failed to get test case results")
 			testSetStatus = models.TestSetStatusInternalErr
+		}
+	}
+
+	// Checking errors for fina iteration
+	// Checking for errors in the loop
+	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
+		testSetStatus = models.TestSetStatusInternalErr
+	} else {
+		// Checking for errors in the mocking and application
+		select {
+		case <-exitLoopChan:
+			testSetStatus = testSetStatusByErrChan
+		default:
 		}
 	}
 
