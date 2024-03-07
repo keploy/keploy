@@ -334,7 +334,7 @@ func checkValidEncode(logger *zap.Logger, filteredMocks []*models.Mock, mockDb i
 	}
 
 	//TODO: SetFilteredMocks is not available in MockMemDb
-	//mockDb.SetFilteredMocks(filteredMocks)
+	//mockdb.SetFilteredMocks(filteredMocks)
 	//h.SetTcsMocks(tcsMocks)
 }
 
