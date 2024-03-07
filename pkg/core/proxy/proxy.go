@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io"
 	"net"
 	"strings"
@@ -90,11 +91,18 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		return err
 	}
 
+	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+
 	// start the proxy server
-	go func() {
+	g.Go(func() error {
 		utils.Recover(p.logger)
-		p.start(ctx)
-	}()
+		err := p.start(ctx)
+		if err != nil {
+			utils.LogError(p.logger, err, "error while running the proxy server")
+			return err
+		}
+		return nil
+	})
 
 	//change the ip4 and ip6 if provided in the opts in case of docker environment
 	if len(opts.DNSIPv4Addr) != 0 {
@@ -107,71 +115,114 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 
 	// start the TCP DNS server
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
-	go func() {
+	g.Go(func() error {
 		utils.Recover(p.logger)
-		p.startTCPDNSServer()
-	}()
+		err := p.startTCPDNSServer(ctx)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to start tcp dns server")
+			return err
+		}
+		return nil
+	})
 
 	if models.GetMode() == models.MODE_TEST {
 		p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave in test mode if you have provided wrong domain name in your application code.")
 		// start the UDP DNS server
 		p.logger.Debug("Starting Udp Dns Server in Test mode...")
-		go func() {
+		g.Go(func() error {
 			utils.Recover(p.logger)
-			p.startUDPDNSServer()
-		}()
+			err := p.startUDPDNSServer(ctx)
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to start udp dns server")
+				return err
+			}
+			return nil
+		})
 	}
 
-	go func() {
+	//stop DNS servers when the context is done
+	g.Go(func() error {
 		utils.Recover(p.logger)
-		p.StopProxyServer(ctx)
-	}()
+		<-ctx.Done()
+		err := p.stopDNSServers(ctx)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to stop the dns servers")
+			return err
+		}
+		return nil
+	})
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
 	return nil
 }
 
 // start function starts the proxy server on the idle local port
-func (p *Proxy) start(ctx context.Context) {
+func (p *Proxy) start(ctx context.Context) error {
 
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
 	if err != nil {
 		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
-		return
+		return err
 	}
 	p.Listener = listener
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 
+	defer func(listener net.Listener) {
+		err := listener.Close()
+		if err != nil {
+			p.logger.Error("failed to close the listener", zap.Error(err))
+		}
+		p.logger.Info("proxy stopped...")
+	}(listener)
+
+	clientConnErrGrp, clientConnCtx := errgroup.WithContext(ctx)
+	defer func() {
+		err := clientConnErrGrp.Wait()
+		if err != nil {
+			//utils.LogError(p.logger, err, "failed to handle the client connection")
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			err := listener.Close()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to close the listener")
+				return err
+			}
+			return nil
 		default:
-			conn, err := listener.Accept()
+			clientConn, err := listener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
-					break
+					return err
 				}
 				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-				break
+				return err
 			}
-
 			// collecting the client connections for cleanup
-			p.connMutex.Lock()
-			p.clientConnections = append(p.clientConnections, conn)
-			p.connMutex.Unlock()
+			//p.connMutex.Lock()
+			//p.clientConnections = append(p.clientConnections, conn)
+			//p.connMutex.Unlock()
 
-			go func() {
+			// handle the client connection
+			clientConnErrGrp.Go(func() error {
 				utils.Recover(p.logger)
-				p.handleConnection(ctx, conn)
-			}()
+				err := p.handleConnection(clientConnCtx, clientConn)
+				if err != nil {
+					utils.LogError(p.logger, nil, "failed to handle the client connection")
+					return nil //ignoring the error to continue the flow
+				}
+				return nil
+			})
 		}
 	}
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
-func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
+func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
@@ -197,32 +248,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Any("Source port", sourcePort))
-		return
+		return err
 	}
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Any("Source port", sourcePort))
-		return
+		return err
 	}
 
 	//get the session rule
 	rule, ok := p.sessions.Get(destInfo.AppID)
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Any("AppID", destInfo.AppID))
-		return
+		return err
 	}
 
-	//TODO: where to close the mock channel and this depsErrChan
-	depsErrChan := rule.DepsErrChan
 	var dstAddr string
 
 	// close the mock channel and depsErrChan when the context is done
 	select {
 	case <-ctx.Done():
 		close(rule.MC)
-		close(depsErrChan)
+		return nil
 	default:
 	}
 
@@ -240,35 +289,31 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
-				depsErrChan <- err
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
-				return
+				return err
 			}
 			// Record the outgoing message into a mock
 			err := p.Integrations["mysql"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
-				depsErrChan <- err
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
-				return
+				return err
 			}
-			return
+			return nil
 		}
 
 		m, ok := p.MockManagers.Load(destInfo.AppID)
 		if !ok {
-			depsErrChan <- err
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
-			return
+			return err
 		}
 
 		//mock the outgoing message
 		err := p.Integrations["mysql"].MockOutgoing(ctx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
-			depsErrChan <- err
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
-			return
+			return err
 		}
-		return
+		return nil
 	}
 
 	reader := bufio.NewReader(srcConn)
@@ -278,11 +323,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
-			return
+			return nil
 		}
-		depsErrChan <- err
 		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Any("proxy port", p.Port))
-		return
+		return err
 	}
 
 	multiReader := io.MultiReader(reader, srcConn)
@@ -297,17 +341,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		srcConn, err = p.handleTLSConnection(srcConn)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
-			depsErrChan <- err
-			return
+			return err
 		}
 	}
 
 	// attempt to read conn until buffer is either filled or conn is closed
 	initialBuf, err := util.ReadInitialBuf(ctx, p.logger, srcConn)
 	if err != nil {
-		depsErrChan <- err
 		utils.LogError(p.logger, err, "failed to read the initial buffer")
-		return
+		return err
 	}
 
 	//update the src connection to have the initial buffer
@@ -340,9 +382,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		dstConn, err = tls.Dial("tcp", addr, cfg)
 		if err != nil {
-			depsErrChan <- err
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
-			return
+			return err
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -351,9 +392,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	} else {
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
-			depsErrChan <- err
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
-			return
+			return err
 		}
 		dstCfg.Addr = dstAddr
 	}
@@ -361,9 +401,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.AppID)
 	if !ok {
-		depsErrChan <- fmt.Errorf("failed to fetch the mock manager for the app:%v", destInfo.AppID)
-		utils.LogError(logger, nil, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
-		return
+		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+		return err
 	}
 
 	generic := true
@@ -373,16 +412,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 			if rule.Mode == models.MODE_RECORD {
 				err := parser.RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 				if err != nil {
-					depsErrChan <- err
 					utils.LogError(logger, err, "failed to record the outgoing message")
-					return
+					return err
 				}
 			} else {
 				err := parser.MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 				if err != nil {
-					depsErrChan <- err
 					utils.LogError(logger, err, "failed to mock the outgoing message")
-					return
+					return err
 				}
 			}
 			generic = false
@@ -394,19 +431,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) {
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations["generic"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
-				depsErrChan <- err
 				utils.LogError(logger, err, "failed to record the outgoing message")
-				return
+				return err
 			}
 		} else {
 			err := p.Integrations["generic"].MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
-				depsErrChan <- err
 				utils.LogError(logger, err, "failed to mock the outgoing message")
-				return
+				return err
 			}
 		}
 	}
+	return nil
 }
 
 func (p *Proxy) StopProxyServer(ctx context.Context) {
@@ -431,7 +467,11 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	}
 
 	// stop dns servers
-	p.stopDNSServer(ctx)
+	err := p.stopDNSServers(ctx)
+	if err != nil {
+		utils.LogError(p.logger, err, "failed to stop the dns servers")
+		return
+	}
 
 	p.logger.Info("proxy stopped...")
 }

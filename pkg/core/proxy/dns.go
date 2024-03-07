@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func (p *Proxy) startTCPDNSServer() {
+func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
 	handler := p
@@ -31,9 +31,10 @@ func (p *Proxy) startTCPDNSServer() {
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.Any("addr", server.Addr))
 	}
+	return nil
 }
 
-func (p *Proxy) startUDPDNSServer() {
+func (p *Proxy) startUDPDNSServer(_ context.Context) error {
 
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
@@ -52,7 +53,9 @@ func (p *Proxy) startUDPDNSServer() {
 	err := server.ListenAndServe()
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to start udp dns server", zap.Any("addr", server.Addr))
+		return err
 	}
+	return nil
 }
 
 // For DNS caching
@@ -167,22 +170,38 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 	return answers
 }
 
-func (p *Proxy) stopDNSServer(_ context.Context) {
-	// stop udp dns server & tcp dns server
-	if p.UDPDNSServer != nil {
-		err := p.UDPDNSServer.Shutdown()
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to stop udp dns server")
-		}
-		p.logger.Info("Udp Dns server stopped successfully")
+func (p *Proxy) stopDNSServers(_ context.Context) error {
+	// stop tcp dns server
+	if err := p.stopTCPDNSServer(); err != nil {
+		return err
 	}
+	// stop udp dns server
+	if err := p.stopUDPDNSServer(); err != nil {
+		return err
+	}
+	return nil
+}
 
-	// stop tcp dns server & tcp dns server
+func (p *Proxy) stopTCPDNSServer() error {
 	if p.TCPDNSServer != nil {
 		err := p.TCPDNSServer.Shutdown()
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to stop tcp dns server")
+			return err
 		}
 		p.logger.Info("Tcp Dns server stopped successfully")
 	}
+	return nil
+}
+
+func (p *Proxy) stopUDPDNSServer() error {
+	if p.UDPDNSServer != nil {
+		err := p.UDPDNSServer.Shutdown()
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to stop udp dns server")
+			return err
+		}
+		p.logger.Info("Udp Dns server stopped successfully")
+	}
+	return nil
 }

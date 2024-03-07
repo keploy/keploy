@@ -138,7 +138,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	defer func() {
 		err := runAppErrGrp.Wait()
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to run app")
+			utils.LogError(c.logger, err, "failed to stop the app")
 		}
 	}()
 
@@ -167,7 +167,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		defer utils.Recover(c.logger)
 		appErr := a.Run(runAppCtx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
 		if appErr.Err != nil {
-			utils.LogError(c.logger, appErr, "failed to run app")
+			utils.LogError(c.logger, appErr, "error while running the app")
 			appErrCh <- appErr
 		}
 		return nil
