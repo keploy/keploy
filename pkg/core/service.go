@@ -52,12 +52,10 @@ type DestInfo interface {
 	Delete(ctx context.Context, srcPort uint16) error
 }
 
-// TODO: change the name of this interface
 type AppInfo interface {
 	SendInode(ctx context.Context, id uint64, inode uint64) error
 }
 
-// TODO: change the name of this interface
 type OutgoingInfo interface {
 	PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error
 }

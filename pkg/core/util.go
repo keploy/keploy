@@ -6,8 +6,7 @@ import (
 	"go.keploy.io/server/v2/config"
 )
 
-// TODO: GetPortToSendToKernel name should be renamed
-func GetPortToSendToKernel(ctx context.Context, rules []config.BypassRule) []uint {
+func GetPortToSendToKernel(_ context.Context, rules []config.BypassRule) []uint {
 	// if the rule only contains port, then it should be sent to kernel
 	ports := []uint{}
 	for _, rule := range rules {
