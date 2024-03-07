@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"sync"
 
 	"go.keploy.io/server/v2/pkg/core/app"
@@ -132,20 +133,54 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	}
 
+	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
+
+	defer func() {
+		err := runAppErrGrp.Wait()
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to run app")
+		}
+	}()
+
+	inodeErrCh := make(chan error, 1)
+	appErrCh := make(chan models.AppError, 1)
 	//send inode to the hook
 	inodeChan := make(chan uint64)
-	go func(inodeChan chan uint64) {
+
+	defer close(inodeErrCh)
+	defer close(appErrCh)
+	defer close(inodeChan)
+
+	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(inodeChan)
-
 		inode := <-inodeChan
 		err := c.hook.SendInode(ctx, id, inode)
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to send inode")
+			utils.LogError(c.logger, err, "")
+			inodeErrCh <- errors.New("failed to send inode to the kernel")
 		}
-	}(inodeChan)
+		return nil
+	})
 
-	return a.Run(ctx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
+	runAppErrGrp.Go(func() error {
+		defer utils.Recover(c.logger)
+		appErr := a.Run(runAppCtx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
+		if appErr.Err != nil {
+			utils.LogError(c.logger, appErr, "failed to run app")
+			appErrCh <- appErr
+		}
+		return nil
+	})
+
+	select {
+	case <-runAppCtx.Done():
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+	case appErr := <-appErrCh:
+		return appErr
+	case inodeErr := <-inodeErrCh:
+		return models.AppError{AppErrorType: models.ErrInternal, Err: inodeErr}
+	}
 }
 
 func (c *Core) GetAppIP(_ context.Context, id uint64) (string, error) {

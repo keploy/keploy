@@ -1,14 +1,12 @@
-// Package app provides functionality for managing user applications.
 package app
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"os"
 	"os/exec"
-	"os/user"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -345,52 +343,68 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		Filters: eventFilter,
 	})
 
-	go func(errCh chan error) {
+	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g.Go(func() error {
 		defer utils.Recover(a.logger)
 		for {
 			select {
 			case <-timer.C:
 				errCh <- errors.New("timeout waiting for the container to start")
+				return nil
 			case <-ctx.Done():
 				a.logger.Debug("context cancelled, stopping the listener for container creation event.")
 				errCh <- ctx.Err()
+				return nil
 			case e := <-messages:
 				err := a.handleDockerEvents(ctx, e)
 				if err != nil {
 					errCh <- err
 				}
+				return nil
 			// for debugging purposes
 			case <-logTicker.C:
 				a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
+				return nil
 			case err := <-errCh2:
 				errCh <- err
+				return nil
 			}
-
 		}
-	}(errCh)
+	})
 	return errCh
 }
 
 func (a *App) runDocker(ctx context.Context) models.AppError {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errCh := make(chan error)
-	// listen for the "create container" event in order to send the inode of the container to the kernel
-	errCh2 := a.getDockerMeta(ctx)
 	// if a.cmd is empty, it means the user wants to run the application manually,
 	// so we don't need to run the application in a goroutine
 	if a.cmd == "" {
 		return models.AppError{}
 	}
-	go func(ctx context.Context) {
+
+	g, ctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+
+	defer func() {
+		err := g.Wait()
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to run dockerized app")
+		}
+	}()
+
+	errCh := make(chan error)
+	// listen for the "create container" event in order to send the inode of the container to the kernel
+	errCh2 := a.getDockerMeta(ctx)
+
+	g.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer cancel()
 		err := a.run(ctx)
 		if err.Err != nil {
 			utils.LogError(a.logger, err.Err, "Application stopped with the error")
 			errCh <- err.Err
 		}
-	}(ctx)
+		return nil
+	})
+
 	select {
 	case err := <-errCh:
 		if err != nil && errors.Is(err, context.Canceled) {
@@ -420,12 +434,10 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) mode
 func (a *App) run(ctx context.Context) models.AppError {
 	// Run the app as the user who invoked sudo
 	username := os.Getenv("SUDO_USER")
-	var cmd *exec.Cmd
+	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
 	if username != "" {
 		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
 		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", a.cmd)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", a.cmd)
 	}
 
 	// Set the cancel function for the command
@@ -445,29 +457,6 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Set the output of the command
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	if username != "" {
-		// Switch to the user who invoked sudo
-		u, err := user.Lookup(username)
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to lookup user")
-			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
-		}
-
-		uid, err := strconv.ParseUint(u.Uid, 10, 32)
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to parse user or user id")
-			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
-		}
-
-		gid, err := strconv.ParseUint(u.Gid, 10, 32)
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to parse user or group id")
-			return models.AppError{AppErrorType: models.ErrInternal, Err: err}
-		}
-		// Switch the user
-		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
-	}
 
 	a.logger.Debug("", zap.Any("executing cli", cmd.String()))
 
