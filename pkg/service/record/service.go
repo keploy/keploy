@@ -23,12 +23,12 @@ type Service interface {
 }
 
 type TestDB interface {
-	GetAllTestSetIds(ctx context.Context) ([]string, error)
-	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetId string) error
+	GetAllTestSetIDs(ctx context.Context) ([]string, error)
+	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
 type MockDB interface {
-	InsertMock(ctx context.Context, mock *models.Mock, testSetId string) error
+	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
 }
 
 type Telemetry interface {

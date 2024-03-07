@@ -1,3 +1,4 @@
+// Package record provides functionality for recording and managing test cases and mocks.
 package record
 
 import (
@@ -66,23 +67,23 @@ func (r *recorder) Start(ctx context.Context) error {
 	var outgoingErrChan <-chan error
 	var insertTestErrChan = make(chan error)
 	var insertMockErrChan = make(chan error)
-	var appId uint64
+	var appID uint64
 
 	defer close(appErrChan)
 	defer close(insertTestErrChan)
 	defer close(insertMockErrChan)
 
-	testSetIds, err := r.testDB.GetAllTestSetIds(ctx)
+	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = "failed to get testSetIds"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
 
-	newTestSetId := pkg.NewId(testSetIds, models.TestSetPattern)
+	newTestSetID := pkg.NewId(testSetIDs, models.TestSetPattern)
 
 	// setting up the environment for recording
-	appId, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -95,7 +96,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
+		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -104,10 +105,10 @@ func (r *recorder) Start(ctx context.Context) error {
 	}
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appId, models.IncomingOptions{})
+	incomingChan, incomingErrChan = r.instrumentation.GetIncoming(ctx, appID, models.IncomingOptions{})
 	g.Go(func() error {
 		for testCase := range incomingChan {
-			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetId)
+			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
 			if err != nil {
 				insertTestErrChan <- err
 			}
@@ -115,10 +116,10 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
-	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
+	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
 	g.Go(func() error {
 		for mock := range outgoingChan {
-			err := r.mockDB.InsertMock(ctx, mock, newTestSetId)
+			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				insertMockErrChan <- err
 			}
@@ -128,7 +129,7 @@ func (r *recorder) Start(ctx context.Context) error {
 
 	// running the user application
 	g.Go(func() error {
-		runAppError = r.instrumentation.Run(ctx, appId, models.RunOptions{})
+		runAppError = r.instrumentation.Run(ctx, appID, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
 			return nil
 		}
@@ -216,20 +217,20 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	var outgoingErrChan <-chan error
 	var insertMockErrChan = make(chan error)
 
-	appId, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
 		stopReason = "failed to exeute mock record due to error while setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
-	err = r.instrumentation.Hook(ctx, appId, models.HookOptions{})
+	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
 	if err != nil {
 		stopReason = "failed to start the hooks and proxy"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
 
-	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appId, models.OutgoingOptions{})
+	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
 	g.Go(func() error {
 		for mock := range outgoingChan {
 			mock := mock // capture range variable

@@ -24,29 +24,29 @@ type Instrumentation interface {
 type Service interface {
 	Start(ctx context.Context) error
 	BootReplay(ctx context.Context) (string, uint64, error)
-	GetAllTestSetIds(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetId string, testRunId string, appId uint64, serveTest bool) (models.TestSetStatus, error)
-	GetTestSetStatus(ctx context.Context, testRunId string, testSetId string) (models.TestSetStatus, error)
-	RunApplication(ctx context.Context, appId uint64, opts models.RunOptions) models.AppError
+	GetAllTestSetIDs(ctx context.Context) ([]string, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
+	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
+	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	ProvideMocks(ctx context.Context) error
 }
 
 type TestDB interface {
-	GetAllTestSetIds(ctx context.Context) ([]string, error)
-	GetTestCases(ctx context.Context, testSetId string) ([]*models.TestCase, error)
+	GetAllTestSetIDs(ctx context.Context) ([]string, error)
+	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
 }
 
 type MockDB interface {
-	GetFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	GetUnFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
+	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
+	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 }
 
 type ReportDB interface {
-	GetAllTestRunIds(ctx context.Context) ([]string, error)
-	GetTestCaseResults(ctx context.Context, testRunId string, testSetId string) ([]models.TestResult, error)
-	GetReport(ctx context.Context, testRunId string, testSetId string) (*models.TestReport, error)
-	InsertTestCaseResult(ctx context.Context, testRunId string, testSetId string, testCaseId string, result *models.TestResult) error
-	InsertReport(ctx context.Context, testRunId string, testSetId string, testReport *models.TestReport) error
+	GetAllTestRunIDs(ctx context.Context) ([]string, error)
+	GetTestCaseResults(ctx context.Context, testRunID string, testSetID string) ([]models.TestResult, error)
+	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
+	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, testCaseID string, result *models.TestResult) error
+	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
 }
 
 type Telemetry interface {

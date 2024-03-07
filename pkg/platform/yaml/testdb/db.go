@@ -57,7 +57,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	return nil
 }
 
-func (ts *TestYaml) GetAllTestSetIds(ctx context.Context) ([]string, error) {
+func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.Logger)
 }
 

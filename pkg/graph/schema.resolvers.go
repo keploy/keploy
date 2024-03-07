@@ -38,7 +38,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	ids, err := r.replay.GetAllTestSetIds(ctx)
+	ids, err := r.replay.GetAllTestSetIDs(ctx)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get all test set ids")
 		return nil, err

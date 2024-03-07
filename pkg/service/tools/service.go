@@ -1,3 +1,4 @@
+// Package tools provides utility functions for the service package.
 package tools
 
 import "context"

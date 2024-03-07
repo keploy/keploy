@@ -66,13 +66,13 @@ func (t *Tools) Update(ctx context.Context) error {
 
 	t.logger.Info("Updating to Version: " + latestVersion)
 
-	downloadUrl := ""
+	downloadURL := ""
 	if runtime.GOARCH == "amd64" {
-		downloadUrl = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
 	} else {
-		downloadUrl = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
 	}
-	err = t.downloadAndUpdate(ctx, downloadUrl)
+	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
 	if err != nil {
 		return err
 	}
@@ -99,9 +99,9 @@ func (t *Tools) Update(ctx context.Context) error {
 	return nil
 }
 
-func (t *Tools) downloadAndUpdate(ctx context.Context, downloadUrl string) error {
+func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {
 	// Create a new request with context
-	req, err := http.NewRequestWithContext(ctx, "GET", downloadUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
@@ -112,15 +112,25 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, downloadUrl string) error
 	if err != nil {
 		return fmt.Errorf("failed to download file: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			utils.LogError(logger, cerr, "failed to close response body")
+		}
+	}()
 
 	// Create a temporary file to store the downloaded tar.gz
 	tmpFile, err := os.CreateTemp("", "keploy-download-*.tar.gz")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %v", err)
 	}
-	defer tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	defer func() {
+		if err := tmpFile.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close temporary file")
+		}
+		if err := os.Remove(tmpFile.Name()); err != nil {
+			utils.LogError(logger, err, "failed to remove temporary file")
+		}
+	}()
 
 	// Write the downloaded content to the temporary file
 	_, err = io.Copy(tmpFile, resp.Body)
@@ -165,13 +175,23 @@ func extractTarGz(gzipPath, destDir string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+
+	defer func() {
+		if err := file.Close(); err != nil {
+			utils.LogError(nil, err, "failed to close file")
+		}
+	}()
 
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
 		return err
 	}
-	defer gzipReader.Close()
+
+	defer func() {
+		if err := gzipReader.Close(); err != nil {
+			utils.LogError(nil, err, "failed to close gzip reader")
+		}
+	}()
 
 	tarReader := tar.NewReader(gzipReader)
 
@@ -197,17 +217,20 @@ func extractTarGz(gzipPath, destDir string) error {
 				return err
 			}
 			if _, err := io.Copy(outFile, tarReader); err != nil {
-				outFile.Close()
+				if err := outFile.Close(); err != nil {
+					return err
+				}
 				return err
 			}
-			outFile.Close()
+			if err := outFile.Close(); err != nil {
+				return err
+			}
 		}
 	}
-
 	return nil
 }
 
-func (t *Tools) CreateConfig(ctx context.Context, filePath string, configData string) error {
+func (t *Tools) CreateConfig(_ context.Context, filePath string, configData string) error {
 	var node yaml.Node
 	var data []byte
 	var err error
