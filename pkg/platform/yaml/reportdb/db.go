@@ -1,3 +1,4 @@
+// Package reportdb provides functionality for managing test reports in a database.
 package reportdb
 
 import (
@@ -35,41 +36,41 @@ func (fe *TestReport) GetAllTestRunIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger)
 }
 
-func (fe *TestReport) InsertTestCaseResult(ctx context.Context, testRunId string, testSetId string, testCaseId string, result *models.TestResult) error {
+func (fe *TestReport) InsertTestCaseResult(_ context.Context, testRunID string, testSetID string, result *models.TestResult) error {
 	fe.m.Lock()
 	defer fe.m.Unlock()
 
-	testSet := fe.tests[testRunId]
+	testSet := fe.tests[testRunID]
 	if testSet == nil {
 		testSet = make(map[string][]models.TestResult)
-		testSet[testSetId] = []models.TestResult{*result}
+		testSet[testSetID] = []models.TestResult{*result}
 	} else {
-		testSet[testSetId] = append(testSet[testSetId], *result)
+		testSet[testSetID] = append(testSet[testSetID], *result)
 	}
-	fe.tests[testRunId] = testSet
+	fe.tests[testRunID] = testSet
 	return nil
 }
 
-func (fe *TestReport) GetTestCaseResults(ctx context.Context, testRunId string, testSetId string) ([]models.TestResult, error) {
-	testRun, ok := fe.tests[testRunId]
+func (fe *TestReport) GetTestCaseResults(_ context.Context, testRunID string, testSetID string) ([]models.TestResult, error) {
+	testRun, ok := fe.tests[testRunID]
 	if !ok {
-		return []models.TestResult{}, fmt.Errorf("%s found no test results for test report with id: %s", utils.Emoji, testRunId)
+		return []models.TestResult{}, fmt.Errorf("%s found no test results for test report with id: %s", utils.Emoji, testRunID)
 	}
-	testSetResults, ok := testRun[testSetId]
+	testSetResults, ok := testRun[testSetID]
 	if !ok {
-		return []models.TestResult{}, fmt.Errorf("%s found no test results for test set with id: %s", utils.Emoji, testSetId)
+		return []models.TestResult{}, fmt.Errorf("%s found no test results for test set with id: %s", utils.Emoji, testSetID)
 	}
 	return testSetResults, nil
 }
 
-func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId string) (*models.TestReport, error) {
-	path := filepath.Join(fe.Path, testRunId)
-	reportName := testSetId + "-report"
+func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error) {
+	path := filepath.Join(fe.Path, testRunID)
+	reportName := testSetID + "-report"
 	_, err := yaml.ValidatePath(filepath.Join(path, reportName+".yaml"))
 	if err != nil {
 		return nil, err
 	}
-	data, err := yaml.ReadFile(ctx, path, reportName)
+	data, err := yaml.ReadFile(ctx, fe.Logger, path, reportName)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 		return nil, err
@@ -84,12 +85,12 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunId string, testSetId
 	return &doc, nil
 }
 
-func (fe *TestReport) InsertReport(ctx context.Context, testRunId string, testSetId string, testReport *models.TestReport) error {
+func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error {
 
-	reportPath := filepath.Join(fe.Path, testRunId)
+	reportPath := filepath.Join(fe.Path, testRunID)
 
 	if testReport.Name == "" {
-		testReport.Name = testSetId + "-report"
+		testReport.Name = testSetID + "-report"
 	}
 
 	_, err := yaml.CreateYamlFile(ctx, fe.Logger, reportPath, testReport.Name)

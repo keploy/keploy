@@ -1,3 +1,4 @@
+// Package configdb provides functionality for working with keploy configuration databases.
 package configdb
 
 import (
@@ -10,6 +11,7 @@ import (
 	"runtime"
 
 	"go.keploy.io/server/v2/pkg/platform/yaml"
+	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -38,12 +40,12 @@ func NewConfigDb(logger *zap.Logger) *ConfigDb {
 	}
 }
 
-func (cdb *ConfigDb) GetInstallationId(ctx context.Context) (string, error) {
+func (cdb *ConfigDb) GetInstallationID(ctx context.Context) (string, error) {
 	var id string
-	id = getInstallationFromFile()
+	id = getInstallationFromFile(cdb.logger)
 	if id != "" {
 		id = primitive.NewObjectID().String()
-		err := cdb.setInstallationId(ctx, id)
+		err := cdb.setInstallationID(ctx, id)
 		if err != nil {
 			return "", fmt.Errorf("failed to set installation id in file. error: %s", err.Error())
 		}
@@ -51,7 +53,7 @@ func (cdb *ConfigDb) GetInstallationId(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-func getInstallationFromFile() string {
+func getInstallationFromFile(logger *zap.Logger) string {
 	var (
 		path = UserHomeDir()
 		id   = ""
@@ -61,7 +63,11 @@ func getInstallationFromFile() string {
 	if err != nil {
 		return id
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file")
+		}
+	}()
 	decoder := yamlLib.NewDecoder(file)
 	err = decoder.Decode(&id)
 	if errors.Is(err, io.EOF) {
@@ -73,7 +79,7 @@ func getInstallationFromFile() string {
 	return id
 }
 
-func (cdb *ConfigDb) setInstallationId(ctx context.Context, id string) error {
+func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 	path := UserHomeDir()
 	_, err := yaml.CreateYamlFile(ctx, cdb.logger, path, "installation-id")
 	if err != nil {

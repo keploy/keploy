@@ -82,7 +82,11 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 		utils.LogError(logger, err, "failed to open file for writing", zap.String("file", yamlPath))
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", yamlPath))
+		}
+	}()
 
 	cw := &ctxWriter{
 		ctx:    ctx,
@@ -100,13 +104,18 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	return nil
 }
 
-func ReadFile(ctx context.Context, path, name string) ([]byte, error) {
+func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byte, error) {
 	filePath := filepath.Join(path, name+".yaml")
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the file: %v", err)
 	}
-	defer file.Close()
+
+	defer func() {
+		if err := file.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		}
+	}()
 
 	cr := &ctxReader{
 		ctx: ctx,
@@ -123,7 +132,7 @@ func ReadFile(ctx context.Context, path, name string) ([]byte, error) {
 	return data, nil
 }
 
-func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
+func CreateYamlFile(_ context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
 		return false, err
@@ -139,13 +148,17 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 			utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 			return false, err
 		}
-		file.Close()
+		err = file.Close()
+		if err != nil {
+			utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+			return false, err
+		}
 		return true, nil
 	}
 	return false, nil
 }
 
-func ReadSessionIndices(ctx context.Context, path string, Logger *zap.Logger) ([]string, error) {
+func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {

@@ -29,14 +29,14 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Curl:    curl,
 	}
 	// find noisy fields
-	m, err := FlattenHttpResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
+	m, err := FlattenHTTPResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
 	if err != nil {
 		msg := "error in flattening http response"
 		utils.LogError(logger, err, msg)
 	}
 	noise := tc.Noise
 
-	noiseFieldsFound := FindNoisyFields(m, func(k string, vals []string) bool {
+	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
 		// check if k is date
 		for _, v := range vals {
 			if pkg.IsTime(v) {
@@ -83,19 +83,19 @@ func FindNoisyFields(m map[string][]string, comparator func(string, []string) bo
 	return noise
 }
 
-func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
+func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error) {
 	m := map[string][]string{}
 	for k, v := range h {
 		m["header."+k] = []string{strings.Join(v, "")}
 	}
-	err := AddHttpBodyToMap(body, m)
+	err := AddHTTPBodyToMap(body, m)
 	if err != nil {
 		return m, err
 	}
 	return m, nil
 }
 
-func AddHttpBodyToMap(body string, m map[string][]string) error {
+func AddHTTPBodyToMap(body string, m map[string][]string) error {
 	// add body
 	if json.Valid([]byte(body)) {
 		var result interface{}
@@ -171,17 +171,17 @@ func Flatten(j interface{}) map[string][]string {
 	return o
 }
 
-func ContainsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, requestMethod models.Method) (error, bool) {
+func ContainsMatchingURL(urlMethods []string, urlStr string, requestURL string, requestMethod models.Method) (bool, error) {
 	urlMatched := false
-	parsedURL, err := url.Parse(requestUrl)
+	parsedURL, err := url.Parse(requestURL)
 	if err != nil {
-		return err, false
+		return false, err
 	}
 
 	// Check for URL path and method
 	regex, err := regexp.Compile(urlStr)
 	if err != nil {
-		return err, false
+		return false, err
 	}
 
 	urlMatch := regex.MatchString(parsedURL.Path)
@@ -199,29 +199,29 @@ func ContainsMatchingUrl(urlMethods []string, urlStr string, requestUrl string, 
 		}
 	}
 
-	return nil, urlMatched
+	return urlMatched, nil
 }
 
-func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string) (error, bool) {
+func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string) (bool, error) {
 	for headerName, headerNameValue := range object {
 		for bannedHeaderName, bannedHeaderValue := range bannedHeaders {
 			regex, err := regexp.Compile(headerName)
 			if err != nil {
-				return err, false
+				return false, err
 			}
-			headerNameMatch := regex.MatchString(bannedHeaderName)
 
+			headerNameMatch := regex.MatchString(bannedHeaderName)
 			regex, err = regexp.Compile(bannedHeaderValue)
 			if err != nil {
-				return err, false
+				return false, err
 			}
 			headerValueMatch := regex.MatchString(headerNameValue)
 			if headerNameMatch && headerValueMatch {
-				return nil, true
+				return true, nil
 			}
 		}
 	}
-	return nil, false
+	return false, nil
 }
 
 func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.TestCase, error) {

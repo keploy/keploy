@@ -1,3 +1,4 @@
+// Package mockdb provides a mock database implementation.
 package mockdb
 
 import (
@@ -35,13 +36,13 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 	}
 }
 
-func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetId string) error {
+func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
-	mockPath := filepath.Join(ys.MockPath, testSetId)
+	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
 		mockFileName = "mocks"
@@ -57,7 +58,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetId
 	return nil
 }
 
-func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
+func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
 	var filteredTcsMocks = make([]*models.Mock, 0)
@@ -67,7 +68,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 		mockFileName = ys.MockName
 	}
 
-	path := filepath.Join(ys.MockPath, testSetId)
+	path := filepath.Join(ys.MockPath, testSetID)
 	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
 	if err != nil {
 		return nil, err
@@ -75,7 +76,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 
 	if _, err := os.Stat(mockPath); err == nil {
 		var mockYamls []*yaml.NetworkTrafficDoc
-		data, err := yaml.ReadFile(ctx, path, mockFileName)
+		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 			return nil, err
@@ -114,7 +115,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetId string, afte
 	return tcsMocks, nil
 }
 
-func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
+func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
 
 	var configMocks = make([]*models.Mock, 0)
 
@@ -123,7 +124,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 		mockName = ys.MockName
 	}
 
-	path := filepath.Join(ys.MockPath, testSetId)
+	path := filepath.Join(ys.MockPath, testSetID)
 
 	mockPath, err := yaml.ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
@@ -132,7 +133,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetId string, af
 
 	if _, err := os.Stat(mockPath); err == nil {
 		var mockYamls []*yaml.NetworkTrafficDoc
-		data, err := yaml.ReadFile(ctx, path, mockName)
+		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 			return nil, err
@@ -184,7 +185,7 @@ func (ys *MockYaml) getNextID() int64 {
 	return atomic.AddInt64(&ys.idCounter, 1)
 }
 
-func (ys *MockYaml) filterByTimeStamp(ctx context.Context, m []*models.Mock, afterTime time.Time, beforeTime time.Time, logger *zap.Logger) ([]*models.Mock, []*models.Mock) {
+func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, afterTime time.Time, beforeTime time.Time, logger *zap.Logger) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)

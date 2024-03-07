@@ -1,3 +1,4 @@
+// Package testdb provides functionality for working with test databases.
 package testdb
 
 import (
@@ -27,8 +28,8 @@ func New(Logger *zap.Logger, tcsPath string) *TestYaml {
 	}
 }
 
-func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetId string) error {
-	tcsPath := filepath.Join(ts.TcsPath, testSetId, "tests")
+func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
 	if tc.Name == "" {
 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.Logger)
@@ -61,8 +62,8 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.Logger)
 }
 
-func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*models.TestCase, error) {
-	path := filepath.Join(ts.TcsPath, testSetId, "tests")
+func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
+	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 	tcs := []*models.TestCase{}
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
@@ -70,7 +71,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 	}
 	_, err = os.Stat(TestPath)
 	if err != nil {
-		ts.Logger.Debug("no tests are recorded for the session", zap.String("index", testSetId))
+		ts.Logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
 		return nil, nil
 	}
 	dir, err := yaml.ReadDir(TestPath, os.ModePerm)
@@ -89,7 +90,11 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetId string) ([]*mode
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		data, err := yaml.ReadFile(ctx, TestPath, name)
+		data, err := yaml.ReadFile(ctx, ts.Logger, TestPath, name)
+		if err != nil {
+			utils.LogError(ts.Logger, err, "failed to read the testcase from yaml")
+			return nil, err
+		}
 
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)

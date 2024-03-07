@@ -1,3 +1,4 @@
+// Package yaml provides utility functions for working with YAML files.
 package yaml
 
 import (
@@ -191,8 +192,8 @@ func ValidatePath(path string) (string, error) {
 	return path, nil
 }
 
-// findLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
-func FindLastIndex(path string, Logger *zap.Logger) (int, error) {
+// FindLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
+func FindLastIndex(path string, _ *zap.Logger) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		return 1, nil
@@ -222,7 +223,7 @@ func FindLastIndex(path string, Logger *zap.Logger) (int, error) {
 			lastIndex = indx
 		}
 	}
-	lastIndex += 1
+	lastIndex++
 
 	return lastIndex, nil
 }

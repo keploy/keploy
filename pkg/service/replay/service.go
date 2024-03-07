@@ -45,7 +45,7 @@ type ReportDB interface {
 	GetAllTestRunIDs(ctx context.Context) ([]string, error)
 	GetTestCaseResults(ctx context.Context, testRunID string, testSetID string) ([]models.TestResult, error)
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
-	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, testCaseID string, result *models.TestResult) error
+	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
 }
 

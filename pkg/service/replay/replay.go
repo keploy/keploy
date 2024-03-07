@@ -375,7 +375,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
-			loopErr = r.reportDB.InsertTestCaseResult(testLoopCtx, testRunID, testSetID, testCase.Name, testCaseResult)
+			loopErr = r.reportDB.InsertTestCaseResult(testLoopCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				continue

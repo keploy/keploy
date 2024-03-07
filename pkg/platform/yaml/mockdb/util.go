@@ -259,7 +259,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 
-			mockSpec, err := decodeMySqlMessage(&mysqlSpec, logger)
+			mockSpec, err := decodeMySQLMessage(&mysqlSpec, logger)
 			if err != nil {
 				return nil, err
 			}
@@ -274,7 +274,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 	return mocks, nil
 }
 
-func decodeMySqlMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models.MockSpec, error) {
+func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
 		Metadata: yamlSpec.Metadata,
 		Created:  yamlSpec.CreatedAt,

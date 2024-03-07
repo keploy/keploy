@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var teleUrl = "https://telemetry.keploy.io/analytics"
+var teleURL = "https://telemetry.keploy.io/analytics"
 
 type Telemetry struct {
 	Enabled        bool
@@ -56,12 +56,12 @@ func (tel *Telemetry) Testrun(ctx context.Context, success int, failure int) {
 	tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
 }
 
-// Telemetry event for the Mocking feature test run
+// MockTestRun is Telemetry event for the Mocking feature test run
 func (tel *Telemetry) MockTestRun(ctx context.Context, utilizedMocks int) {
 	tel.SendTelemetry(ctx, "MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
 }
 
-// Telemetry event for the tests and mocks that are recorded
+// RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
 func (tel *Telemetry) RecordedTestSuite(ctx context.Context, testSet string, testsTotal int, mockTotal map[string]int) {
 	tel.SendTelemetry(ctx, "RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
 }
@@ -70,7 +70,7 @@ func (tel *Telemetry) RecordedTestAndMocks(ctx context.Context) {
 	tel.SendTelemetry(ctx, "RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
 }
 
-// Telemetry event for the mocks that are recorded in the mocking feature
+// RecordedMocks is Telemetry event for the mocks that are recorded in the mocking feature
 func (tel *Telemetry) RecordedMocks(ctx context.Context, mockTotal map[string]int) {
 	go tel.SendTelemetry(ctx, "RecordedMocks", map[string]interface{}{"mocks": mockTotal})
 }
@@ -104,7 +104,7 @@ func (tel *Telemetry) SendTelemetry(ctx context.Context, eventType string, outpu
 			return
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, teleUrl, bytes.NewBuffer(bin))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, teleURL, bytes.NewBuffer(bin))
 		if err != nil {
 			tel.logger.Debug("failed to create request for analytics", zap.Error(err))
 			return
@@ -117,6 +117,10 @@ func (tel *Telemetry) SendTelemetry(ctx context.Context, eventType string, outpu
 			tel.logger.Debug("failed to send request for analytics", zap.Error(err))
 			return
 		}
-		unmarshalResp(resp, tel.logger)
+		_, err = unmarshalResp(resp, tel.logger)
+		if err != nil {
+			tel.logger.Debug("failed to unmarshal response", zap.Error(err))
+			return
+		}
 	}
 }
