@@ -36,7 +36,6 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq m
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
-
 			mocks, err := mockDb.GetFilteredMocks()
 			if err != nil {
 				return nil, fmt.Errorf("error while getting tsc mocks %v", err)
