@@ -47,9 +47,9 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					logger.Debug("No SQL mock found")
 					return nil
 				}
-				header := sqlMock.Spec.MySqlResponses[0].Header
-				packet := sqlMock.Spec.MySqlResponses[0].Message
-				opr := sqlMock.Spec.MySqlResponses[0].Header.PacketType
+				header := sqlMock.Spec.MySQLResponses[0].Header
+				packet := sqlMock.Spec.MySQLResponses[0].Message
+				opr := sqlMock.Spec.MySQLResponses[0].Header.PacketType
 
 				binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
 				if err != nil {
@@ -64,8 +64,8 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				}
 				matchedIndex := 0
 				matchedReqIndex := 0
-				configMocks[matchedIndex].Spec.MySqlResponses = append(configMocks[matchedIndex].Spec.MySqlResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
-				if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
+				configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
+				if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
 					configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
 				}
 				//h.SetConfigMocks(configMocks)
@@ -200,7 +200,7 @@ func decodeMySql(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 func getfirstSQLMock(configMocks []*models.Mock) (*models.Mock, bool) {
 	for _, mock := range configMocks {
-		if len(mock.Spec.MySqlResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySqlResponses[0].Header.PacketType == "MySQLHandshakeV10" {
+		if len(mock.Spec.MySQLResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySQLResponses[0].Header.PacketType == "MySQLHandshakeV10" {
 			return mock, true
 		}
 	}

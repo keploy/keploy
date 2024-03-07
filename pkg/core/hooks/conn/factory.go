@@ -109,7 +109,7 @@ func capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		Name:    pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
 		Created: time.Now().Unix(),
-		HttpReq: models.HttpReq{
+		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
 			ProtoMajor: req.ProtoMajor,
 			ProtoMinor: req.ProtoMinor,
@@ -122,7 +122,7 @@ func capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			URLParams: pkg.UrlParams(req),
 			Timestamp: reqTimeTest,
 		},
-		HttpResp: models.HttpResp{
+		HTTPResp: models.HTTPResp{
 			StatusCode: resp.StatusCode,
 			Header:     pkg.ToYamlHttpHeader(resp.Header),
 			Body:       string(respBody),

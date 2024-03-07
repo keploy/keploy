@@ -114,7 +114,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		tcs = append(tcs, tc)
 	}
 	sort.SliceStable(tcs, func(i, j int) bool {
-		return tcs[i].HttpReq.Timestamp.Before(tcs[j].HttpReq.Timestamp)
+		return tcs[i].HTTPReq.Timestamp.Before(tcs[j].HTTPReq.Timestamp)
 	})
 	return tcs, nil
 }

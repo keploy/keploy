@@ -5,11 +5,12 @@ import (
 	"github.com/k0kubun/pp/v3"
 )
 
+// Patterns for different usecases in keploy
 const (
-	NoSqlDB             string = "NO_SQL_DB"
-	SqlDB               string = "SQL_DB"
+	NoSQLDB             string = "NO_SQL_DB"
+	SQLDB               string = "SQL_DB"
 	GRPC                string = "GRPC"
-	HttpClient          string = "HTTP_CLIENT"
+	HTTPClient          string = "HTTP_CLIENT"
 	TestSetPattern      string = "test-set-"
 	String              string = "string"
 	TestRunTemplateName string = "test-run-"
@@ -56,6 +57,7 @@ var FailingColorScheme = pp.ColorScheme{
 	ObjectLength:    pp.Blue,
 }
 
+// MySQL constants
 const (
 	TypeDecimal    byte = 0x00
 	TypeTiny       byte = 0x01
@@ -86,6 +88,7 @@ const (
 	TypeGeometry   byte = 0xff
 )
 
+// MySQL constants
 const (
 	HeaderSize         = 1024
 	OKPacketResulSet   = 0x00
@@ -93,17 +96,15 @@ const (
 	LengthEncodedInt   = 0xfb
 )
 
-// ColumnValue represents a value from a column in a result set
-
+// MySQL constants
 const (
 	OK               = 0x00
 	ERR              = 0xff
 	LocalInFile      = 0xfb
 	EOF         byte = 0xfe
-	flagUnsigned
-	statusMoreResultsExists
 )
 
+// MySQL constants
 const (
 	AuthMoreData                                 byte = 0x01
 	CachingSha2PasswordRequestPublicKey          byte = 2
@@ -111,12 +112,14 @@ const (
 	CachingSha2PasswordPerformFullAuthentication byte = 4
 )
 
+// MySQL constants
 const (
 	MaxPacketSize = 1<<24 - 1
 )
 
 type CapabilityFlags uint32
 
+// MySQL constants
 const (
 	CLIENT_LONG_PASSWORD CapabilityFlags = 1 << iota
 	CLIENT_FOUND_ROWS
@@ -147,6 +150,7 @@ const (
 
 type FieldType byte
 
+// MySQL constants
 const (
 	FieldTypeDecimal FieldType = iota
 	FieldTypeTiny
@@ -166,6 +170,8 @@ const (
 	FieldTypeVarChar
 	FieldTypeBit
 )
+
+// MySQL constants
 const (
 	FieldTypeJSON FieldType = iota + 0xf5
 	FieldTypeNewDecimal

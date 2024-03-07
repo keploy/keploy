@@ -4,9 +4,10 @@ package proxy
 // Here it is used to handle the mocks.
 
 import (
+	"sync"
+
 	"github.com/emirpasic/gods/trees/redblacktree"
 	"go.keploy.io/server/v2/pkg/models"
-	"sync"
 )
 
 // customComparator is a custom comparator function for the tree db
@@ -18,9 +19,9 @@ var customComparator = func(a, b interface{}) int {
 	} else if aStruct.SortOrder > bStruct.SortOrder {
 		return 1
 	}
-	if aStruct.Id < bStruct.Id {
+	if aStruct.ID < bStruct.ID {
 		return -1
-	} else if aStruct.Id > bStruct.Id {
+	} else if aStruct.ID > bStruct.ID {
 		return 1
 	}
 	return 0

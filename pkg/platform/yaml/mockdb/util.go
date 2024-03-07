@@ -61,10 +61,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 
 	case models.HTTP:
-		httpSpec := models.HttpSchema{
+		httpSpec := models.HTTPSchema{
 			Metadata:         mock.Spec.Metadata,
-			Request:          *mock.Spec.HttpReq,
-			Response:         *mock.Spec.HttpResp,
+			Request:          *mock.Spec.HTTPReq,
+			Response:         *mock.Spec.HTTPResp,
 			Created:          mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
@@ -116,7 +116,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 	case models.SQL:
 		requests := []models.MysqlRequestYaml{}
-		for _, v := range mock.Spec.MySqlRequests {
+		for _, v := range mock.Spec.MySQLRequests {
 
 			req := models.MysqlRequestYaml{
 				Header:    v.Header,
@@ -130,7 +130,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			requests = append(requests, req)
 		}
 		responses := []models.MysqlResponseYaml{}
-		for _, v := range mock.Spec.MySqlResponses {
+		for _, v := range mock.Spec.MySQLResponses {
 			resp := models.MysqlResponseYaml{
 				Header:    v.Header,
 				ReadDelay: v.ReadDelay,
@@ -178,7 +178,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		}
 		switch m.Kind {
 		case models.HTTP:
-			httpSpec := models.HttpSchema{}
+			httpSpec := models.HTTPSchema{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
@@ -186,8 +186,8 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = models.MockSpec{
 				Metadata: httpSpec.Metadata,
-				HttpReq:  &httpSpec.Request,
-				HttpResp: &httpSpec.Response,
+				HTTPReq:  &httpSpec.Request,
+				HTTPResp: &httpSpec.Response,
 
 				Created:          httpSpec.Created,
 				ReqTimestampMock: httpSpec.ReqTimestampMock,
@@ -319,7 +319,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			}
 			req.Message = requestMessage
 		case "COM_STMT_SEND_LONG_DATA":
-			requestMessage := &models.MySQLCOM_STMT_SEND_LONG_DATA{}
+			requestMessage := &models.MySQLComStmtSendLongData{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_SEND_LONG_DATA")
@@ -327,7 +327,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			}
 			req.Message = requestMessage
 		case "COM_STMT_RESET":
-			requestMessage := &models.MySQLCOM_STMT_RESET{}
+			requestMessage := &models.MySQLcomStmtReset{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_RESET")
@@ -369,7 +369,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 		}
 		requests = append(requests, req)
 	}
-	mockSpec.MySqlRequests = requests
+	mockSpec.MySQLRequests = requests
 
 	responses := []models.MySQLResponse{}
 	for _, v := range yamlSpec.Response {
@@ -438,7 +438,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 		}
 		responses = append(responses, resp)
 	}
-	mockSpec.MySqlResponses = responses
+	mockSpec.MySQLResponses = responses
 	return &mockSpec, nil
 
 }

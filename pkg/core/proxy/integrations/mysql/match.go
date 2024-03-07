@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"fmt"
+
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -16,19 +17,19 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 	maxMatchCount := 0
 
 	for i, mock := range allMocks {
-		for j, mockReq := range mock.Spec.MySqlRequests {
+		for j, mockReq := range mock.Spec.MySQLRequests {
 			matchCount := compareMySQLRequests(mysqlRequest, mockReq)
 			if matchCount > maxMatchCount {
 				maxMatchCount = matchCount
 				matchedIndex = i
 				matchedReqIndex = j
 				mockType = mock.Spec.Metadata["type"]
-				if len(mock.Spec.MySqlResponses) > j {
+				if len(mock.Spec.MySQLResponses) > j {
 					if mockType == "config" {
-						responseCopy := mock.Spec.MySqlResponses[j]
+						responseCopy := mock.Spec.MySQLResponses[j]
 						bestMatch = &responseCopy
 					} else {
-						bestMatch = &mock.Spec.MySqlResponses[j]
+						bestMatch = &mock.Spec.MySQLResponses[j]
 					}
 				}
 			}
@@ -43,10 +44,10 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if matchedIndex >= len(configMocks) {
 			return nil, -1, "", fmt.Errorf("index out of range in configMocks")
 		}
-		configMocks[matchedIndex].Spec.MySqlRequests = append(configMocks[matchedIndex].Spec.MySqlRequests[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlRequests[matchedReqIndex+1:]...)
-		configMocks[matchedIndex].Spec.MySqlResponses = append(configMocks[matchedIndex].Spec.MySqlResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
+		configMocks[matchedIndex].Spec.MySQLRequests = append(configMocks[matchedIndex].Spec.MySQLRequests[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
+		configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 
-		if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
+		if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
 			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
 		}
 		//h.SetConfigMocks(configMocks)
@@ -55,10 +56,10 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if realIndex < 0 || realIndex >= len(tcsMocks) {
 			return nil, -1, "", fmt.Errorf("index out of range in tcsMocks")
 		}
-		tcsMocks[realIndex].Spec.MySqlRequests = append(tcsMocks[realIndex].Spec.MySqlRequests[:matchedReqIndex], tcsMocks[realIndex].Spec.MySqlRequests[matchedReqIndex+1:]...)
-		tcsMocks[realIndex].Spec.MySqlResponses = append(tcsMocks[realIndex].Spec.MySqlResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySqlResponses[matchedReqIndex+1:]...)
+		tcsMocks[realIndex].Spec.MySQLRequests = append(tcsMocks[realIndex].Spec.MySQLRequests[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
+		tcsMocks[realIndex].Spec.MySQLResponses = append(tcsMocks[realIndex].Spec.MySQLResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 
-		if len(tcsMocks[realIndex].Spec.MySqlResponses) == 0 {
+		if len(tcsMocks[realIndex].Spec.MySQLResponses) == 0 {
 			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
 		}
 		//h.SetTcsMocks(tcsMocks)

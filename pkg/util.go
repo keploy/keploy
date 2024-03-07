@@ -64,19 +64,19 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HttpResp, error) {
-	resp := &models.HttpResp{}
+func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+	resp := &models.HTTPResp{}
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-	req, err := http.NewRequestWithContext(ctx, string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
+	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHttpHeader(tc.HttpReq.Header)
+	req.Header = ToHttpHeader(tc.HTTPReq.Header)
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
-	req.ProtoMajor = tc.HttpReq.ProtoMajor
-	req.ProtoMinor = tc.HttpReq.ProtoMinor
+	req.ProtoMajor = tc.HTTPReq.ProtoMajor
+	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
@@ -129,7 +129,7 @@ func SimulateHttp(ctx context.Context, tc models.TestCase, testSet string, logge
 		return nil, err
 	}
 
-	resp = &models.HttpResp{
+	resp = &models.HTTPResp{
 		StatusCode: httpResp.StatusCode,
 		Body:       string(respBody),
 		Header:     ToYamlHttpHeader(httpResp.Header),

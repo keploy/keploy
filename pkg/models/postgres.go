@@ -6,7 +6,8 @@ import (
 	"github.com/jackc/pgproto3/v2"
 )
 
-const ProtocolVersionNumber uint32 = 196608 // Replace with actual version number if different
+// ProtocolVersionNumber should be replaced with actual version number if different
+const ProtocolVersionNumber uint32 = 196608
 
 type PostgresSpec struct {
 	Metadata map[string]string `json:"metadata" yaml:"metadata"`
@@ -19,7 +20,7 @@ type PostgresSpec struct {
 	ResTimestampMock time.Time `json:"ResTimestampMock,omitempty"`
 }
 
-// PG Request Packet Transcoder
+// Backend is PG Request Packet Transcoder
 type Backend struct {
 	PacketTypes         []string                     `json:"header,omitempty" yaml:"header,omitempty,flow"`
 	Identfier           string                       `json:"identifier,omitempty" yaml:"identifier,omitempty"`

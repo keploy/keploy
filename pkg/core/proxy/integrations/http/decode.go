@@ -100,14 +100,14 @@ func decodeHttp(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				}
 			}
 
-			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HttpReq.ProtoMajor, stub.Spec.HttpReq.ProtoMinor, stub.Spec.HttpResp.StatusCode, http.StatusText(stub.Spec.HttpResp.StatusCode))
+			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 
-			body := stub.Spec.HttpResp.Body
+			body := stub.Spec.HTTPResp.Body
 			var respBody string
 			var responseString string
 
 			// Fetching the response headers
-			header := pkg.ToHttpHeader(stub.Spec.HttpResp.Header)
+			header := pkg.ToHttpHeader(stub.Spec.HTTPResp.Header)
 
 			//Check if the gzip encoding is present in the header
 			if header["Content-Encoding"] != nil && header["Content-Encoding"][0] == "gzip" {

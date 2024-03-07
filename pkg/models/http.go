@@ -6,7 +6,7 @@ import (
 
 type Method string
 
-type HttpReq struct {
+type HTTPReq struct {
 	Method     Method            `json:"method" yaml:"method"`
 	ProtoMajor int               `json:"proto_major" yaml:"proto_major"` // e.g. 1
 	ProtoMinor int               `json:"proto_minor" yaml:"proto_minor"` // e.g. 0
@@ -19,10 +19,10 @@ type HttpReq struct {
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
 }
 
-type HttpSchema struct {
+type HTTPSchema struct {
 	Metadata         map[string]string      `json:"metadata" yaml:"metadata"`
-	Request          HttpReq                `json:"req" yaml:"req"`
-	Response         HttpResp               `json:"resp" yaml:"resp"`
+	Request          HTTPReq                `json:"req" yaml:"req"`
+	Response         HTTPResp               `json:"resp" yaml:"resp"`
 	Objects          []*OutputBinary        `json:"objects" yaml:"objects"`
 	Assertions       map[string]interface{} `json:"assertions" yaml:"assertions,omitempty"`
 	Created          int64                  `json:"created" yaml:"created,omitempty"`
@@ -36,7 +36,7 @@ type FormData struct {
 	Paths  []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
 }
 
-type HttpResp struct {
+type HTTPResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
 	Body          string            `json:"body" yaml:"body"`

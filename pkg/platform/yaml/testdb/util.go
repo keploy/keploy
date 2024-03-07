@@ -20,8 +20,8 @@ import (
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
-	header := pkg.ToHttpHeader(tc.HttpReq.Header)
-	curl := pkg.MakeCurlCommand(string(tc.HttpReq.Method), tc.HttpReq.URL, pkg.ToYamlHttpHeader(header), tc.HttpReq.Body)
+	header := pkg.ToHttpHeader(tc.HTTPReq.Header)
+	curl := pkg.MakeCurlCommand(string(tc.HTTPReq.Method), tc.HTTPReq.URL, pkg.ToYamlHttpHeader(header), tc.HTTPReq.Body)
 	doc := &yaml.NetworkTrafficDoc{
 		Version: tc.Version,
 		Kind:    tc.Kind,
@@ -29,7 +29,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Curl:    curl,
 	}
 	// find noisy fields
-	m, err := FlattenHTTPResponse(pkg.ToHttpHeader(tc.HttpResp.Header), tc.HttpResp.Body)
+	m, err := FlattenHTTPResponse(pkg.ToHttpHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
 	if err != nil {
 		msg := "error in flattening http response"
 		utils.LogError(logger, err, msg)
@@ -54,9 +54,9 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 	switch tc.Kind {
 	case models.HTTP:
-		err := doc.Spec.Encode(models.HttpSchema{
-			Request:  tc.HttpReq,
-			Response: tc.HttpResp,
+		err := doc.Spec.Encode(models.HTTPSchema{
+			Request:  tc.HTTPReq,
+			Response: tc.HTTPResp,
 			Created:  tc.Created,
 			Assertions: map[string]interface{}{
 				"noise": noise,
@@ -233,15 +233,15 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 	}
 	switch tc.Kind {
 	case models.HTTP:
-		httpSpec := models.HttpSchema{}
+		httpSpec := models.HTTPSchema{}
 		err := yamlTestcase.Spec.Decode(&httpSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to unmarshal a yaml doc into the http testcase")
 			return nil, err
 		}
 		tc.Created = httpSpec.Created
-		tc.HttpReq = httpSpec.Request
-		tc.HttpResp = httpSpec.Response
+		tc.HTTPReq = httpSpec.Request
+		tc.HTTPResp = httpSpec.Response
 		tc.Noise = map[string][]string{}
 		switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
 		case reflect.Map:

@@ -16,14 +16,11 @@ func (e AppError) Error() string {
 	return string(e.AppErrorType)
 }
 
+// AppErrorType is a type of error that can be returned by the application
 const (
-	//ErrInterrupted    AppErrorType = "exited with interrupt"
 	ErrCommandError AppErrorType = "exited due to command error"
 	ErrUnExpected   AppErrorType = "an unexpected error occurred"
 	ErrInternal     AppErrorType = "an internal error occurred"
 	ErrAppStopped   AppErrorType = "app stopped"
 	ErrCtxCanceled  AppErrorType = "context canceled"
-	//ErrDockerError    AppErrorType = "an error occurred while using docker client"
-	//ErrFailedUnitTest AppErrorType = "test failure occurred when running keploy tests along with unit tests"
-	//ErrKilledByKeploy AppErrorType = "killed by keploy"
 )

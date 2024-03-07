@@ -39,7 +39,7 @@ type JSONComparisonResult struct {
 	differences []string // Lists the keys or indices of values that are not the same
 }
 
-func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
+func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
@@ -50,13 +50,13 @@ func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map
 	res := &models.Result{
 		StatusCode: models.IntResult{
 			Normal:   false,
-			Expected: tc.HttpResp.StatusCode,
+			Expected: tc.HTTPResp.StatusCode,
 			Actual:   actualResponse.StatusCode,
 		},
 		BodyResult: []models.BodyResult{{
 			Normal:   false,
 			Type:     bodyType,
-			Expected: tc.HttpResp.Body,
+			Expected: tc.HTTPResp.Body,
 			Actual:   actualResponse.Body,
 		}},
 	}
@@ -85,7 +85,7 @@ func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map
 	}
 
 	// stores the json body after removing the noise
-	cleanExp, cleanAct := tc.HttpResp.Body, actualResponse.Body
+	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 	var jsonComparisonResult JSONComparisonResult
 	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
 		//validate the stored json
@@ -107,20 +107,20 @@ func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map
 		logger.Debug("cleanExp", zap.Any("", cleanExp))
 		logger.Debug("cleanAct", zap.Any("", cleanAct))
 	} else {
-		if !Contains(MapToArray(noise), "body") && tc.HttpResp.Body != actualResponse.Body {
+		if !Contains(MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}
 
 	res.BodyResult[0].Normal = pass
 
-	if !CompareHeaders(pkg.ToHttpHeader(tc.HttpResp.Header), pkg.ToHttpHeader(actualResponse.Header), hRes, headerNoise) {
+	if !CompareHeaders(pkg.ToHttpHeader(tc.HTTPResp.Header), pkg.ToHttpHeader(actualResponse.Header), hRes, headerNoise) {
 
 		pass = false
 	}
 
 	res.HeadersResult = *hRes
-	if tc.HttpResp.StatusCode == actualResponse.StatusCode {
+	if tc.HTTPResp.StatusCode == actualResponse.StatusCode {
 		res.StatusCode.Normal = true
 	} else {
 
@@ -164,7 +164,7 @@ func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map
 
 		if !res.BodyResult[0].Normal {
 			if json.Valid([]byte(actualResponse.Body)) {
-				patch, err := jsondiff.Compare(tc.HttpResp.Body, actualResponse.Body)
+				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
@@ -177,7 +177,7 @@ func match(tc *models.TestCase, actualResponse *models.HttpResp, noiseConfig map
 
 				}
 			} else {
-				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
+				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
 			}
 		}
 		_, err := newLogger.Printf(logs)

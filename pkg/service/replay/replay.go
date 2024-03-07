@@ -304,12 +304,12 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testResult *models.Result
 		var testPass bool
 
-		filteredMocks, loopErr := r.mockDB.GetFilteredMocks(testLoopCtx, testSetID, testCase.HttpReq.Timestamp, testCase.HttpResp.Timestamp)
+		filteredMocks, loopErr := r.mockDB.GetFilteredMocks(testLoopCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to get filtered mocks")
 			continue
 		}
-		unfilteredMocks, loopErr := r.mockDB.GetUnFilteredMocks(testLoopCtx, testSetID, testCase.HttpReq.Timestamp, testCase.HttpResp.Timestamp)
+		unfilteredMocks, loopErr := r.mockDB.GetUnFilteredMocks(testLoopCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 			continue
@@ -348,27 +348,27 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				Started:    started.Unix(),
 				Completed:  time.Now().UTC().Unix(),
 				TestCaseID: testCase.Name,
-				Req: models.HttpReq{
-					Method:     testCase.HttpReq.Method,
-					ProtoMajor: testCase.HttpReq.ProtoMajor,
-					ProtoMinor: testCase.HttpReq.ProtoMinor,
-					URL:        testCase.HttpReq.URL,
-					URLParams:  testCase.HttpReq.URLParams,
-					Header:     testCase.HttpReq.Header,
-					Body:       testCase.HttpReq.Body,
-					Binary:     testCase.HttpReq.Binary,
-					Form:       testCase.HttpReq.Form,
-					Timestamp:  testCase.HttpReq.Timestamp,
+				Req: models.HTTPReq{
+					Method:     testCase.HTTPReq.Method,
+					ProtoMajor: testCase.HTTPReq.ProtoMajor,
+					ProtoMinor: testCase.HTTPReq.ProtoMinor,
+					URL:        testCase.HTTPReq.URL,
+					URLParams:  testCase.HTTPReq.URLParams,
+					Header:     testCase.HTTPReq.Header,
+					Body:       testCase.HTTPReq.Body,
+					Binary:     testCase.HTTPReq.Binary,
+					Form:       testCase.HTTPReq.Form,
+					Timestamp:  testCase.HTTPReq.Timestamp,
 				},
-				Res: models.HttpResp{
-					StatusCode:    testCase.HttpResp.StatusCode,
-					Header:        testCase.HttpResp.Header,
-					Body:          testCase.HttpResp.Body,
-					StatusMessage: testCase.HttpResp.StatusMessage,
-					ProtoMajor:    testCase.HttpResp.ProtoMajor,
-					ProtoMinor:    testCase.HttpResp.ProtoMinor,
-					Binary:        testCase.HttpResp.Binary,
-					Timestamp:     testCase.HttpResp.Timestamp,
+				Res: models.HTTPResp{
+					StatusCode:    testCase.HTTPResp.StatusCode,
+					Header:        testCase.HTTPResp.Header,
+					Body:          testCase.HTTPResp.Body,
+					StatusMessage: testCase.HTTPResp.StatusMessage,
+					ProtoMajor:    testCase.HTTPResp.ProtoMajor,
+					ProtoMinor:    testCase.HTTPResp.ProtoMinor,
+					Binary:        testCase.HTTPResp.Binary,
+					Timestamp:     testCase.HTTPResp.Timestamp,
 				},
 				TestCasePath: r.config.Path,
 				MockPath:     r.config.Path,
@@ -461,7 +461,7 @@ func (r *replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HttpResp, error) {
+func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		r.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
@@ -475,13 +475,13 @@ func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models
 				return nil, err
 			}
 
-			tc.HttpReq.URL, err = replaceHostToIP(tc.HttpReq.URL, userIP)
+			tc.HTTPReq.URL, err = replaceHostToIP(tc.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
 			}
-			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HttpReq.URL))
+			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
-		r.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HttpReq.URL))
+		r.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
 		resp, err := pkg.SimulateHttp(ctx, *tc, testSetID, r.logger, r.config.Test.APITimeout)
 		r.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 		r.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
@@ -490,7 +490,7 @@ func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models
 	return nil, nil
 }
 
-func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HttpResp, testSetID string) (bool, *models.Result) {
+func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
 
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {

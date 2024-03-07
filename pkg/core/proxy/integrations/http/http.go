@@ -148,7 +148,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 	// store the request and responses as mocks
 	meta := map[string]string{
 		"name":      "Http",
-		"type":      models.HttpClient,
+		"type":      models.HTTPClient,
 		"operation": req.Method,
 	}
 
@@ -164,7 +164,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 		Kind:    models.HTTP,
 		Spec: models.MockSpec{
 			Metadata: meta,
-			HttpReq: &models.HttpReq{
+			HTTPReq: &models.HTTPReq{
 				Method:     models.Method(req.Method),
 				ProtoMajor: req.ProtoMajor,
 				ProtoMinor: req.ProtoMinor,
@@ -173,7 +173,7 @@ func ParseFinalHttp(ctx context.Context, logger *zap.Logger, mock *finalHttp, de
 				Body:       string(reqBody),
 				URLParams:  pkg.UrlParams(req),
 			},
-			HttpResp: &models.HttpResp{
+			HTTPResp: &models.HTTPResp{
 				StatusCode: respParsed.StatusCode,
 				Header:     pkg.ToYamlHttpHeader(respParsed.Header),
 				Body:       string(respBody),

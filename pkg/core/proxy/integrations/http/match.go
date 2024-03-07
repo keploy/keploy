@@ -30,7 +30,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 
 			for _, mock := range tcsMocks {
 				if mock.Kind == models.HTTP {
-					isMockBodyJSON := isJSON([]byte(mock.Spec.HttpReq.Body))
+					isMockBodyJSON := isJSON([]byte(mock.Spec.HTTPReq.Body))
 
 					//the body of mock and request aren't of same type
 					if isMockBodyJSON != matchParams.reqBodyIsJson {
@@ -38,7 +38,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					}
 
 					//parse request body url
-					parsedURL, err := url.Parse(mock.Spec.HttpReq.URL)
+					parsedURL, err := url.Parse(mock.Spec.HTTPReq.URL)
 					if err != nil {
 						utils.LogError(logger, err, "failed to parse mock url")
 						continue
@@ -51,18 +51,18 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					}
 
 					//Check if the method matches
-					if mock.Spec.HttpReq.Method != models.Method(matchParams.req.Method) {
+					if mock.Spec.HTTPReq.Method != models.Method(matchParams.req.Method) {
 						//If it is not the same, continue
 						continue
 					}
 
 					// Check if the header keys match
-					if !mapsHaveSameKeys(mock.Spec.HttpReq.Header, matchParams.req.Header) {
+					if !mapsHaveSameKeys(mock.Spec.HTTPReq.Header, matchParams.req.Header) {
 						// Different headers, so not a match
 						continue
 					}
 
-					if !mapsHaveSameKeys(mock.Spec.HttpReq.URLParams, matchParams.req.URL.Query()) {
+					if !mapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, matchParams.req.URL.Query()) {
 						// Different query params, so not a match
 						continue
 					}
@@ -135,7 +135,7 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	mxIdx := -1
 	// find the fuzzy hash of the mocks
 	for idx, mock := range mocks {
-		encoded, _ := decode(mock.Spec.HttpReq.Body)
+		encoded, _ := decode(mock.Spec.HTTPReq.Body)
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)
 		shingles2 := util.CreateShingles(reqBuff, k)
@@ -165,15 +165,15 @@ func decode(encoded string) ([]byte, error) {
 func fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	com := encode(reqBuff)
 	for _, mock := range tcsMocks {
-		encoded, _ := decode(mock.Spec.HttpReq.Body)
-		if string(encoded) == string(reqBuff) || mock.Spec.HttpReq.Body == com {
+		encoded, _ := decode(mock.Spec.HTTPReq.Body)
+		if string(encoded) == string(reqBuff) || mock.Spec.HTTPReq.Body == com {
 			return true, mock
 		}
 	}
 	// convert all the configmocks to string array
 	mockString := make([]string, len(tcsMocks))
 	for i := 0; i < len(tcsMocks); i++ {
-		mockString[i] = tcsMocks[i].Spec.HttpReq.Body
+		mockString[i] = tcsMocks[i].Spec.HTTPReq.Body
 	}
 	// find the closest match
 	if util.IsAsciiPrintable(string(reqBuff)) {

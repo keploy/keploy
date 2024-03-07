@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -22,7 +23,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 	for index, mock := range mocks {
 		mock.TestModeInfo.SortOrder = index
-		mock.TestModeInfo.Id = index
+		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
 	}
 }
@@ -32,7 +33,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 	for index, mock := range mocks {
 		mock.TestModeInfo.SortOrder = index
-		mock.TestModeInfo.Id = index
+		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
 	}
 }

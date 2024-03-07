@@ -29,8 +29,8 @@ type TestResult struct {
 	TestCasePath string     `json:"testCasePath" yaml:"test_case_path"`
 	MockPath     string     `json:"mockPath" yaml:"mock_path"`
 	TestCaseID   string     `json:"testCaseID" yaml:"test_case_id"`
-	Req          HttpReq    `json:"req" yaml:"req,omitempty"`
-	Res          HttpResp   `json:"resp" yaml:"resp,omitempty"`
+	Req          HTTPReq    `json:"req" yaml:"req,omitempty"`
+	Res          HTTPResp   `json:"resp" yaml:"resp,omitempty"`
 	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
 	Result       Result     `json:"result" yaml:"result"`
 }
@@ -41,6 +41,7 @@ func (tr *TestResult) GetKind() string {
 
 type TestSetStatus string
 
+// constants for testSet status
 const (
 	TestSetStatusRunning      TestSetStatus = "RUNNING"
 	TestSetStatusFailed       TestSetStatus = "FAILED"
@@ -116,6 +117,7 @@ type BodyResult struct {
 
 type TestStatus string
 
+// constants for test status
 const (
 	TestStatusPending TestStatus = "PENDING"
 	TestStatusRunning TestStatus = "RUNNING"

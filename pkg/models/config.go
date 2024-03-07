@@ -1,3 +1,4 @@
+// Package models provides data models for the keploy.
 package models
 
 import "time"
@@ -23,7 +24,7 @@ type Stubs struct {
 }
 type Filters struct {
 	Path       string            `json:"path" yaml:"path"`
-	UrlMethods []string          `json:"urlMethods" yaml:"urlMethods"`
+	URLMethods []string          `json:"urlMethods" yaml:"urlMethods"`
 	Host       string            `json:"host" yaml:"host"`
 	Headers    map[string]string `json:"headers" yaml:"headers"`
 	Port       uint              `json:"ports" yaml:"ports"`
@@ -43,7 +44,7 @@ type Test struct {
 	GlobalNoise             Globalnoise         `json:"globalNoise" yaml:"globalNoise"`
 	Delay                   uint64              `json:"delay" yaml:"delay"`
 	BuildDelay              time.Duration       `json:"buildDelay" yaml:"buildDelay"`
-	ApiTimeout              uint64              `json:"apiTimeout" yaml:"apiTimeout"`
+	APITimeout              uint64              `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts        []uint              `json:"passThroughPorts" yaml:"passThroughPorts"`
 	BypassEndpointsRegistry []string            `json:"bypassEndpointsRegistry" yaml:"bypassEndpointsRegistry"`
 	WithCoverage            bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test

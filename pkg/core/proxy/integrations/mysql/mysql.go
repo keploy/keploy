@@ -70,8 +70,8 @@ func recordMySQLMessage(ctx context.Context, mysqlRequests []models.MySQLRequest
 		Name:    "mocks",
 		Spec: models.MockSpec{
 			Metadata:       meta,
-			MySqlRequests:  mysqlRequests,
-			MySqlResponses: mysqlResponses,
+			MySQLRequests:  mysqlRequests,
+			MySQLResponses: mysqlResponses,
 			Created:        time.Now().Unix(),
 		},
 	}
