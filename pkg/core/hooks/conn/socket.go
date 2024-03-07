@@ -40,8 +40,6 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 			select {
 			case <-ctx.Done():
 				close(t)
-				errCh <- ctx.Err()
-				close(errCh)
 				return
 			default:
 				// TODO refactor this to directly consume the events from the maps
@@ -105,6 +103,8 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 
 func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh chan error) {
 	defer utils.Recover(l)
+	defer close(errCh) // Close the channel when the function exits
+
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		utils.LogError(l, err, "failed to create ring buffer of socketDataEvent")
@@ -159,6 +159,8 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh cha
 
 func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, errCh chan error) {
 	defer utils.Recover(l)
+	defer close(errCh) // Close the channel when the function exits
+
 	r, err := perf.NewReader(m, os.Getpagesize())
 	if err != nil {
 		utils.LogError(l, err, "failed to create perf event reader of socketCloseEvent")
