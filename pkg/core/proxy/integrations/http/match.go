@@ -74,7 +74,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 				return false, nil, nil
 			}
 
-			isMatched, bestMatch := fuzzymatch(eligibleMocks, matchParams.reqBuf)
+			isMatched, bestMatch := fuzzyMatch(eligibleMocks, matchParams.reqBuf)
 			if isMatched {
 				isDeleted := mockDb.DeleteFilteredMock(bestMatch)
 				if !isDeleted {
@@ -162,7 +162,7 @@ func decode(encoded string) ([]byte, error) {
 	return data, nil
 }
 
-func fuzzymatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
+func fuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	com := encode(reqBuff)
 	for _, mock := range tcsMocks {
 		encoded, _ := decode(mock.Spec.HTTPReq.Body)

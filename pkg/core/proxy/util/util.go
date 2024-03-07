@@ -187,7 +187,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	defer close(destBufferChannel)
 	defer close(errChannel)
 
-	// get the error group from the context
+	// get the error group from the context (derived from the proxy context)
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 
 	g.Go(func() error {
