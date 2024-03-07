@@ -1,3 +1,4 @@
+// Package graph provides the resolver implementation for the GraphQL schema.
 package graph
 
 import (
