@@ -221,8 +221,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		})
 	}
 
-	time.Sleep(time.Duration(r.config.Test.Delay) * time.Second)
-
 	exitLoopChan := make(chan bool, 2)
 	defer close(exitLoopChan)
 
@@ -260,6 +258,12 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		return nil
 	})
+
+	// Delay for user application to run
+	select {
+	case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+	case <-runTestSetCtx.Done():
+	}
 
 	// Inserting the initial report for the test set
 	testReport := &models.TestReport{
