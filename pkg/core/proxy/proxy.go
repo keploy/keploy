@@ -212,7 +212,7 @@ func (p *Proxy) start(ctx context.Context) error {
 				utils.Recover(p.logger)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil {
-					utils.LogError(p.logger, nil, "failed to handle the client connection")
+					utils.LogError(p.logger, err, "failed to handle the client connection")
 					return nil //ignoring the error to continue the flow
 				}
 				return nil

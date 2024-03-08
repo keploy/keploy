@@ -172,12 +172,15 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
+
+	exitLoopChan := make(chan bool, 2)
 	defer func() {
 		runTestSetCtxCancel()
 		err := runTestSetErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
+		close(exitLoopChan)
 	}()
 
 	var mockErrChan <-chan error
@@ -231,9 +234,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		})
 	}
 
-	exitLoopChan := make(chan bool, 2)
-	defer close(exitLoopChan)
-
 	// Checking for errors in the mocking and application
 	runTestSetErrGrp.Go(func() error {
 		defer utils.Recover(r.logger)
@@ -279,7 +279,8 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to insert report: %w", err)
+		utils.LogError(r.logger, err, "failed to insert report")
+		return models.TestSetStatusFailed, err
 	}
 
 	// var to exit the loop

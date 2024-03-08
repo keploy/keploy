@@ -149,7 +149,6 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	defer close(inodeErrCh)
 	defer close(appErrCh)
-	defer close(inodeChan)
 
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)

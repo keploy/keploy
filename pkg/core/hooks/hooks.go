@@ -3,7 +3,6 @@ package hooks
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -104,10 +103,8 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
-		if err := h.unLoad(ctx); err != nil {
-			utils.LogError(h.logger, err, "failed to unload hooks")
-		}
-		return errors.New("failed to release ebpf resources")
+		h.unLoad(ctx)
+		return nil
 	})
 
 	if opts.IsDocker {
@@ -489,69 +486,40 @@ func (h *Hooks) Record(ctx context.Context, _ uint64) (<-chan *models.TestCase, 
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents)
 }
 
-func (h *Hooks) unLoad(_ context.Context) error {
+func (h *Hooks) unLoad(_ context.Context) {
 	// closing all events
 	//other
 	if err := h.socket.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
-	err := h.socket.Close()
-	if err != nil {
-		return err
-	}
 
-	//egress
 	if err := h.bind.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the bind")
 	}
 	if err := h.udpp4.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the udpp4")
 	}
-	err = h.bind.Close()
-	if err != nil {
-		return err
-	}
-	err = h.udpp4.Close()
-	if err != nil {
-		return err
-	}
-	//ipv4
+
 	if err := h.connect4.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connect4")
 	}
+
 	if err := h.gp4.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the gp4")
 	}
+
 	if err := h.tcppv4.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the tcppv4")
 	}
+
 	if err := h.tcpv4.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the tcpv4")
 	}
+
 	if err := h.tcpv4Ret.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
 	}
-	err = h.connect4.Close()
-	if err != nil {
-		return err
-	}
-	err = h.gp4.Close()
-	if err != nil {
-		return err
-	}
-	err = h.tcppv4.Close()
-	if err != nil {
-		return err
-	}
-	err = h.tcpv4.Close()
-	if err != nil {
-		return err
-	}
-	err = h.tcpv4Ret.Close()
-	if err != nil {
-		return err
-	}
-	//ipv6
+
 	if err := h.connect6.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connect6")
 	}
@@ -567,95 +535,56 @@ func (h *Hooks) unLoad(_ context.Context) error {
 	if err := h.tcpv6Ret.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
 	}
-	err = h.connect6.Close()
-	if err != nil {
-		return err
+	if err := h.accept.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the accept")
 	}
-	err = h.gp6.Close()
-	if err != nil {
-		return err
+	if err := h.acceptRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the acceptRet")
 	}
-	err = h.tcppv6.Close()
-	if err != nil {
-		return err
+	if err := h.accept4.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the accept4")
 	}
-	err = h.tcpv6.Close()
-	if err != nil {
-		return err
+	if err := h.accept4Ret.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the accept4Ret")
 	}
-	err = h.tcpv6Ret.Close()
-	if err != nil {
-		return err
+	if err := h.read.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the read")
 	}
-	//ingress
-	err = h.accept.Close()
-	if err != nil {
-		return err
+	if err := h.readRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the readRet")
 	}
-	err = h.acceptRet.Close()
-	if err != nil {
-		return err
+	if err := h.write.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the write")
 	}
-	err = h.accept4.Close()
-	if err != nil {
-		return err
+	if err := h.writeRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the writeRet")
 	}
-	err = h.accept4Ret.Close()
-	if err != nil {
-		return err
+	if err := h.writev.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the writev")
 	}
-	err = h.close.Close()
-	if err != nil {
-		return err
+	if err := h.writevRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the writevRet")
 	}
-	err = h.closeRet.Close()
-	if err != nil {
-		return err
+	if err := h.close.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the close")
 	}
-	err = h.read.Close()
-	if err != nil {
-		return err
+	if err := h.closeRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the closeRet")
 	}
-	err = h.readRet.Close()
-	if err != nil {
-		return err
+	if err := h.sendto.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the sendto")
 	}
-	err = h.write.Close()
-	if err != nil {
-		return err
+	if err := h.sendtoRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the sendtoRet")
 	}
-	err = h.writeRet.Close()
-	if err != nil {
-		return err
+	if err := h.recvfrom.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the recvfrom")
 	}
-	err = h.writev.Close()
-	if err != nil {
-		return err
+	if err := h.recvfromRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the recvfromRet")
 	}
-	err = h.writevRet.Close()
-	if err != nil {
-		return err
-	}
-	err = h.sendto.Close()
-	if err != nil {
-		return err
-	}
-	err = h.sendtoRet.Close()
-	if err != nil {
-		return err
-	}
-	err = h.recvfrom.Close()
-	if err != nil {
-		return err
-	}
-	err = h.recvfromRet.Close()
-	if err != nil {
-		return err
-	}
-	err = h.objects.Close()
-	if err != nil {
-		return err
+	if err := h.objects.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the objects")
 	}
 	h.logger.Info("eBPF resources released successfully...")
-	return nil
 }

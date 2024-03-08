@@ -111,9 +111,5 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		utils.LogError(fe.Logger, err, "failed to write the mocks to config yaml", zap.Any("session", filepath.Base(reportPath)))
 		return err
 	}
-
-	if err != nil {
-		return fmt.Errorf("%s failed to write test report in yaml file. error: %s", utils.Emoji, err.Error())
-	}
 	return nil
 }

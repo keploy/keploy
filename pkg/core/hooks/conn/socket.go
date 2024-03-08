@@ -6,10 +6,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"os"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/models"
@@ -182,24 +183,17 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	g.Go(func() error {
 		defer utils.Recover(l)
-		for {
-			select {
-			case <-ctx.Done(): // Check for context cancellation
-				err := r.Close()
-				if err != nil {
-					utils.LogError(l, err, "failed to close ringbuf socketDataEvent reader")
-				}
-				return nil
-			default:
+		go func() {
+			defer utils.Recover(l)
+			for {
 				rec, err := r.Read()
 				if err != nil {
 					if errors.Is(err, perf.ErrClosed) {
-						return nil
+						return
 					}
 					utils.LogError(l, err, "failed to read from perf socketCloseEvent reader")
 					continue
 				}
-
 				if rec.LostSamples != 0 {
 					l.Debug(fmt.Sprintf("perf socketCloseEvent array full, dropped %d samples", rec.LostSamples))
 					continue
@@ -215,7 +209,15 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				event.TimestampNano += getRealTimeOffset()
 				c.GetOrCreate(event.ConnID).AddCloseEvent(event)
 			}
+		}()
+
+		<-ctx.Done() // Check for context cancellation
+		err := r.Close()
+		if err != nil {
+			utils.LogError(l, err, "failed to close perf socketCloseEvent reader")
+			return err
 		}
+		return nil
 	})
 	return nil
 }
