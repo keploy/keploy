@@ -4,33 +4,29 @@ package v1
 import (
 	"context"
 	"fmt"
-	"io"
-	"net"
-	"time"
-
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"io"
+	"net"
+	"time"
 )
 
 func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	pgRequests := [][]byte{reqBuf}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	errCh := make(chan error, 1)
+	defer close(errCh)
+	go func(errCh chan error, reqBuf []byte, pgRequests [][]byte) {
+		for {
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
-
 			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 			if err != nil {
 				utils.LogError(logger, err, "failed to set the read deadline for the pg client conn")
-				return err
+				errCh <- err
 			}
 
 			// To read the stream of request packets from the client
@@ -40,11 +36,11 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 						if err == io.EOF {
 							logger.Debug("EOF error received from client. Closing conn in postgres !!")
-							return err
+							errCh <- err
 						}
 						//TODO: why debug log sarthak?
 						logger.Debug("failed to read the request message in proxy for postgres dependency")
-						return err
+						errCh <- err
 					}
 				}
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -61,22 +57,21 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 			matched, pgResponses, err := matchingReadablePG(ctx, logger, pgRequests, mockDb)
 			if err != nil {
-				return fmt.Errorf("error while matching tcs mocks %v", err)
+				errCh <- fmt.Errorf("error while matching tcs mocks %v", err)
 			}
 
 			if !matched {
-
 				// making destConn
 				destConn, err := net.Dial("tcp", dstCfg.Addr)
 				if err != nil {
 					utils.LogError(logger, err, "failed to dial the destination server")
-					return err
+					errCh <- err
 				}
 
 				_, err = pUtil.PassThrough(ctx, logger, clientConn, destConn, pgRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))
-					return err
+					errCh <- err
 				}
 				continue
 			}
@@ -87,16 +82,23 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				}
 				if err != nil {
 					utils.LogError(logger, err, "failed to decode the response message in proxy for postgres dependency")
-					return err
+					errCh <- err
 				}
 				_, err = clientConn.Write(encoded)
 				if err != nil {
 					utils.LogError(logger, err, "failed to write the response message to the client application")
-					return err
+					errCh <- err
 				}
 			}
 			// Clear the buffer for the next dependency call
 			pgRequests = [][]byte{}
 		}
+	}(errCh, reqBuf, pgRequests)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
 	}
 }

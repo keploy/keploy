@@ -29,6 +29,9 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 			var matchedMock *models.Mock
 
 			for _, mock := range tcsMocks {
+				if ctx.Err() != nil {
+					return false, nil, ctx.Err()
+				}
 				if mock == nil {
 					continue
 				}
@@ -43,6 +46,9 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 
 				if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 					for requestIndex, reqBuf := range requestBuffers {
+						if ctx.Err() != nil {
+							return false, nil, ctx.Err()
+						}
 						bufStr := util.EncodeBase64(reqBuf)
 						encoded, err := postgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
 						if err != nil {
