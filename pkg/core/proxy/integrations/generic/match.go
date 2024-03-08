@@ -98,7 +98,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
 				return true, responseMock, nil
 			}
-			break
+			return false, nil, nil
 		}
 	}
 }

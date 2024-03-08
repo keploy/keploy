@@ -135,7 +135,7 @@ type MySQLResultSet struct {
 
 type PacketHeader struct {
 	PacketLength     uint32 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
-	PacketSequenceID uint8 `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
+	PacketSequenceID uint8  `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
 }
 
 type RowHeader struct {

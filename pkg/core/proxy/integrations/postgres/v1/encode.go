@@ -3,6 +3,10 @@ package v1
 import (
 	"context"
 	"encoding/binary"
+	"net"
+	"strconv"
+	"time"
+
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
@@ -10,9 +14,6 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-	"net"
-	"strconv"
-	"time"
 )
 
 func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
@@ -92,7 +93,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 		return nil
 	})
-	
+
 	// read responses from destination
 	g.Go(func() error {
 		defer utils.Recover(logger)

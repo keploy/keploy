@@ -1,14 +1,16 @@
+// Package app provides functionality for managing applications.
 package app
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/models"
 
