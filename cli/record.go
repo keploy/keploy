@@ -36,7 +36,7 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			}
 			err = record.Start(ctx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to start recording")
+				utils.LogError(logger, err, "failed to record")
 				return nil
 			}
 

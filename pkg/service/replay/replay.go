@@ -591,12 +591,18 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to get filtered mocks"
 		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
 		return fmt.Errorf(stopReason)
 	}
 	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(ctx, "", time.Time{}, time.Now())
 	if err != nil {
 		stopReason = "failed to get unfiltered mocks"
 		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -604,6 +610,9 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to boot replay"
 		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -611,6 +620,9 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to set mocks"
 		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
 		return fmt.Errorf(stopReason)
 	}
 	<-ctx.Done()
