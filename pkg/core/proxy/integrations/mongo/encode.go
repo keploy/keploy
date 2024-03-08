@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"time"
 
@@ -23,7 +22,6 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		}
 	}(destConn)
 
-	rand.Seed(time.Now().UnixNano())
 	for {
 		select {
 		case <-ctx.Done():
