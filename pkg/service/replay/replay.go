@@ -172,7 +172,13 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
-	defer runTestSetCtxCancel()
+	defer func() {
+		runTestSetCtxCancel()
+		err := runTestSetErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "error in testLoopErrGrp")
+		}
+	}()
 
 	var mockErrChan <-chan error
 	var appErrChan = make(chan models.AppError)
@@ -194,19 +200,23 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	filteredMocks, err := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get filtered mocks: %w", err)
+		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		return models.TestSetStatusFailed, err
 	}
 	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
+		return models.TestSetStatusFailed, err
 	}
 	err = r.instrumentation.SetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks)
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to set mocks: %w", err)
+		utils.LogError(r.logger, err, "failed to set mocks")
+		return models.TestSetStatusFailed, err
 	}
 	mockErrChan = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{})
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to mock outgoing: %w", err)
+		utils.LogError(r.logger, err, "failed to mock outgoing")
+		return models.TestSetStatusFailed, err
 	}
 
 	if !serveTest {
@@ -247,15 +257,11 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatusByErrChan = models.TestSetStatusAppHalted
 			}
 			utils.LogError(r.logger, err, "application failed to run")
-		case <-ctx.Done():
+		case <-runTestSetCtx.Done():
 			testSetStatusByErrChan = models.TestSetStatusUserAbort
 		}
 		exitLoopChan <- true
 		runTestSetCtxCancel()
-		err := runTestSetErrGrp.Wait()
-		if err != nil {
-			utils.LogError(r.logger, err, "error in testLoopErrGrp")
-		}
 		return nil
 	})
 
