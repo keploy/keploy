@@ -46,6 +46,9 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq m
 
 			grpcMocks := FilterMocksRelatedToGrpc(mocks)
 			for _, mock := range grpcMocks {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				have := mock.Spec.GRPCReq
 				// Investigate pseudo headers.
 				if have.Headers.PseudoHeaders[KLabelForAuthority] != grpcReq.Headers.PseudoHeaders[KLabelForAuthority] {

@@ -29,6 +29,9 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 			var eligibleMocks []*models.Mock
 
 			for _, mock := range tcsMocks {
+				if ctx.Err() != nil {
+					return false, nil, ctx.Err()
+				}
 				if mock.Kind == models.HTTP {
 					isMockBodyJSON := isJSON([]byte(mock.Spec.HTTPReq.Body))
 

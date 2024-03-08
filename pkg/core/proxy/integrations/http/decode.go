@@ -28,24 +28,23 @@ type matchParams struct {
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	errCh := make(chan error, 1)
+	defer close(errCh)
+	go func(errCh chan error) {
+		for {
 			//Check if the expected header is present
 			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
 				//Send the 100 continue response
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
 					utils.LogError(logger, err, "failed to write the 100 continue response to the user application")
-					return err
+					errCh <- err
 				}
 				//Read the request buffer again
 				newRequest, err := util.ReadBytes(ctx, clientConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read the request buffer from the user application")
-					return err
+					errCh <- err
 				}
 				//Append the new request buffer to the old request buffer
 				reqBuf = append(reqBuf, newRequest...)
@@ -54,7 +53,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			err := handleChunkedRequests(ctx, logger, &reqBuf, clientConn, nil)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle chunked requests")
-				return err
+				errCh <- err
 			}
 
 			logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
@@ -63,13 +62,13 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
 			if err != nil {
 				utils.LogError(logger, err, "failed to parse the http request message")
-				return err
+				errCh <- err
 			}
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
 				utils.LogError(logger, err, "failed to read from request body", zap.Any("metadata", getReqMeta(request)))
-				return err
+				errCh <- err
 			}
 
 			//check if reqBuf body is a json
@@ -92,12 +91,12 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				destConn, err := net.Dial("tcp", dstCfg.Addr)
 				if err != nil {
 					utils.LogError(logger, err, "failed to dial the destination server")
-					return err
+					errCh <- err
 				}
 				_, err = util.PassThrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf})
 				if err != nil {
 					utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
-					return err
+					errCh <- err
 				}
 			}
 
@@ -117,12 +116,12 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				_, err := gw.Write([]byte(body))
 				if err != nil {
 					utils.LogError(logger, err, "failed to compress the response body", zap.Any("metadata", getReqMeta(request)))
-					return err
+					errCh <- err
 				}
 				err = gw.Close()
 				if err != nil {
 					utils.LogError(logger, err, "failed to close the gzip writer", zap.Any("metadata", getReqMeta(request)))
-					return err
+					errCh <- err
 				}
 				logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
 				respBody = compressedBuffer.String()
@@ -149,15 +148,21 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			_, err = clientConn.Write([]byte(responseString))
 			if err != nil {
 				utils.LogError(logger, err, "failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(request)))
-				return err
+				errCh <- err
 			}
 
 			reqBuf, err = util.ReadBytes(ctx, clientConn)
 			if err != nil {
 				logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				logger.Debug("This was the last response from the server:\n" + string(responseString))
-				return nil
+				errCh <- nil
 			}
 		}
+	}(errCh)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
 	}
 }

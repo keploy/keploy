@@ -299,6 +299,9 @@ func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
 				utils.LogError(srv.logger, err, "Failed to read frame")
 				return err
 			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			err = srv.ProcessGenericFrame(ctx, frame)
 			if err != nil {
 				return err
