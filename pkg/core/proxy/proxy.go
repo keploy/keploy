@@ -117,12 +117,25 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
 	g.Go(func() error {
 		utils.Recover(p.logger)
-		err := p.startTCPDNSServer(ctx)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to start tcp dns server")
+		errCh := make(chan error, 1)
+		go func(errCh chan error) {
+			err := p.startTCPDNSServer(ctx)
+			if err != nil {
+				errCh <- err
+			}
+		}(errCh)
+
+		select {
+		case <-ctx.Done():
+			err := p.TCPDNSServer.Shutdown()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
+				return err
+			}
+			return nil
+		case err := <-errCh:
 			return err
 		}
-		return nil
 	})
 
 	if models.GetMode() == models.MODE_TEST {
@@ -131,26 +144,27 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		p.logger.Debug("Starting Udp Dns Server in Test mode...")
 		g.Go(func() error {
 			utils.Recover(p.logger)
-			err := p.startUDPDNSServer(ctx)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to start udp dns server")
+			errCh := make(chan error, 1)
+			go func(errCh chan error) {
+				err := p.startUDPDNSServer(ctx)
+				if err != nil {
+					errCh <- err
+				}
+			}(errCh)
+
+			select {
+			case <-ctx.Done():
+				err := p.UDPDNSServer.Shutdown()
+				if err != nil {
+					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
+					return err
+				}
+				return nil
+			case err := <-errCh:
 				return err
 			}
-			return nil
 		})
 	}
-
-	//stop DNS servers when the context is done
-	g.Go(func() error {
-		utils.Recover(p.logger)
-		<-ctx.Done()
-		err := p.stopDNSServers(ctx)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to stop the dns servers")
-			return err
-		}
-		return nil
-	})
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
 	return nil

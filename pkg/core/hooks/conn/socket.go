@@ -36,6 +36,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {
+			defer utils.Recover(l)
 			for {
 				select {
 				case <-ctx.Done():
