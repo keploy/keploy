@@ -83,32 +83,49 @@ func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
 	const maxEmptyReads = 5
 	emptyReads := 0
 
+	// Channel to communicate read results
+	readResult := make(chan struct {
+		n   int
+		err error
+		buf []byte
+	})
+	defer close(readResult)
+
 	for {
+		// Start a goroutine to perform the read operation
+		go func() {
+			buf := make([]byte, 1024)
+			n, err := reader.Read(buf)
+			readResult <- struct {
+				n   int
+				err error
+				buf []byte
+			}{n, err, buf}
+		}()
+
+		// Use a select statement to wait for either the read result or context cancellation
 		select {
 		case <-ctx.Done():
 			return buffer, ctx.Err()
-		default:
-			buf := make([]byte, 1024)
-			n, err := reader.Read(buf)
-
-			if n > 0 {
-				buffer = append(buffer, buf[:n]...)
-				emptyReads = 0 // reset the counter because we got some data
+		case result := <-readResult:
+			if result.n > 0 {
+				buffer = append(buffer, result.buf[:result.n]...)
+				emptyReads = 0 // Reset the counter because we got some data
 			}
 
-			if err != nil {
-				if err == io.EOF {
+			if result.err != nil {
+				if result.err == io.EOF {
 					emptyReads++
 					if emptyReads >= maxEmptyReads {
-						return buffer, err // multiple EOFs in a row, probably a true EOF
+						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
 					}
-					time.Sleep(time.Millisecond * 100) // sleep before trying again
+					time.Sleep(time.Millisecond * 100) // Sleep before trying again
 					continue
 				}
-				return buffer, err
+				return buffer, result.err
 			}
 
-			if n < len(buf) {
+			if result.n < len(result.buf) {
 				return buffer, nil
 			}
 		}
@@ -122,39 +139,56 @@ func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]b
 	const maxEmptyReads = 5
 	emptyReads := 0
 
-	for {
+	// Channel to communicate read results
+	readResult := make(chan struct {
+		n   int
+		err error
+		buf []byte
+	})
+	defer close(readResult)
+
+	for numBytes > 0 {
+		// Start a goroutine to perform the read operation
+		go func() {
+			buf := make([]byte, numBytes)
+			n, err := reader.Read(buf)
+			readResult <- struct {
+				n   int
+				err error
+				buf []byte
+			}{n, err, buf}
+		}()
+
+		// Use a select statement to wait for either the read result or context cancellation
 		select {
 		case <-ctx.Done():
 			return buffer, ctx.Err()
-		default:
-			buf := make([]byte, numBytes)
-
-			n, err := reader.Read(buf)
-
-			if n == numBytes {
-				buffer = append(buffer, buf...)
-				return buffer, nil
+		case result := <-readResult:
+			if result.n > 0 {
+				buffer = append(buffer, result.buf[:result.n]...)
+				numBytes -= result.n
+				emptyReads = 0 // Reset the counter because we got some data
 			}
 
-			if n > 0 {
-				buffer = append(buffer, buf[:n]...)
-				numBytes = numBytes - n
-				emptyReads = 0 // reset the counter because we got some data
-			}
-
-			if err != nil {
-				if err == io.EOF {
+			if result.err != nil {
+				if result.err == io.EOF {
 					emptyReads++
 					if emptyReads >= maxEmptyReads {
-						return buffer, err // multiple EOFs in a row, probably a true EOF
+						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
 					}
-					time.Sleep(time.Millisecond * 100) // sleep before trying again
+					time.Sleep(time.Millisecond * 100) // Sleep before trying again
 					continue
 				}
-				return buffer, err
+				return buffer, result.err
+			}
+
+			if result.n == numBytes {
+				return buffer, nil
 			}
 		}
 	}
+
+	return buffer, nil
 }
 
 // PassThrough function is used to pass the network traffic to the destination connection.

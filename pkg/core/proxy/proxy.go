@@ -199,35 +199,32 @@ func (p *Proxy) start(ctx context.Context) error {
 	}()
 
 	for {
-		select {
-		case <-ctx.Done():
-			err := listener.Close()
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to close the listener")
-				return err
-			}
-			return nil
-		default:
-			clientConn, err := listener.Accept()
+		clientConnCh := make(chan net.Conn, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			conn, err := listener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
-					return err
+					errCh <- nil
 				}
 				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-				return err
+				errCh <- nil
 			}
-			// collecting the client connections for cleanup
-			//p.connMutex.Lock()
-			//p.clientConnections = append(p.clientConnections, conn)
-			//p.connMutex.Unlock()
+			clientConnCh <- conn
 
-			// handle the client connection
+		}()
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-errCh:
+			return err
+		// handle the client connection
+		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
 				utils.Recover(p.logger)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
-					return nil //ignoring the error to continue the flow
 				}
 				return nil
 			})
@@ -272,6 +269,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	//TODO: how to close the mock channel here i mean before getting it if there is any error.
 	//get the session rule
 	rule, ok := p.sessions.Get(destInfo.AppID)
 	if !ok {
@@ -289,14 +287,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
 	}
 
-	// close the mock channel and depsErrChan when the context is done
-	select {
-	case <-ctx.Done():
-		close(rule.MC)
-		return nil
-	default:
-	}
-
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
@@ -305,6 +295,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if err != nil {
 		}
 	}()
+
+	// To close the mock channel if the context is done
+	//TODO: How can i close this if error occurs before this.
+	parserErrGrp.Go(func() error {
+		utils.Recover(p.logger)
+		<-parserCtx.Done()
+		close(rule.MC)
+		return nil
+	})
 
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {
