@@ -99,6 +99,9 @@ func (r *recorder) Start(ctx context.Context) error {
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
+			if err == context.Canceled {
+				return err
+			}
 			return fmt.Errorf(stopReason)
 		}
 	}
@@ -108,6 +111,9 @@ func (r *recorder) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to get incoming frames"
 		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
 		return fmt.Errorf(stopReason)
 	}
 

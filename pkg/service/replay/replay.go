@@ -76,6 +76,9 @@ func (r *replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
 		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -83,6 +86,9 @@ func (r *replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -94,6 +100,9 @@ func (r *replayer) Start(ctx context.Context) error {
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
+			if err == context.Canceled {
+				return err
+			}
 			return fmt.Errorf(stopReason)
 		}
 		switch testSetStatus {

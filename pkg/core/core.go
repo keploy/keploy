@@ -5,8 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/models"
@@ -104,7 +105,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 
 	select {
 	case <-ctx.Done():
-		println("context cancelled before starting proxy")
 		return ctx.Err()
 	default:
 	}
