@@ -51,10 +51,16 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 							matched = false
 							break // Exit the loop if any request doesn't match
 						}
+						if ctx.Err() != nil {
+							return false, nil, ctx.Err()
+						}
 					}
 					if matched {
 						index = idx
 						break
+					}
+					if ctx.Err() != nil {
+						return false, nil, ctx.Err()
 					}
 				}
 			}

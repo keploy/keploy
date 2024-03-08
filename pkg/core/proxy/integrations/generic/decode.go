@@ -103,6 +103,11 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					utils.LogError(logger, err, "failed to write the response message to the client application")
 					return err
 				}
+
+				// if ctx is done, return the error
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 			}
 
 			// Clear the genericRequests buffer for the next dependency call
