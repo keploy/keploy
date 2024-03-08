@@ -308,24 +308,24 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		filteredMocks, loopErr := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to get filtered mocks")
-			continue
+			break
 		}
 		unfilteredMocks, loopErr := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to get unfiltered mocks")
-			continue
+			break
 		}
 		loopErr = r.instrumentation.SetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to set mocks")
-			continue
+			break
 		}
 
 		started := time.Now().UTC()
 		resp, loopErr := r.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
-			continue
+			break
 		}
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
@@ -379,14 +379,14 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, err, "failed to insert test case result")
-				continue
+				break
 			}
 			if !testPass {
 				testSetStatus = models.TestSetStatusFailed
 			}
 		} else {
 			utils.LogError(r.logger, nil, "test result is nil")
-			continue
+			break
 		}
 	}
 
