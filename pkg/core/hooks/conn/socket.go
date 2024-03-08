@@ -35,17 +35,21 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	g.Go(func() error {
 		defer utils.Recover(l)
-		for {
-			select {
-			case <-ctx.Done():
-				close(t)
-				return nil
-			default:
-				// TODO refactor this to directly consume the events from the maps
-				c.ProcessActiveTrackers(ctx, t)
-				time.Sleep(100 * time.Millisecond)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					// TODO refactor this to directly consume the events from the maps
+					c.ProcessActiveTrackers(ctx, t)
+					time.Sleep(100 * time.Millisecond)
+				}
 			}
-		}
+		}()
+		<-ctx.Done()
+		close(t)
+		return nil
 	})
 
 	err = open(ctx, c, l, openMap)
@@ -77,19 +81,13 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	g.Go(func() error {
 		defer utils.Recover(l)
-		for {
-			select {
-			case <-ctx.Done(): // Check for context cancellation
-				err := r.Close()
-				if err != nil {
-					utils.LogError(l, err, "failed to close perf socketOpenEvent reader")
-				}
-				return nil
-			default:
+		go func() {
+			defer utils.Recover(l)
+			for {
 				rec, err := r.Read()
 				if err != nil {
 					if errors.Is(err, perf.ErrClosed) {
-						return nil
+						return
 					}
 					utils.LogError(l, err, "failed to read from perf socketOpenEvent reader")
 					continue
@@ -110,7 +108,13 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				event.TimestampNano += getRealTimeOffset()
 				c.GetOrCreate(event.ConnID).AddOpenEvent(event)
 			}
+		}()
+		<-ctx.Done() // Check for context cancellation
+		err := r.Close()
+		if err != nil {
+			utils.LogError(l, err, "failed to close perf socketOpenEvent reader")
 		}
+		return nil
 	})
 	return nil
 }
@@ -121,23 +125,18 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
 		return err
 	}
+
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	g.Go(func() error {
 		defer utils.Recover(l)
-		for {
-			select {
-			case <-ctx.Done(): // Check for context cancellation
-				err := r.Close()
-				if err != nil {
-					utils.LogError(l, err, "failed to close ringbuf socketDataEvent reader")
-				}
-				return nil
-			default:
+		go func() {
+			defer utils.Recover(l)
+			for {
 				record, err := r.Read()
 				if err != nil {
 					if !errors.Is(err, ringbuf.ErrClosed) {
 						utils.LogError(l, err, "failed to receive signal from ringbuf socketDataEvent reader")
-						return nil
+						return
 					}
 					continue
 				}
@@ -167,7 +166,13 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
+		}()
+		<-ctx.Done() // Check for context cancellation
+		err := r.Close()
+		if err != nil {
+			utils.LogError(l, err, "failed to close ringbuf socketDataEvent reader")
 		}
+		return nil
 	})
 	return nil
 }
