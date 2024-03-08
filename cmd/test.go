@@ -115,6 +115,8 @@ func (t *Test) GetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
 
+			defer t.logger.Info("Upload your test reports for better visualization at https://beta.keploy.io/test-report")
+
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				t.logger.Error("failed to read the testcase path input")
