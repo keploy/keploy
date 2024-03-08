@@ -22,11 +22,11 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		}
 	}(destConn)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	errCh := make(chan error, 1)
+	defer close(errCh)
+
+	go func(errCh chan error, reqBuf []byte) {
+		for {
 			var err error
 			var readRequestDelay time.Duration
 			// var logStr string = fmt.Sprintln("the conn id: ", clientConnId, " the destination conn id: ", destConnId)
@@ -40,10 +40,10 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				if err != nil {
 					if err == io.EOF {
 						logger.Debug("recieved request buffer is empty in record mode for mongo call")
-						return err
+						errCh <- err
 					}
 					utils.LogError(logger, err, "failed to read request from the mongo client", zap.String("mongo client address", clientConn.RemoteAddr().String()))
-					return err
+					errCh <- err
 				}
 				readRequestDelay = time.Since(started)
 				// logStr += lstr
@@ -57,7 +57,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			opReq, requestHeader, mongoRequest, err := Decode(reqBuf, logger)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the mongo wire message from the client")
-				return err
+				errCh <- err
 			}
 
 			mongoRequests = append(mongoRequests, models.MongoRequest{
@@ -68,7 +68,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			_, err = destConn.Write(reqBuf)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write the request buffer to mongo server", zap.String("mongo server address", destConn.RemoteAddr().String()))
-				return err
+				errCh <- err
 			}
 			logger.Debug(fmt.Sprintf("the request in the mongo parser after passing to dest: %v", len(reqBuf)))
 
@@ -81,10 +81,10 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					if err != nil {
 						if err == io.EOF {
 							logger.Debug("recieved request buffer is empty in record mode for mongo request")
-							return err
+							errCh <- err
 						}
 						utils.LogError(logger, err, "failed to read request from the mongo client", zap.String("mongo client address", clientConn.RemoteAddr().String()))
-						return err
+						errCh <- err
 					}
 
 					// write the reply to mongo client
@@ -92,7 +92,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					if err != nil {
 						// fmt.Println(logStr)
 						utils.LogError(logger, err, "failed to write the reply message to mongo client")
-						return err
+						errCh <- err
 					}
 
 					// logStr += fmt.Sprintln("after writting response to the client: ", time.Since(started), "current time is: ", time.Now())
@@ -104,7 +104,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode the mongo wire message from the destination server")
-						return err
+						errCh <- err
 					}
 					if mongoReqVal, ok := mongoReq.(models.MongoOpMessage); ok && !hasSecondSetBit(mongoReqVal.FlagBits) {
 						logger.Debug("the request from the client is complete since the more_to_come flagbit is 0")
@@ -126,10 +126,10 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("recieved response buffer is empty in record mode for mongo call")
-					return err
+					errCh <- err
 				}
 				utils.LogError(logger, err, "failed to read reply from the mongo server", zap.String("mongo server address", destConn.RemoteAddr().String()))
-				return err
+				errCh <- err
 			}
 
 			logger.Debug("recieved these pck length packets", zap.Any("packets", responsePckLengthBuffer))
@@ -147,10 +147,10 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("recieved response buffer is empty in record mode for mongo call")
-					return err
+					errCh <- err
 				}
 				utils.LogError(logger, err, "failed to read reply from the mongo server", zap.String("mongo server address", destConn.RemoteAddr().String()))
-				return err
+				errCh <- err
 			}
 			readResponseDelay := time.Since(started)
 
@@ -158,7 +158,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			_, err = clientConn.Write(responseBuffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write the reply message to mongo client")
-				return err
+				errCh <- err
 			}
 
 			// logStr += fmt.Sprintln("after writting response to the client: ", time.Since(started), "current time is: ", time.Now())
@@ -166,7 +166,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			_, responseHeader, mongoResponse, err := Decode(responseBuffer, logger)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the mongo wire message from the destination server")
-				return err
+				errCh <- err
 			}
 			mongoResponses = append(mongoResponses, models.MongoResponse{
 				Header:    &responseHeader,
@@ -187,10 +187,10 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					if err != nil {
 						if err == io.EOF {
 							logger.Debug("recieved response buffer is empty in record mode for mongo call")
-							return err
+							errCh <- err
 						}
 						utils.LogError(logger, err, "failed to read reply from the mongo server", zap.String("mongo server address", destConn.RemoteAddr().String()))
-						return err
+						errCh <- err
 					}
 					logger.Debug(fmt.Sprintf("the response in the mongo parser before passing to client: %v", len(responseBuffer)))
 
@@ -201,7 +201,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					if err != nil {
 						// fmt.Println(logStr)
 						utils.LogError(logger, err, "failed to write the reply message to mongo client")
-						return err
+						errCh <- err
 					}
 					logger.Debug(fmt.Sprintf("the response in the mongo parser after passing to client: %v", len(responseBuffer)))
 
@@ -214,7 +214,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					_, respHeader, mongoResp, err := Decode(responseBuffer, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode the mongo wire message from the destination server")
-						return err
+						errCh <- err
 					}
 					if mongoRespVal, ok := mongoResp.(models.MongoOpMessage); ok && !hasSecondSetBit(mongoRespVal.FlagBits) {
 						logger.Debug("the response from the server is complete since the more_to_come flagbit is 0")
@@ -228,14 +228,17 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 			}
 
-			//go func() {
-			//defer utils.Recover(logger)
 			recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
-			//}()
 			reqBuf = []byte("read form client conn")
 		}
-	}
+	}(errCh, reqBuf)
 
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	}
 }
 
 func getPacketLength(src []byte) (length int32) {

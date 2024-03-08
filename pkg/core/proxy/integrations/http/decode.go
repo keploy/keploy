@@ -30,7 +30,7 @@ type matchParams struct {
 func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 	defer close(errCh)
-	go func(errCh chan error) {
+	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		for {
 			//Check if the expected header is present
 			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
@@ -158,7 +158,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				errCh <- nil
 			}
 		}
-	}(errCh)
+	}(errCh, reqBuf, opts)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
