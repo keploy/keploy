@@ -20,7 +20,7 @@ The following behaviors are expected and requested of all community members:
  * Show consideration and respect in all your actions and speech. Avoid any behavior that is demeaning, discriminatory, or harassing.
  * Seek collaboration as an initial step instead of conflict.
  * Refrain from demeaning, discriminatory, or harassing behavior and speech.
- * Report any unsafe situations, distress or violations of the code of conduct to the maintainers through [Slack](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA).
+ * Report any unsafe situations, distress or violations of the code of conduct to the maintainers through [Slack](https://join.slack.com/t/keploy/shared_invite/zt-2dno1yetd-Ec3el~tTwHYIHgGI0jPe7A).
 * Practice empathy and kindness towards other community members.
 * Respect diverse opinions, perspectives, and experiences.
 * Give and receive constructive feedback in a gracious manner.
@@ -116,7 +116,7 @@ the community.
 
 ## Contact info
 
-* [Slack](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
+* [Slack](https://join.slack.com/t/keploy/shared_invite/zt-2dno1yetd-Ec3el~tTwHYIHgGI0jPe7A)
 * [Mail](hello@keploy.io)
 
 ## Support 🙏 
