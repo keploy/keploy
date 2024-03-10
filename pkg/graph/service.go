@@ -5,6 +5,6 @@ import (
 )
 
 type graphInterface interface {
-	Serve(path string, proxyPort uint32, mongoPassword, testReportPath string, generateTestReport bool, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool, testFilters map[string][]string)
+	Serve(path string, proxyPort uint32, mongoPassword, testReportPath string, generateTestReport bool, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool, testFilters map[string][]string, enableAutoNoise bool)
 	stopGraphqlServer(http *http.Server)
 }

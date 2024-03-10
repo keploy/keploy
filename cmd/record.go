@@ -42,7 +42,7 @@ func readRecordConfig(configPath string) (*models.Record, error) {
 
 var filters = models.TestFilter{}
 
-func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, passThrough *[]models.Filters, configPath string, recordTimer *time.Duration) error {
+func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, passThrough *[]models.Filters, configPath string, recordTimer *time.Duration, autoNoise *bool) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -78,6 +78,7 @@ func (t *Record) GetRecordConfig(path *string, proxyPort *uint32, appCmd *string
 	if *buildDelay == 30*time.Second && confRecord.BuildDelay != 0 {
 		*buildDelay = confRecord.BuildDelay
 	}
+	*autoNoise = *autoNoise || confRecord.AutoNoise
 	passThroughPortProvided := len(*passThroughPorts) == 0
 
 	for _, filter := range confRecord.Stubs.Filters {
@@ -165,6 +166,12 @@ func (r *Record) GetCmd() *cobra.Command {
 				return err
 			}
 
+			autoNoise, err := cmd.Flags().GetBool("autoNoise")
+			if err != nil {
+				r.logger.Error("failed to read the auto noise flag")
+				return err
+			}
+
 			recordTimer, err := cmd.Flags().GetDuration("recordTimer")
 			if err != nil {
 				r.logger.Error("Failed to read the timer value")
@@ -172,7 +179,7 @@ func (r *Record) GetCmd() *cobra.Command {
 
 			passThrough := []models.Filters{}
 
-			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath, &recordTimer)
+			err = r.GetRecordConfig(&path, &proxyPort, &appCmd, &appContainer, &networkName, &delay, &buildDelay, &ports, &passThrough, configPath, &recordTimer, &autoNoise)
 			if err != nil {
 				if err == errFileNotFound {
 					r.logger.Info("Keploy config not found, continuing without configuration")
@@ -299,7 +306,7 @@ func (r *Record) GetCmd() *cobra.Command {
 				}
 			}
 			r.logger.Debug("the ports are", zap.Any("ports", ports))
-			r.recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough, recordTimer)
+			r.recorder.StartCaptureTraffic(path, proxyPort, appCmd, appContainer, networkName, delay, buildDelay, ports, &filters, enableTele, passThrough, recordTimer, autoNoise)
 			return nil
 		},
 	}
@@ -317,6 +324,8 @@ func (r *Record) GetCmd() *cobra.Command {
 	recordCmd.Flags().StringP("networkName", "n", "", "Name of the application's docker network")
 
 	recordCmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+
+	recordCmd.Flags().BoolP("autoNoise", "a", false, "auto noise detection in api responses")
 
 	recordCmd.Flags().DurationP("buildDelay", "", 30*time.Second, "User provided time to wait docker container build")
 

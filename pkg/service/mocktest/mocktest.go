@@ -51,7 +51,7 @@ func (s *mockTester) MockTest(path string, proxyPort, pid uint32, mockName strin
 		return
 	}
 
-	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil); err != nil {
+	if err := loadedHooks.LoadHooks("", "", pid, ctx, nil, false); err != nil {
 		return
 	}
 

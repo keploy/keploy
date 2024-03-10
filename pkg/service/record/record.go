@@ -30,7 +30,7 @@ func NewRecorder(logger *zap.Logger) Recorder {
 	}
 }
 
-func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters, recordTimer time.Duration) {
+func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters, recordTimer time.Duration, autoNoise bool) {
 	teleFS := fs.NewTeleFS(r.Logger)
 	tele := telemetry.NewTelemetry(enableTele, false, teleFS, r.Logger, "", nil)
 	tele.Ping(false)
@@ -40,10 +40,10 @@ func (r *recorder) StartCaptureTraffic(path string, proxyPort uint32, appCmd, ap
 		return
 	}
 	tcDB := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
-	r.CaptureTraffic(path, proxyPort, appCmd, appContainer, appNetwork, dirName, delay, buildDelay, ports, filters, tcDB, tele, passThroughHosts, recordTimer)
+	r.CaptureTraffic(path, proxyPort, appCmd, appContainer, appNetwork, dirName, delay, buildDelay, ports, filters, tcDB, tele, passThroughHosts, recordTimer, autoNoise)
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters, recordTimer time.Duration) {
+func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, dirName string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, ys platform.TestCaseDB, tele *telemetry.Telemetry, passThroughHosts []models.Filters, recordTimer time.Duration, autoNoise bool) {
 
 	var ps *proxy.ProxySet
 	stopper := make(chan os.Signal, 1)
@@ -74,7 +74,7 @@ func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appCont
 		return
 	default:
 		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx, filters); err != nil {
+		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx, filters, autoNoise); err != nil {
 			return
 		}
 	}

@@ -44,6 +44,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		logger.Error(msg, zap.Error(err))
 	}
 	noise := tc.Noise
+	autoNoise := tc.AutoNoise
 
 	noiseFieldsFound := FindNoisyFields(m, func(k string, vals []string) bool {
 		// check if k is date
@@ -61,6 +62,22 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 		noise[v] = []string{}
 	}
 
+	autoNoiseLabels := map[string][]string{}
+
+	for k, v := range autoNoise{
+		for _, j := range v {
+			label := ""
+			if j == "" {
+				label = k
+			} else if j[0] == '.' {
+				label = k+j
+			} else {
+				label = k+"."+j
+			}
+			autoNoiseLabels[label] = []string{}
+		}
+	}
+
 	switch tc.Kind {
 	case models.HTTP:
 		err := doc.Spec.Encode(spec.HttpSpec{
@@ -69,6 +86,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*NetworkTrafficDoc,
 			Created:  tc.Created,
 			Assertions: map[string]interface{}{
 				"noise": noise,
+				"autoNoise": autoNoiseLabels,
 			},
 		})
 		if err != nil {
@@ -265,6 +283,22 @@ func Decode(yamlTestcase *NetworkTrafficDoc, logger *zap.Logger) (*models.TestCa
 				tc.Noise[v.(string)] = []string{}
 			}
 		}
+
+		tc.AutoNoise = map[string][]string{}
+		switch reflect.ValueOf(httpSpec.Assertions["autoNoise"]).Kind() {
+		case reflect.Map:
+			for k, v := range httpSpec.Assertions["autoNoise"].(map[string]interface{}) {
+				tc.AutoNoise[k] = []string{}
+				for _, val := range v.([]interface{}) {
+					tc.AutoNoise[k] = append(tc.AutoNoise[k], val.(string))
+				}
+			}
+		case reflect.Slice:
+			for _, v := range httpSpec.Assertions["autoNoise"].([]interface{}) {
+				tc.AutoNoise[v.(string)] = []string{}
+			}
+		}
+		
 	// unmarshal its mocks from yaml docs to go struct
 	case models.GRPC_EXPORT:
 		grpcSpec := spec.GrpcSpec{}

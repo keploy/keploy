@@ -33,4 +33,5 @@ type Resolver struct {
 	AppPid             uint32
 	ApiTimeout         uint64
 	ServeTest          bool
+	EnableAutoNoise    bool
 }

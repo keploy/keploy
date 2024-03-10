@@ -42,6 +42,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	testCasePath := r.Resolver.Path
 	testReportPath := r.Resolver.TestReportPath
 	delay := r.Resolver.Delay
+	enableAutoNoise := r.Resolver.EnableAutoNoise
 
 	testReportFS := r.Resolver.TestReportFS
 	if tester == nil {
@@ -78,7 +79,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		// send filtered testcases to run the test-set
 		testcaseFilter := utils.ArrayToMap(r.TestFilter[testSet])
 		// run the test set with a delay
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, testcaseFilter, nil, serveTest, initialisedValues)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, testcaseFilter, nil, serveTest, initialisedValues, enableAutoNoise)
 	}()
 
 	testRunID := <-testRunChan
@@ -118,7 +119,7 @@ func (r *queryResolver) TestSets(ctx context.Context) ([]string, error) {
 	case <-stopper:
 		return nil, fmt.Errorf("test stopped during execution")
 	default:
-		if err := r.LoadedHooks.LoadHooks("", "", r.AppPid, context.Background(), nil); err != nil {
+		if err := r.LoadedHooks.LoadHooks("", "", r.AppPid, context.Background(), nil, false); err != nil {
 			return nil, err
 		}
 

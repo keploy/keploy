@@ -2,6 +2,7 @@ package connection
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"go.keploy.io/server/pkg/hooks/structs"
 	"go.keploy.io/server/pkg/models"
 	"go.keploy.io/server/pkg/platform"
+	"go.keploy.io/server/utils"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -38,7 +40,7 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // ProcessActiveTrackers iterates over all connection the trackers and checks if they are complete. If so, it captures the ingress call and
 // deletes the tracker. If the tracker is inactive for a long time, it deletes it.
-func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.TestFilter) {
+func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx context.Context, filters *models.TestFilter, autoNoiseCfg *models.AutoNoiseConfig) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []structs.ConnID
@@ -66,7 +68,7 @@ func (factory *Factory) ProcessActiveTrackers(db platform.TestCaseDB, ctx contex
 			case models.MODE_RECORD:
 				// capture the ingress call for record cmd
 				factory.logger.Debug("capturing ingress call from tracker in record mode")
-				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest, filters)
+				capture(db, parsedHttpReq, parsedHttpRes, factory.logger, ctx, reqTimestampTest, resTimestampTest, filters, autoNoiseCfg)
 			case models.MODE_TEST:
 				factory.logger.Debug("skipping tracker in test mode")
 			default:
@@ -98,7 +100,7 @@ func (factory *Factory) GetOrCreate(connectionID structs.ConnID) *Tracker {
 	return tracker
 }
 
-func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.TestFilter) {
+func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, logger *zap.Logger, ctx context.Context, reqTimeTest time.Time, resTimeTest time.Time, filters *models.TestFilter, autoNoiseCfg *models.AutoNoiseConfig) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		logger.Error("failed to read the http request body", zap.Error(err))
@@ -111,7 +113,8 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		logger.Error("failed to read the http response body", zap.Error(err))
 		return
 	}
-	err = db.WriteTestcase(&models.TestCase{
+
+	testCase := models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHttpHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
@@ -136,11 +139,77 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
-		Noise: map[string][]string{},
+		Noise:     map[string][]string{},
+		AutoNoise: map[string][]string{},
 		// Mocks: mocks,
-	}, ctx, filters)
-	if err != nil {
-		logger.Error("failed to record the ingress requests", zap.Error(err))
-		return
+	}
+
+	// check if the incoming request is simulation or not
+	if testCase.HttpReq.Header["Keploy-Simulation"] != "true" {
+		autoNoise := map[string][]string{}
+
+		// start the simulation if autoNoise is enabled
+		if autoNoiseCfg.AutoNoise {
+			testCase.HttpReq.Header["Keploy-Simulation"] = "true"
+
+			// check if the user application is running docker container using IDE
+			dockerID := (autoNoiseCfg.AppCmd == "" && len(autoNoiseCfg.AppContainer) != 0)
+			ok, _ := utils.IsDockerRelatedCmd(autoNoiseCfg.AppCmd)
+			if ok || dockerID {
+				var err error
+				testCase.HttpReq.URL, err = pkg.ReplaceHostToIP(testCase.HttpReq.URL, autoNoiseCfg.UserIP)
+				if err != nil {
+					logger.Error("failed to replace host to docker container's IP", zap.Error(err))
+				}
+				logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HttpReq.URL))
+			}
+
+			testRes, err := pkg.SimulateHttp(testCase, "", logger, 10)
+			if err != nil && resp == nil {
+				logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("passed", models.HighlightFailingString("false")))
+			} else {
+				// checking the difference in label values in request and response
+				ok, diff := utils.TestHttp(testCase, testRes, models.GlobalNoise{}, true, logger, &sync.Mutex{}, false)
+				if !ok {
+
+					// checking for header and body noise
+					headerNoise := []string{}
+					bodyNoise := []string{}
+					var (
+						bodyExpected interface{}
+						bodyActual   interface{}
+					)
+
+					for _, j := range diff.HeadersResult {
+						if !j.Normal {
+							headerNoise = append(headerNoise, j.Actual.Key)
+						}
+					}
+
+					bodyRes := diff.BodyResult[0]
+
+					if !bodyRes.Normal && bodyRes.Type == models.BodyTypeJSON {
+
+						err1 := json.Unmarshal([]byte(bodyRes.Expected), &bodyExpected)
+						err2 := json.Unmarshal([]byte(bodyRes.Actual), &bodyActual)
+
+						if err1 != nil || err2 != nil {
+							logger.Error("response are not json", zap.Error(err1), zap.Error(err2))
+						}
+
+						bodyNoise = findNoisyLabels(bodyExpected, bodyActual, logger)
+					}
+					autoNoise["header"] = headerNoise
+					autoNoise["body"] = bodyNoise
+				}
+			}
+		}
+
+		testCase.AutoNoise = autoNoise
+		err = db.WriteTestcase(&testCase, ctx, filters)
+		if err != nil {
+			logger.Error("failed to record the ingress requests", zap.Error(err))
+			return
+		}
 	}
 }

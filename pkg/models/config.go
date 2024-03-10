@@ -12,6 +12,7 @@ record:
   networkName: ""
   delay: 5
   buildDelay: 30s
+  autoNoise: false
   tests: 
     filters:
       - path: ""
@@ -41,6 +42,7 @@ test:
   buildDelay: 30s
   apiTimeout: 5
   ignoreOrdering: false
+  enableAutoNoise: false
   stubs:
     filters:
       - path: ""
@@ -66,6 +68,7 @@ type Record struct {
 	BuildDelay    time.Duration `json:"buildDelay" yaml:"buildDelay"`
 	Tests         TestFilter    `json:"tests" yaml:"tests"`
 	Stubs         Stubs         `json:"stubs" yaml:"stubs"`
+	AutoNoise     bool          `json:"autoNoise" yaml:"autoNoise"`
 }
 
 type TestFilter struct {
@@ -104,12 +107,20 @@ type Test struct {
 	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 	GenerateTestReport      bool                `json:"generateTestReport" yaml:"generateTestReport"`
 	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
+	EnableAutoNoise         bool                `json:"enableAutoNoise" yaml:"enableAutoNoise"`
 	Stubs                   Stubs               `json:"stubs" yaml:"stubs"`
 }
 
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global"`
 	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets"`
+}
+
+type AutoNoiseConfig struct {
+	AppCmd       string
+	AppContainer string
+	UserIP       string
+	AutoNoise    bool
 }
 
 type (

@@ -2,7 +2,6 @@ package test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,10 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"net/url"
-
 	"github.com/k0kubun/pp/v3"
-	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/pkg"
 	"go.keploy.io/server/pkg/hooks"
 	"go.keploy.io/server/pkg/models"
@@ -53,6 +49,7 @@ type TestOptions struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	IgnoreOrdering     bool
+	EnableAutoNoise    bool
 	RemoveUnusedMocks  bool
 	PassthroughHosts   []models.Filters
 	GenerateTestReport bool
@@ -143,7 +140,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 		return returnVal, errors.New("Keploy was interupted by stopper")
 	default:
 		// load the ebpf hooks into the kernel
-		if err := returnVal.LoadedHooks.LoadHooks(cfg.AppCmd, cfg.AppContainer, 0, context.Background(), nil); err != nil {
+		if err := returnVal.LoadedHooks.LoadHooks(cfg.AppCmd, cfg.AppContainer, 0, context.Background(), nil, false); err != nil {
 			return returnVal, err
 		}
 	}
@@ -254,7 +251,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues, options.EnableAutoNoise)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -505,7 +502,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 		ok, _ := utils.IsDockerRelatedCmd(cfg.AppCmd)
 		if ok || cfg.DockerID {
 			var err error
-			cfg.Tc.HttpReq.URL, err = replaceHostToIP(cfg.Tc.HttpReq.URL, cfg.UserIP)
+			cfg.Tc.HttpReq.URL, err = pkg.ReplaceHostToIP(cfg.Tc.HttpReq.URL, cfg.UserIP)
 			if err != nil {
 				t.logger.Error("failed to replace host to docker container's IP", zap.Error(err))
 			}
@@ -520,7 +517,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := t.testHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering)
+		testPass, testResult := utils.TestHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, t.logger, &t.mutex, cfg.EnableAutoNoise)
 
 		if !testPass {
 			t.logger.Info("", zap.Any("matched mocks", GetMatchedMocks(cfg.LoadedHooks.GetConsumedMocks())))
@@ -638,7 +635,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup, enableAutoNoise bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:            testSet,
 		Path:               path,
@@ -761,21 +758,22 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appCon
 		}
 
 		cfg := &SimulateRequestConfig{
-			Tc:             tc,
-			LoadedHooks:    initialisedValues.LoadedHooks,
-			AppCmd:         appCmd,
-			UserIP:         userIp,
-			TestSet:        testSet,
-			ApiTimeout:     apiTimeout,
-			Success:        &success,
-			Failure:        &failure,
-			Status:         &status,
-			TestReportFS:   initialisedValues.TestReportFS,
-			TestReport:     initialisedTestSets.TestReport,
-			Path:           path,
-			DockerID:       initialisedTestSets.DockerID,
-			NoiseConfig:    noiseConfig,
-			IgnoreOrdering: initialisedValues.IgnoreOrdering,
+			Tc:              tc,
+			LoadedHooks:     initialisedValues.LoadedHooks,
+			AppCmd:          appCmd,
+			UserIP:          userIp,
+			TestSet:         testSet,
+			ApiTimeout:      apiTimeout,
+			Success:         &success,
+			Failure:         &failure,
+			Status:          &status,
+			TestReportFS:    initialisedValues.TestReportFS,
+			TestReport:      initialisedTestSets.TestReport,
+			Path:            path,
+			DockerID:        initialisedTestSets.DockerID,
+			NoiseConfig:     noiseConfig,
+			IgnoreOrdering:  initialisedValues.IgnoreOrdering,
+			EnableAutoNoise: enableAutoNoise,
 		}
 		t.SimulateRequest(cfg)
 	}
@@ -807,193 +805,4 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appCon
 	}
 	status = t.FetchTestResults(resultsCfg)
 	return status
-}
-
-func (t *tester) testHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool) (bool, *models.Result) {
-
-	bodyType := models.BodyTypePlain
-	if json.Valid([]byte(actualResponse.Body)) {
-		bodyType = models.BodyTypeJSON
-	}
-	pass := true
-	hRes := &[]models.HeaderResult{}
-
-	res := &models.Result{
-		StatusCode: models.IntResult{
-			Normal:   false,
-			Expected: tc.HttpResp.StatusCode,
-			Actual:   actualResponse.StatusCode,
-		},
-		BodyResult: []models.BodyResult{{
-			Normal:   false,
-			Type:     bodyType,
-			Expected: tc.HttpResp.Body,
-			Actual:   actualResponse.Body,
-		}},
-	}
-	noise := tc.Noise
-
-	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"]
-	)
-
-	if bodyNoise == nil {
-		bodyNoise = map[string][]string{}
-	}
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
-
-	for field, regexArr := range noise {
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[x] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = regexArr
-		}
-	}
-
-	// stores the json body after removing the noise
-	cleanExp, cleanAct := tc.HttpResp.Body, actualResponse.Body
-	var jsonComparisonResult jsonComparisonResult
-	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		//validate the stored json
-		validatedJSON, err := ValidateAndMarshalJson(t.logger, &cleanExp, &cleanAct)
-		if err != nil {
-			return false, res
-		}
-		if validatedJSON.isIdentical {
-			jsonComparisonResult, err = JsonDiffWithNoiseControl(t.logger, validatedJSON, bodyNoise, ignoreOrdering)
-			pass = jsonComparisonResult.isExact
-			if err != nil {
-				return false, res
-			}
-		} else {
-			pass = false
-		}
-
-		// debug log for cleanExp and cleanAct
-		t.logger.Debug("cleanExp", zap.Any("", cleanExp))
-		t.logger.Debug("cleanAct", zap.Any("", cleanAct))
-	} else {
-		if !Contains(MapToArray(noise), "body") && tc.HttpResp.Body != actualResponse.Body {
-			pass = false
-		}
-	}
-
-	res.BodyResult[0].Normal = pass
-
-	if !CompareHeaders(pkg.ToHttpHeader(tc.HttpResp.Header), pkg.ToHttpHeader(actualResponse.Header), hRes, headerNoise) {
-
-		pass = false
-	}
-
-	res.HeadersResult = *hRes
-	if tc.HttpResp.StatusCode == actualResponse.StatusCode {
-		res.StatusCode.Normal = true
-	} else {
-
-		pass = false
-	}
-
-	if !pass {
-		logDiffs := NewDiffsPrinter(tc.Name)
-
-		logger := pp.New()
-		logger.WithLineInfo = false
-		logger.SetColorScheme(models.FailingColorScheme)
-		var logs = ""
-
-		logs = logs + logger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-
-		// ------------ DIFFS RELATED CODE -----------
-		if !res.StatusCode.Normal {
-			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
-		}
-
-		var (
-			actualHeader   = map[string][]string{}
-			expectedHeader = map[string][]string{}
-			unmatched      = true
-		)
-
-		for _, j := range res.HeadersResult {
-			if !j.Normal {
-				unmatched = false
-				actualHeader[j.Actual.Key] = j.Actual.Value
-				expectedHeader[j.Expected.Key] = j.Expected.Value
-			}
-		}
-
-		if !unmatched {
-			for i, j := range expectedHeader {
-				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
-			}
-		}
-
-		if !res.BodyResult[0].Normal {
-			if json.Valid([]byte(actualResponse.Body)) {
-				patch, err := jsondiff.Compare(tc.HttpResp.Body, actualResponse.Body)
-				if err != nil {
-					t.logger.Warn("failed to compute json diff", zap.Error(err))
-				}
-				for _, op := range patch {
-					keyStr := op.Path
-					if len(keyStr) > 1 && keyStr[0] == '/' {
-						keyStr = keyStr[1:]
-					}
-					if jsonComparisonResult.matches {
-						logDiffs.hasarrayIndexMismatch = true
-						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
-					}
-					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
-
-				}
-			} else {
-				logDiffs.PushBodyDiff(fmt.Sprint(tc.HttpResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
-			}
-		}
-		t.mutex.Lock()
-		logger.Printf(logs)
-		err := logDiffs.Render()
-		if err != nil {
-			t.logger.Error("failed to render the diffs", zap.Error(err))
-		}
-
-		t.mutex.Unlock()
-
-	} else {
-		logger := pp.New()
-		logger.WithLineInfo = false
-		logger.SetColorScheme(models.PassingColorScheme)
-		var log2 = ""
-		log2 += logger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-		t.mutex.Lock()
-		logger.Printf(log2)
-		t.mutex.Unlock()
-
-	}
-
-	return pass, res
-}
-
-func replaceHostToIP(currentURL string, ipAddress string) (string, error) {
-	// Parse the current URL
-	parsedURL, err := url.Parse(currentURL)
-
-	if err != nil {
-		// Return the original URL if parsing fails
-		return currentURL, err
-	}
-
-	if ipAddress == "" {
-		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
-	}
-
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
-	return parsedURL.String(), nil
 }

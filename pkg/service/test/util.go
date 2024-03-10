@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,18 +20,6 @@ import (
 	"go.keploy.io/server/pkg/proxy"
 	"go.uber.org/zap"
 )
-
-type jsonComparisonResult struct {
-	matches     bool     // Indicates if the JSON strings match according to the criteria
-	isExact     bool     // Indicates if the match is exact, considering ordering and noise
-	differences []string // Lists the keys or indices of values that are not the same
-}
-
-type validatedJSON struct {
-	expected    interface{} // The expected JSON
-	actual      interface{} // The actual JSON
-	isIdentical bool
-}
 
 type InitialiseRunTestSetReturn struct {
 	Tcs           []*models.TestCase
@@ -103,21 +90,22 @@ type RunTestSetConfig struct {
 }
 
 type SimulateRequestConfig struct {
-	Tc             *models.TestCase
-	LoadedHooks    *hooks.Hook
-	AppCmd         string
-	UserIP         string
-	TestSet        string
-	ApiTimeout     uint64
-	Success        *int
-	Failure        *int
-	Status         *models.TestRunStatus
-	TestReportFS   platform.TestReportDB
-	TestReport     *models.TestReport
-	Path           string
-	DockerID       bool
-	NoiseConfig    models.GlobalNoise
-	IgnoreOrdering bool
+	Tc              *models.TestCase
+	LoadedHooks     *hooks.Hook
+	AppCmd          string
+	UserIP          string
+	TestSet         string
+	ApiTimeout      uint64
+	Success         *int
+	Failure         *int
+	Status          *models.TestRunStatus
+	TestReportFS    platform.TestReportDB
+	TestReport      *models.TestReport
+	Path            string
+	DockerID        bool
+	NoiseConfig     models.GlobalNoise
+	IgnoreOrdering  bool
+	EnableAutoNoise bool
 }
 
 type FetchTestResultsConfig struct {
@@ -236,178 +224,6 @@ func LeftJoinNoise(globalNoise models.GlobalNoise, tsNoise models.GlobalNoise) m
 		noise["header"][field] = regexArr
 	}
 	return noise
-}
-
-func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
-	for _, pattern := range regexArray {
-		re := regexp.MustCompile(pattern)
-		if re.MatchString(str) {
-			return true, pattern
-		}
-	}
-	return false, ""
-}
-
-func MapToArray(mp map[string][]string) []string {
-	var result []string
-	for k := range mp {
-		result = append(result, k)
-	}
-	return result
-}
-
-func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
-	if val, ok := mp[s]; ok {
-		return val, ok
-	}
-	ok, val := MatchesAnyRegex(s, MapToArray(mp))
-	if ok {
-		return mp[val], ok
-	}
-	return []string{}, false
-}
-
-func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string][]string) bool {
-	if res == nil {
-		return false
-	}
-	match := true
-	_, isHeaderNoisy := noise["header"]
-	for k, v := range h1 {
-		regexArr, isNoisy := CheckStringExist(k, noise)
-		if isNoisy && len(regexArr) != 0 {
-			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
-		}
-		isNoisy = isNoisy || isHeaderNoisy
-		val, ok := h2[k]
-		if !isNoisy {
-			if !ok {
-				if checkKey(res, k) {
-					*res = append(*res, models.HeaderResult{
-						Normal: false,
-						Expected: models.Header{
-							Key:   k,
-							Value: v,
-						},
-						Actual: models.Header{
-							Key:   k,
-							Value: nil,
-						},
-					})
-				}
-
-				match = false
-				continue
-			}
-			if len(v) != len(val) {
-				if checkKey(res, k) {
-					*res = append(*res, models.HeaderResult{
-						Normal: false,
-						Expected: models.Header{
-							Key:   k,
-							Value: v,
-						},
-						Actual: models.Header{
-							Key:   k,
-							Value: val,
-						},
-					})
-				}
-				match = false
-				continue
-			}
-			for i, e := range v {
-				if val[i] != e {
-					if checkKey(res, k) {
-						*res = append(*res, models.HeaderResult{
-							Normal: false,
-							Expected: models.Header{
-								Key:   k,
-								Value: v,
-							},
-							Actual: models.Header{
-								Key:   k,
-								Value: val,
-							},
-						})
-					}
-					match = false
-					continue
-				}
-			}
-		}
-		if checkKey(res, k) {
-			*res = append(*res, models.HeaderResult{
-				Normal: true,
-				Expected: models.Header{
-					Key:   k,
-					Value: v,
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: val,
-				},
-			})
-		}
-	}
-	for k, v := range h2 {
-		regexArr, isNoisy := CheckStringExist(k, noise)
-		if isNoisy && len(regexArr) != 0 {
-			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
-		}
-		isNoisy = isNoisy || isHeaderNoisy
-		val, ok := h1[k]
-		if isNoisy && checkKey(res, k) {
-			*res = append(*res, models.HeaderResult{
-				Normal: true,
-				Expected: models.Header{
-					Key:   k,
-					Value: val,
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: v,
-				},
-			})
-			continue
-		}
-		if !ok {
-			if checkKey(res, k) {
-				*res = append(*res, models.HeaderResult{
-					Normal: false,
-					Expected: models.Header{
-						Key:   k,
-						Value: nil,
-					},
-					Actual: models.Header{
-						Key:   k,
-						Value: v,
-					},
-				})
-			}
-
-			match = false
-		}
-	}
-	return match
-}
-
-func checkKey(res *[]models.HeaderResult, key string) bool {
-	for _, v := range *res {
-		if key == v.Expected.Key {
-			return false
-		}
-	}
-	return true
-}
-
-func Contains(elems []string, v string) bool {
-	for _, s := range elems {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // Sort the mocks in such a way that the mocks that have request timestamp between the test's request and response timestamp are at the top
