@@ -4,22 +4,23 @@ package v1
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"time"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"io"
-	"net"
-	"time"
 )
 
 func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	pgRequests := [][]byte{reqBuf}
 	errCh := make(chan error, 1)
 	defer close(errCh)
-	go func(errCh chan error, reqBuf []byte, pgRequests [][]byte) {
+	go func(errCh chan error, pgRequests [][]byte) {
 		for {
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
@@ -86,7 +87,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			// Clear the buffer for the next dependency call
 			pgRequests = [][]byte{}
 		}
-	}(errCh, reqBuf, pgRequests)
+	}(errCh, pgRequests)
 
 	select {
 	case <-ctx.Done():

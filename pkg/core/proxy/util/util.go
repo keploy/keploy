@@ -7,12 +7,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"io"
 	"os"
 	"os/exec"
 	"sync/atomic"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
 	"go.keploy.io/server/v2/utils"
 
@@ -108,7 +109,6 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 				err error
 				buf []byte
 			}{n, err, buf}
-			return
 		}()
 
 		// Use a select statement to wait for either the read result or context cancellation
