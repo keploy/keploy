@@ -7,12 +7,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
@@ -209,12 +210,13 @@ func (p *Proxy) start(ctx context.Context) error {
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					errCh <- nil
+					return
 				}
 				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
 				errCh <- nil
+				return
 			}
 			clientConnCh <- conn
-
 		}()
 		select {
 		case <-ctx.Done():
@@ -234,6 +236,16 @@ func (p *Proxy) start(ctx context.Context) error {
 		}
 	}
 }
+
+// TODO:Should I make this global?
+var closeOnce sync.Once
+
+//func closeChannel(ch chan interface{}) {
+//	closeOnce.Do(func() {
+//		//it can be closed multiple time by multiple go routines.
+//		close(ch)
+//	})
+//}
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
@@ -300,7 +312,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
 		}
 		//closing the mock channel after the parser error group is done
-		close(rule.MC)
+		closeOnce.Do(func() {
+			//TODO:it can be closed multiple time by multiple go routines.
+			close(rule.MC)
+		})
 	}()
 
 	//checking for the destination port of "mysql"
@@ -313,7 +328,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 			// Record the outgoing message into a mock
-			err := p.Integrations["mysql"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations["mysql"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -328,7 +343,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations["mysql"].MockOutgoing(ctx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		err := p.Integrations["mysql"].MockOutgoing(parserCtx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			return err
@@ -366,7 +381,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err := util.ReadInitialBuf(ctx, p.logger, srcConn)
+	initialBuf, err := util.ReadInitialBuf(parserCtx, p.logger, srcConn)
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to read the initial buffer")
 		return err
@@ -428,15 +443,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	generic := true
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
-		if parser.MatchType(ctx, initialBuf) {
+		if parser.MatchType(parserCtx, initialBuf) {
 			if rule.Mode == models.MODE_RECORD {
-				err := parser.RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+				err := parser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 				if err != nil {
 					utils.LogError(logger, err, "failed to record the outgoing message")
 					return err
 				}
 			} else {
-				err := parser.MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+				err := parser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 				if err != nil {
 					utils.LogError(logger, err, "failed to mock the outgoing message")
 					return err
@@ -449,13 +464,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations["generic"].RecordOutgoing(ctx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		} else {
-			err := p.Integrations["generic"].MockOutgoing(ctx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			err := p.Integrations["generic"].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				return err

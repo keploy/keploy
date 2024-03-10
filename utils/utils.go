@@ -478,6 +478,7 @@ func InterruptProcessTree(cmd *exec.Cmd, ppid int, sig syscall.Signal) error {
 
 	for _, pid := range children {
 		if cmd.ProcessState == nil {
+			println("killing process: ", pid)
 			err := syscall.Kill(pid, sig)
 			if err != nil {
 				fmt.Printf("failed to send signal to process(%v): %v\n", pid, err)

@@ -144,15 +144,13 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	inodeErrCh := make(chan error, 1)
 	appErrCh := make(chan models.AppError, 1)
-	//send inode to the hook
-	inodeChan := make(chan uint64)
-
-	defer close(inodeErrCh)
-	defer close(appErrCh)
+	inodeChan := make(chan uint64) //send inode to the hook
 
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
+		defer close(inodeErrCh)
 		defer close(inodeChan)
+
 		inode := <-inodeChan
 		err := c.hook.SendInode(ctx, id, inode)
 		if err != nil {
@@ -164,6 +162,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
+		defer close(appErrCh)
 		appErr := a.Run(runAppCtx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr, "error while running the app")
