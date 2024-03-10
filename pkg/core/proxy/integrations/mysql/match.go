@@ -1,12 +1,13 @@
 package mysql
 
 import (
+	"context"
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, int, string, error) {
+func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, int, string, error) {
 	//TODO: any reason to write the similar code twice?
 	allMocks := append([]*models.Mock(nil), configMocks...)
 	allMocks = append(allMocks, tcsMocks...)
@@ -17,7 +18,13 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 	maxMatchCount := 0
 
 	for i, mock := range allMocks {
+		if ctx.Err() != nil {
+			return nil, -1, "", ctx.Err()
+		}
 		for j, mockReq := range mock.Spec.MySQLRequests {
+			if ctx.Err() != nil {
+				return nil, -1, "", ctx.Err()
+			}
 			matchCount := compareMySQLRequests(mysqlRequest, mockReq)
 			if matchCount > maxMatchCount {
 				maxMatchCount = matchCount

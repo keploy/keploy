@@ -28,7 +28,7 @@ func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]
 
 	for !hasCompleteHeaders(*finalReq) {
 		logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
-		reqHeader, err := util.ReadBytes(ctx, clientConn)
+		reqHeader, err := util.ReadBytes(ctx, logger, clientConn)
 		if err != nil {
 			utils.LogError(logger, nil, "failed to read the request message from the client")
 			return err
@@ -100,7 +100,7 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 
 	for !hasCompleteHeaders(resp) {
 		logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
-		respHeader, err := util.ReadBytes(ctx, destConn)
+		respHeader, err := util.ReadBytes(ctx, logger, destConn)
 		if err != nil {
 			if err == io.EOF {
 				logger.Debug("received EOF from the server")
@@ -186,7 +186,7 @@ func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]b
 			utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 			return err
 		}
-		requestChunked, err := util.ReadBytes(ctx, clientConn)
+		requestChunked, err := util.ReadBytes(ctx, logger, clientConn)
 		if err != nil {
 			if err == io.EOF {
 				utils.LogError(logger, nil, "conn closed by the user client")
@@ -232,7 +232,7 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 				return err
 			}
-			requestChunked, err := util.ReadBytes(ctx, clientConn)
+			requestChunked, err := util.ReadBytes(ctx, logger, clientConn)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					break
@@ -272,7 +272,7 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 			utils.LogError(logger, err, "failed to set the read deadline for the destination conn")
 			return err
 		}
-		resp, err := util.ReadBytes(ctx, destConn)
+		resp, err := util.ReadBytes(ctx, logger, destConn)
 		if err != nil {
 			if err == io.EOF {
 				isEOF = true
@@ -318,7 +318,7 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			resp, err := util.ReadBytes(ctx, destConn)
+			resp, err := util.ReadBytes(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the response message from the destination server")

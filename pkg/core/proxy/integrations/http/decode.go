@@ -43,12 +43,14 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					}
 					utils.LogError(logger, err, "failed to write the 100 continue response to the user application")
 					errCh <- err
+					return
 				}
 				//Read the request buffer again
-				newRequest, err := util.ReadBytes(ctx, clientConn)
+				newRequest, err := util.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read the request buffer from the user application")
 					errCh <- err
+					return
 				}
 				//Append the new request buffer to the old request buffer
 				reqBuf = append(reqBuf, newRequest...)
@@ -58,6 +60,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle chunked requests")
 				errCh <- err
+				return
 			}
 
 			logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
@@ -67,12 +70,14 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			if err != nil {
 				utils.LogError(logger, err, "failed to parse the http request message")
 				errCh <- err
+				return
 			}
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
 				utils.LogError(logger, err, "failed to read from request body", zap.Any("metadata", getReqMeta(request)))
 				errCh <- err
+				return
 			}
 
 			//check if reqBuf body is a json
@@ -96,6 +101,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if err != nil {
 					utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
 					errCh <- err
+					return
 				}
 			}
 
@@ -116,11 +122,13 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if err != nil {
 					utils.LogError(logger, err, "failed to compress the response body", zap.Any("metadata", getReqMeta(request)))
 					errCh <- err
+					return
 				}
 				err = gw.Close()
 				if err != nil {
 					utils.LogError(logger, err, "failed to close the gzip writer", zap.Any("metadata", getReqMeta(request)))
 					errCh <- err
+					return
 				}
 				logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
 				respBody = compressedBuffer.String()
@@ -151,13 +159,15 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				}
 				utils.LogError(logger, err, "failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(request)))
 				errCh <- err
+				return
 			}
 
-			reqBuf, err = util.ReadBytes(ctx, clientConn)
+			reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
 			if err != nil {
 				logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				logger.Debug("This was the last response from the server:\n" + string(responseString))
 				errCh <- nil
+				return
 			}
 		}
 	}(errCh, reqBuf, opts)

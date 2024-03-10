@@ -38,7 +38,6 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	// get the error group from the context
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	errCh := make(chan error, 2)
-	//TODO:Where to close this channel
 	defer close(errCh)
 
 	// Route requests from the client to the server.
@@ -52,7 +51,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				return nil
 			}
 			utils.LogError(logger, err, "failed to transfer frame from client to server")
-			if ctx.Err() != nil {
+			if ctx.Err() != nil { //to avoid sending error to the closed channel if the context is cancelled
 				return ctx.Err()
 			}
 			errCh <- err
@@ -67,7 +66,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		err := transferFrame(ctx, clientConn, destConn, streamInfoCollection, !reqFromClient, clientSideDecoder, mocks)
 		if err != nil {
 			utils.LogError(logger, err, "failed to transfer frame from server to client")
-			if ctx.Err() != nil {
+			if ctx.Err() != nil { //to avoid sending error to the closed channel if the context is cancelled
 				return ctx.Err()
 			}
 			errCh <- err

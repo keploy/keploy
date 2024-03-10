@@ -58,7 +58,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	//TODO: where to close the channels
 	defer close(clientBuffChan)
 	defer close(destBuffChan)
-	defer close(errChan)
+	//TODO: where to close the error channel since it is used in both the go routines
+	//close(errChan)
 
 	//get the error group from the context
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)

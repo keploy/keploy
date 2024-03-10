@@ -31,7 +31,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 			// To read the stream of request packets from the client
 			for {
-				buffer, err := pUtil.ReadBytes(ctx, clientConn)
+				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 						if err == io.EOF {

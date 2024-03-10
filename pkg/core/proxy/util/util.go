@@ -33,6 +33,7 @@ func GetNextID() int64 {
 
 // ReadBuffConn is used to read the buffer from the connection
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
+	//TODO: where to close the bufferChannel and errChannel
 	for {
 		select {
 		case <-ctx.Done():
@@ -42,10 +43,13 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			if conn == nil {
 				logger.Debug("the conn is nil")
 			}
-			buffer, err := ReadBytes(ctx, conn)
+			buffer, err := ReadBytes(ctx, logger, conn)
 			if err != nil {
 				utils.LogError(logger, err, "failed to read the packet message in proxy")
 				errChannel <- err
+				return
+			}
+			if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 				return
 			}
 			bufferChannel <- buffer
@@ -56,7 +60,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
 	readErr := errors.New("failed to read the initial request buffer")
 
-	initialBuf, err := ReadBytes(ctx, conn)
+	initialBuf, err := ReadBytes(ctx, logger, conn)
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read the request message in proxy")
 		return nil, readErr
@@ -77,7 +81,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 // ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
-func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
+func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
 	var buffer []byte
 	const maxEmptyReads = 5
 	emptyReads := 0
@@ -92,6 +96,7 @@ func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
 	for {
 		// Start a goroutine to perform the read operation
 		go func() {
+			defer utils.Recover(logger)
 			defer close(readResult)
 			buf := make([]byte, 1024)
 			n, err := reader.Read(buf)
@@ -136,7 +141,7 @@ func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
 
 // ReadRequiredBytes ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
-func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]byte, error) {
+func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
 	var buffer []byte
 	const maxEmptyReads = 5
 	emptyReads := 0
@@ -151,6 +156,7 @@ func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]b
 	for numBytes > 0 {
 		// Start a goroutine to perform the read operation
 		go func() {
+			defer utils.Recover(logger)
 			defer close(readResult)
 			buf := make([]byte, numBytes)
 			n, err := reader.Read(buf)
@@ -218,14 +224,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	// channels for writing messages from proxy to destination or client
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error)
-	defer close(destBufferChannel)
+	//TODO:Should I even close this error channel here?
 	defer close(errChannel)
-
-	//// get the error group from the context (derived from the proxy context)
-	//g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	//if !ok {
-	//	return nil, errors.New("failed to get the error group from the context")
-	//}
 
 	go func() {
 		defer utils.Recover(logger)

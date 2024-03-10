@@ -23,9 +23,10 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	requestBuffers := [][]byte{reqBuf}
 
 	errCh := make(chan error, 1)
-	defer close(errCh)
 
 	go func(errCh chan error, reqBuf []byte, startedDecoding time.Time, requestBuffers [][]byte) {
+		defer utils.Recover(logger)
+		defer close(errCh)
 		var readRequestDelay time.Duration
 		for {
 			configMocks, err := mockDb.GetUnFilteredMocks()
@@ -39,7 +40,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			)
 			if string(reqBuf) == "read form client conn" {
 				started := time.Now()
-				reqBuf, err = util.ReadBytes(ctx, clientConn)
+				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if err == io.EOF {
 						logger.Debug("recieved request buffer is empty in test mode for mongo calls")
@@ -74,7 +75,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				for {
 					started := time.Now()
 					logger.Debug("into the for loop for request stream")
-					requestBuffer1, err := util.ReadBytes(ctx, clientConn)
+					requestBuffer1, err := util.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
 							logger.Debug("recieved request buffer is empty for streaming mongo request call")
@@ -198,6 +199,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						logger.Debug(fmt.Sprintf("the bufffer response is: %v", string(heathCheckReplyBuffer)))
 						_, err = clientConn.Write(heathCheckReplyBuffer)
 						if err != nil {
+							if ctx.Err() != nil {
+								return
+							}
 							utils.LogError(logger, err, "failed to write the health check reply to mongo client")
 							errCh <- err
 							return
@@ -224,6 +228,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 								_, err := clientConn.Write(message.Encode(responseTo, requestID))
 								logger.Debug("the response lifecycle ended.")
 								if err != nil {
+									if ctx.Err() != nil {
+										return
+									}
 									utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
 									errCh <- err
 									return
@@ -234,6 +241,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						} else {
 							_, err := clientConn.Write(message.Encode(responseTo, wiremessage.NextRequestID()))
 							if err != nil {
+								if ctx.Err() != nil {
+									return
+								}
 								utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
 								errCh <- err
 								return
@@ -275,6 +285,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					requestID := wiremessage.NextRequestID()
 					_, err = clientConn.Write(message.Encode(responseTo, requestID))
 					if err != nil {
+						if ctx.Err() != nil {
+							return
+						}
 						utils.LogError(logger, err, "failed to write the health check opmsg to mongo client", zap.Any("for request with id", responseTo))
 						errCh <- err
 						return

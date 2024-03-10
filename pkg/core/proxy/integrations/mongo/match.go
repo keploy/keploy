@@ -28,8 +28,14 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
 			for tcsIndx, tcsMock := range tcsMocks {
+				if ctx.Err() != nil {
+					return false, nil, ctx.Err()
+				}
 				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range tcsMock.Spec.MongoRequests {
+						if ctx.Err() != nil {
+							return false, nil, ctx.Err()
+						}
 						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
 							logger.Debug("the recieved request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
 							continue

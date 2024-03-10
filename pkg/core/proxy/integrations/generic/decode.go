@@ -17,28 +17,25 @@ import (
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
-	//errCh := make(chan error, 1)
-	//defer close(errCh)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	errCh := make(chan error, 1)
+	go func(errCh chan error, genericRequests [][]byte) {
+		defer utils.Recover(logger)
+		defer close(errCh)
+		for {
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
 			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 			if err != nil {
 				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
-				return err
+				return
 			}
 
 			// To read the stream of request packets from the client
 			for {
-				buffer, err := pUtil.ReadBytes(ctx, clientConn)
+				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
 					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
-					return err
+					return
 				}
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
 					logger.Debug("the timeout for the client read in generic or EOF")
@@ -63,7 +60,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				err := clientConn.SetReadDeadline(time.Time{})
 				if err != nil {
 					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
-					return err
+					return
 				}
 
 				logger.Debug("the genericRequests before pass through are", zap.Any("length", len(genericRequests)))
@@ -74,7 +71,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to passthrough the generic request")
-					return err
+					return
 				}
 
 				genericRequests = [][]byte{}
@@ -91,18 +88,16 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					encoded, err = util.DecodeBase64(genericResponse.Message[0].Data)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode the base64 response")
-						return err
+						return
 					}
 				}
 				_, err := clientConn.Write(encoded)
 				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
 					utils.LogError(logger, err, "failed to write the response message to the client application")
-					return err
-				}
-
-				// if ctx is done, return the error
-				if ctx.Err() != nil {
-					return ctx.Err()
+					return
 				}
 			}
 
@@ -110,5 +105,12 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			genericRequests = [][]byte{}
 			logger.Debug("the genericRequests after the iteration", zap.Any("length", len(genericRequests)))
 		}
+	}(errCh, genericRequests)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
 	}
 }
