@@ -3,6 +3,7 @@ package hooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -99,7 +100,11 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		return err
 	}
 
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
+	
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()

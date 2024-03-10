@@ -34,15 +34,19 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		return err
 	}
 
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	logger.Debug("This is the initial request: " + string(reqBuf))
 	var finalReq []byte
 	errCh := make(chan error, 1)
-	defer close(errCh)
 
 	finalReq = append(finalReq, reqBuf...)
 
 	//for keeping conn alive
 	go func(errCh chan error, finalReq []byte) {
+		defer close(errCh)
 		for {
 			//check if expect : 100-continue header is present
 			lines := strings.Split(string(finalReq), "\n")
@@ -64,6 +68,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				// write the response message to the client
 				_, err = clientConn.Write(resp)
 				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
 					utils.LogError(logger, err, "failed to write response message to the user client")
 					errCh <- err
 				}
@@ -83,6 +90,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				// write the request message to the actual destination server
 				_, err = destConn.Write(reqBuf)
 				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
 					utils.LogError(logger, err, "failed to write request message to the destination server")
 					errCh <- err
 				}
@@ -112,6 +122,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 						// write the response message to the user client
 						_, err = clientConn.Write(resp)
 						if err != nil {
+							if ctx.Err() != nil {
+								return
+							}
 							utils.LogError(logger, err, "failed to write response message to the user client")
 							errCh <- err
 						}
@@ -141,6 +154,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			// write the response message to the user client
 			_, err = clientConn.Write(resp)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				utils.LogError(logger, err, "failed to write response message to the user client")
 				errCh <- err
 			}
@@ -201,6 +217,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			// write the request message to the actual destination server
 			_, err = destConn.Write(finalReq)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				errCh <- err
 			}

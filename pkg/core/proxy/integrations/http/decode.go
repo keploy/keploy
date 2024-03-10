@@ -29,14 +29,18 @@ type matchParams struct {
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
-	defer close(errCh)
+
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
+		defer close(errCh)
 		for {
 			//Check if the expected header is present
 			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
 				//Send the 100 continue response
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
 					utils.LogError(logger, err, "failed to write the 100 continue response to the user application")
 					errCh <- err
 				}
@@ -87,13 +91,8 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if !isPassThrough(logger, request, dstCfg.Port, opts) {
 					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
-				// making destConn
-				destConn, err := net.Dial("tcp", dstCfg.Addr)
-				if err != nil {
-					utils.LogError(logger, err, "failed to dial the destination server")
-					errCh <- err
-				}
-				_, err = util.PassThrough(ctx, logger, clientConn, destConn, [][]byte{reqBuf})
+
+				_, err = util.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{reqBuf})
 				if err != nil {
 					utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
 					errCh <- err
@@ -147,6 +146,9 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 			_, err = clientConn.Write([]byte(responseString))
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				utils.LogError(logger, err, "failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(request)))
 				errCh <- err
 			}
@@ -159,6 +161,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			}
 		}
 	}(errCh, reqBuf, opts)
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

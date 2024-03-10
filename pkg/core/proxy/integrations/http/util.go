@@ -37,6 +37,9 @@ func handleChunkedRequests(ctx context.Context, logger *zap.Logger, finalReq *[]
 		if destConn != nil {
 			_, err = destConn.Write(reqHeader)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, nil, "failed to write request message to the destination server")
 				return err
 			}
@@ -103,10 +106,12 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 				logger.Debug("received EOF from the server")
 				// if there is any buffer left before EOF, we must send it to the client and save this as mock
 				if len(respHeader) != 0 {
-
 					// write the response message to the user client
 					_, err = clientConn.Write(resp)
 					if err != nil {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
 						utils.LogError(logger, nil, "failed to write response message to the user client")
 						return err
 					}
@@ -120,6 +125,9 @@ func handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *
 		// write the response message to the user client
 		_, err = clientConn.Write(respHeader)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			utils.LogError(logger, nil, "failed to write response message to the user client")
 			return err
 		}
@@ -198,6 +206,9 @@ func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]b
 		if destConn != nil {
 			_, err = destConn.Write(requestChunked)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, nil, "failed to write request message to the destination server")
 				return err
 			}
@@ -235,6 +246,9 @@ func chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq *[]byte, c
 			if destConn != nil {
 				_, err = destConn.Write(requestChunked)
 				if err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
 					utils.LogError(logger, nil, "failed to write request message to the destination server")
 					return err
 				}
@@ -282,6 +296,9 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 		// write the response message to the user client
 		_, err = clientConn.Write(resp)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			utils.LogError(logger, nil, "failed to write response message to the user client")
 			return err
 		}
@@ -319,6 +336,9 @@ func chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte,
 			// write the response message to the user client
 			_, err = clientConn.Write(resp)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, nil, "failed to write response message to the user client")
 				return err
 			}

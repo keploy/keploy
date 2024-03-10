@@ -61,14 +61,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			}
 
 			if !matched {
-				// making destConn
-				destConn, err := net.Dial("tcp", dstCfg.Addr)
-				if err != nil {
-					utils.LogError(logger, err, "failed to dial the destination server")
-					errCh <- err
-				}
-
-				_, err = pUtil.PassThrough(ctx, logger, clientConn, destConn, pgRequests)
+				_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, pgRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))
 					errCh <- err

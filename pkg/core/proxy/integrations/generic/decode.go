@@ -17,6 +17,9 @@ import (
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
+	//errCh := make(chan error, 1)
+	//defer close(errCh)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -68,14 +71,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					logger.Debug("the genericRequests are:", zap.Any("h", string(genReq)))
 				}
 
-				// making destConn
-				destConn, err := net.Dial("tcp", dstCfg.Addr)
-				if err != nil {
-					utils.LogError(logger, err, "failed to dial the destination server")
-					return err
-				}
-
-				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, destConn, genericRequests)
+				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to passthrough the generic request")
 					return err

@@ -32,7 +32,10 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		return nil, errors.New("failed to start socket listeners")
 	}
 	c := NewFactory(time.Minute, l)
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return nil, errors.New("failed to get the error group from the context")
+	}
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {
@@ -79,7 +82,10 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		return err
 	}
 
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {
@@ -127,7 +133,10 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		return err
 	}
 
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {
@@ -186,7 +195,10 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		return err
 	}
 
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {

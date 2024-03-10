@@ -7,8 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/models"
-	"golang.org/x/sync/errgroup"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"io"
 	"os"
 	"os/exec"
@@ -89,18 +88,22 @@ func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
 		err error
 		buf []byte
 	})
-	defer close(readResult)
 
 	for {
 		// Start a goroutine to perform the read operation
 		go func() {
+			defer close(readResult)
 			buf := make([]byte, 1024)
 			n, err := reader.Read(buf)
+			if ctx.Err() != nil {
+				return
+			}
 			readResult <- struct {
 				n   int
 				err error
 				buf []byte
 			}{n, err, buf}
+			return
 		}()
 
 		// Use a select statement to wait for either the read result or context cancellation
@@ -124,7 +127,6 @@ func ReadBytes(ctx context.Context, reader io.Reader) ([]byte, error) {
 				}
 				return buffer, result.err
 			}
-
 			if result.n < len(result.buf) {
 				return buffer, nil
 			}
@@ -145,13 +147,16 @@ func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]b
 		err error
 		buf []byte
 	})
-	defer close(readResult)
 
 	for numBytes > 0 {
 		// Start a goroutine to perform the read operation
 		go func() {
+			defer close(readResult)
 			buf := make([]byte, numBytes)
 			n, err := reader.Read(buf)
+			if ctx.Err() != nil {
+				return
+			}
 			readResult <- struct {
 				n   int
 				err error
@@ -193,18 +198,13 @@ func ReadRequiredBytes(ctx context.Context, reader io.Reader, numBytes int) ([]b
 
 // PassThrough function is used to pass the network traffic to the destination connection.
 // It also closes the destination connection if the function returns an error.
-func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, requestBuffer [][]byte) ([]byte, error) {
-
-	if destConn == nil {
-		return nil, errors.New("failed to pass network traffic to the destination conn")
+func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
+	// making destConn
+	destConn, err := net.Dial("tcp", dstCfg.Addr)
+	if err != nil {
+		utils.LogError(logger, err, "failed to dial the destination server")
+		return nil, err
 	}
-
-	defer func(destConn net.Conn) {
-		err := destConn.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the destination connection")
-		}
-	}(destConn)
 
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	for _, v := range requestBuffer {
@@ -221,20 +221,34 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 	defer close(destBufferChannel)
 	defer close(errChannel)
 
-	// get the error group from the context (derived from the proxy context)
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	//// get the error group from the context (derived from the proxy context)
+	//g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	//if !ok {
+	//	return nil, errors.New("failed to get the error group from the context")
+	//}
 
-	g.Go(func() error {
+	go func() {
 		defer utils.Recover(logger)
+		defer close(destBufferChannel)
+		defer close(errChannel)
+		defer func(destConn net.Conn) {
+			err := destConn.Close()
+			if err != nil {
+				utils.LogError(logger, err, "failed to close the destination connection")
+			}
+		}(destConn)
+
 		ReadBuffConn(ctx, logger, destConn, destBufferChannel, errChannel)
-		return nil
-	})
+	}()
 
 	select {
 	case buffer := <-destBufferChannel:
 		// Write the response message to the client
 		_, err := clientConn.Write(buffer)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			utils.LogError(logger, err, "failed to write response to the client")
 			return nil, err
 		}

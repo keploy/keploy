@@ -133,6 +133,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
+// TODO: passThrough the dns queries rather than resolving them.
 func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 	// Remove the last dot from the domain name if it exists
 	domain = strings.TrimSuffix(domain, ".")

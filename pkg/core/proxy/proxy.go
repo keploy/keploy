@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"golang.org/x/sync/errgroup"
 	"io"
@@ -84,14 +85,16 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		return err
 	}
 
-	// set up the CA for tls connections
-	err = SetupCA(ctx, p.logger)
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to setup CA")
-		return err
+	//// set up the CA for tls connections
+	//err = SetupCA(ctx, p.logger)
+	//if err != nil {
+	//	utils.LogError(p.logger, err, "failed to setup CA")
+	//	return err
+	//}
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
 	}
-
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 
 	// start the proxy server
 	g.Go(func() error {
@@ -237,15 +240,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
-	defer func(start time.Time, srcConn net.Conn) {
-		err := srcConn.Close()
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to close the source connection")
-			return
-		}
+	defer func(start time.Time) {
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
-	}(start, srcConn)
+	}(start)
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
@@ -291,19 +289,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	defer func() {
-		err := parserErrGrp.Wait()
+		err := srcConn.Close()
 		if err != nil {
+			utils.LogError(p.logger, err, "failed to close the source connection")
+			return
 		}
-	}()
 
-	// To close the mock channel if the context is done
-	//TODO: How can i close this if error occurs before this.
-	parserErrGrp.Go(func() error {
-		utils.Recover(p.logger)
-		<-parserCtx.Done()
+		err = parserErrGrp.Wait()
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
+		}
+		//closing the mock channel after the parser error group is done
 		close(rule.MC)
-		return nil
-	})
+	}()
 
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {

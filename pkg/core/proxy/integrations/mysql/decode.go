@@ -157,14 +157,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				if matchedIndex == -1 {
 					logger.Debug("No matching mock found")
 
-					// making destConn
-					destConn, err := net.Dial("tcp", dstCfg.Addr)
-					if err != nil {
-						utils.LogError(logger, err, "Failed to dial the destination server")
-						return err
-					}
-
-					responseBuffer, err := util.PassThrough(ctx, logger, clientConn, destConn, requestBuffers)
+					responseBuffer, err := util.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
 					if err != nil {
 						utils.LogError(logger, err, "Failed to passthrough the mysql request to the actual database server")
 						return err

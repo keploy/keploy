@@ -3,6 +3,7 @@ package generic
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"golang.org/x/sync/errgroup"
 	"net"
 	"strconv"
@@ -54,12 +55,17 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
 	errChan := make(chan error)
+	//TODO: where to close the channels
 	defer close(clientBuffChan)
 	defer close(destBuffChan)
 	defer close(errChan)
 
 	//get the error group from the context
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
+
 	// read requests from client
 	g.Go(func() error {
 		defer utils.Recover(logger)

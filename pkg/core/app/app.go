@@ -345,9 +345,14 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		Filters: eventFilter,
 	})
 
-	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		errCh <- errors.New("failed to get the error group from the context")
+		return nil
+	}
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
+		defer close(errCh)
 		for {
 			select {
 			case <-timer.C:
@@ -399,6 +404,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
+		defer close(errCh)
 		err := a.run(ctx)
 		if err.Err != nil {
 			utils.LogError(a.logger, err.Err, "Application stopped with the error")
