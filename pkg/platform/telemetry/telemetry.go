@@ -52,8 +52,12 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 	}()
 }
 
-func (tel *Telemetry) Testrun(ctx context.Context, success int, failure int) {
-	go tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
+func (tel *Telemetry) TestSetRun(ctx context.Context, success int, failure int, testSet string, runStatus string) {
+	go tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure, "Test-Set": testSet, "Run-Status": runStatus})
+}
+
+func (tel *Telemetry) TestRun(ctx context.Context, success int, failure int, testSets int, runStatus string) {
+	go tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure, "Test-Sets": testSets, "Run-Status": runStatus})
 }
 
 // MockTestRun is Telemetry event for the Mocking feature test run
