@@ -31,19 +31,22 @@ type HttpParser struct {
 }
 
 // ProcessOutgoing implements proxy.DepInterface.
-func (http *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
+func (h *HttpParser) ProcessOutgoing(request []byte, clientConn, destConn net.Conn, ctx context.Context) {
+	h.logger.Debug("Processing outgoing http call for mocking")
 	switch models.GetMode() {
 	case models.MODE_RECORD:
-		err := encodeOutgoingHttp(request, clientConn, destConn, http.logger, http.hooks, ctx)
+		h.logger.Debug("Recording the outgoing http call")
+		err := encodeOutgoingHttp(request, clientConn, destConn, h.logger, h.hooks, ctx)
 		if err != nil {
-			http.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
+			h.logger.Error("failed to encode the http message into the yaml", zap.Error(err))
 			return
 		}
 
 	case models.MODE_TEST:
-		decodeOutgoingHttp(request, clientConn, destConn, http.hooks, http.logger)
+		h.logger.Debug("Mocking the outgoing http call in test mode")
+		decodeOutgoingHttp(request, clientConn, destConn, h.hooks, h.logger)
 	default:
-		http.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
+		h.logger.Info("Invalid mode detected while intercepting outgoing http call", zap.Any("mode", models.GetMode()))
 	}
 
 }
@@ -58,7 +61,7 @@ func NewHttpParser(logger *zap.Logger, h *hooks.Hook) *HttpParser {
 // IsOutgoingHTTP function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
 func (h *HttpParser) OutgoingType(buffer []byte) bool {
-	return bytes.HasPrefix(buffer[:], []byte("HTTP/")) ||
+	isHttp := bytes.HasPrefix(buffer[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buffer[:], []byte("GET ")) ||
 		bytes.HasPrefix(buffer[:], []byte("POST ")) ||
 		bytes.HasPrefix(buffer[:], []byte("PUT ")) ||
@@ -66,6 +69,8 @@ func (h *HttpParser) OutgoingType(buffer []byte) bool {
 		bytes.HasPrefix(buffer[:], []byte("DELETE ")) ||
 		bytes.HasPrefix(buffer[:], []byte("OPTIONS ")) ||
 		bytes.HasPrefix(buffer[:], []byte("HEAD "))
+	h.logger.Debug("checking if the outgoing network call is HTTP", zap.Any("is Http Protocol", isHttp))
+	return isHttp
 }
 
 func isJSON(body []byte) bool {
@@ -431,29 +436,37 @@ func checkIfGzipped(check io.ReadCloser) (bool, *bufio.Reader) {
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger) {
+	logger.Debug("into the decodeOutgoingHttp function to mock the external Http call", zap.Any("requestBuffer", string(requestBuffer)))
+
 	//Matching algorithmm
 	//Get the mocks
 	for {
+		logger.Debug("started the keep-alive loop for the http mocking")
 		remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 		sourcePort := remoteAddr.Port
 		//Check if the expected header is present
 		if bytes.Contains(requestBuffer, []byte("Expect: 100-continue")) {
+			logger.Debug("The expect header is present in the request buffer and writing the 100 continue response to the client")
 			//Send the 100 continue response
 			_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 			if err != nil {
 				logger.Error("failed to write the 100 continue response to the user application", zap.Error(err))
 				return
 			}
+
+			logger.Debug("The 100 continue response has been sent to the user application")
 			//Read the request buffer again
 			newRequest, err := util.ReadBytes(clientConn)
 			if err != nil {
 				logger.Error("failed to read the request buffer from the user application", zap.Error(err))
 				return
 			}
+
+			logger.Debug("This is the new request buffer after the 100 continue response:\n" + string(newRequest))
 			//Append the new request buffer to the old request buffer
 			requestBuffer = append(requestBuffer, newRequest...)
 		}
-
+		logger.Debug("handling the chunked requests to read the complete request")
 		err := handleChunkedRequests(&requestBuffer, clientConn, destConn, logger)
 		if err != nil {
 			logger.Error("failed to handle chunk request", zap.Error(err))
@@ -469,6 +482,7 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 			return
 		}
 
+		logger.Debug("parsed the http request")
 		reqBody, err := io.ReadAll(req.Body)
 		if err != nil {
 			logger.Error("failed to read from request body", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
@@ -486,10 +500,10 @@ func decodeOutgoingHttp(requestBuffer []byte, clientConn, destConn net.Conn, h *
 		isReqBodyJSON := isJSON(reqBody)
 
 		isMatched, stub, err := match(req, reqBody, reqURL, isReqBodyJSON, h, logger, clientConn, destConn, requestBuffer, h.Recover)
-
 		if err != nil {
 			logger.Error("error while matching http mocks", zap.Any("metadata", getReqMeta(req)), zap.Error(err))
 		}
+		logger.Debug("after matchin the http request", zap.Any("isMatched", isMatched), zap.Any("stub", stub), zap.Error(err))
 		if !isMatched {
 			passthroughHost := false
 			for _, filters := range h.GetPassThroughHosts().Filters {
