@@ -125,35 +125,38 @@ func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byt
 	data, err := io.ReadAll(cr)
 	if err != nil {
 		if err == ctx.Err() {
-			return nil, nil // Ignore context cancellation error
+			return nil, err // Ignore context cancellation error
 		}
 		return nil, fmt.Errorf("failed to read the file: %v", err)
 	}
 	return data, nil
 }
 
-func CreateYamlFile(_ context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
+func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
 		return false, err
 	}
 	if _, err := os.Stat(yamlPath); err != nil {
-		err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
-		if err != nil {
-			utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
-			return false, err
+		if ctx.Err() != nil {
+			err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
+			if err != nil {
+				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
+			if err != nil {
+				utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+			err = file.Close()
+			if err != nil {
+				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+			return true, nil
 		}
-		file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
-		if err != nil {
-			utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
-			return false, err
-		}
-		err = file.Close()
-		if err != nil {
-			utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
-			return false, err
-		}
-		return true, nil
+		return false, err
 	}
 	return false, nil
 }

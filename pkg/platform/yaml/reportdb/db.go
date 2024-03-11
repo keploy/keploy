@@ -106,7 +106,6 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	data = append(data, d...)
 
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
-
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the mocks to config yaml", zap.Any("session", filepath.Base(reportPath)))
 		return err
