@@ -451,7 +451,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 
-		return utils.InterruptProcessTree(cmd, cmd.Process.Pid, syscall.SIGTERM)
+		return utils.InterruptProcessTree(cmd, a.logger, cmd.Process.Pid, syscall.SIGTERM)
 	}
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = 3 * time.Second

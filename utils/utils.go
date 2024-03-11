@@ -465,7 +465,7 @@ func FetchHomeDirectory(isNewConfigPath bool) string {
 }
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
-func InterruptProcessTree(cmd *exec.Cmd, ppid int, sig syscall.Signal) error {
+func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
@@ -480,7 +480,7 @@ func InterruptProcessTree(cmd *exec.Cmd, ppid int, sig syscall.Signal) error {
 		if cmd.ProcessState == nil {
 			err := syscall.Kill(pid, sig)
 			if err != nil {
-				fmt.Printf("failed to send signal to process(%v): %v\n", pid, err)
+				logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
 			}
 		}
 	}
