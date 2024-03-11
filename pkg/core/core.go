@@ -135,22 +135,24 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
 
+	inodeErrCh := make(chan error, 1)
+	appErrCh := make(chan models.AppError, 1)
+	inodeChan := make(chan uint64) //send inode to the hook
+
 	defer func() {
 		err := runAppErrGrp.Wait()
+		defer close(inodeErrCh)
+		defer close(inodeChan)
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to stop the app")
 		}
 	}()
 
-	inodeErrCh := make(chan error, 1)
-	appErrCh := make(chan models.AppError, 1)
-	inodeChan := make(chan uint64) //send inode to the hook
-
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
-		defer close(inodeErrCh)
-		defer close(inodeChan)
-
+		if a.Kind(ctx) == utils.Native {
+			return nil
+		}
 		inode := <-inodeChan
 		err := c.hook.SendInode(ctx, id, inode)
 		if err != nil {

@@ -54,7 +54,7 @@ func (r *replayer) Start(ctx context.Context) error {
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
-	var stopReason string
+	var stopReason = "replay completed successfully"
 	defer func() {
 		select {
 		case <-ctx.Done():
@@ -193,7 +193,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}()
 
 	var mockErrChan <-chan error
-	var appErrChan = make(chan models.AppError)
+	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
 	var success int
 	var failure int

@@ -219,35 +219,14 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 							errCh <- err
 							return
 						}
-						if hasSecondSetBit(respMessage.FlagBits) {
-							// the first response wiremessage have
-							for {
-								time.Sleep(time.Duration(mongoResponse.ReadDelay))
-								// generate requestID for the mongo wiremessage
-								requestID := wiremessage.NextRequestID()
-								_, err := clientConn.Write(message.Encode(responseTo, requestID))
-								logger.Debug("the response lifecycle ended.")
-								if err != nil {
-									if ctx.Err() != nil {
-										return
-									}
-									utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
-									errCh <- err
-									return
-								}
-								// the 'responseTo' field of response wiremessage is set to requestId of currently sent wiremessage
-								responseTo = requestID
-							}
-						} else {
-							_, err := clientConn.Write(message.Encode(responseTo, wiremessage.NextRequestID()))
-							if err != nil {
-								if ctx.Err() != nil {
-									return
-								}
-								utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
-								errCh <- err
+						_, err = clientConn.Write(message.Encode(responseTo, wiremessage.NextRequestID()))
+						if err != nil {
+							if ctx.Err() != nil {
 								return
 							}
+							utils.LogError(logger, err, "failed to write the health check opmsg to mongo client")
+							errCh <- err
+							return
 						}
 					}
 				}
