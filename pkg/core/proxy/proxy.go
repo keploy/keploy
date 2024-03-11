@@ -201,6 +201,10 @@ func (p *Proxy) start(ctx context.Context) error {
 		if err != nil {
 			//utils.LogError(p.logger, err, "failed to handle the client connection")
 		}
+		//closing all the mock channels
+		for _, mc := range p.sessions.GetAllMC() {
+			close(mc)
+		}
 	}()
 
 	for {
@@ -238,16 +242,6 @@ func (p *Proxy) start(ctx context.Context) error {
 	}
 }
 
-// TODO:Should I make this global?
-var closeOnce sync.Once
-
-//func closeChannel(ch chan interface{}) {
-//	closeOnce.Do(func() {
-//		//it can be closed multiple time by multiple go routines.
-//		close(ch)
-//	})
-//}
-
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
@@ -280,7 +274,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	//TODO: how to close the mock channel here i mean before getting it if there is any error.
 	//get the session rule
 	rule, ok := p.sessions.Get(destInfo.AppID)
 	if !ok {
@@ -312,11 +305,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
 		}
-		//closing the mock channel after the parser error group is done
-		closeOnce.Do(func() {
-			//TODO:it can be closed multiple time by multiple go routines.
-			close(rule.MC)
-		})
 	}()
 
 	//checking for the destination port of "mysql"
@@ -517,7 +505,6 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 		ID:              id,
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
-		DepsErrChan:     errChan,
 		OutgoingOptions: opts,
 	})
 
@@ -536,7 +523,6 @@ func (p *Proxy) Mock(_ context.Context, id uint64, errChan chan error, opts mode
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_TEST,
-		DepsErrChan:     errChan,
 		OutgoingOptions: opts,
 	})
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))

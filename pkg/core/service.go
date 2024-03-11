@@ -90,11 +90,28 @@ func (s *Sessions) Set(id uint64, session *Session) {
 	s.sessions.Store(id, session)
 }
 
+func (s *Sessions) getAll() map[uint64]*Session {
+	sessions := map[uint64]*Session{}
+	s.sessions.Range(func(k, v interface{}) bool {
+		sessions[k.(uint64)] = v.(*Session)
+		return true
+	})
+	return sessions
+}
+
+func (s *Sessions) GetAllMC() []chan<- *models.Mock {
+	sessions := s.getAll()
+	var mc []chan<- *models.Mock
+	for _, session := range sessions {
+		mc = append(mc, session.MC)
+	}
+	return mc
+}
+
 type Session struct {
-	ID          uint64
-	Mode        models.Mode
-	TC          chan<- *models.TestCase
-	MC          chan<- *models.Mock
-	DepsErrChan chan error
+	ID   uint64
+	Mode models.Mode
+	TC   chan<- *models.TestCase
+	MC   chan<- *models.Mock
 	models.OutgoingOptions
 }
