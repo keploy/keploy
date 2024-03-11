@@ -102,7 +102,7 @@ func (t *tester) setupNsswitchConfig() error {
 			return err
 		}
 
-		t.logger.Info("Successfully written to nsswitch config of linux")
+		t.logger.Debug("Successfully written to nsswitch config of linux")
 	}
 	return nil
 }
