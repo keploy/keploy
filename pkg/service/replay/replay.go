@@ -278,6 +278,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	select {
 	case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
 	case <-runTestSetCtx.Done():
+		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
 	// Inserting the initial report for the test set
