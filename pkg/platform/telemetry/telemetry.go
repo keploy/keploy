@@ -53,21 +53,21 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 }
 
 func (tel *Telemetry) Testrun(ctx context.Context, success int, failure int) {
-	tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
+	go tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
 }
 
 // MockTestRun is Telemetry event for the Mocking feature test run
 func (tel *Telemetry) MockTestRun(ctx context.Context, utilizedMocks int) {
-	tel.SendTelemetry(ctx, "MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
+	go tel.SendTelemetry(ctx, "MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
 }
 
 // RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
 func (tel *Telemetry) RecordedTestSuite(ctx context.Context, testSet string, testsTotal int, mockTotal map[string]int) {
-	tel.SendTelemetry(ctx, "RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
+	go tel.SendTelemetry(ctx, "RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
 }
 
 func (tel *Telemetry) RecordedTestAndMocks(ctx context.Context) {
-	tel.SendTelemetry(ctx, "RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
+	go tel.SendTelemetry(ctx, "RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
 }
 
 // RecordedMocks is Telemetry event for the mocks that are recorded in the mocking feature
