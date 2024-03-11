@@ -104,7 +104,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	if !ok {
 		return errors.New("failed to get the error group from the context")
 	}
-	
+
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
