@@ -1,12 +1,12 @@
 module go.keploy.io/server/v2
 
-go 1.21
+go 1.21.0
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.2
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
-	github.com/cilium/ebpf v0.10.0
+	github.com/cilium/ebpf v0.13.2
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/docker v24.0.4+incompatible
