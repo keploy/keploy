@@ -55,9 +55,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
 	errChan := make(chan error)
-	//TODO: where to close the channels
-	defer close(clientBuffChan)
-	defer close(destBuffChan)
 	//TODO: where to close the error channel since it is used in both the go routines
 	//close(errChan)
 
@@ -70,12 +67,14 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	// read requests from client
 	g.Go(func() error {
 		defer utils.Recover(logger)
+		defer close(clientBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 		return nil
 	})
 	// read responses from destination
 	g.Go(func() error {
 		defer utils.Recover(logger)
+		defer close(destBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 		return nil
 	})

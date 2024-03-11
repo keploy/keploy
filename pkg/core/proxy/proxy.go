@@ -188,7 +188,7 @@ func (p *Proxy) start(ctx context.Context) error {
 
 	defer func(listener net.Listener) {
 		err := listener.Close()
-		
+
 		if err != nil {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}
@@ -201,9 +201,11 @@ func (p *Proxy) start(ctx context.Context) error {
 		if err != nil {
 			//utils.LogError(p.logger, err, "failed to handle the client connection")
 		}
-		//closing all the mock channels
+		//closing all the mock channels (if any in record mode)
 		for _, mc := range p.sessions.GetAllMC() {
-			close(mc)
+			if mc != nil {
+				close(mc)
+			}
 		}
 	}()
 
