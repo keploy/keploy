@@ -42,10 +42,24 @@ func (r *recorder) Start(ctx context.Context) error {
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	var stopReason string
 
+	// defining all the channels and variables required for the record
+	var runAppError models.AppError
+	var appErrChan = make(chan models.AppError)
+	var incomingChan <-chan *models.TestCase
+	var outgoingChan <-chan *models.Mock
+	var outgoingErrChan <-chan error
+	var insertTestErrChan = make(chan error)
+	var insertMockErrChan = make(chan error)
+	var appID uint64
+	var newTestSetID string
+	var testCount = 0
+	var mockCountMap = make(map[string]int)
+
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
 		case <-ctx.Done():
+			r.telemetry.RecordedTestSuite(ctx, newTestSetID, testCount, mockCountMap)
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
@@ -58,16 +72,6 @@ func (r *recorder) Start(ctx context.Context) error {
 		}
 	}()
 
-	// defining all the channels and variables required for the record
-	var runAppError models.AppError
-	var appErrChan = make(chan models.AppError)
-	var incomingChan <-chan *models.TestCase
-	var outgoingChan <-chan *models.Mock
-	var outgoingErrChan <-chan error
-	var insertTestErrChan = make(chan error)
-	var insertMockErrChan = make(chan error)
-	var appID uint64
-
 	defer close(appErrChan)
 	defer close(insertTestErrChan)
 	defer close(insertMockErrChan)
@@ -79,7 +83,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	newTestSetID := pkg.NewID(testSetIDs, models.TestSetPattern)
+	newTestSetID = pkg.NewID(testSetIDs, models.TestSetPattern)
 
 	// setting up the environment for recording
 	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
@@ -122,6 +126,9 @@ func (r *recorder) Start(ctx context.Context) error {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
 			if err != nil {
 				insertTestErrChan <- err
+			} else {
+				testCount++
+				r.telemetry.RecordedTestAndMocks(ctx)
 			}
 		}
 		return nil
@@ -133,6 +140,9 @@ func (r *recorder) Start(ctx context.Context) error {
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				insertMockErrChan <- err
+			} else {
+				mockCountMap[mock.GetKind()]++
+				r.telemetry.RecordedTestCaseMock(ctx, mock.GetKind())
 			}
 		}
 		return nil
