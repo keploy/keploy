@@ -42,7 +42,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 	testCasePath := r.Resolver.Path
 	testReportPath := r.Resolver.TestReportPath
 	delay := r.Resolver.Delay
-	enableAutoNoise := r.Resolver.EnableAutoNoise
+	checkAutoNoise := r.Resolver.CheckAutoNoise
 
 	testReportFS := r.Resolver.TestReportFS
 	if tester == nil {
@@ -79,7 +79,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSet string) (*mod
 		// send filtered testcases to run the test-set
 		testcaseFilter := utils.ArrayToMap(r.TestFilter[testSet])
 		// run the test set with a delay
-		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, testcaseFilter, nil, serveTest, initialisedValues, enableAutoNoise)
+		tester.RunTestSet(testSet, testCasePath, testReportPath, "", "", "", delay, 30*time.Second, pid, testRunChan, r.ApiTimeout, testcaseFilter, nil, serveTest, initialisedValues, checkAutoNoise)
 	}()
 
 	testRunID := <-testRunChan

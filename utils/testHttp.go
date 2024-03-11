@@ -19,7 +19,7 @@ type JsonComparisonResult struct {
 	Differences []string // Lists the keys or indices of values that are not the same
 }
 
-func TestHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger, mut *sync.Mutex, enableAutoNoise bool) (bool, *models.Result) {
+func TestHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger, mut *sync.Mutex, checkAutoNoise bool) (bool, *models.Result) {
 
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
@@ -43,12 +43,12 @@ func TestHttp(tc models.TestCase, actualResponse *models.HttpResp, noiseConfig m
 	}
 	noise := tc.Noise
 
-	if enableAutoNoise {
+	if checkAutoNoise {
 		for k, v := range tc.AutoNoise {
 			noise[k] = v
 		}
 	}
-	
+
 	var (
 		bodyNoise   = noiseConfig["body"]
 		headerNoise = noiseConfig["header"]

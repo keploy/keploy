@@ -42,7 +42,7 @@ func ReadTestConfig(configPath string) (*models.Test, error) {
 	return &doc.Test, nil
 }
 
-func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testFilters *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, enableAutoNoise *bool, passThroughHosts *[]models.Filters) error {
+func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, testFilters *map[string][]string, appContainer, networkName *string, Delay *uint64, buildDelay *time.Duration, passThroughPorts *[]uint, apiTimeout *uint64, globalNoise *models.GlobalNoise, testSetNoise *models.TestsetNoise, coverageReportPath *string, withCoverage *bool, generateTestReport *bool, configPath string, ignoreOrdering *bool, checkAutoNoise *bool, passThroughHosts *[]models.Filters) error {
 	configFilePath := filepath.Join(configPath, "keploy-config.yaml")
 	if isExist := utils.CheckFileExists(configFilePath); !isExist {
 		return errFileNotFound
@@ -91,7 +91,7 @@ func (t *Test) getTestConfig(path *string, proxyPort *uint32, appCmd *string, te
 	if !*ignoreOrdering {
 		*ignoreOrdering = confTest.IgnoreOrdering
 	}
-	*enableAutoNoise = *enableAutoNoise || confTest.EnableAutoNoise
+	*checkAutoNoise = *checkAutoNoise || confTest.CheckAutoNoise
 	passThroughPortProvided := len(*passThroughPorts) == 0
 	for _, filter := range confTest.Stubs.Filters {
 		if filter.Port != 0 && filter.Host == "" && filter.Path == "" && passThroughPortProvided {
@@ -243,7 +243,7 @@ func (t *Test) GetCmd() *cobra.Command {
 				return err
 			}
 
-			enableAutoNoise, err := cmd.Flags().GetBool("enableAutoNoise")
+			checkAutoNoise, err := cmd.Flags().GetBool("checkAutoNoise")
 			if err != nil {
 				t.logger.Error("failed to read the enable auto noise flag")
 				return err
@@ -271,7 +271,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			testsetNoise := make(models.TestsetNoise)
 
 			passThroughHosts := []models.Filters{}
-			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testFilters, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &enableAutoNoise, &passThroughHosts)
+			err = t.getTestConfig(&path, &proxyPort, &appCmd, &testFilters, &appContainer, &networkName, &delay, &buildDelay, &ports, &apiTimeout, &globalNoise, &testsetNoise, &coverageReportPath, &withCoverage, &generateTestReport, configPath, &ignoreOrdering, &checkAutoNoise, &passThroughHosts)
 			if err != nil {
 				if err == errFileNotFound {
 					t.logger.Info("Keploy config not found, continuing without configuration")
@@ -442,7 +442,7 @@ func (t *Test) GetCmd() *cobra.Command {
 			t.logger.Debug("the configuration for mocking mongo connection", zap.Any("password", mongoPassword))
 			if coverage {
 				g := graph.NewGraph(t.logger)
-				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele, testFilters, enableAutoNoise)
+				g.Serve(path, proxyPort, mongoPassword, testReportPath, generateTestReport, delay, pid, port, lang, ports, apiTimeout, appCmd, enableTele, testFilters, checkAutoNoise)
 			} else {
 
 				t.tester.StartTest(path, testReportPath, appCmd, test.TestOptions{
@@ -460,7 +460,7 @@ func (t *Test) GetCmd() *cobra.Command {
 					WithCoverage:       withCoverage,
 					CoverageReportPath: coverageReportPath,
 					IgnoreOrdering:     ignoreOrdering,
-					EnableAutoNoise:    enableAutoNoise,
+					CheckAutoNoise:     checkAutoNoise,
 					RemoveUnusedMocks:  removeUnusedMocks,
 					PassthroughHosts:   passThroughHosts,
 					GenerateTestReport: generateTestReport,
@@ -519,7 +519,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Bool("ignoreOrdering", true, "Ignore ordering of array in response")
 
-	testCmd.Flags().BoolP("enableAutoNoise", "a", true, "Allow auto noise by keploy to detect noisy labels")
+	testCmd.Flags().BoolP("checkAutoNoise", "a", true, "Allow auto noise by keploy to detect noisy labels")
 
 	testCmd.Flags().Bool("removeUnusedMocks", false, "Removes unused mocks from mock file")
 

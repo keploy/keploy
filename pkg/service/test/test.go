@@ -49,7 +49,7 @@ type TestOptions struct {
 	WithCoverage       bool
 	CoverageReportPath string
 	IgnoreOrdering     bool
-	EnableAutoNoise    bool
+	CheckAutoNoise     bool
 	RemoveUnusedMocks  bool
 	PassthroughHosts   []models.Filters
 	GenerateTestReport bool
@@ -251,7 +251,7 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 			noiseConfig = LeftJoinNoise(options.GlobalNoise, tsNoise)
 		}
 
-		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues, options.EnableAutoNoise)
+		testRunStatus := t.RunTestSet(sessionIndex, path, testReportPath, appCmd, options.AppContainer, options.AppNetwork, options.Delay, options.BuildDelay, 0, nil, options.ApiTimeout, testcases, noiseConfig, false, initialisedValues, options.CheckAutoNoise)
 
 		switch testRunStatus {
 		case models.TestRunStatusAppHalted:
@@ -517,7 +517,7 @@ func (t *tester) SimulateRequest(cfg *SimulateRequestConfig) {
 			t.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(cfg.Tc.Name)), zap.Any("testset id", models.HighlightFailingString(cfg.TestSet)), zap.Any("passed", models.HighlightFailingString("false")))
 			return
 		}
-		testPass, testResult := utils.TestHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, t.logger, &t.mutex, cfg.EnableAutoNoise)
+		testPass, testResult := utils.TestHttp(*cfg.Tc, resp, cfg.NoiseConfig, cfg.IgnoreOrdering, t.logger, &t.mutex, cfg.CheckAutoNoise)
 
 		if !testPass {
 			t.logger.Info("", zap.Any("matched mocks", GetMatchedMocks(cfg.LoadedHooks.GetConsumedMocks())))
@@ -635,7 +635,7 @@ func (t *tester) FetchTestResults(cfg *FetchTestResultsConfig) models.TestRunSta
 }
 
 // testSet, path, testReportPath, generateTestReport, appCmd, appContainer, appNetwork, delay, pid, ys, loadedHooks, testReportFS, testRunChan, apiTimeout, ctx
-func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup, enableAutoNoise bool) models.TestRunStatus {
+func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appContainer, appNetwork string, delay uint64, buildDelay time.Duration, pid uint32, testRunChan chan string, apiTimeout uint64, testcases map[string]bool, noiseConfig models.GlobalNoise, serveTest bool, initialisedValues TestEnvironmentSetup, checkAutoNoise bool) models.TestRunStatus {
 	cfg := &RunTestSetConfig{
 		TestSet:            testSet,
 		Path:               path,
@@ -758,22 +758,22 @@ func (t *tester) RunTestSet(testSet, path, testReportPath string, appCmd, appCon
 		}
 
 		cfg := &SimulateRequestConfig{
-			Tc:              tc,
-			LoadedHooks:     initialisedValues.LoadedHooks,
-			AppCmd:          appCmd,
-			UserIP:          userIp,
-			TestSet:         testSet,
-			ApiTimeout:      apiTimeout,
-			Success:         &success,
-			Failure:         &failure,
-			Status:          &status,
-			TestReportFS:    initialisedValues.TestReportFS,
-			TestReport:      initialisedTestSets.TestReport,
-			Path:            path,
-			DockerID:        initialisedTestSets.DockerID,
-			NoiseConfig:     noiseConfig,
-			IgnoreOrdering:  initialisedValues.IgnoreOrdering,
-			EnableAutoNoise: enableAutoNoise,
+			Tc:             tc,
+			LoadedHooks:    initialisedValues.LoadedHooks,
+			AppCmd:         appCmd,
+			UserIP:         userIp,
+			TestSet:        testSet,
+			ApiTimeout:     apiTimeout,
+			Success:        &success,
+			Failure:        &failure,
+			Status:         &status,
+			TestReportFS:   initialisedValues.TestReportFS,
+			TestReport:     initialisedTestSets.TestReport,
+			Path:           path,
+			DockerID:       initialisedTestSets.DockerID,
+			NoiseConfig:    noiseConfig,
+			IgnoreOrdering: initialisedValues.IgnoreOrdering,
+			CheckAutoNoise: checkAutoNoise,
 		}
 		t.SimulateRequest(cfg)
 	}

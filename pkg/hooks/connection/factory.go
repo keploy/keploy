@@ -149,7 +149,7 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 		autoNoise := map[string][]string{}
 
 		// start the simulation if autoNoise is enabled
-		if autoNoiseCfg.AutoNoise {
+		if autoNoiseCfg.EnableAutoNoise {
 			testCase.HttpReq.Header["Keploy-Simulation"] = "true"
 
 			// check if the user application is running docker container using IDE
