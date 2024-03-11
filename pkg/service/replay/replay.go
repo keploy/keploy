@@ -208,6 +208,8 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
+	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
+
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
