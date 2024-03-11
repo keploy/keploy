@@ -70,7 +70,7 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 
 	err = decodeMongo(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		utils.LogError(logger, err, "failed to decode the mongo message from the yaml")
+		utils.LogError(logger, err, "failed to decode the mongo message")
 		return err
 	}
 	return nil

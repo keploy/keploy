@@ -452,12 +452,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
 
-	runTestSetCtxCancel()
-	err = runTestSetErrGrp.Wait()
-	if err != nil {
-		utils.LogError(r.logger, err, "error in runTestSetErrGrp")
-		return models.TestSetStatusInternalErr, fmt.Errorf("error in runTestSetErrGrp")
-	}
 	return testSetStatus, nil
 }
 

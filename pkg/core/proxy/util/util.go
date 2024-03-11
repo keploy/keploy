@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/utils"
 
@@ -94,22 +95,32 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 		buf []byte
 	})
 
+	g, ctx := errgroup.WithContext(ctx)
+
+	defer func() {
+		err := g.Wait()
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the request message in proxy")
+		}
+		close(readResult)
+	}()
+
 	for {
 		// Start a goroutine to perform the read operation
-		go func() {
+		g.Go(func() error {
 			defer utils.Recover(logger)
-			defer close(readResult)
 			buf := make([]byte, 1024)
 			n, err := reader.Read(buf)
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
 			readResult <- struct {
 				n   int
 				err error
 				buf []byte
 			}{n, err, buf}
-		}()
+			return nil
+		})
 
 		// Use a select statement to wait for either the read result or context cancellation
 		select {
@@ -153,22 +164,32 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 		buf []byte
 	})
 
+	g, ctx := errgroup.WithContext(ctx)
+
+	defer func() {
+		err := g.Wait()
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the request message in proxy")
+		}
+		close(readResult)
+	}()
+
 	for numBytes > 0 {
 		// Start a goroutine to perform the read operation
-		go func() {
+		g.Go(func() error {
 			defer utils.Recover(logger)
-			defer close(readResult)
 			buf := make([]byte, numBytes)
 			n, err := reader.Read(buf)
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
 			readResult <- struct {
 				n   int
 				err error
 				buf []byte
 			}{n, err, buf}
-		}()
+			return nil
+		})
 
 		// Use a select statement to wait for either the read result or context cancellation
 		select {
