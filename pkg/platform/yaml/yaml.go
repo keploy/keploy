@@ -67,6 +67,7 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	if err != nil {
 		return err
 	}
+	fmt.Println(isFileEmpty)
 	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	if isAppend {
 		data := []byte("---\n")
@@ -135,10 +136,11 @@ func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byt
 func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
+		utils.LogError(Logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
 		return false, err
 	}
 	if _, err := os.Stat(yamlPath); err != nil {
-		if ctx.Err() != nil {
+		if ctx.Err() == nil {
 			err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))

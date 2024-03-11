@@ -149,27 +149,24 @@ func (r *recorder) Start(ctx context.Context) error {
 	})
 
 	// setting a timer for recording
-	g.Go(func() error {
-		if r.config.Record.RecordTimer != 0 {
-			g.Go(func() error {
-				r.logger.Info("Setting a timer of " + r.config.Record.RecordTimer.String() + " for recording")
-				timer := time.After(r.config.Record.RecordTimer)
-				select {
-				case <-timer:
-					r.logger.Warn("Time up! Stopping keploy")
-					err := utils.Stop(r.logger, "Time up! Stopping keploy")
-					if err != nil {
-						utils.LogError(r.logger, err, "failed to stop recording")
-						return errors.New("failed to stop recording")
-					}
-				case <-ctx.Done():
-					return nil
+	if r.config.Record.RecordTimer != 0 {
+		g.Go(func() error {
+			r.logger.Info("Setting a timer of " + r.config.Record.RecordTimer.String() + " for recording")
+			timer := time.After(r.config.Record.RecordTimer)
+			select {
+			case <-timer:
+				r.logger.Warn("Time up! Stopping keploy")
+				err := utils.Stop(r.logger, "Time up! Stopping keploy")
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to stop recording")
+					return errors.New("failed to stop recording")
 				}
+			case <-ctx.Done():
 				return nil
-			})
-		}
-		return nil
-	})
+			}
+			return nil
+		})
+	}
 
 	// Waiting for the error to occur in any of the go routines
 	select {

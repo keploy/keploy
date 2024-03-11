@@ -188,6 +188,7 @@ func (p *Proxy) start(ctx context.Context) error {
 
 	defer func(listener net.Listener) {
 		err := listener.Close()
+		
 		if err != nil {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}

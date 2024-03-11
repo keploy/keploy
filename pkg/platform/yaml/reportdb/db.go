@@ -93,11 +93,6 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		testReport.Name = testSetID + "-report"
 	}
 
-	_, err := yaml.CreateYamlFile(ctx, fe.Logger, reportPath, testReport.Name)
-	if err != nil {
-		return err
-	}
-
 	data := []byte{}
 	d, err := yamlLib.Marshal(&testReport)
 	if err != nil {
@@ -105,9 +100,10 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	}
 	data = append(data, d...)
 
+	fmt.Println("came here")
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to write the mocks to config yaml", zap.Any("session", filepath.Base(reportPath)))
+		utils.LogError(fe.Logger, err, "failed to write the report to yaml", zap.Any("session", filepath.Base(reportPath)))
 		return err
 	}
 	return nil

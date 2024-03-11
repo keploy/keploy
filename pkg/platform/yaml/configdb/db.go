@@ -93,10 +93,10 @@ func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
 	}
 	data = append(data, d...)
-
-	err = os.WriteFile(filepath.Join(path, "installation-id.yaml"), data, os.ModePerm)
+	err = yaml.WriteFile(ctx, cdb.logger, path, "installation-id", data, false)
 	if err != nil {
-		return fmt.Errorf("failed to write installation id in yaml file. error: %s", err.Error())
+		utils.LogError(cdb.logger, err, "failed to write installation id in yaml file")
+		return err
 	}
 
 	return nil

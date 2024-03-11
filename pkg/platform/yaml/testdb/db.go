@@ -18,13 +18,13 @@ import (
 
 type TestYaml struct {
 	TcsPath string
-	Logger  *zap.Logger
+	logger  *zap.Logger
 }
 
-func New(Logger *zap.Logger, tcsPath string) *TestYaml {
+func New(logger *zap.Logger, tcsPath string) *TestYaml {
 	return &TestYaml{
 		TcsPath: tcsPath,
-		Logger:  Logger,
+		logger:  logger,
 	}
 }
 
@@ -32,7 +32,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
 	if tc.Name == "" {
-		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.Logger)
+		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
 		if err != nil {
 			return err
 		}
@@ -40,7 +40,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	} else {
 		tcsName = tc.Name
 	}
-	yamlTc, err := EncodeTestcase(*tc, ts.Logger)
+	yamlTc, err := EncodeTestcase(*tc, ts.logger)
 	if err != nil {
 		return err
 	}
@@ -49,17 +49,17 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	if err != nil {
 		return err
 	}
-	err = yaml.WriteFile(ctx, ts.Logger, tcsPath, tcsName, data, false)
+	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
 	if err != nil {
-		utils.LogError(ts.Logger, err, "failed to write testcase yaml file")
+		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
 		return err
 	}
-	ts.Logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
+	ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
 	return nil
 }
 
 func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.Logger)
+	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
@@ -71,17 +71,17 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	}
 	_, err = os.Stat(TestPath)
 	if err != nil {
-		ts.Logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
+		ts.logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
 		return nil, nil
 	}
 	dir, err := yaml.ReadDir(TestPath, os.ModePerm)
 	if err != nil {
-		utils.LogError(ts.Logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
 		return nil, err
 	}
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		utils.LogError(ts.Logger, err, "failed to read the file names of yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.Any("path", TestPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -90,24 +90,24 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		data, err := yaml.ReadFile(ctx, ts.Logger, TestPath, name)
+		data, err := yaml.ReadFile(ctx, ts.logger, TestPath, name)
 		if err != nil {
-			utils.LogError(ts.Logger, err, "failed to read the testcase from yaml")
+			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
 		}
 
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {
-			utils.LogError(ts.Logger, err, "failed to unmarshall YAML data")
+			utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
 			return nil, err
 		}
 
 		if err != nil {
-			utils.LogError(ts.Logger, err, "failed to read the testcase from yaml")
+			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
 		}
-		tc, err := Decode(testCase, ts.Logger)
+		tc, err := Decode(testCase, ts.logger)
 		if err != nil {
 			return nil, err
 		}
