@@ -67,7 +67,6 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	if err != nil {
 		return err
 	}
-	fmt.Println(isFileEmpty)
 	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	if isAppend {
 		data := []byte("---\n")
