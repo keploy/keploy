@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strings"
 )
 
 const mockTable string = "mock"
@@ -26,4 +27,16 @@ func ConvertIPToUint32(ipStr string) (uint32, error) {
 	} else {
 		return 0, errors.New("failed to parse IP address")
 	}
+}
+
+func IsDetachMode(command string) bool {
+	args := strings.Fields(command)
+
+	for _, arg := range args {
+		if arg == "-d" || arg == "--detach" {
+			return true
+		}
+	}
+
+	return false
 }
