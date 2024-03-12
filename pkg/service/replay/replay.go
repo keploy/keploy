@@ -174,8 +174,9 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{})
 		if err != nil {
+			cancel()
 			if errors.Is(err, context.Canceled) {
 				return "", 0, nil, err
 			}
@@ -237,16 +238,19 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return models.TestSetStatusFailed, err
 	}
-	err = r.instrumentation.SetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to set mocks")
-		return models.TestSetStatusFailed, err
-	}
+
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
 	}
+	
+	err = r.instrumentation.SetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to set mocks")
+		return models.TestSetStatusFailed, err
+	}
+	
 
 	if !serveTest {
 		runTestSetErrGrp.Go(func() error {

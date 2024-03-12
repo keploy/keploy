@@ -416,10 +416,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.Addr = addr
 
 	} else {
-		dstConn, err = net.Dial("tcp", dstAddr)
-		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
-			return err
+		if rule.Mode != models.MODE_TEST {
+			dstConn, err = net.Dial("tcp", dstAddr)
+			if err != nil {
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+				return err
+			}
 		}
 		dstCfg.Addr = dstAddr
 	}
