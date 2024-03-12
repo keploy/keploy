@@ -81,7 +81,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 
 	select {
 	case <-ctx.Done():
-		println("context cancelled before loading hooks")
 		return ctx.Err()
 	default:
 	}
