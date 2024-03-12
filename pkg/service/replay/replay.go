@@ -199,7 +199,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
-	var mockErrChan <-chan error
 	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
 	var success int
@@ -234,7 +233,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to set mocks")
 		return models.TestSetStatusFailed, err
 	}
-	mockErrChan = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{})
+	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
@@ -256,9 +255,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetErrGrp.Go(func() error {
 		defer utils.Recover(r.logger)
 		select {
-		case err := <-mockErrChan:
-			utils.LogError(r.logger, err, "failed to mock outgoing")
-			testSetStatusByErrChan = models.TestSetStatusFailed
 		case err := <-appErrChan:
 			switch err.AppErrorType {
 			case models.ErrCommandError:

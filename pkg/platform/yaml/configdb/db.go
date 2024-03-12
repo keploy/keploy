@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,7 +60,7 @@ func getInstallationFromFile(logger *zap.Logger) string {
 		id   = ""
 	)
 
-	file, err := os.OpenFile(filepath.Join(path, "installation-id.yaml"), os.O_RDONLY, os.ModePerm)
+	file, err := os.OpenFile(filepath.Join(path, "installation-id.yaml"), os.O_RDONLY, fs.ModePerm)
 	if err != nil {
 		return id
 	}

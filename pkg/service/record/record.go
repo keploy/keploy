@@ -47,7 +47,6 @@ func (r *recorder) Start(ctx context.Context) error {
 	var appErrChan = make(chan models.AppError)
 	var incomingChan <-chan *models.TestCase
 	var outgoingChan <-chan *models.Mock
-	var outgoingErrChan <-chan error
 	var insertTestErrChan = make(chan error)
 	var insertMockErrChan = make(chan error)
 	var appID uint64
@@ -134,7 +133,15 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
-	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	if err != nil {
+		stopReason = "failed to get outgoing frames"
+		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
+		return fmt.Errorf(stopReason)
+	}
 	g.Go(func() error {
 		for mock := range outgoingChan {
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
@@ -198,8 +205,6 @@ func (r *recorder) Start(ctx context.Context) error {
 			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
 
-	case err = <-outgoingErrChan:
-		stopReason = "error while fetching outgoing frame, hence stopping keploy"
 	case err = <-insertTestErrChan:
 		stopReason = "error while inserting test case into db, hence stopping keploy"
 	case err = <-insertMockErrChan:
@@ -231,7 +236,6 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		}
 	}()
 	var outgoingChan <-chan *models.Mock
-	var outgoingErrChan <-chan error
 	var insertMockErrChan = make(chan error)
 
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
@@ -247,7 +251,15 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	outgoingChan, outgoingErrChan = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	if err != nil {
+		stopReason = "failed to get outgoing frames"
+		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
+		return fmt.Errorf(stopReason)
+	}
 	g.Go(func() error {
 		for mock := range outgoingChan {
 			mock := mock // capture range variable
@@ -263,8 +275,6 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	})
 
 	select {
-	case err = <-outgoingErrChan:
-		stopReason = "error while fetching outgoing frame, hence stopping keploy"
 	case err = <-insertMockErrChan:
 		stopReason = "error while inserting mock into db, hence stopping keploy"
 	case <-ctx.Done():

@@ -199,7 +199,7 @@ func (p *Proxy) start(ctx context.Context) error {
 	defer func() {
 		err := clientConnErrGrp.Wait()
 		if err != nil {
-			//utils.LogError(p.logger, err, "failed to handle the client connection")
+			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
 		//closing all the mock channels (if any in record mode)
 		for _, mc := range p.sessions.GetAllMC() {
@@ -502,7 +502,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("proxy stopped...")
 }
 
-func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, errChan chan error, opts models.OutgoingOptions) error {
+func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_RECORD,
@@ -521,7 +521,7 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 	return nil
 }
 
-func (p *Proxy) Mock(_ context.Context, id uint64, errChan chan error, opts models.OutgoingOptions) error {
+func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_TEST,

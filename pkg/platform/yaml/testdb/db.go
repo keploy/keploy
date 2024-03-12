@@ -4,6 +4,7 @@ package testdb
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -74,7 +75,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		ts.logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
 		return nil, nil
 	}
-	dir, err := yaml.ReadDir(TestPath, os.ModePerm)
+	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
 		return nil, err
@@ -103,12 +104,9 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			return nil, err
 		}
 
-		if err != nil {
-			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
-			return nil, err
-		}
 		tc, err := Decode(testCase, ts.logger)
 		if err != nil {
+			utils.LogError(ts.logger, err, "failed to decode the testcase")
 			return nil, err
 		}
 		tcs = append(tcs, tc)

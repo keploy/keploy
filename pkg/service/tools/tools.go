@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -258,7 +259,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 
-	err = os.WriteFile(filePath, finalOutput, os.ModePerm)
+	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to write config file")
 		return nil

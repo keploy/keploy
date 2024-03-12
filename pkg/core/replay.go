@@ -7,26 +7,21 @@ import (
 	"go.keploy.io/server/v2/utils"
 )
 
-func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) <-chan error {
-	//make a new channel for the errors
-	errCh := make(chan error, 10) // Buffered channel to prevent blocking
-
+func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 	ports := GetPortToSendToKernel(ctx, opts.Rules)
 	if len(ports) > 0 {
 		err := c.hook.PassThroughPortsInKernel(ctx, id, ports)
 		if err != nil {
-			errCh <- err
-			return errCh
+			return err
 		}
 	}
 
-	err := c.proxy.Mock(ctx, id, errCh, opts)
+	err := c.proxy.Mock(ctx, id, opts)
 	if err != nil {
-		errCh <- err
-		return errCh
+		return err
 	}
 
-	return errCh
+	return nil
 }
 
 func (c *Core) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
