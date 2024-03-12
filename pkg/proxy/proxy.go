@@ -929,7 +929,10 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				InsecureSkipVerify: true,
 				ServerName:         destinationUrl,
 			}
-			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			dialer := &net.Dialer{
+				Timeout: 1 * time.Second,
+			}
+			dst, err = tls.DialWithDialer(dialer, "tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
 			if err != nil && models.GetMode() != models.MODE_TEST {
 				logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
