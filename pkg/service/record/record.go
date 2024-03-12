@@ -38,8 +38,18 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 func (r *recorder) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
-	g, ctx := errgroup.WithContext(ctx)
-	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	errGrp, _ := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+
+	runAppErrGrp, _ := errgroup.WithContext(ctx)
+	runAppCtx := context.WithoutCancel(ctx)
+	runAppCtx, runAppCtxCancel := context.WithCancel(runAppCtx)
+
+	hookErrGrp, _ := errgroup.WithContext(ctx)
+	hookCtx := context.WithoutCancel(ctx)
+	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
+	hookCtx = context.WithValue(ctx, models.ErrGroupKey, hookErrGrp)
+
 	var stopReason string
 
 	// defining all the channels and variables required for the record
@@ -65,7 +75,17 @@ func (r *recorder) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to stop recording")
 			}
 		}
-		err := g.Wait()
+		runAppCtxCancel()
+		err := runAppErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop application")
+		}
+		hookCtxCancel()
+		err = hookErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop hooks")
+		}
+		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
@@ -98,7 +118,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -120,7 +140,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	g.Go(func() error {
+	errGrp.Go(func() error {
 		for testCase := range incomingChan {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
 			if err != nil {
@@ -145,7 +165,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
-	g.Go(func() error {
+	errGrp.Go(func() error {
 		for mock := range outgoingChan {
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
@@ -162,8 +182,8 @@ func (r *recorder) Start(ctx context.Context) error {
 	})
 
 	// running the user application
-	g.Go(func() error {
-		runAppError = r.instrumentation.Run(ctx, appID, models.RunOptions{})
+	runAppErrGrp.Go(func() error {
+		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
 			return nil
 		}
@@ -173,7 +193,7 @@ func (r *recorder) Start(ctx context.Context) error {
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
-		g.Go(func() error {
+		errGrp.Go(func() error {
 			r.logger.Info("Setting a timer of " + r.config.Record.RecordTimer.String() + " for recording")
 			timer := time.After(r.config.Record.RecordTimer)
 			select {
