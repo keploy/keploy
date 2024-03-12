@@ -112,7 +112,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		return filteredTcsMocks[i].Spec.ReqTimestampMock.Before(filteredTcsMocks[j].Spec.ReqTimestampMock)
 	})
 
-	return tcsMocks, nil
+	return filteredTcsMocks, nil
 }
 
 func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
