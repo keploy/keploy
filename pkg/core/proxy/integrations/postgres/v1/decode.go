@@ -59,6 +59,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			matched, pgResponses, err := matchingReadablePG(ctx, logger, pgRequests, mockDb)
 			if err != nil {
 				errCh <- fmt.Errorf("error while matching tcs mocks %v", err)
+				return
 			}
 
 			if !matched {

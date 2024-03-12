@@ -233,7 +233,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			} else {
 				matched, matchedMock, err := match(ctx, logger, mongoRequests, mockDb)
 				if err != nil {
+					errCh <- err
 					utils.LogError(logger, err, "error while matching mongo mocks")
+					return
 				}
 				if !matched {
 					logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
