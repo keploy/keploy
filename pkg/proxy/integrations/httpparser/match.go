@@ -21,6 +21,7 @@ func match(req *http.Request, reqBody []byte, reqURL *url.URL, isReqBodyJSON boo
 		if err != nil {
 			return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 		}
+		logger.Debug("mocks to match with the http request", zap.Any("tcsMocks", tcsMocks))
 
 		var eligibleMock []*models.Mock
 
