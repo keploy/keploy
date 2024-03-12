@@ -5,6 +5,9 @@
 *.so
 *.dylib
 
+# add fuse hidden files
+.fuse_hidden*
+
 # Test binary, built with `go test -c`
 *.test
 

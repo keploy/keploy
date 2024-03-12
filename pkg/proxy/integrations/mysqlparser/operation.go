@@ -46,7 +46,7 @@ type ColumnDefinition struct {
 }
 
 type RowDataPacket struct {
-	Data []byte `yaml:"data"`
+	Data []byte `yaml:"data,omitempty,flow"`
 }
 
 type PluginDetails struct {
@@ -158,8 +158,10 @@ func DecodeMySQLPacket(packet MySQLPacket, logger *zap.Logger, destConn net.Conn
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
+			if err != nil {
+				fmt.Println("Error parsing result set: ", err)
+			}
 			lastCommand = 0x00 // Reset the last command
-
 		default:
 			packetType = "Unknown"
 			packetData = data
@@ -523,6 +525,10 @@ func readLengthEncodedIntegers(b []byte) (uint64, int) {
 
 func readLengthEncodedStrings(b []byte) (string, int) {
 	length, n := readLengthEncodedIntegers(b)
+	// add check for slice out of range
+	if int(length) > len(b) {
+		return "", n
+	}
 	return string(b[n : n+int(length)]), n + int(length)
 }
 

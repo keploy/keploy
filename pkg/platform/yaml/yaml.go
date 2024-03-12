@@ -456,7 +456,7 @@ func (ys *Yaml) ReadTcsMocks(tcRead platform.KindSpecifier, testSet string) ([]p
 		}
 		if (mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{})) && mock.Kind != "SQL" {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
-			ys.Logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
+			ys.Logger.Debug("request or response timestamp of mock is missing for " + tc.Name)
 			filteredMocks = append(filteredMocks, mock)
 			continue
 		}

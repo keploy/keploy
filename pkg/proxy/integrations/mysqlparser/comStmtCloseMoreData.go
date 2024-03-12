@@ -7,13 +7,13 @@ import (
 )
 
 type ComStmtPreparePacket1 struct {
-	Header []byte `json:"header,omitempty" yaml:"header,omitempty"`
-	Query  string `json:"query,omitempty" yaml:"query,omitempty"`
+	Header []byte
+	Query  string
 }
 
 type ComStmtCloseAndPrepare struct {
-	StmtClose   ComStmtClosePacket    `json:"stmt_close,omitempty" yaml:"stmt_close,omitempty"`
-	StmtPrepare ComStmtPreparePacket1 `json:"stmt_prepare,omitempty" yaml:"stmt_prepare,omitempty"`
+	StmtClose   ComStmtClosePacket
+	StmtPrepare ComStmtPreparePacket1
 }
 
 func decodeComStmtCloseMoreData(data []byte) (*ComStmtCloseAndPrepare, error) {

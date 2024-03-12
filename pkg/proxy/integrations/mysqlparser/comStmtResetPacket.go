@@ -6,7 +6,7 @@ import (
 )
 
 type COM_STMT_RESET struct {
-	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow"`
+	StatementID uint32 `yaml:"statement_id"`
 }
 
 func decodeComStmtReset(packet []byte) (*COM_STMT_RESET, error) {

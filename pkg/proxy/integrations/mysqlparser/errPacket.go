@@ -6,11 +6,11 @@ import (
 )
 
 type ERRPacket struct {
-	Header         byte   `json:"header,omitempty" yaml:"header,omitempty,flow"`
-	ErrorCode      uint16 `json:"error_code,omitempty" yaml:"error_code,omitempty,flow"`
-	SQLStateMarker string `json:"sql_state_marker,omitempty" yaml:"sql_state_marker,omitempty,flow"`
-	SQLState       string `json:"sql_state,omitempty" yaml:"sql_state,omitempty,flow"`
-	ErrorMessage   string `json:"error_message,omitempty" yaml:"error_message,omitempty,flow"`
+	Header         byte   `yaml:"header"`
+	ErrorCode      uint16 `yaml:"error_code"`
+	SQLStateMarker string `yaml:"sql_state_marker"`
+	SQLState       string `yaml:"sql_state"`
+	ErrorMessage   string `yaml:"error_message"`
 }
 
 func decodeMySQLErr(data []byte) (*ERRPacket, error) {

@@ -99,9 +99,10 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				logger.Error("failed to write auth switch request to client", zap.Error(err))
 				return
 			}
+
 			expectingHandshakeResponse = true
 			oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(handshakeResponseFromClient), logger, destConn)
-			if err != nil {
+			if err != nil && !h.IsUserAppTerminateInitiated() {
 				logger.Error("failed to decode MySQL packet from client", zap.Error(err))
 				return
 			}
@@ -115,7 +116,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			})
 			expectingHandshakeResponse = false
 			oprResponse1, responseHeader1, mysqlResp1, err := DecodeMySQLPacket(bytesToMySQLPacket(handshakeResponseBuffer), logger, destConn)
-			if err != nil {
+			if err != nil && !h.IsUserAppTerminateInitiated() {
 				logger.Error("failed to decode MySQL packet from destination", zap.Error(err))
 				return
 			}
@@ -128,7 +129,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				Message: mysqlResp1,
 			})
 			oprResponse2, responseHeader2, mysqlResp2, err := DecodeMySQLPacket(bytesToMySQLPacket(okPacket1), logger, destConn)
-			if err != nil {
+			if err != nil && !h.IsUserAppTerminateInitiated() {
 				logger.Error("failed to decode MySQL packet from OK packet", zap.Error(err))
 				return
 			}
@@ -157,6 +158,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					logger.Error("failed to read final response from server", zap.Error(err))
 					return
 				}
+
 				_, err = clientConn.Write(ServerResponse)
 				if err != nil {
 					logger.Error("failed to write final response to client", zap.Error(err))
@@ -165,7 +167,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				expectingAuthSwitchResponse = true
 
 				oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(authSwitchResponse), logger, destConn)
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("failed to decode MySQL packet from client after full authentication", zap.Error(err))
 					return
 				}
@@ -182,7 +184,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				isPluginData = true
 				oprResponse, responseHeader, mysqlResp, err := DecodeMySQLPacket(bytesToMySQLPacket(ServerResponse), logger, destConn)
 				isPluginData = false
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("failed to decode MySQL packet from destination after full authentication", zap.Error(err))
 					return
 				}
@@ -222,7 +224,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 						return
 					}
 					oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(clientResponse), logger, destConn)
-					if err != nil {
+					if err != nil && !h.IsUserAppTerminateInitiated() {
 						logger.Error("failed to decode MySQL packet from client after full authentication", zap.Error(err))
 						return
 					}
@@ -237,7 +239,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					isPluginData = true
 					oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(finalServerResponse), logger, destConn)
 					isPluginData = false
-					if err != nil {
+					if err != nil && !h.IsUserAppTerminateInitiated() {
 						logger.Error("failed to decode MySQL packet from destination after full authentication", zap.Error(err))
 						return
 					}
@@ -270,7 +272,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 						return
 					}
 					finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(bytesToMySQLPacket(finalServerResponse1), logger, destConn)
-					if err != nil {
+					if err != nil && !h.IsUserAppTerminateInitiated() {
 						logger.Error("failed to decode MySQL packet from final server response", zap.Error(err))
 						return
 					}
@@ -283,7 +285,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 						Message: mysqlRespfinalServerResponse,
 					})
 					oprRequestFinal1, requestHeaderFinal1, err := decodeEncryptPassword(clientResponse1)
-					if err != nil {
+					if err != nil && !h.IsUserAppTerminateInitiated() {
 						logger.Error("failed to decode MySQL packet from client after full authentication", zap.Error(err))
 						return
 					}
@@ -314,7 +316,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					}
 					oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(finalServerResponse), logger, destConn)
 					isPluginData = false
-					if err != nil {
+					if err != nil && !h.IsUserAppTerminateInitiated() {
 						logger.Error("failed to decode MySQL packet from destination after full authentication", zap.Error(err))
 						return
 					}
@@ -358,7 +360,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					return
 				}
 				oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(clientResponse), logger, destConn)
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("failed to decode MySQL packet from client after full authentication", zap.Error(err))
 					return
 				}
@@ -373,7 +375,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				isPluginData = true
 				oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(bytesToMySQLPacket(finalServerResponse), logger, destConn)
 				isPluginData = false
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("failed to decode MySQL packet from destination after full authentication", zap.Error(err))
 					return
 				}
@@ -406,7 +408,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					return
 				}
 				finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(bytesToMySQLPacket(finalServerResponse1), logger, destConn)
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("failed to decode MySQL packet from final server response", zap.Error(err))
 					return
 				}
@@ -419,7 +421,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					Message: mysqlRespfinalServerResponse,
 				})
 				oprRequestFinal1, requestHeaderFinal1, err := decodeEncryptPassword(clientResponse1)
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("failed to decode MySQL packet from client after full authentication", zap.Error(err))
 					return
 				}
@@ -437,7 +439,7 @@ func encodeOutgoingMySql(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					},
 				})
 			}
-			recordMySQLMessage(h, mysqlRequests, mysqlResponses, oprRequest, oprResponse2, "config", ctx)
+			recordMySQLMessage(h, mysqlRequests, mysqlResponses, oprRequest, oprResponse2, "config", ctx, time.Time{}, time.Time{})
 			mysqlRequests = []models.MySQLRequest{}
 			mysqlResponses = []models.MySQLResponse{}
 			handleClientQueries(h, nil, clientConn, destConn, logger, ctx)
@@ -452,41 +454,29 @@ var (
 	mockResponseRead = 0
 )
 
+
 var (
 	expectingHandshakeResponseTest = false
 )
-
-func getfirstSQLMock(configMocks []*models.Mock) (*models.Mock, bool) {
-	for _, mock := range configMocks {
-		if len(mock.Spec.MySqlResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySqlResponses[0].Header.PacketType == "MySQLHandshakeV10" {
-			return mock, true
-		}
-	}
-	return nil, false
-}
 
 func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h *hooks.Hook, logger *zap.Logger, ctx context.Context, delay uint64) {
 	firstLoop := true
 	doHandshakeAgain := true
 	prevRequest := ""
 	var requestBuffers [][]byte
-	configMocks, _ := h.GetConfigMocks()
-	tcsMocks, _ := h.GetTcsMocks()
 	for {
+		configMocks, _ := h.GetConfigMocks()
+		tcsMocks, _ := h.GetTcsMocks()
 		//logger.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 		if firstLoop || doHandshakeAgain {
 			if len(configMocks) == 0 {
 				logger.Debug("No more config mocks available")
 				return
 			}
-			sqlMock, found := getfirstSQLMock(configMocks)
-			if !found {
-				logger.Debug("No SQL mock found")
-				return
-			}
-			header := sqlMock.Spec.MySqlResponses[0].Header
-			packet := sqlMock.Spec.MySqlResponses[0].Message
-			opr := sqlMock.Spec.MySqlResponses[0].Header.PacketType
+
+			header := configMocks[0].Spec.MySqlResponses[0].Header
+			packet := configMocks[0].Spec.MySqlResponses[0].Message
+			opr := configMocks[0].Spec.MySqlResponses[0].Header.PacketType
 
 			binaryPacket, err := encodeToBinary(&packet, header, opr, 0)
 			if err != nil {
@@ -505,7 +495,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
 				configMocks = (append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...))
 			}
-			//h.SetConfigMocks(configMocks)
+			h.SetConfigMocks(configMocks)
 			firstLoop = false
 			doHandshakeAgain = false
 			logger.Debug("BINARY PACKET SENT HANDSHAKE", zap.ByteString("binaryPacketKey", binaryPacket))
@@ -545,7 +535,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 			}
 
 			oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(bytesToMySQLPacket(requestBuffer), logger, destConn)
-			if err != nil {
+			if err != nil && !h.IsUserAppTerminateInitiated() {
 				logger.Error("Failed to decode MySQL packet", zap.Error(err))
 				return
 			}
@@ -575,7 +565,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				return
 			}
 			matchedResponse, matchedIndex, _, err := matchRequestWithMock(mysqlRequest, configMocks, tcsMocks, h)
-			if err != nil {
+			if err != nil && !h.IsUserAppTerminateInitiated() {
 				logger.Error("Failed to match request with mock", zap.Error(err))
 				return
 			}
@@ -591,7 +581,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 				}
 
 				_, err = clientConn.Write(responseBinary)
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("Failed to write response to clientConn", zap.Error(err))
 					return
 				}
@@ -602,7 +592,7 @@ func decodeOutgoingMySQL(requestBuffer []byte, clientConn, destConn net.Conn, h 
 					return
 				}
 				_, err = clientConn.Write(responseBuffer)
-				if err != nil {
+				if err != nil && !h.IsUserAppTerminateInitiated() {
 					logger.Error("Failed to write response to clientConn", zap.Error(err))
 					return
 				}
@@ -654,7 +644,7 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if len(configMocks[matchedIndex].Spec.MySqlResponses) == 0 {
 			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
 		}
-		//h.SetConfigMocks(configMocks)
+		h.SetConfigMocks(configMocks)
 	} else {
 		realIndex := matchedIndex - len(configMocks)
 		if realIndex < 0 || realIndex >= len(tcsMocks) {
@@ -666,7 +656,7 @@ func matchRequestWithMock(mysqlRequest models.MySQLRequest, configMocks, tcsMock
 		if len(tcsMocks[realIndex].Spec.MySqlResponses) == 0 {
 			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
 		}
-		//h.SetTcsMocks(tcsMocks)
+		h.SetTcsMocks(tcsMocks)
 	}
 
 	return bestMatch, matchedIndex, mockType, nil
@@ -726,8 +716,10 @@ func ReadFirstBuffer(clientConn, destConn net.Conn) ([]byte, string, error) {
 func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destConn net.Conn, logger *zap.Logger, ctx context.Context) ([]*models.Mock, error) {
 	firstIteration := true
 	var (
-		mysqlRequests  []models.MySQLRequest
-		mysqlResponses []models.MySQLResponse
+		mysqlRequests     []models.MySQLRequest
+		mysqlResponses    []models.MySQLResponse
+		mysqlRequestTime  time.Time
+		mysqlResponseTime time.Time
 	)
 	for {
 		var queryBuffer []byte
@@ -743,6 +735,7 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 					return nil, err
 				}
 			}
+			mysqlRequestTime = time.Now()
 		}
 		if len(queryBuffer) == 0 {
 			break
@@ -766,9 +759,10 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 		}
 		queryResponse, err := util.ReadBytes(destConn)
 		if err != nil {
-			logger.Error("failed to read query response from mysql server", zap.Error(err))
+			logger.Debug("failed to read query response from mysql server", zap.Error(err))
 			return nil, err
 		}
+		mysqlResponseTime = time.Now()
 		_, err = clientConn.Write(queryResponse)
 		if err != nil {
 			logger.Error("failed to write query response to mysql client", zap.Error(err))
@@ -793,11 +787,11 @@ func handleClientQueries(h *hooks.Hook, initialBuffer []byte, clientConn, destCo
 			},
 			Message: mysqlResp,
 		})
-		recordMySQLMessage(h, mysqlRequests, mysqlResponses, operation, responseOperation, "mocks", ctx)
+		recordMySQLMessage(h, mysqlRequests, mysqlResponses, operation, responseOperation, "mocks", ctx, mysqlRequestTime, mysqlResponseTime)
 	}
 	return nil, nil
 }
-func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, operation string, responseOperation string, name string, ctx context.Context) {
+func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, operation string, responseOperation string, name string, ctx context.Context, mysqlRequestTime time.Time, mysqlResponseTime time.Time) {
 	shouldRecordCalls := true
 	if shouldRecordCalls {
 		meta := map[string]string{
@@ -805,15 +799,19 @@ func recordMySQLMessage(h *hooks.Hook, mysqlRequests []models.MySQLRequest, mysq
 			"operation":         operation,
 			"responseOperation": responseOperation,
 		}
+		// fmt.Println("THIS IS REQ TIME", mysqlRequestTime)
+		// fmt.Println("THIS IS RES TIME", mysqlResponseTime)
 		mysqlMock := &models.Mock{
 			Version: models.GetVersion(),
 			Kind:    models.SQL,
 			Name:    "mocks",
 			Spec: models.MockSpec{
-				Metadata:       meta,
-				MySqlRequests:  mysqlRequests,
-				MySqlResponses: mysqlResponses,
-				Created:        time.Now().Unix(),
+				Metadata:         meta,
+				MySqlRequests:    mysqlRequests,
+				MySqlResponses:   mysqlResponses,
+				Created:          time.Now().Unix(),
+				ReqTimestampMock: mysqlRequestTime,
+				ResTimestampMock: mysqlResponseTime,
 			},
 		}
 		h.AppendMocks(mysqlMock, ctx)

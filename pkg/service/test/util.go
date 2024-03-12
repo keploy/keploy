@@ -457,7 +457,7 @@ func FilterMocks(tc *models.TestCase, m []*models.Mock, logger *zap.Logger) ([]*
 	for _, mock := range m {
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			// If mock doesn't have either of one timestamp, then, logging a warning msg and appending the mock to filteredMocks to support backward compatibility.
-			logger.Warn("request or response timestamp of mock is missing for " + tc.Name)
+			logger.Debug("request or response timestamp of mock is missing for " + tc.Name)
 			mock.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, mock)
 			continue
