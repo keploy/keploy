@@ -44,11 +44,11 @@ func (r *recorder) Start(ctx context.Context) error {
 
 	// defining all the channels and variables required for the record
 	var runAppError models.AppError
-	var appErrChan = make(chan models.AppError)
+	var appErrChan = make(chan models.AppError, 1)
 	var incomingChan <-chan *models.TestCase
 	var outgoingChan <-chan *models.Mock
-	var insertTestErrChan = make(chan error)
-	var insertMockErrChan = make(chan error)
+	var insertTestErrChan = make(chan error, 10)
+	var insertMockErrChan = make(chan error, 10)
 	var appID uint64
 	var newTestSetID string
 	var testCount = 0
@@ -124,6 +124,9 @@ func (r *recorder) Start(ctx context.Context) error {
 		for testCase := range incomingChan {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
 			if err != nil {
+				if err == context.Canceled {
+					continue
+				}
 				insertTestErrChan <- err
 			} else {
 				testCount++
@@ -146,6 +149,9 @@ func (r *recorder) Start(ctx context.Context) error {
 		for mock := range outgoingChan {
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
+				if err == context.Canceled {
+					continue
+				}
 				insertMockErrChan <- err
 			} else {
 				mockCountMap[mock.GetKind()]++
