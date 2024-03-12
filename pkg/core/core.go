@@ -95,13 +95,13 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 	hookErrGrp, _ := errgroup.WithContext(ctx)
 	hookCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the hookCtx to control the lifecycle of the hooks
 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
-	hookCtx = context.WithValue(ctx, models.ErrGroupKey, hookErrGrp)
+	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
 
 	// create a new error group for the proxy
 	proxyErrGrp, _ := errgroup.WithContext(ctx)
 	proxyCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the proxyCtx to control the lifecycle of the proxy
 	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
-	proxyCtx = context.WithValue(ctx, models.ErrGroupKey, proxyErrGrp)
+	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
 
 	g.Go(func() error {
 		<-ctx.Done()
