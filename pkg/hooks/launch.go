@@ -297,7 +297,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 				for _, containerName := range containerNames {
 					if len(containerName) != 0 {
-						composeErr = h.idc.StopAndRemoveDockerContainerByID(containerName)
+						composeErr = h.idc.StopAndRemoveByID(containerName)
 						if composeErr != nil {
 							h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerName), zap.Error(composeErr))
 						}

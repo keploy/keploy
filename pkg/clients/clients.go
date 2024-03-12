@@ -11,7 +11,7 @@ type InternalDockerClient interface {
 	ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error
 	ConnectContainerToNetworksByNames(containerName string, networkName []string) error
 	StopAndRemoveDockerContainer() error
-	StopAndRemoveDockerContainerByID(containerID string) error
+	StopAndRemoveByID(containerID string) error
 	GetContainerID() string
 	SetContainerID(containerID string)
 	NetworkExists(network string) (bool, error)
