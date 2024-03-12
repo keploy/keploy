@@ -48,7 +48,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	hookErrGrp, _ := errgroup.WithContext(ctx)
 	hookCtx := context.WithoutCancel(ctx)
 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
-	hookCtx = context.WithValue(ctx, models.ErrGroupKey, hookErrGrp)
+	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
 
 	var stopReason string
 
