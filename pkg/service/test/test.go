@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,8 +32,9 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 type tester struct {
-	logger *zap.Logger
-	mutex  sync.Mutex
+	logger        *zap.Logger
+	mutex         sync.Mutex
+	hostConfigStr string // hosts string in the nsswitch.conf of linux system. To restore the system hosts configuration after completion of test
 }
 type TestOptions struct {
 	MongoPassword      string
@@ -70,12 +72,79 @@ func NewTester(logger *zap.Logger) Tester {
 	}
 }
 
+// setting up the dns routing for the linux system
+func (t *tester) setupNsswitchConfig() error {
+	// Check if the nsswitch.conf present for the system
+	if _, err := os.Stat("/etc/nsswitch.conf"); err == nil {
+		// Read the current nsswitch.conf
+		data, err := os.ReadFile("/etc/nsswitch.conf")
+		if err != nil {
+			t.logger.Error("failed to read the nsswitch.conf file from system", zap.Error(err))
+			return err
+		}
+
+		// Replace the hosts field value if it exists
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, "hosts:") {
+				t.hostConfigStr = lines[i]
+				lines[i] = "hosts: files dns"
+			}
+		}
+
+		// Write the modified nsswitch.conf back to the file
+		err = os.WriteFile("/etc/nsswitch.conf", []byte(strings.Join(lines, "\n")), 0644)
+		if err != nil {
+			t.logger.Error("failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy", zap.Error(err))
+			return err
+		}
+
+		t.logger.Debug("Successfully written to nsswitch config of linux")
+	}
+	return nil
+}
+
+// resetNsswitchConfig resets the hosts config of nsswitch of the system
+func (t *tester) resetNsswitchConfig() {
+	data, err := os.ReadFile("/etc/nsswitch.conf")
+	if err != nil {
+		t.logger.Error("failed to read the nsswitch.conf file from system", zap.Error(err))
+		return
+	}
+
+	// Replace the hosts field value if it exists with the actual system hosts value
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "hosts:") {
+			lines[i] = t.hostConfigStr
+		}
+	}
+
+	// Write the modified nsswitch.conf back to the file
+	err = os.WriteFile("/etc/nsswitch.conf", []byte(strings.Join(lines, "\n")), 0644)
+	if err != nil {
+		t.logger.Error("failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy", zap.Error(err))
+		return
+	}
+
+	t.logger.Debug("Successfully reset the nsswitch config of linux")
+}
+
 func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	var (
 		returnVal TestEnvironmentSetup
 		err       error
 	)
 	returnVal.Storage = cfg.Storage
+
+	// setting up the dns routing for the fedora distro
+	if runtime.GOOS == "linux" {
+		err = t.setupNsswitchConfig()
+		if err != nil {
+			return returnVal, err
+		}
+	}
+
 	// capturing the code coverage for go bianries built by go-version 1.20^
 	if cfg.WithCoverage {
 
@@ -99,7 +168,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 				return returnVal, err
 			} else if err == nil && !dirInfo.IsDir() {
 				t.logger.Error("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries.")
-				return returnVal, fmt.Errorf("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries.")
+				return returnVal, fmt.Errorf("the goCoverDir is not a directory. Please provide a valid path to a directory for go coverage binaries")
 			} else if err != nil && os.IsNotExist(err) {
 				err := makeDirectory(cfg.CoverageReportPath)
 				if err != nil {
@@ -121,7 +190,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	}
 
 	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
 	models.SetMode(models.MODE_TEST)
 
@@ -137,7 +206,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 
 	select {
 	case <-stopper:
-		return returnVal, errors.New("Keploy was interupted by stopper")
+		return returnVal, errors.New("keploy was interupted by stopper")
 	default:
 		// load the ebpf hooks into the kernel
 		if err := returnVal.LoadedHooks.LoadHooks(cfg.AppCmd, cfg.AppContainer, 0, context.Background(), nil, false); err != nil {
@@ -148,7 +217,7 @@ func (t *tester) InitialiseTest(cfg *TestConfig) (TestEnvironmentSetup, error) {
 	select {
 	case <-stopper:
 		returnVal.LoadedHooks.Stop(true)
-		return returnVal, errors.New("Keploy was interupted by stopper")
+		return returnVal, errors.New("keploy was interupted by stopper")
 	default:
 		// start the proxy
 		returnVal.ProxySet = proxy.BootProxy(t.logger, proxy.Option{Port: cfg.Proxyport, MongoPassword: cfg.MongoPassword}, cfg.AppCmd, cfg.AppContainer, 0, "", cfg.PassThroughPorts, returnVal.LoadedHooks, context.Background(), cfg.Delay)
@@ -234,6 +303,14 @@ func (t *tester) Test(path string, testReportPath string, appCmd string, options
 		return false
 	}
 	initialisedValues, err := t.InitialiseTest(cfg)
+
+	// reset the hosts config in nsswitch.conf of the system
+	defer func() {
+		if t.hostConfigStr != "" {
+			t.resetNsswitchConfig()
+		}
+	}()
+
 	// Recover from panic and gracefully shutdown
 	defer initialisedValues.LoadedHooks.Recover(pkg.GenerateRandomID())
 	if err != nil {

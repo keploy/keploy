@@ -924,12 +924,15 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 		destConnId := util.GetNextID()
 		logger := ps.logger.With(zap.Any("Client IP Address", conn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnId), zap.Any("Destination IP Address", actualAddress), zap.Any("Destination ConnectionID", destConnId))
 		if isTLS {
-			logger.Debug("", zap.Any("isTLS", isTLS))
+			logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 			config := &tls.Config{
 				InsecureSkipVerify: true,
 				ServerName:         destinationUrl,
 			}
-			dst, err = tls.Dial("tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
+			dialer := &net.Dialer{
+				Timeout: 1 * time.Second,
+			}
+			dst, err = tls.DialWithDialer(dialer, "tcp", fmt.Sprintf("%v:%v", destinationUrl, destInfo.DestPort), config)
 			if err != nil && models.GetMode() != models.MODE_TEST {
 				logger.Error("failed to dial the connection to destination server", zap.Error(err), zap.Any("proxy port", port), zap.Any("server address", actualAddress))
 				conn.Close()
@@ -944,8 +947,11 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 			}
 		}
 
+		logger.Debug("checking for the passThroughProts in the proxy server...", zap.Any("passThroughPorts", ps.PassThroughPorts), zap.Any("destPort", destInfo.DestPort))
+
 		for _, port := range ps.PassThroughPorts {
 			if port == uint(destInfo.DestPort) {
+				logger.Debug("passThroughPort found", zap.Any("for port", port))
 				err = ps.callNext(buffer, conn, dst, logger)
 				if err != nil {
 					logger.Error("failed to pass through the outgoing call", zap.Error(err), zap.Any("for port", port))
@@ -953,6 +959,7 @@ func (ps *ProxySet) handleConnection(conn net.Conn, port uint32, ctx context.Con
 				}
 			}
 		}
+		logger.Debug("checking the buffer packet protocol", zap.Any("buffer", string(buffer)))
 		genericCheck := true
 		//Checking for all the parsers.
 		for _, parser := range ParsersMap {
