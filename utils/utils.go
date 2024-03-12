@@ -179,6 +179,8 @@ func IsDockerRelatedCmd(cmd string) (bool, string) {
 		"sudo docker-compose ",
 		"docker compose ",
 		"sudo docker compose ",
+		"docker start",
+		"sudo docker start",
 		"docker ",
 		"sudo docker ",
 	}
@@ -187,6 +189,8 @@ func IsDockerRelatedCmd(cmd string) (bool, string) {
 		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
 			if strings.Contains(pattern, "compose") {
 				return true, "docker-compose"
+			} else if strings.Contains(pattern, "start") {
+				return true, "docker-start"
 			}
 			return true, "docker"
 		}
