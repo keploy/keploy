@@ -53,8 +53,10 @@ func (r *replayer) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	var stopReason = "replay completed successfully"
+	var hookCancel context.CancelFunc
+
+	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
 		case <-ctx.Done():
@@ -65,6 +67,9 @@ func (r *replayer) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to stop recording")
 			}
 		}
+		if hookCancel != nil {
+			hookCancel()
+		}
 		err := g.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
@@ -72,7 +77,7 @@ func (r *replayer) Start(ctx context.Context) error {
 	}()
 
 	// BootReplay will start the hooks and proxy and return the testRunID and appID
-	testRunID, appID, err := r.BootReplay(ctx)
+	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
 		utils.LogError(r.logger, err, stopReason)
@@ -140,14 +145,16 @@ func (r *replayer) Start(ctx context.Context) error {
 	return nil
 }
 
-func (r *replayer) BootReplay(ctx context.Context) (string, uint64, error) {
+func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error) {
+
+	var cancel context.CancelFunc
 
 	testRunIDs, err := r.reportDB.GetAllTestRunIDs(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return "", 0, err
+			return "", 0, nil, err
 		}
-		return "", 0, fmt.Errorf("failed to get all test run ids: %w", err)
+		return "", 0, nil, fmt.Errorf("failed to get all test run ids: %w", err)
 	}
 
 	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
@@ -155,26 +162,28 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, error) {
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return "", 0, err
+			return "", 0, nil, err
 		}
-		return "", 0, fmt.Errorf("failed to setup instrumentation: %w", err)
+		return "", 0, nil, fmt.Errorf("failed to setup instrumentation: %w", err)
 	}
 
 	// starting the hooks and proxy
 	select {
 	case <-ctx.Done():
-		return "", 0, context.Canceled
+		return "", 0, nil, context.Canceled
 	default:
+		hookCtx := context.WithoutCancel(ctx)
+		hookCtx, cancel = context.WithCancel(hookCtx)
 		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return "", 0, err
+				return "", 0, nil, err
 			}
-			return "", 0, fmt.Errorf("failed to start the hooks and proxy: %w", err)
+			return "", 0, nil, fmt.Errorf("failed to start the hooks and proxy: %w", err)
 		}
 	}
 
-	return newTestRunID, appID, nil
+	return newTestRunID, appID, cancel, nil
 }
 
 func (r *replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
@@ -575,6 +584,7 @@ func (r *replayer) RunApplication(ctx context.Context, appID uint64, opts models
 
 func (r *replayer) ProvideMocks(ctx context.Context) error {
 	var stopReason string
+	var hookCancel context.CancelFunc
 	defer func() {
 		select {
 		case <-ctx.Done():
@@ -584,7 +594,9 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to stop mock replay")
 			}
-
+		}
+		if hookCancel != nil {
+			hookCancel()
 		}
 	}()
 
@@ -607,7 +619,7 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	_, appID, err := r.BootReplay(ctx)
+	_, appID, hookCancel, err := r.BootReplay(ctx)
 	if err != nil {
 		stopReason = "failed to boot replay"
 		utils.LogError(r.logger, err, stopReason)

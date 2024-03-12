@@ -20,7 +20,7 @@ func (r *mutationResolver) Start(ctx context.Context) (*model.TestRunInfo, error
 		return nil, err
 	}
 
-	testRunId, appId, err := r.replay.BootReplay(ctx)
+	testRunId, appId, _, err := r.replay.BootReplay(ctx)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to boot replay")
 		return nil, err
