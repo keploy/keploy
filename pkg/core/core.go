@@ -86,8 +86,43 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 	default:
 	}
 
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
+
+	// create a new error group for the hooks
+	hookErrGrp, _ := errgroup.WithContext(ctx)
+	hookCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the hookCtx to control the lifecycle of the hooks
+	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
+	hookCtx = context.WithValue(ctx, models.ErrGroupKey, hookErrGrp)
+
+	// create a new error group for the proxy
+	proxyErrGrp, _ := errgroup.WithContext(ctx)
+	proxyCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the proxyCtx to control the lifecycle of the proxy
+	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
+	proxyCtx = context.WithValue(ctx, models.ErrGroupKey, proxyErrGrp)
+
+	g.Go(func() error {
+		<-ctx.Done()
+
+		proxyCtxCancel()
+		err = proxyErrGrp.Wait()
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to stop the proxy")
+		}
+
+		hookCtxCancel()
+		err := hookErrGrp.Wait()
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to unload the hooks")
+		}
+
+		return nil
+	})
+
 	//load hooks
-	err = c.hook.Load(ctx, id, HookCfg{
+	err = c.hook.Load(hookCtx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
 		IsDocker:   isDocker,
@@ -113,7 +148,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
 	//start proxy
-	err = c.proxy.StartProxy(ctx, ProxyOptions{
+	err = c.proxy.StartProxy(proxyCtx, ProxyOptions{
 		DNSIPv4Addr: a.KeployIPv4Addr(),
 		//DnsIPv6Addr: ""
 	})
