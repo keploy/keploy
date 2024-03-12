@@ -51,7 +51,7 @@ func (u *updater) Update() {
 		return
 	}
 
-	latestVersion := releaseInfo.TagName
+	latestVersion := releaseInfo.TagName[1:]
 	changelog := releaseInfo.Body
 
 	if currentVersion == latestVersion {
