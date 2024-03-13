@@ -26,7 +26,7 @@ python3 manage.py migrate
 sudo rm -rf keploy/
 
 # Update the global noise to ignore the Allow header.
-config_file="./keploy-config.yaml"
+config_file="./keploy.yml"
 sed -i 's/header: {}/header: {"Allow":[]}/' "$config_file"
 
 # Wait for 5 seconds for it to complete

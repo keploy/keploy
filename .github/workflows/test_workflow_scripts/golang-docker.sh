@@ -11,7 +11,7 @@ docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 docker run  --name keploy-v2 -p 16789:16789 --privileged --pid=host -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 config --generate
 
 # Update the global noise to ts.
-config_file="./keploy-config.yaml"
+config_file="./keploy.yml"
 sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
