@@ -23,8 +23,6 @@ sed -i 's/global: {}/global: {body: {"ts":[]}}/' "$config_file"
 
 sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
-cat $config_file
-
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
 
@@ -98,9 +96,9 @@ sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 # go test
 
 # Get the test results from the testReport file.
-report_file="./keploy/reports/test-run-1/test-set-0-report.yaml"
+report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/reports/test-run-1/test-set-1-report.yaml"
+report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.

@@ -518,9 +518,11 @@ func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models
 func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
 
 	noiseConfig := r.config.Test.GlobalNoise.Global
+	fmt.Println("NoiseConfig", noiseConfig)
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
+	fmt.Println("NoiseConfig", noiseConfig)
 	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
