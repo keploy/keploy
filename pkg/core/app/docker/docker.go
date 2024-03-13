@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	kDefaultTimeoutForDockerQuery = 1 * time.Minute
+	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
 type Impl struct {
@@ -38,7 +38,7 @@ func New(logger *zap.Logger) (Client, error) {
 	}
 	return &Impl{
 		APIClient:             dockerClient,
-		timeoutForDockerQuery: kDefaultTimeoutForDockerQuery,
+		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
 		logger:                logger,
 	}, nil
 }
