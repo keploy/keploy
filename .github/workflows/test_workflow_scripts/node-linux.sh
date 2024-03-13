@@ -74,8 +74,7 @@ sudo ./../../keployv2 config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
-sed -i '/selectedTests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
-
+sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "$config_file"
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
 
