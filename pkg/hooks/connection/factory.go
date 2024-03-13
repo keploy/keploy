@@ -165,8 +165,8 @@ func capture(db platform.TestCaseDB, req *http.Request, resp *http.Response, log
 			}
 
 			testRes, err := pkg.SimulateHttp(testCase, "", logger, 10)
-			if err != nil && resp == nil {
-				logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("passed", models.HighlightFailingString("false")))
+			if err != nil {
+				logger.Error("Request could not be simulated for detecting autonoise", zap.Error(err))
 			} else {
 				// checking the difference in label values in request and response
 				ok, diff := utils.TestHttp(testCase, testRes, models.GlobalNoise{}, true, logger, &sync.Mutex{}, false)
