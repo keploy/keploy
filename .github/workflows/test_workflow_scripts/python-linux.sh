@@ -20,14 +20,14 @@ python3 manage.py makemigrations
 python3 manage.py migrate
 
 # Generate the keploy-config file.
-./../../../keployv2 config --generate
+sudo ./../../../keployv2 config --generate
 
 #Clean any keploy folders.
 sudo rm -rf keploy/
 
 # Update the global noise to ignore the Allow header.
 config_file="./keploy.yml"
-sed -i 's/header: {}/header: {"Allow":[]}/' "$config_file"
+sed -i 's/global: {}/global :{"header": {"Allow":[]}}/' "$config_file"
 
 # Wait for 5 seconds for it to complete
 sleep 5
@@ -92,9 +92,9 @@ done
 sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-run-1/report-1.yaml"
+report_file="./keploy/reports/test-run-0/report-1.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-run-1/report-2.yaml"
+report_file2="./keploy/reports/test-run-0/report-2.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
