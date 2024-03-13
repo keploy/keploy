@@ -200,6 +200,56 @@ func diffIndex(s1, s2 string) (int, bool) {
  * minus or add symbol followed by the respective line.
  */
 func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
+
+	// Check if inputs are JSON arrays
+	if json1[0] == '[' && json1[len(json1)-1] == ']' && json2[0] == '[' && json2[len(json2)-1] == ']' {
+		json1 = []byte("{\"array\":" + string(json1) + "}")
+		json2 = []byte("{\"array\":" + string(json2) + "}")
+	}
+
+	var jsonObject1 map[string]interface{}
+	_ = json.Unmarshal(json1, &jsonObject1)
+
+	var jsonObject2 map[string]interface{}
+	_ = json.Unmarshal(json2, &jsonObject2)
+	returnedString := ""
+	// Check if jsonObject1 is an array
+	if array1, ok := jsonObject1["array"].([]interface{}); ok {
+		if array2, ok := jsonObject2["array"].([]interface{}); ok {
+			// Iterate over items in json1
+			for i, item1 := range array1 {
+				// Convert item to JSON bytes
+				itemJSON1, err := json.Marshal(item1)
+				if err != nil {
+					return "", err
+				}
+				item2 := array2[i]
+				itemJSON2, err := json.Marshal(item2)
+				if err != nil {
+					return "", err
+				}
+				// Perform comparison for each item
+				diffString, err := performComparison(itemJSON1, itemJSON2)
+				if err != nil {
+					return "", err
+				}
+				returnedString += diffString
+			}
+		}
+	} else {
+		// Perform comparison for the entire JSON
+		diffString, err := performComparison(json1, json2)
+		if err != nil {
+			return "", err
+		}
+		returnedString += diffString
+	}
+
+	return returnedString, nil // Modify the return value as needed
+}
+
+// performComparison performs the comparison between two JSON byte slices.
+func performComparison(json1 []byte, json2 []byte) (string, error) {
 	var diff = gojsondiff.New()
 	dObj, err := diff.Compare(json1, json2)
 	if err != nil {
@@ -207,7 +257,7 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 	}
 
 	var jsonObject map[string]interface{}
-	err = json.Unmarshal([]byte(json1), &jsonObject)
+	err = json.Unmarshal(json1, &jsonObject)
 	if err != nil {
 		return "", err
 	}
