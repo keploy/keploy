@@ -444,6 +444,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	username := os.Getenv("SUDO_USER")
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
 	if username != "" {
+		// print all environment variables
+		a.logger.Debug("env inherited from the cmd", zap.Any("env", os.Environ()))
 		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
 		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", a.cmd)
 	}
@@ -459,9 +461,6 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
-
-	// Explicitly set the environment for cmd
-	cmd.Env = os.Environ()
 
 	// Set the output of the command
 	cmd.Stdout = os.Stdout

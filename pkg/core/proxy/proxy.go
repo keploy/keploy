@@ -406,10 +406,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
-		dstConn, err = tls.Dial("tcp", addr, cfg)
-		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
-			return err
+		if rule.Mode != models.MODE_TEST {
+			dialer := &net.Dialer{
+				Timeout: 1 * time.Second,
+			}
+			dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
+			if err != nil {
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+				return err
+			}
 		}
 
 		dstCfg.TLSCfg = cfg
