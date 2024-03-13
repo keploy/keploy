@@ -5,12 +5,11 @@ import (
 	"github.com/k0kubun/pp/v3"
 )
 
-// Patterns for different usecases in keploy
 const (
-	NoSQLDB             string = "NO_SQL_DB"
-	SQLDB               string = "SQL_DB"
+	NoSqlDB             string = "NO_SQL_DB"
+	SqlDB               string = "SQL_DB"
 	GRPC                string = "GRPC"
-	HTTPClient          string = "HTTP_CLIENT"
+	HttpClient          string = "HTTP_CLIENT"
 	TestSetPattern      string = "test-set-"
 	String              string = "string"
 	TestRunTemplateName string = "test-run-"
@@ -57,7 +56,6 @@ var FailingColorScheme = pp.ColorScheme{
 	ObjectLength:    pp.Blue,
 }
 
-// MySQL constants
 const (
 	TypeDecimal    byte = 0x00
 	TypeTiny       byte = 0x01
@@ -88,7 +86,6 @@ const (
 	TypeGeometry   byte = 0xff
 )
 
-// MySQL constants
 const (
 	HeaderSize         = 1024
 	OKPacketResulSet   = 0x00
@@ -96,30 +93,30 @@ const (
 	LengthEncodedInt   = 0xfb
 )
 
-// MySQL constants
+// ColumnValue represents a value from a column in a result set
+
 const (
 	OK               = 0x00
 	ERR              = 0xff
 	LocalInFile      = 0xfb
 	EOF         byte = 0xfe
+	flagUnsigned
+	statusMoreResultsExists
 )
 
-// MySQL constants
 const (
 	AuthMoreData                                 byte = 0x01
-	CachingSha2PasswordRequestPublicKey          byte = 2
-	CachingSha2PasswordFastAuthSuccess           byte = 3
-	CachingSha2PasswordPerformFullAuthentication byte = 4
+	CachingSha2PasswordRequestPublicKey               = 2
+	CachingSha2PasswordFastAuthSuccess                = 3
+	CachingSha2PasswordPerformFullAuthentication      = 4
 )
 
-// MySQL constants
 const (
 	MaxPacketSize = 1<<24 - 1
 )
 
 type CapabilityFlags uint32
 
-// MySQL constants
 const (
 	CLIENT_LONG_PASSWORD CapabilityFlags = 1 << iota
 	CLIENT_FOUND_ROWS
@@ -148,9 +145,67 @@ const (
 	CLIENT_DEPRECATE_EOF
 )
 
+var mySQLfieldTypeNames = map[byte]string{
+	0x00: "MYSQL_TYPE_DECIMAL",
+	0x01: "MYSQL_TYPE_TINY",
+	0x02: "MYSQL_TYPE_SHORT",
+	0x03: "MYSQL_TYPE_LONG",
+	0x04: "MYSQL_TYPE_FLOAT",
+	0x05: "MYSQL_TYPE_DOUBLE",
+	0x06: "MYSQL_TYPE_NULL",
+	0x07: "MYSQL_TYPE_TIMESTAMP",
+	0x08: "MYSQL_TYPE_LONGLONG",
+	0x09: "MYSQL_TYPE_INT24",
+	0x0a: "MYSQL_TYPE_DATE",
+	0x0b: "MYSQL_TYPE_TIME",
+	0x0c: "MYSQL_TYPE_DATETIME",
+	0x0d: "MYSQL_TYPE_YEAR",
+	0x0e: "MYSQL_TYPE_NEWDATE",
+	0x0f: "MYSQL_TYPE_VARCHAR",
+	0x10: "MYSQL_TYPE_BIT",
+	0xf6: "MYSQL_TYPE_NEWDECIMAL",
+	0xf7: "MYSQL_TYPE_ENUM",
+	0xf8: "MYSQL_TYPE_SET",
+	0xf9: "MYSQL_TYPE_TINY_BLOB",
+	0xfa: "MYSQL_TYPE_MEDIUM_BLOB",
+	0xfb: "MYSQL_TYPE_LONG_BLOB",
+	0xfc: "MYSQL_TYPE_BLOB",
+	0xfd: "MYSQL_TYPE_VAR_STRING",
+	0xfe: "MYSQL_TYPE_STRING",
+	0xff: "MYSQL_TYPE_GEOMETRY",
+}
+var columnTypeValues = map[string]byte{
+	"MYSQL_TYPE_DECIMAL":     0x00,
+	"MYSQL_TYPE_TINY":        0x01,
+	"MYSQL_TYPE_SHORT":       0x02,
+	"MYSQL_TYPE_LONG":        0x03,
+	"MYSQL_TYPE_FLOAT":       0x04,
+	"MYSQL_TYPE_DOUBLE":      0x05,
+	"MYSQL_TYPE_NULL":        0x06,
+	"MYSQL_TYPE_TIMESTAMP":   0x07,
+	"MYSQL_TYPE_LONGLONG":    0x08,
+	"MYSQL_TYPE_INT24":       0x09,
+	"MYSQL_TYPE_DATE":        0x0a,
+	"MYSQL_TYPE_TIME":        0x0b,
+	"MYSQL_TYPE_DATETIME":    0x0c,
+	"MYSQL_TYPE_YEAR":        0x0d,
+	"MYSQL_TYPE_NEWDATE":     0x0e,
+	"MYSQL_TYPE_VARCHAR":     0x0f,
+	"MYSQL_TYPE_BIT":         0x10,
+	"MYSQL_TYPE_NEWDECIMAL":  0xf6,
+	"MYSQL_TYPE_ENUM":        0xf7,
+	"MYSQL_TYPE_SET":         0xf8,
+	"MYSQL_TYPE_TINY_BLOB":   0xf9,
+	"MYSQL_TYPE_MEDIUM_BLOB": 0xfa,
+	"MYSQL_TYPE_LONG_BLOB":   0xfb,
+	"MYSQL_TYPE_BLOB":        0xfc,
+	"MYSQL_TYPE_VAR_STRING":  0xfd,
+	"MYSQL_TYPE_STRING":      0xfe,
+	"MYSQL_TYPE_GEOMETRY":    0xff,
+}
+
 type FieldType byte
 
-// MySQL constants
 const (
 	FieldTypeDecimal FieldType = iota
 	FieldTypeTiny
@@ -170,8 +225,6 @@ const (
 	FieldTypeVarChar
 	FieldTypeBit
 )
-
-// MySQL constants
 const (
 	FieldTypeJSON FieldType = iota + 0xf5
 	FieldTypeNewDecimal
@@ -186,6 +239,33 @@ const (
 	FieldTypeGeometry
 )
 
-type contextKey string
-
-const ErrGroupKey contextKey = "errGroup"
+var fieldTypeNames = map[FieldType]string{
+	FieldTypeDecimal:    "FieldTypeDecimal",
+	FieldTypeTiny:       "FieldTypeTiny",
+	FieldTypeShort:      "FieldTypeShort",
+	FieldTypeLong:       "FieldTypeLong",
+	FieldTypeFloat:      "FieldTypeFloat",
+	FieldTypeDouble:     "FieldTypeDouble",
+	FieldTypeNULL:       "FieldTypeNULL",
+	FieldTypeTimestamp:  "FieldTypeTimestamp",
+	FieldTypeLongLong:   "FieldTypeLongLong",
+	FieldTypeInt24:      "FieldTypeInt24",
+	FieldTypeDate:       "FieldTypeDate",
+	FieldTypeTime:       "FieldTypeTime",
+	FieldTypeDateTime:   "FieldTypeDateTime",
+	FieldTypeYear:       "FieldTypeYear",
+	FieldTypeNewDate:    "FieldTypeNewDate",
+	FieldTypeVarChar:    "FieldTypeVarChar",
+	FieldTypeBit:        "FieldTypeBit",
+	FieldTypeJSON:       "FieldTypeJSON",
+	FieldTypeNewDecimal: "FieldTypeNewDecimal",
+	FieldTypeEnum:       "FieldTypeEnum",
+	FieldTypeSet:        "FieldTypeSet",
+	FieldTypeTinyBLOB:   "FieldTypeTinyBLOB",
+	FieldTypeMediumBLOB: "FieldTypeMediumBLOB",
+	FieldTypeLongBLOB:   "FieldTypeLongBLOB",
+	FieldTypeBLOB:       "FieldTypeBLOB",
+	FieldTypeVarString:  "FieldTypeVarString",
+	FieldTypeString:     "FieldTypeString",
+	FieldTypeGeometry:   "FieldTypeGeometry",
+}

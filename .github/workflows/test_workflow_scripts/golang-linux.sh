@@ -15,7 +15,7 @@ if [ -f "./keploy-config.yaml" ]; then
 fi
 
 # Generate the keploy-config file.
-./../../keployv2 config --generate
+./../../keployv2 generate-config
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"

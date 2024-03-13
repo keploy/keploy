@@ -18,7 +18,6 @@ func GetVersion() (V1 Version) {
 	return currentVersion
 }
 
-// mocks types
 const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
@@ -40,8 +39,8 @@ type TestCase struct {
 	Created  int64               `json:"created" bson:"created"`
 	Updated  int64               `json:"updated" bson:"updated"`
 	Captured int64               `json:"captured" bson:"captured"`
-	HTTPReq  HTTPReq             `json:"http_req" bson:"http_req"`
-	HTTPResp HTTPResp            `json:"http_resp" bson:"http_resp"`
+	HttpReq  HttpReq             `json:"http_req" bson:"http_req"`
+	HttpResp HttpResp            `json:"http_resp" bson:"http_resp"`
 	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys"`
 	GrpcResp GrpcResp            `json:"grpcResp" bson:"grpcResp"`
 	GrpcReq  GrpcReq             `json:"grpcReq" bson:"grpcReq"`

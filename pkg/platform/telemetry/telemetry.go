@@ -1,131 +1,174 @@
-// Package telemetry provides functionality for telemetry data collection.
 package telemetry
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"runtime"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/utils"
 	"go.uber.org/zap"
 )
 
-var teleURL = "https://telemetry.keploy.io/analytics"
+var teleUrl = "https://telemetry.keploy.io/analytics"
 
 type Telemetry struct {
 	Enabled        bool
 	OffMode        bool
 	logger         *zap.Logger
 	InstallationID string
+	store          FS
 	KeployVersion  string
 	GlobalMap      map[string]interface{}
 	client         *http.Client
 }
 
-type Options struct {
-	Enabled        bool
-	Version        string
-	GlobalMap      map[string]interface{}
-	InstallationID string
-}
-
-func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
-	return &Telemetry{
-		logger:         logger,
-		KeployVersion:  opt.Version,
-		GlobalMap:      opt.GlobalMap,
-		InstallationID: opt.InstallationID,
-		client:         &http.Client{Timeout: 10 * time.Second},
+func NewTelemetry(enabled, offMode bool, store FS, logger *zap.Logger, version string, GlobalMap map[string]interface{}) *Telemetry {
+	if version == "" {
+		version = utils.Version
 	}
+	tele := Telemetry{
+		Enabled:       enabled,
+		OffMode:       offMode,
+		logger:        logger,
+		store:         store,
+		KeployVersion: version,
+		GlobalMap:     GlobalMap,
+		client:        &http.Client{Timeout: 10 * time.Second},
+	}
+	return &tele
 }
 
-func (tel *Telemetry) Ping(ctx context.Context) {
+func (tel *Telemetry) Ping(isTestMode bool) {
 	if !tel.Enabled {
 		return
 	}
+
 	go func() {
+		defer utils.HandlePanic()
 		for {
-			tel.SendTelemetry(ctx, "Ping")
+			var count int64
+			var id string
+
+			id, _ = tel.store.Get(true)
+			count = int64(len(id))
+
+			event := models.TeleEvent{
+				EventType: "Ping",
+				CreatedAt: time.Now().Unix(),
+			}
+
+			if count == 0 {
+				//Check in the old keploy folder.
+				id, _ = tel.store.Get(false)
+				count = int64(len(id))
+				if count == 0 {
+					bin, err := marshalEvent(event, tel.logger)
+					if err != nil {
+						break
+					}
+					resp, err := http.Post(teleUrl, "application/json", bytes.NewBuffer(bin))
+					if err != nil {
+						tel.logger.Debug("failed to send request for analytics", zap.Error(err))
+						break
+					}
+					installation_id, err := unmarshalResp(resp, tel.logger)
+					if err != nil {
+						break
+					}
+					id = installation_id
+				}
+				tel.store.Set(id)
+			}
+			tel.InstallationID = id
+			tel.SendTelemetry("Ping")
 			time.Sleep(5 * time.Minute)
 		}
 	}()
 }
 
-func (tel *Telemetry) TestSetRun(ctx context.Context, success int, failure int, testSet string, runStatus string) {
-	go tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure, "Test-Set": testSet, "Run-Status": runStatus})
+func (tel *Telemetry) Testrun(success int, failure int) {
+	tel.SendTelemetry("TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure})
 }
 
-func (tel *Telemetry) TestRun(ctx context.Context, success int, failure int, testSets int, runStatus string) {
-	go tel.SendTelemetry(ctx, "TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure, "Test-Sets": testSets, "Run-Status": runStatus})
+// func (tel *Telemetry) UnitTestRun(cmd string, success int, failure int) {
+// 	tel.SendTelemetry("UnitTestRun", map[string]interface{}{"Cmd": cmd, "Passed-UnitTests": success, "Failed-UnitTests": failure})
+// }
+
+// Telemetry event for the Mocking feature test run
+func (tel *Telemetry) MockTestRun(utilizedMocks int) {
+	tel.SendTelemetry("MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
 }
 
-// MockTestRun is Telemetry event for the Mocking feature test run
-func (tel *Telemetry) MockTestRun(ctx context.Context, utilizedMocks int) {
-	go tel.SendTelemetry(ctx, "MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
+// Telemetry event for the tests and mocks that are recorded
+func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int) {
+	tel.SendTelemetry("RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
 }
 
-// RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
-func (tel *Telemetry) RecordedTestSuite(ctx context.Context, testSet string, testsTotal int, mockTotal map[string]int) {
-	go tel.SendTelemetry(ctx, "RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
+func (tel *Telemetry) RecordedTestAndMocks() {
+	tel.SendTelemetry("RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
 }
 
-func (tel *Telemetry) RecordedTestAndMocks(ctx context.Context) {
-	go tel.SendTelemetry(ctx, "RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
+// Telemetry event for the mocks that are recorded in the mocking feature
+func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
+	tel.SendTelemetry("RecordedMocks", map[string]interface{}{"mocks": mockTotal})
 }
 
-// RecordedMocks is Telemetry event for the mocks that are recorded in the mocking feature
-func (tel *Telemetry) RecordedMocks(ctx context.Context, mockTotal map[string]int) {
-	go tel.SendTelemetry(ctx, "RecordedMocks", map[string]interface{}{"mocks": mockTotal})
+func (tel *Telemetry) RecordedMock(mockType string) {
+	tel.SendTelemetry("RecordedMock", map[string]interface{}{"mock": mockType})
 }
 
-func (tel *Telemetry) RecordedTestCaseMock(ctx context.Context, mockType string) {
-	go tel.SendTelemetry(ctx, "RecordedTestCaseMock", map[string]interface{}{"mock": mockType})
-}
+func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
+	go func() {
 
-func (tel *Telemetry) SendTelemetry(ctx context.Context, eventType string, output ...map[string]interface{}) {
-	if tel.Enabled {
-		event := models.TeleEvent{
-			EventType: eventType,
-			CreatedAt: time.Now().Unix(),
-		}
-		event.Meta = make(map[string]interface{})
-		if len(output) != 0 {
-			event.Meta = output[0]
-		}
+		if tel.Enabled {
+			event := models.TeleEvent{
+				EventType: eventType,
+				CreatedAt: time.Now().Unix(),
+			}
+			event.Meta = make(map[string]interface{})
+			if len(output) != 0 {
+				event.Meta = output[0]
+			}
 
-		if tel.GlobalMap != nil {
-			event.Meta["global-map"] = tel.GlobalMap
-		}
+			if tel.GlobalMap != nil {
+				event.Meta["global-map"] = tel.GlobalMap
+			}
 
-		event.InstallationID = tel.InstallationID
-		event.OS = runtime.GOOS
-		event.KeployVersion = tel.KeployVersion
-		event.Arch = runtime.GOARCH
-		bin, err := marshalEvent(event, tel.logger)
-		if err != nil {
-			tel.logger.Debug("failed to marshal event", zap.Error(err))
-			return
-		}
+			if tel.InstallationID == "" {
+				id := ""
+				id, _ = tel.store.Get(true)
+				if id == "" {
+					id, _ = tel.store.Get(false)
+				}
+				tel.InstallationID = id
+			}
+			event.InstallationID = tel.InstallationID
+			event.OS = runtime.GOOS
+			event.KeployVersion = tel.KeployVersion
+			event.Arch = runtime.GOARCH
+			bin, err := marshalEvent(event, tel.logger)
+			if err != nil {
+				tel.logger.Debug("failed to marshal event", zap.Error(err))
+				return
+			}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, teleURL, bytes.NewBuffer(bin))
-		if err != nil {
-			tel.logger.Debug("failed to create request for analytics", zap.Error(err))
-			return
-		}
+			req, err := http.NewRequest(http.MethodPost, teleUrl, bytes.NewBuffer(bin))
+			if err != nil {
+				tel.logger.Debug("failed to create request for analytics", zap.Error(err))
+				return
+			}
 
-		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+			req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-		resp, err := tel.client.Do(req)
-		if err != nil {
-			tel.logger.Debug("failed to send request for analytics", zap.Error(err))
-			return
+			defer utils.HandlePanic()
+			resp, err := tel.client.Do(req)
+			if err != nil {
+				tel.logger.Debug("failed to send request for analytics", zap.Error(err))
+				return
+			}
+			unmarshalResp(resp, tel.logger)
 		}
-		_, err = unmarshalResp(resp, tel.logger)
-		if err != nil {
-			tel.logger.Debug("failed to unmarshal response", zap.Error(err))
-			return
-		}
-	}
+	}()
 }
