@@ -8,9 +8,10 @@ type Mutation struct {
 type Query struct {
 }
 
-type TestRunInfo struct {
-	AppID     int    `json:"appId"`
-	TestRunID string `json:"testRunId"`
+type RunTestSetResponse struct {
+	Success   bool    `json:"success"`
+	TestRunID string  `json:"testRunId"`
+	Message   *string `json:"message,omitempty"`
 }
 
 type TestSetStatus struct {
