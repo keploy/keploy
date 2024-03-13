@@ -21,10 +21,10 @@ RUN go build -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
 
-ENV IS_DOCKER_CMD=true
+ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
-RUN apt-get update && \
+RUN apt-get tools && \
     apt-get install -y ca-certificates curl sudo && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
