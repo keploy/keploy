@@ -10,7 +10,7 @@ git checkout native-linux
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
 # Check if there is a keploy-config file, if there is, delete it.
-if [ -f "./keploy.yaml" ]; then
+if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
 fi
 
@@ -18,7 +18,7 @@ fi
 sudo ./../../keployv2 config --generate
 
 # Update the global noise to ts.
-config_file="./keploy.yaml"
+config_file="./keploy.yml"
 sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
 
 sed -i 's/ports: 0/ports: 27017/' "$config_file"
