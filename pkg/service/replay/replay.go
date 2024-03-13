@@ -522,7 +522,6 @@ func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	fmt.Println("NoiseConfig", noiseConfig)
 	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 

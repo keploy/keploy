@@ -251,6 +251,9 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+	fmt.Println("cfg", cfg)
+	fmt.Println("global ", cfg.Test.GlobalNoise)
+	fmt.Println("global noise", cfg.Test.GlobalNoise.Global)
 	if cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
