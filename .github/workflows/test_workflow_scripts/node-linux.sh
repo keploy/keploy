@@ -76,6 +76,8 @@ sudo ./../../keployv2 config --generate
 config_file="./keploy.yml"
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "$config_file"
 
+cat $config_file
+
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
 
 # Get the test results from the testReport file.
