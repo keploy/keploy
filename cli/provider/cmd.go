@@ -155,6 +155,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 	switch cmd.Name() {
 	case "update":
 		return nil
+	case "normalise":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().String("test-set", "", "Test Set to be normalised")
+		cmd.Flags().String("test-cases", "", "Test Cases to be normalised")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")

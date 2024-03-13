@@ -1,74 +1,90 @@
-package cmd
+package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	normalise "go.keploy.io/server/pkg/service/normalise"
+	"go.keploy.io/server/v2/config"
+	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-// NewCmdNormalise initializes a new command to update the Keploy binary file.
-func NewCmdNormalise(logger *zap.Logger) *Normalise {
-	normaliser := normalise.NewNormaliser(logger)
-	return &Normalise{
-		normaliser: normaliser,
-		logger:     logger,
-	}
+// func NewCmdNormalise(logger *zap.Logger) *Normalise {
+// 	normaliser := normalise.NewNormaliser(logger)
+// 	return &Normalise{
+// 		normaliser: normaliser,
+// 		logger:     logger,
+// 	}
+// }
+
+//	type Normalise struct {
+//		normaliser normalise.Normaliser
+//		logger     *zap.Logger
+//	}
+func init() {
+	Register("normalise", Normalise)
 }
 
-// Normalise holds the normaliser instance for managing binary updates.
-type Normalise struct {
-	normaliser normalise.Normaliser
-	logger     *zap.Logger
-}
-
-// GetCmd retrieves the command to normalise Keploy
-func (n *Normalise) GetCmd() *cobra.Command {
+// Normalise retrieves the command to normalise Keploy
+func Normalise(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var normaliseCmd = &cobra.Command{
 		Use:     "normalise",
 		Short:   "Normalise Keploy",
-		Example: "keploy normalise",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Example: "keploy normalise --path /path/to/localdir --test-set testset --test-cases testcases",
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				n.logger.Error("Error in getting path", zap.Error(err))
+				utils.LogError(logger, err, "Error in getting path")
 				return err
 			}
 			//if user provides relative path
 			if len(path) > 0 && path[0] != '/' {
 				absPath, err := filepath.Abs(path)
 				if err != nil {
-					n.logger.Error("failed to get the absolute path from relative path", zap.Error(err))
+					utils.LogError(logger, err, "failed to get the absolute path from relative path")
 				}
 				path = absPath
 			} else if len(path) == 0 { // if user doesn't provide any path
 				cdirPath, err := os.Getwd()
 				if err != nil {
-					n.logger.Error("failed to get the path of current directory", zap.Error(err))
+					utils.LogError(logger, err, "failed to get the path of current directory")
 				}
 				path = cdirPath
 			}
 			path += "/keploy"
 			testSet, err := cmd.Flags().GetString("test-set")
 			if err != nil || len(testSet) == 0 {
-				n.logger.Error("Please enter the testset to be normalised", zap.Error(err))
+				utils.LogError(logger, nil, "Please enter the testset to be normalised")
 				return err
 			}
 			testCases, err := cmd.Flags().GetString("test-cases")
 			if err != nil || len(testCases) == 0 {
-				n.logger.Error("Please enter the testcases to be normalised", zap.Error(err))
+				utils.LogError(logger, nil, "Please enter the testcases to be normalised")
 				return err
 			}
-			n.normaliser.Normalise(path, testSet, testCases)
+			svc, err := serviceFactory.GetService(ctx, "normalise", *conf)
+			if err != nil {
+				return err
+			}
+			var tools toolsSvc.Service
+			var ok bool
+			if tools, ok = svc.(toolsSvc.Service); !ok {
+				utils.LogError(logger, nil, "service doesn't satisfy normalise service interface")
+				return nil
+			}
+			if err := tools.Normalise(ctx, path, testSet, testCases); err != nil {
+				utils.LogError(logger, err, "failed to normalise test cases")
+				return err
+			}
 			return nil
 		},
 	}
-
-	normaliseCmd.Flags().StringP("path", "p", "", "Path to local directory where generated testcases/mocks are stored")
-	normaliseCmd.Flags().String("test-set", "", "Test Set to be normalised")
-	normaliseCmd.Flags().String("test-cases", "", "Test Cases to be normalised")
-
+	if err := cmdConfigurator.AddFlags(normaliseCmd, conf); err != nil {
+		utils.LogError(logger, err, "failed to add nornalise cmd flags")
+		return nil
+	}
 	return normaliseCmd
 }

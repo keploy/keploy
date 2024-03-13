@@ -13,10 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -272,5 +275,111 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	}
 
 	t.logger.Info("Config file generated successfully")
+	return nil
+}
+
+// Normalise initiates the normalise process for normalising the test cases.
+func (t *Tools) Normalise(_ context.Context, path string, testSet string, testCases string) error {
+	t.logger.Info("Test cases and Mock Path", zap.String("path", path))
+	testReportPath := filepath.Join(path, "testReports")
+
+	// Get a list of directories in the testReportPath
+	dirs, err := getDirectories(testReportPath)
+	if err != nil {
+		utils.LogError(t.logger, err, "Failed to get TestReports")
+		return err
+	}
+
+	// Find the last-run folder
+	sort.Strings(dirs)
+	var lastRunFolder string
+	maxFolderNumber := -1
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if strings.HasPrefix(dirs[i], "test-run-") {
+			folderNumberStr := strings.TrimPrefix(dirs[i], "test-run-")
+			folderNumber, err := strconv.Atoi(folderNumberStr)
+			if err != nil {
+				utils.LogError(t.logger, err, "Failed to parse folder number")
+				continue
+			}
+			if folderNumber > maxFolderNumber {
+				maxFolderNumber = folderNumber
+				lastRunFolder = dirs[i]
+			}
+		}
+	}
+	lastRunFolderPath := filepath.Join(testReportPath, lastRunFolder)
+	t.logger.Info("Test Run Folder", zap.String("folder", lastRunFolderPath))
+
+	// Get list of YAML files in the last run folder
+	files, err := fs.ReadDir(os.DirFS(lastRunFolderPath), ".")
+	if err != nil {
+		utils.LogError(t.logger, err, "Failed to read directory")
+		return err
+	}
+
+	// Iterate over each YAML file
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".yaml") {
+			filePath := filepath.Join(lastRunFolderPath, file.Name())
+
+			// Read the YAML file
+			yamlData, err := os.ReadFile(filePath)
+			if err != nil {
+				utils.LogError(t.logger, err, "Failed to read YAML file")
+				continue
+			}
+
+			// Unmarshal YAML into TestReport
+			var testReport models.TestReport
+			err = yaml.Unmarshal(yamlData, &testReport)
+			if err != nil {
+				utils.LogError(t.logger, err, "Failed to unmarshal YAML")
+				continue
+			}
+			testCasesArr := strings.Split(testCases, " ")
+			// Iterate over tests in the TestReport
+			for _, test := range testReport.Tests {
+				testCasePath := filepath.Join(path, testSet)
+				if test.Status == models.TestStatusFailed && test.TestCasePath == testCasePath && contains(testCasesArr, test.TestCaseID) {
+
+					// Read the contents of the testcase file
+					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
+					t.logger.Info("Updating testcase file", zap.String("filePath", testCaseFilePath))
+					testCaseContent, err := os.ReadFile(testCaseFilePath)
+					if err != nil {
+						utils.LogError(t.logger, err, "Failed to read testcase file")
+						continue
+					}
+
+					// Unmarshal YAML into TestCase
+					var testCase TestCaseFile
+					err = yaml.Unmarshal(testCaseContent, &testCase)
+					if err != nil {
+						utils.LogError(t.logger, err, "Failed to unmarshal YAML")
+						continue
+					}
+					t.logger.Info("Updating Response body from :" + testCase.Spec.Resp.Body + " to :" + test.Result.BodyResult[0].Actual)
+					testCase.Spec.Resp.Body = test.Result.BodyResult[0].Actual
+
+					// Marshal TestCase back to YAML
+					updatedYAML, err := yaml.Marshal(&testCase)
+					if err != nil {
+						utils.LogError(t.logger, err, "Failed to marshal YAML", zap.Error(err))
+						continue
+					}
+
+					// Write the updated YAML content back to the file
+					err = os.WriteFile(testCaseFilePath, updatedYAML, 0644)
+					if err != nil {
+						utils.LogError(t.logger, err, "Failed to write updated YAML to file", zap.Error(err))
+						continue
+					}
+
+					t.logger.Info("Updated testcase file successfully", zap.String("testCaseFilePath", testCaseFilePath))
+				}
+			}
+		}
+	}
 	return nil
 }
