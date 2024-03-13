@@ -56,7 +56,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 
 		h.logger.Debug("User Application is running inside docker in isolation", zap.Any("Container", appContainer), zap.Any("Network", appNetwork))
 		//search for the container and process it
-		err := h.processDockerEnv("", appContainer, appNetwork, buildDelay)
+		err := h.processDockerEnv("", appContainer, appNetwork, buildDelay, false)
 		if err != nil {
 			return err
 		}
@@ -235,7 +235,8 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 				}
 			}
 
-			err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay)
+			isDockerComposeCmd := cmd == "docker-compose"
+			err := h.processDockerEnv(appCmd, appContainer, appNetwork, buildDelay, isDockerComposeCmd)
 			if err != nil {
 				return err
 			}
@@ -261,7 +262,7 @@ func (h *Hook) LaunchUserApplication(appCmd, appContainer, appNetwork string, De
 	}
 }
 
-func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration) error {
+func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDelay time.Duration, isDockerComposeCmd bool) error {
 	// to notify the kernel hooks that the user application is related to Docker.
 	key := 0
 	value := true
@@ -270,6 +271,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 	stopListenContainer := make(chan bool)
 	stopApplicationErrors := false
 	abortStopListenContainerChan := false
+	isContainerCreated := false
 
 	dockerClient := h.idc
 	appErrCh := make(chan error, 1)
@@ -282,6 +284,26 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 			err := h.runApp(appCmd, true)
 			h.logger.Debug("Application stopped with the error", zap.Error(err))
+
+			if isContainerCreated && isDockerComposeCmd && h.userAppCmd.ProcessState.Exited() {
+
+				h.SetUserAppTerminateInitiated(true)
+
+				composeFile := findDockerComposeFile()
+				containerNames, composeErr := getContainersFromComposeFile(composeFile)
+				if composeErr != nil {
+					h.logger.Error("Failed to get the containers from the docker compose file", zap.Error(composeErr))
+				}
+
+				for _, containerName := range containerNames {
+					if len(containerName) != 0 {
+						composeErr = h.idc.StopAndRemoveByID(containerName)
+						if composeErr != nil {
+							h.logger.Error(fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerName), zap.Error(composeErr))
+						}
+					}
+				}
+			}
 			if !stopApplicationErrors {
 				appErrCh <- err
 			}
@@ -343,6 +365,8 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 				if e.Type == events.ContainerEventType && e.Action == "create" {
 					// Set Docker Container ID
 					h.idc.SetContainerID(e.ID)
+
+					isContainerCreated = true
 
 					// Fetch container details by inspecting using container ID to check if container is created
 					containerDetails, err := dockerClient.ContainerInspect(context.Background(), e.ID)
