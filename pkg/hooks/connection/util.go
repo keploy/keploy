@@ -66,7 +66,6 @@ func findNoisyLabelsUtil(map1, map2 map[string]interface{}, curPrefix string) []
 		} else {
 			diffKeys = append(diffKeys, prefix+"."+key)
 		}
-		prefix = curPrefix
 	}
 
 	return diffKeys
