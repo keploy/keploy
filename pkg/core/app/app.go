@@ -482,9 +482,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	default:
 		if err != nil {
 			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
-		} else {
-			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 		}
+		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 	}
 }
 
