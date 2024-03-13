@@ -12,6 +12,7 @@ record:
   networkName: ""
   delay: 5
   buildDelay: 30s
+  enableAutoNoise: false
   tests: 
     filters:
       - path: ""
@@ -41,6 +42,7 @@ test:
   buildDelay: 30s
   apiTimeout: 5
   ignoreOrdering: false
+  checkAutoNoise: false
   stubs:
     filters:
       - path: ""
@@ -57,15 +59,16 @@ type Config struct {
 }
 
 type Record struct {
-	Path          string        `json:"path" yaml:"path"`
-	Command       string        `json:"command" yaml:"command"`
-	ProxyPort     uint32        `json:"proxyport" yaml:"proxyport"`
-	ContainerName string        `json:"containerName" yaml:"containerName"`
-	NetworkName   string        `json:"networkName" yaml:"networkName"`
-	Delay         uint64        `json:"delay" yaml:"delay"`
-	BuildDelay    time.Duration `json:"buildDelay" yaml:"buildDelay"`
-	Tests         TestFilter    `json:"tests" yaml:"tests"`
-	Stubs         Stubs         `json:"stubs" yaml:"stubs"`
+	Path            string        `json:"path" yaml:"path"`
+	Command         string        `json:"command" yaml:"command"`
+	ProxyPort       uint32        `json:"proxyport" yaml:"proxyport"`
+	ContainerName   string        `json:"containerName" yaml:"containerName"`
+	NetworkName     string        `json:"networkName" yaml:"networkName"`
+	Delay           uint64        `json:"delay" yaml:"delay"`
+	BuildDelay      time.Duration `json:"buildDelay" yaml:"buildDelay"`
+	Tests           TestFilter    `json:"tests" yaml:"tests"`
+	Stubs           Stubs         `json:"stubs" yaml:"stubs"`
+	EnableAutoNoise bool          `json:"enableAutoNoise" yaml:"enableAutoNoise"`
 }
 
 type TestFilter struct {
@@ -104,12 +107,20 @@ type Test struct {
 	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
 	GenerateTestReport      bool                `json:"generateTestReport" yaml:"generateTestReport"`
 	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
+	CheckAutoNoise          bool                `json:"checkAutoNoise" yaml:"checkAutoNoise"`
 	Stubs                   Stubs               `json:"stubs" yaml:"stubs"`
 }
 
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global"`
 	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets"`
+}
+
+type AutoNoiseConfig struct {
+	AppCmd          string
+	AppContainer    string
+	UserIP          string
+	EnableAutoNoise bool
 }
 
 type (

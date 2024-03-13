@@ -414,7 +414,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 							networkDetails, ok := containerDetails.NetworkSettings.Networks[appNetwork]
 							if ok && networkDetails != nil {
 								h.logger.Debug(fmt.Sprintf("the ip of the docker container: %v", networkDetails.IPAddress))
-								if models.GetMode() == models.MODE_TEST {
+								if models.GetMode() == models.MODE_TEST || models.GetMode() == models.MODE_RECORD {
 									h.logger.Debug("setting container ip address")
 									containerIp = networkDetails.IPAddress
 									h.logger.Debug("receiver channel received the ip address", zap.Any("containerIp found", containerIp))
@@ -440,7 +440,7 @@ func (h *Hook) processDockerEnv(appCmd, appContainer, appNetwork string, buildDe
 
 						h.logger.Info("container & network found and processed successfully", zap.Any("time", time.Now().UnixNano()))
 						abortStopListenContainerChan = true
-						if models.GetMode() == models.MODE_TEST {
+						if models.GetMode() == models.MODE_TEST || models.GetMode() == models.MODE_RECORD {
 							h.userIpAddress <- containerIp
 						}
 						return

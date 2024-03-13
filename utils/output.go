@@ -1,4 +1,4 @@
-package test
+package utils
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/yudai/gojsondiff"
 	"github.com/yudai/gojsondiff/formatter"
-	"go.keploy.io/server/utils"
 )
 
 // Chars PER expected/actual string. Can be changed no problem
@@ -94,7 +93,7 @@ func (d *DiffsPrinter) Render() error {
 			midPartpaint = redPaint(d.text)
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
+		initalPart := yellowPaint(WarningSign + startPart)
 
 		endPaint := yellowPaint(" are in different order but have the same objects")
 		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
