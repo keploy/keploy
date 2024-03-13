@@ -29,8 +29,6 @@ sudo rm -rf keploy/
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "$config_file"
 
-cat $config_file
-
 # Wait for 5 seconds for it to complete
 sleep 5
 
