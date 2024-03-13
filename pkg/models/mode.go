@@ -10,7 +10,6 @@ type Mode string
 
 type KctxType string
 
-// constants for keploy mode
 const (
 	MODE_RECORD Mode     = "record"
 	MODE_TEST   Mode     = "test"
