@@ -244,13 +244,12 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
 	}
-	
+
 	err = r.instrumentation.SetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
 		return models.TestSetStatusFailed, err
 	}
-	
 
 	if !serveTest {
 		runTestSetErrGrp.Go(func() error {

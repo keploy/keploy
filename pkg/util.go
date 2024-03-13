@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -158,13 +157,6 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 		return nil, err
 	}
 	return response, nil
-}
-
-// GenerateRandomID Generates unique random id
-func GenerateRandomID() int {
-	rand.Seed(time.Now().UnixNano())
-	id := rand.Intn(1000000000) // Adjust the range as needed
-	return id
 }
 
 func MakeCurlCommand(method string, url string, header map[string]string, body string) string {
