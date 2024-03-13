@@ -10,8 +10,8 @@ type AbsResult struct {
 
 type ReqResult struct {
 	MethodResult    StringResult      `json:"method_result" bson:"method_result" yaml:"method_result"`
-	URLResult       StringResult      `json:"url_result" bson:"url_result" yaml:"url_result"`
-	URLParamsResult []URLParamsResult `json:"url_params_result" bson:"url_params_result" yaml:"url_params_result"`
+	UrlResult       StringResult      `json:"url_result" bson:"url_result" yaml:"url_result"`
+	UrlParamsResult []URLParamsResult `json:"url_params_result" bson:"url_params_result" yaml:"url_params_result"`
 	ProtoMajor      IntResult         `json:"proto_major" bson:"proto_major" yaml:"proto_major"`
 	ProtoMinor      IntResult         `json:"proto_minor" bson:"proto_minor" yaml:"proto_minor"`
 	HeaderResult    []HeaderResult    `json:"headers_result" bson:"headers_result" yaml:"headers_result"`

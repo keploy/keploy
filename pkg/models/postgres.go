@@ -1,26 +1,12 @@
 package models
 
 import (
-	"time"
-
 	"github.com/jackc/pgproto3/v2"
 )
 
-// ProtocolVersionNumber should be replaced with actual version number if different
-const ProtocolVersionNumber uint32 = 196608
+const ProtocolVersionNumber uint32 = 196608 // Replace with actual version number if different
 
-type PostgresSpec struct {
-	Metadata map[string]string `json:"metadata" yaml:"metadata"`
-
-	// Objects  []*models.OutputBinary          `json:"objects" yaml:"objects"`
-	PostgresRequests  []Backend  `json:"RequestBin,omitempty"`
-	PostgresResponses []Frontend `json:"ResponseBin,omitempty"`
-
-	ReqTimestampMock time.Time `json:"ReqTimestampMock,omitempty"`
-	ResTimestampMock time.Time `json:"ResTimestampMock,omitempty"`
-}
-
-// Backend is PG Request Packet Transcoder
+// PG Request Packet Transcoder
 type Backend struct {
 	PacketTypes         []string                     `json:"header,omitempty" yaml:"header,omitempty,flow"`
 	Identfier           string                       `json:"identifier,omitempty" yaml:"identifier,omitempty"`
@@ -112,3 +98,11 @@ type RegularPacket struct {
 	Length     uint32
 	Payload    []byte
 }
+
+const (
+	minStartupPacketLen = 4     // minStartupPacketLen is a single 32-bit int version or code.
+	maxStartupPacketLen = 10000 // maxStartupPacketLen is MAX_STARTUP_PACKET_LENGTH from PG source.
+	sslRequestNumber    = 80877103
+	cancelRequestCode   = 80877102
+	gssEncReqNumber     = 80877104
+)

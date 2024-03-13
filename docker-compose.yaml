@@ -1,0 +1,16 @@
+version: "3.9"
+services:
+  keploy:
+    image: ghcr.io/keploy/keploy
+    ports:
+      - "6789:6789"
+    environment:
+      KEPLOY_MODE: "off"
+      KEPLOY_MONGO_URI: "mongodb://mongo:27017"
+      ENABLE_TEST_EXPORT: "false"
+    depends_on:
+      - mongo
+  mongo:
+    image: "mongo"
+    ports:
+    - "27017:27017"

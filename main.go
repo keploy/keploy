@@ -1,19 +1,18 @@
-// Package main is the entry point for the keploy application.
 package main
 
 import (
-	"context"
 	"fmt"
+	_ "net/http/pprof"
 	"os"
+	"time"
 
-	"go.keploy.io/server/v2/cli"
-	"go.keploy.io/server/v2/cli/provider"
-	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
-	"go.keploy.io/server/v2/utils"
-	"go.keploy.io/server/v2/utils/log"
+	"github.com/cloudflare/cfssl/log"
+	sentry "github.com/getsentry/sentry-go"
+	"go.keploy.io/server/cmd"
+	"go.keploy.io/server/utils"
 )
 
-// version is the version of the server and will be injected during build by ldflags, same with dsn
+// version is the version of the server and will be injected during build by ldflags
 // see https://goreleaser.com/customization/build/
 
 var version string
@@ -32,12 +31,6 @@ const logo string = `
 `
 
 func main() {
-	printLogo()
-	ctx := utils.NewCtx()
-	start(ctx)
-}
-
-func printLogo() {
 	if version == "" {
 		version = "2-dev"
 	}
@@ -48,25 +41,16 @@ func printLogo() {
 	} else {
 		fmt.Println("Starting keploy in docker environment.")
 	}
-}
-
-func start(ctx context.Context) {
-	logger, err := log.New()
+	//Initialise sentry.
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn:              dsn,
+		TracesSampleRate: 1.0,
+	})
+	log.Level = 0
 	if err != nil {
-		fmt.Println("Failed to start the logger for the CLI", err)
-		return
+		log.Debug("Could not initialise sentry.", err)
 	}
-	defer utils.DeleteLogs(logger)
-	defer utils.Recover(logger)
-	configDb := configdb.NewConfigDb(logger)
-	if dsn != "" {
-		utils.SentryInit(logger, dsn)
-		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
-	}
-	svcProvider := provider.NewServiceProvider(logger, configDb)
-	cmdConfigurator := provider.NewCmdConfigurator(logger)
-	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	defer utils.HandlePanic()
+	defer sentry.Flush(2 * time.Second)
+	cmd.Execute()
 }
