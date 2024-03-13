@@ -23,8 +23,6 @@ sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
-cat $config_file
-
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
 
