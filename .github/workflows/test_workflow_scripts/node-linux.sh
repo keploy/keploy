@@ -8,7 +8,7 @@ docker run --name mongoDb --rm -p 27017:27017 -d mongo
 # Install the required node dependencies.
 npm install
 
-# Edit the connection.js file to connect to local mongodb.
+# Edit the conn.js file to connect to local mongodb.
 file_path="src/db/connection.js"
 sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
 
@@ -70,7 +70,7 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
 
 # Generate the keploy-config file.
-./../../keployv2 generate-config
+./../../keployv2 config --generate
 
 # Update the global noise to ts.
 config_file="./keploy-config.yaml"
