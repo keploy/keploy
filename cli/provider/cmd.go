@@ -237,6 +237,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		viper.SetConfigName("keploy")
 		viper.SetConfigType("yml")
 		viper.AddConfigPath(configPath)
+		fmt.Println("configPath", configPath)
 		if err := viper.ReadInConfig(); err != nil {
 			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 				errMsg := "failed to read config file"
