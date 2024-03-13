@@ -519,7 +519,7 @@ func (t *Test) GetCmd() *cobra.Command {
 
 	testCmd.Flags().Bool("ignoreOrdering", true, "Ignore ordering of array in response")
 
-	testCmd.Flags().BoolP("checkAutoNoise", "a", true, "Allow auto noise by keploy to detect noisy labels")
+	testCmd.Flags().BoolP("checkAutoNoise", "a", false, "Allow auto noise by keploy to detect noisy labels")
 
 	testCmd.Flags().Bool("removeUnusedMocks", false, "Removes unused mocks from mock file")
 
