@@ -23,6 +23,8 @@ sed -i 's/global: {}/global: {body: {"ts":[]}}/' "$config_file"
 
 sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
+cat config_file
+
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
 
@@ -80,8 +82,8 @@ sudo kill $pid
 sleep 5
 done
 
-# # Start the gin-mongo app in test mode.
-# sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+# Start the gin-mongo app in test mode.
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 
 # # move keployv2 to /usr/local/bin/keploy
 # mv ./../../keployv2 /usr/local/bin/keploy
