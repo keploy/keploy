@@ -138,7 +138,7 @@ func (r *replayer) Start(ctx context.Context) error {
 	if testRunResult {
 		testRunStatus = "pass"
 	}
-	r.telemetry.TestRun(ctx, totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
+	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
@@ -471,7 +471,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
 
-	r.telemetry.TestSetRun(runTestSetCtx, testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
+	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 	return testSetStatus, nil
 }
 
