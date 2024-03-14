@@ -46,7 +46,7 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config
 		return nil, errors.New("failed to get installation id")
 	}
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
-		Enabled:        config.DisableTele,
+		Enabled:        !config.DisableTele,
 		Version:        utils.Version,
 		GlobalMap:      map[string]interface{}{},
 		InstallationID: installtionID,
@@ -74,7 +74,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string, config con
 	if err != nil {
 		return nil, err
 	}
-	tel.Ping(ctx)
+	tel.Ping()
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, tel), nil
