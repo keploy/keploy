@@ -7,6 +7,7 @@ import (
 )
 
 type HookOptions struct {
+	Mode Mode
 }
 
 type OutgoingOptions struct {
