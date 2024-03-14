@@ -85,7 +85,7 @@ func SetSelectedTests(conf *Config, testSets []string) {
 	if conf.Test.SelectedTests == nil {
 		conf.Test.SelectedTests = make(map[string][]string)
 	}
-	
+
 	for _, testSet := range testSets {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
