@@ -19,8 +19,9 @@ import (
 func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	pgRequests := [][]byte{reqBuf}
 	errCh := make(chan error, 1)
-	defer close(errCh)
+
 	go func(errCh chan error, pgRequests [][]byte) {
+		defer close(errCh)
 		for {
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
@@ -34,12 +35,11 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
-					if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+					if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) {
 						if err == io.EOF {
 							logger.Debug("EOF error received from client. Closing conn in postgres !!")
 							errCh <- err
 						}
-						//TODO: why debug log sarthak?
 						logger.Debug("failed to read the request message in proxy for postgres dependency")
 						errCh <- err
 					}
