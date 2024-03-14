@@ -24,12 +24,14 @@ import (
 
 func NewApp(logger *zap.Logger, id uint64, cmd string, opts Options) *App {
 	app := &App{
-		logger:          logger,
-		id:              id,
-		cmd:             cmd,
-		kind:            utils.FindDockerCmd(cmd),
-		keployContainer: "keploy-v2",
-		container:       opts.Container,
+		logger:           logger,
+		id:               id,
+		cmd:              cmd,
+		kind:             utils.FindDockerCmd(cmd),
+		keployContainer:  "keploy-v2",
+		container:        opts.Container,
+		containerDelay:   opts.DockerDelay,
+		containerNetwork: opts.DockerNetwork,
 	}
 	return app
 }
@@ -171,10 +173,10 @@ func (a *App) SetupCompose() error {
 			utils.LogError(a.logger, nil, "failed to make the network external in the compose file", zap.String("network", info.Name))
 			return fmt.Errorf("error while updating network to external: %v", err)
 		}
-		a.keployNetwork = info.Name
 		composeChanged = true
-
 	}
+
+	a.keployNetwork = info.Name
 
 	ok, err = a.docker.NetworkExists(a.keployNetwork)
 	if err != nil {
@@ -201,6 +203,9 @@ func (a *App) SetupCompose() error {
 		a.cmd = modifyDockerComposeCommand(a.cmd, newPath)
 	}
 
+	if a.containerNetwork == "" {
+		a.containerNetwork = a.keployNetwork
+	}
 	err = a.injectNetwork(a.containerNetwork)
 	if err != nil {
 		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
@@ -430,8 +435,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}
 }
 
-func (a *App) Run(ctx context.Context, inodeChan chan uint64, opts Options) models.AppError {
-	a.containerDelay = opts.DockerDelay
+func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
 
 	if a.kind == utils.DockerCompose || a.kind == utils.Docker {
