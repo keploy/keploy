@@ -82,11 +82,6 @@ func getInstallationFromFile(logger *zap.Logger) string {
 
 func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 	path := UserHomeDir()
-	_, err := yaml.CreateYamlFile(ctx, cdb.logger, path, "installation-id")
-	if err != nil {
-		return fmt.Errorf("failed to create yaml file. error: %s", err.Error())
-	}
-
 	data := []byte{}
 
 	d, err := yamlLib.Marshal(&id)

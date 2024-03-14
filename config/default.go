@@ -24,7 +24,7 @@ test:
   globalNoise:
     global: {}
     test-sets: {}
-  delay: 10
+  delay: 5
   apiTimeout: 5
   coverage: false
   coverageReportPath: ""
