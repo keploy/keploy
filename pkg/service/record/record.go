@@ -68,7 +68,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			r.telemetry.RecordedTestSuite(ctx, newTestSetID, testCount, mockCountMap)
+			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
@@ -150,7 +150,7 @@ func (r *recorder) Start(ctx context.Context) error {
 				insertTestErrChan <- err
 			} else {
 				testCount++
-				r.telemetry.RecordedTestAndMocks(ctx)
+				r.telemetry.RecordedTestAndMocks()
 			}
 		}
 		return nil
@@ -175,7 +175,7 @@ func (r *recorder) Start(ctx context.Context) error {
 				insertMockErrChan <- err
 			} else {
 				mockCountMap[mock.GetKind()]++
-				r.telemetry.RecordedTestCaseMock(ctx, mock.GetKind())
+				r.telemetry.RecordedTestCaseMock(mock.GetKind())
 			}
 		}
 		return nil

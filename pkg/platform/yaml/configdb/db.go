@@ -44,7 +44,7 @@ func NewConfigDb(logger *zap.Logger) *ConfigDb {
 func (cdb *ConfigDb) GetInstallationID(ctx context.Context) (string, error) {
 	var id string
 	id = getInstallationFromFile(cdb.logger)
-	if id != "" {
+	if id == "" {
 		id = primitive.NewObjectID().String()
 		err := cdb.setInstallationID(ctx, id)
 		if err != nil {

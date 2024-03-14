@@ -50,7 +50,7 @@ type ReportDB interface {
 }
 
 type Telemetry interface {
-	TestSetRun(ctx context.Context, success int, failure int, testSet string, runStatus string)
-	TestRun(ctx context.Context, success int, failure int, testSets int, runStatus string)
-	MockTestRun(ctx context.Context, utilizedMocks int)
+	TestSetRun(success int, failure int, testSet string, runStatus string)
+	TestRun(success int, failure int, testSets int, runStatus string)
+	MockTestRun(utilizedMocks int)
 }
