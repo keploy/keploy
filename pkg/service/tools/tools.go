@@ -41,20 +41,20 @@ func (t *Tools) Update(ctx context.Context) error {
 	currentVersion := "v" + utils.Version
 	isKeployInDocker := len(os.Getenv("KEPLOY_INDOCKER")) > 0
 	if isKeployInDocker {
-		return errors.New("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
+		fmt.Println("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
+		return nil
 	}
 	if strings.HasSuffix(currentVersion, "-dev") {
-		return errors.New("you are using a development version of Keploy. Skipping update check")
+		fmt.Println("you are using a development version of Keploy. Skipping update")
+		return nil
 	}
 
 	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, t.logger)
 	if err != nil {
 		if errors.Is(err, ErrGitHubAPIUnresponsive) {
-			utils.LogError(t.logger, err, "GitHub API is unresponsive. Update process cannot continue.")
 			return errors.New("gitHub API is unresponsive. Update process cannot continue")
 		}
-		utils.LogError(t.logger, err, "failed to fetch latest GitHub release version")
-		return err
+		return fmt.Errorf("failed to fetch latest GitHub release version: %v", err)
 	}
 
 	latestVersion := releaseInfo.TagName
@@ -168,6 +168,10 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
 	}
 
+	if err := os.Chmod(aliasPath, 0777); err != nil {
+		return fmt.Errorf("failed to set execute permission on %s: %v", aliasPath, err)
+	}
+
 	return nil
 }
 
@@ -209,7 +213,7 @@ func extractTarGz(gzipPath, destDir string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
+			if err := os.MkdirAll(target, 0777); err != nil {
 				return err
 			}
 		case tar.TypeReg:
