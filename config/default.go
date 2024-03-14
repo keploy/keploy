@@ -41,6 +41,7 @@ bypassRules: []
 const InternalConfig = `
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
+inDocker: false
 `
 
 var config = &Config{}

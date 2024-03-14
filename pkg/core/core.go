@@ -39,6 +39,7 @@ func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) 
 	c.apps.Store(id, a)
 
 	err := a.Setup(ctx, app.Options{
+
 		DockerNetwork: opts.DockerNetwork,
 	})
 	if err != nil {

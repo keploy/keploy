@@ -22,13 +22,14 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewApp(logger *zap.Logger, id uint64, cmd string) *App {
+func NewApp(logger *zap.Logger, id uint64, cmd string, opts Options) *App {
 	app := &App{
 		logger:          logger,
 		id:              id,
 		cmd:             cmd,
 		kind:            utils.FindDockerCmd(cmd),
 		keployContainer: "keploy-v2",
+		container:       opts.Container,
 	}
 	return app
 }
@@ -53,12 +54,12 @@ type App struct {
 type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
-	Type          utils.CmdType
+	Container     string
 	DockerDelay   time.Duration
 	DockerNetwork string
 }
 
-func (a *App) Setup(_ context.Context, _ Options) error {
+func (a *App) Setup(_ context.Context) error {
 	d, err := docker.New(a.logger)
 	if err != nil {
 		return err
