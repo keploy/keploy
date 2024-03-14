@@ -61,9 +61,9 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	return nil
 }
 
-func (h *Hooks) SendKeployPid(kPid uint32) error {
-	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", kPid))
-	err := h.keployPid.Update(uint32(0), &kPid, ebpf.UpdateAny)
+func (h *Hooks) SendKeployPid(pid uint32) error {
+	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", pid))
+	err := h.keployPid.Update(uint32(0), &pid, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the keploy pid to the ebpf program")
 		return err
