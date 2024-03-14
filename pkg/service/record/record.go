@@ -1,150 +1,311 @@
+// Package record provides functionality for recording and managing test cases and mocks.
 package record
 
 import (
 	"context"
-	"os"
-	"os/signal"
-	"syscall"
+	"errors"
+	"fmt"
 	"time"
 
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/fs"
-	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/platform/yaml"
-	"go.keploy.io/server/pkg/proxy"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
-var Emoji = "\U0001F430" + " Keploy:"
-
 type recorder struct {
-	Logger *zap.Logger
+	logger          *zap.Logger
+	testDB          TestDB
+	mockDB          MockDB
+	telemetry       Telemetry
+	instrumentation Instrumentation
+	config          config.Config
 }
 
-func NewRecorder(logger *zap.Logger) Recorder {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
 	return &recorder{
-		Logger: logger,
+		logger:          logger,
+		testDB:          testDB,
+		mockDB:          mockDB,
+		telemetry:       telemetry,
+		instrumentation: instrumentation,
+		config:          config,
 	}
 }
 
-func (r *recorder) CaptureTraffic(path string, proxyPort uint32, appCmd, appContainer, appNetwork string, Delay uint64, buildDelay time.Duration, ports []uint, filters *models.TestFilter, enableTele bool, passThroughHosts []models.Filters) {
+func (r *recorder) Start(ctx context.Context) error {
 
-	var ps *proxy.ProxySet
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGKILL)
+	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
+	errGrp, _ := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
-	models.SetMode(models.MODE_RECORD)
-	teleFS := fs.NewTeleFS(r.Logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, r.Logger, "", nil)
-	tele.Ping(false)
+	runAppErrGrp, _ := errgroup.WithContext(ctx)
+	runAppCtx := context.WithoutCancel(ctx)
+	runAppCtx, runAppCtxCancel := context.WithCancel(runAppCtx)
 
-	dirName, err := yaml.NewSessionIndex(path, r.Logger)
+	hookErrGrp, _ := errgroup.WithContext(ctx)
+	hookCtx := context.WithoutCancel(ctx)
+	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
+	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
+
+	var stopReason string
+
+	// defining all the channels and variables required for the record
+	var runAppError models.AppError
+	var appErrChan = make(chan models.AppError, 1)
+	var incomingChan <-chan *models.TestCase
+	var outgoingChan <-chan *models.Mock
+	var insertTestErrChan = make(chan error, 10)
+	var insertMockErrChan = make(chan error, 10)
+	var appID uint64
+	var newTestSetID string
+	var testCount = 0
+	var mockCountMap = make(map[string]int)
+
+	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
+	defer func() {
+		select {
+		case <-ctx.Done():
+			r.telemetry.RecordedTestSuite(ctx, newTestSetID, testCount, mockCountMap)
+		default:
+			err := utils.Stop(r.logger, stopReason)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to stop recording")
+			}
+		}
+		runAppCtxCancel()
+		err := runAppErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop application")
+		}
+		hookCtxCancel()
+		err = hookErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop hooks")
+		}
+		err = errGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop recording")
+		}
+	}()
+
+	defer close(appErrChan)
+	defer close(insertTestErrChan)
+	defer close(insertMockErrChan)
+
+	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		r.Logger.Error("Failed to create the session index file", zap.Error(err))
-		return
+		stopReason = "failed to get testSetIds"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
 	}
 
-	ys := yaml.NewYamlStore(path+"/"+dirName+"/tests", path+"/"+dirName, "", "", r.Logger, tele)
-	routineId := pkg.GenerateRandomID()
-	// Initiate the hooks and update the vaccant ProxyPorts map
-	loadedHooks, err := hooks.NewHook(ys, routineId, r.Logger)
-	loadedHooks.SetPassThroughHosts(passThroughHosts)
+	newTestSetID = pkg.NewID(testSetIDs, models.TestSetPattern)
+
+	// setting up the environment for recording
+	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
 	if err != nil {
-		r.Logger.Error("error while creating hooks", zap.Error(err))
-		return
+		stopReason = "failed setting up the environment"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
 	}
 
-	// Recover from panic and gracefully shutdown
-	defer loadedHooks.Recover(routineId)
-
-	mocksTotal := make(map[string]int)
-	testsTotal := 0
-	ctx := context.WithValue(context.Background(), "mocksTotal", &mocksTotal)
-	ctx = context.WithValue(ctx, "testsTotal", &testsTotal)
-
+	// checking for context cancellation as we don't want to start the hooks and proxy if the context is cancelled
 	select {
-	case <-stopper:
-		return
+	case <-ctx.Done():
+		return nil
 	default:
-		// load the ebpf hooks into the kernel
-		if err := loadedHooks.LoadHooks(appCmd, appContainer, 0, ctx, filters); err != nil {
-			return
+		// Starting the hooks and proxy
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{})
+		if err != nil {
+			stopReason = "failed to start the hooks and proxy"
+			utils.LogError(r.logger, err, stopReason)
+			if err == context.Canceled {
+				return err
+			}
+			return fmt.Errorf(stopReason)
 		}
 	}
 
-	select {
-	case <-stopper:
-		loadedHooks.Stop(true)
-		return
-	default:
-		// start the BootProxy
-		ps = proxy.BootProxy(r.Logger, proxy.Option{Port: proxyPort}, appCmd, appContainer, 0, "", ports, loadedHooks, ctx, 0)
+	// fetching test cases and mocks from the application and inserting them into the database
+	incomingChan, err = r.instrumentation.GetIncoming(ctx, appID, models.IncomingOptions{})
+	if err != nil {
+		stopReason = "failed to get incoming frames"
+		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
+		return fmt.Errorf(stopReason)
 	}
 
-	//proxy fetches the destIp and destPort from the redirect proxy map
-	//Sending Proxy Ip & Port to the ebpf program
-	if err := loadedHooks.SendProxyInfo(ps.IP4, ps.Port, ps.IP6); err != nil {
-		return
-	}
-
-	// Channels to communicate between different types of closing keploy
-	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	exitCmd := make(chan bool)                 // channel to exit this command
-	abortStopHooksForcefully := false          // boolen to stop closing of keploy via user app error
-
-	select {
-	case <-stopper:
-		loadedHooks.Stop(true)
-		ps.StopProxyServer()
-		return
-	default:
-		// start user application
-		go func() {
-			stopApplication := false
-			if err := loadedHooks.LaunchUserApplication(appCmd, appContainer, appNetwork, Delay, buildDelay, false); err != nil {
-				switch err {
-				case hooks.ErrInterrupted:
-					r.Logger.Info("keploy terminated user application")
-					return
-				case hooks.ErrCommandError:
-				case hooks.ErrUnExpected:
-					r.Logger.Warn("user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected")
-				case hooks.ErrDockerError:
-					stopApplication = true
-				default:
-					r.Logger.Error("unknown error recieved from application", zap.Error(err))
+	errGrp.Go(func() error {
+		for testCase := range incomingChan {
+			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
+			if err != nil {
+				if err == context.Canceled {
+					continue
 				}
-			}
-			if !abortStopHooksForcefully {
-				abortStopHooksInterrupt <- true
-				// stop listening for the eBPF events
-				loadedHooks.Stop(!stopApplication)
-				//stop listening for proxy server
-				ps.StopProxyServer()
-				exitCmd <- true
+				insertTestErrChan <- err
 			} else {
-				return
+				testCount++
+				r.telemetry.RecordedTestAndMocks(ctx)
 			}
-		}()
+		}
+		return nil
+	})
+
+	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	if err != nil {
+		stopReason = "failed to get outgoing frames"
+		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
+		return fmt.Errorf(stopReason)
 	}
+	errGrp.Go(func() error {
+		for mock := range outgoingChan {
+			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			if err != nil {
+				if err == context.Canceled {
+					continue
+				}
+				insertMockErrChan <- err
+			} else {
+				mockCountMap[mock.GetKind()]++
+				r.telemetry.RecordedTestCaseMock(ctx, mock.GetKind())
+			}
+		}
+		return nil
+	})
+
+	// running the user application
+	runAppErrGrp.Go(func() error {
+		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
+		if runAppError.AppErrorType == models.ErrCtxCanceled {
+			return nil
+		}
+		appErrChan <- runAppError
+		return nil
+	})
+
+	// setting a timer for recording
+	if r.config.Record.RecordTimer != 0 {
+		errGrp.Go(func() error {
+			r.logger.Info("Setting a timer of " + r.config.Record.RecordTimer.String() + " for recording")
+			timer := time.After(r.config.Record.RecordTimer)
+			select {
+			case <-timer:
+				r.logger.Warn("Time up! Stopping keploy")
+				err := utils.Stop(r.logger, "Time up! Stopping keploy")
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to stop recording")
+					return errors.New("failed to stop recording")
+				}
+			case <-ctx.Done():
+				return nil
+			}
+			return nil
+		})
+	}
+
+	// Waiting for the error to occur in any of the go routines
+	select {
+	case appErr := <-appErrChan:
+		switch appErr.AppErrorType {
+		case models.ErrCommandError:
+			stopReason = "error in running the user application, hence stopping keploy"
+		case models.ErrUnExpected:
+			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
+		case models.ErrInternal:
+			stopReason = "internal error occured while hooking into the application, hence stopping keploy"
+		case models.ErrAppStopped:
+			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
+			r.logger.Warn(stopReason, zap.Error(appErr))
+			return nil
+		case models.ErrCtxCanceled:
+			return nil
+		default:
+			stopReason = "unknown error recieved from application, hence stopping keploy"
+		}
+
+	case err = <-insertTestErrChan:
+		stopReason = "error while inserting test case into db, hence stopping keploy"
+	case err = <-insertMockErrChan:
+		stopReason = "error while inserting mock into db, hence stopping keploy"
+	case <-ctx.Done():
+		return nil
+	}
+	utils.LogError(r.logger, err, stopReason)
+	return fmt.Errorf(stopReason)
+}
+
+func (r *recorder) StartMock(ctx context.Context) error {
+	g, ctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	var stopReason string
+	defer func() {
+		select {
+		case <-ctx.Done():
+			break
+		default:
+			err := utils.Stop(r.logger, stopReason)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to stop recording")
+			}
+		}
+		err := g.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop recording")
+		}
+	}()
+	var outgoingChan <-chan *models.Mock
+	var insertMockErrChan = make(chan error)
+
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	if err != nil {
+		stopReason = "failed to exeute mock record due to error while setting up the environment"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
+	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
+	if err != nil {
+		stopReason = "failed to start the hooks and proxy"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
+
+	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	if err != nil {
+		stopReason = "failed to get outgoing frames"
+		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
+		return fmt.Errorf(stopReason)
+	}
+	g.Go(func() error {
+		for mock := range outgoingChan {
+			mock := mock // capture range variable
+			g.Go(func() error {
+				err := r.mockDB.InsertMock(ctx, mock, "")
+				if err != nil {
+					insertMockErrChan <- err
+				}
+				return nil
+			})
+		}
+		return nil
+	})
 
 	select {
-	case <-stopper:
-		abortStopHooksForcefully = true
-		loadedHooks.Stop(false)
-		if testsTotal != 0 {
-			tele.RecordedTestSuite(dirName, testsTotal, mocksTotal)
-		}
-		ps.StopProxyServer()
-		return
-	case <-abortStopHooksInterrupt:
-		if testsTotal != 0 {
-			tele.RecordedTestSuite(path, testsTotal, mocksTotal)
-		}
-
+	case err = <-insertMockErrChan:
+		stopReason = "error while inserting mock into db, hence stopping keploy"
+	case <-ctx.Done():
+		return nil
 	}
-
-	<-exitCmd
+	utils.LogError(r.logger, err, stopReason)
+	return fmt.Errorf(stopReason)
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/99designs/gqlgen/graphql/introspection"
 	gqlparser "github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
-	"go.keploy.io/server/pkg/graph/model"
+	"go.keploy.io/server/v2/pkg/graph/model"
 )
 
 // region    ************************** generated!.gotpl **************************
@@ -24,6 +24,7 @@ import (
 // NewExecutableSchema creates an ExecutableSchema from the ResolverRoot interface.
 func NewExecutableSchema(cfg Config) graphql.ExecutableSchema {
 	return &executableSchema{
+		schema:     cfg.Schema,
 		resolvers:  cfg.Resolvers,
 		directives: cfg.Directives,
 		complexity: cfg.Complexity,
@@ -31,6 +32,7 @@ func NewExecutableSchema(cfg Config) graphql.ExecutableSchema {
 }
 
 type Config struct {
+	Schema     *ast.Schema
 	Resolvers  ResolverRoot
 	Directives DirectiveRoot
 	Complexity ComplexityRoot
@@ -46,17 +48,18 @@ type DirectiveRoot struct {
 
 type ComplexityRoot struct {
 	Mutation struct {
-		RunTestSet func(childComplexity int, testSet string) int
+		RunTestSet func(childComplexity int, testSetID string, testRunID string, appID int) int
+		Start      func(childComplexity int) int
 	}
 
 	Query struct {
-		TestSetStatus func(childComplexity int, testRunID string) int
+		Stop          func(childComplexity int) int
+		TestSetStatus func(childComplexity int, testRunID string, testSetID string) int
 		TestSets      func(childComplexity int) int
 	}
 
-	RunTestSetResponse struct {
-		Message   func(childComplexity int) int
-		Success   func(childComplexity int) int
+	TestRunInfo struct {
+		AppID     func(childComplexity int) int
 		TestRunID func(childComplexity int) int
 	}
 
@@ -66,20 +69,26 @@ type ComplexityRoot struct {
 }
 
 type MutationResolver interface {
-	RunTestSet(ctx context.Context, testSet string) (*model.RunTestSetResponse, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID int) (string, error)
+	Start(ctx context.Context) (*model.TestRunInfo, error)
 }
 type QueryResolver interface {
 	TestSets(ctx context.Context) ([]string, error)
-	TestSetStatus(ctx context.Context, testRunID string) (*model.TestSetStatus, error)
+	TestSetStatus(ctx context.Context, testRunID string, testSetID string) (*model.TestSetStatus, error)
+	Stop(ctx context.Context) (bool, error)
 }
 
 type executableSchema struct {
+	schema     *ast.Schema
 	resolvers  ResolverRoot
 	directives DirectiveRoot
 	complexity ComplexityRoot
 }
 
 func (e *executableSchema) Schema() *ast.Schema {
+	if e.schema != nil {
+		return e.schema
+	}
 	return parsedSchema
 }
 
@@ -98,7 +107,21 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 			return 0, false
 		}
 
-		return e.complexity.Mutation.RunTestSet(childComplexity, args["testSet"].(string)), true
+		return e.complexity.Mutation.RunTestSet(childComplexity, args["testSetId"].(string), args["testRunId"].(string), args["appId"].(int)), true
+
+	case "Mutation.start":
+		if e.complexity.Mutation.Start == nil {
+			break
+		}
+
+		return e.complexity.Mutation.Start(childComplexity), true
+
+	case "Query.stop":
+		if e.complexity.Query.Stop == nil {
+			break
+		}
+
+		return e.complexity.Query.Stop(childComplexity), true
 
 	case "Query.testSetStatus":
 		if e.complexity.Query.TestSetStatus == nil {
@@ -110,7 +133,7 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 			return 0, false
 		}
 
-		return e.complexity.Query.TestSetStatus(childComplexity, args["testRunId"].(string)), true
+		return e.complexity.Query.TestSetStatus(childComplexity, args["testRunId"].(string), args["testSetId"].(string)), true
 
 	case "Query.testSets":
 		if e.complexity.Query.TestSets == nil {
@@ -119,26 +142,19 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.Query.TestSets(childComplexity), true
 
-	case "RunTestSetResponse.message":
-		if e.complexity.RunTestSetResponse.Message == nil {
+	case "TestRunInfo.appId":
+		if e.complexity.TestRunInfo.AppID == nil {
 			break
 		}
 
-		return e.complexity.RunTestSetResponse.Message(childComplexity), true
+		return e.complexity.TestRunInfo.AppID(childComplexity), true
 
-	case "RunTestSetResponse.success":
-		if e.complexity.RunTestSetResponse.Success == nil {
+	case "TestRunInfo.testRunId":
+		if e.complexity.TestRunInfo.TestRunID == nil {
 			break
 		}
 
-		return e.complexity.RunTestSetResponse.Success(childComplexity), true
-
-	case "RunTestSetResponse.testRunId":
-		if e.complexity.RunTestSetResponse.TestRunID == nil {
-			break
-		}
-
-		return e.complexity.RunTestSetResponse.TestRunID(childComplexity), true
+		return e.complexity.TestRunInfo.TestRunID(childComplexity), true
 
 	case "TestSetStatus.status":
 		if e.complexity.TestSetStatus.Status == nil {
@@ -240,14 +256,14 @@ func (ec *executionContext) introspectSchema() (*introspection.Schema, error) {
 	if ec.DisableIntrospection {
 		return nil, errors.New("introspection disabled")
 	}
-	return introspection.WrapSchema(parsedSchema), nil
+	return introspection.WrapSchema(ec.Schema()), nil
 }
 
 func (ec *executionContext) introspectType(name string) (*introspection.Type, error) {
 	if ec.DisableIntrospection {
 		return nil, errors.New("introspection disabled")
 	}
-	return introspection.WrapTypeFromDef(parsedSchema, parsedSchema.Types[name]), nil
+	return introspection.WrapTypeFromDef(ec.Schema(), ec.Schema().Types[name]), nil
 }
 
 //go:embed "schema.graphqls"
@@ -274,14 +290,32 @@ func (ec *executionContext) field_Mutation_runTestSet_args(ctx context.Context, 
 	var err error
 	args := map[string]interface{}{}
 	var arg0 string
-	if tmp, ok := rawArgs["testSet"]; ok {
-		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testSet"))
+	if tmp, ok := rawArgs["testSetId"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testSetId"))
 		arg0, err = ec.unmarshalNString2string(ctx, tmp)
 		if err != nil {
 			return nil, err
 		}
 	}
-	args["testSet"] = arg0
+	args["testSetId"] = arg0
+	var arg1 string
+	if tmp, ok := rawArgs["testRunId"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testRunId"))
+		arg1, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["testRunId"] = arg1
+	var arg2 int
+	if tmp, ok := rawArgs["appId"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("appId"))
+		arg2, err = ec.unmarshalNInt2int(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["appId"] = arg2
 	return args, nil
 }
 
@@ -312,6 +346,15 @@ func (ec *executionContext) field_Query_testSetStatus_args(ctx context.Context, 
 		}
 	}
 	args["testRunId"] = arg0
+	var arg1 string
+	if tmp, ok := rawArgs["testSetId"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testSetId"))
+		arg1, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["testSetId"] = arg1
 	return args, nil
 }
 
@@ -367,7 +410,7 @@ func (ec *executionContext) _Mutation_runTestSet(ctx context.Context, field grap
 	}()
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Mutation().RunTestSet(rctx, fc.Args["testSet"].(string))
+		return ec.resolvers.Mutation().RunTestSet(rctx, fc.Args["testSetId"].(string), fc.Args["testRunId"].(string), fc.Args["appId"].(int))
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -379,9 +422,9 @@ func (ec *executionContext) _Mutation_runTestSet(ctx context.Context, field grap
 		}
 		return graphql.Null
 	}
-	res := resTmp.(*model.RunTestSetResponse)
+	res := resTmp.(string)
 	fc.Result = res
-	return ec.marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx, field.Selections, res)
+	return ec.marshalNString2string(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) fieldContext_Mutation_runTestSet(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
@@ -391,15 +434,7 @@ func (ec *executionContext) fieldContext_Mutation_runTestSet(ctx context.Context
 		IsMethod:   true,
 		IsResolver: true,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			switch field.Name {
-			case "success":
-				return ec.fieldContext_RunTestSetResponse_success(ctx, field)
-			case "testRunId":
-				return ec.fieldContext_RunTestSetResponse_testRunId(ctx, field)
-			case "message":
-				return ec.fieldContext_RunTestSetResponse_message(ctx, field)
-			}
-			return nil, fmt.Errorf("no field named %q was found under type RunTestSetResponse", field.Name)
+			return nil, errors.New("field of type String does not have child fields")
 		},
 	}
 	defer func() {
@@ -412,6 +447,56 @@ func (ec *executionContext) fieldContext_Mutation_runTestSet(ctx context.Context
 	if fc.Args, err = ec.field_Mutation_runTestSet_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_start(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_Mutation_start(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().Start(rctx)
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*model.TestRunInfo)
+	fc.Result = res
+	return ec.marshalNTestRunInfo2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestRunInfo(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_Mutation_start(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "appId":
+				return ec.fieldContext_TestRunInfo_appId(ctx, field)
+			case "testRunId":
+				return ec.fieldContext_TestRunInfo_testRunId(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type TestRunInfo", field.Name)
+		},
 	}
 	return fc, nil
 }
@@ -474,7 +559,7 @@ func (ec *executionContext) _Query_testSetStatus(ctx context.Context, field grap
 	}()
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Query().TestSetStatus(rctx, fc.Args["testRunId"].(string))
+		return ec.resolvers.Query().TestSetStatus(rctx, fc.Args["testRunId"].(string), fc.Args["testSetId"].(string))
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -488,7 +573,7 @@ func (ec *executionContext) _Query_testSetStatus(ctx context.Context, field grap
 	}
 	res := resTmp.(*model.TestSetStatus)
 	fc.Result = res
-	return ec.marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx, field.Selections, res)
+	return ec.marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) fieldContext_Query_testSetStatus(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
@@ -515,6 +600,50 @@ func (ec *executionContext) fieldContext_Query_testSetStatus(ctx context.Context
 	if fc.Args, err = ec.field_Query_testSetStatus_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_stop(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_Query_stop(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Query().Stop(rctx)
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_Query_stop(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
 	}
 	return fc, nil
 }
@@ -648,8 +777,8 @@ func (ec *executionContext) fieldContext_Query___schema(ctx context.Context, fie
 	return fc, nil
 }
 
-func (ec *executionContext) _RunTestSetResponse_success(ctx context.Context, field graphql.CollectedField, obj *model.RunTestSetResponse) (ret graphql.Marshaler) {
-	fc, err := ec.fieldContext_RunTestSetResponse_success(ctx, field)
+func (ec *executionContext) _TestRunInfo_appId(ctx context.Context, field graphql.CollectedField, obj *model.TestRunInfo) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TestRunInfo_appId(ctx, field)
 	if err != nil {
 		return graphql.Null
 	}
@@ -662,7 +791,7 @@ func (ec *executionContext) _RunTestSetResponse_success(ctx context.Context, fie
 	}()
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return obj.Success, nil
+		return obj.AppID, nil
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -674,26 +803,26 @@ func (ec *executionContext) _RunTestSetResponse_success(ctx context.Context, fie
 		}
 		return graphql.Null
 	}
-	res := resTmp.(bool)
+	res := resTmp.(int)
 	fc.Result = res
-	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+	return ec.marshalNInt2int(ctx, field.Selections, res)
 }
 
-func (ec *executionContext) fieldContext_RunTestSetResponse_success(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_TestRunInfo_appId(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
-		Object:     "RunTestSetResponse",
+		Object:     "TestRunInfo",
 		Field:      field,
 		IsMethod:   false,
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return nil, errors.New("field of type Boolean does not have child fields")
+			return nil, errors.New("field of type Int does not have child fields")
 		},
 	}
 	return fc, nil
 }
 
-func (ec *executionContext) _RunTestSetResponse_testRunId(ctx context.Context, field graphql.CollectedField, obj *model.RunTestSetResponse) (ret graphql.Marshaler) {
-	fc, err := ec.fieldContext_RunTestSetResponse_testRunId(ctx, field)
+func (ec *executionContext) _TestRunInfo_testRunId(ctx context.Context, field graphql.CollectedField, obj *model.TestRunInfo) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TestRunInfo_testRunId(ctx, field)
 	if err != nil {
 		return graphql.Null
 	}
@@ -723,50 +852,9 @@ func (ec *executionContext) _RunTestSetResponse_testRunId(ctx context.Context, f
 	return ec.marshalNString2string(ctx, field.Selections, res)
 }
 
-func (ec *executionContext) fieldContext_RunTestSetResponse_testRunId(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_TestRunInfo_testRunId(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
-		Object:     "RunTestSetResponse",
-		Field:      field,
-		IsMethod:   false,
-		IsResolver: false,
-		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return nil, errors.New("field of type String does not have child fields")
-		},
-	}
-	return fc, nil
-}
-
-func (ec *executionContext) _RunTestSetResponse_message(ctx context.Context, field graphql.CollectedField, obj *model.RunTestSetResponse) (ret graphql.Marshaler) {
-	fc, err := ec.fieldContext_RunTestSetResponse_message(ctx, field)
-	if err != nil {
-		return graphql.Null
-	}
-	ctx = graphql.WithFieldContext(ctx, fc)
-	defer func() {
-		if r := recover(); r != nil {
-			ec.Error(ctx, ec.Recover(ctx, r))
-			ret = graphql.Null
-		}
-	}()
-	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
-		ctx = rctx // use context from middleware stack in children
-		return obj.Message, nil
-	})
-	if err != nil {
-		ec.Error(ctx, err)
-		return graphql.Null
-	}
-	if resTmp == nil {
-		return graphql.Null
-	}
-	res := resTmp.(*string)
-	fc.Result = res
-	return ec.marshalOString2ᚖstring(ctx, field.Selections, res)
-}
-
-func (ec *executionContext) fieldContext_RunTestSetResponse_message(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
-	fc = &graphql.FieldContext{
-		Object:     "RunTestSetResponse",
+		Object:     "TestRunInfo",
 		Field:      field,
 		IsMethod:   false,
 		IsResolver: false,
@@ -2628,6 +2716,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "start":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_start(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -2714,6 +2809,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "stop":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_stop(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "__type":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Query___type(ctx, field)
@@ -2745,29 +2862,27 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 	return out
 }
 
-var runTestSetResponseImplementors = []string{"RunTestSetResponse"}
+var testRunInfoImplementors = []string{"TestRunInfo"}
 
-func (ec *executionContext) _RunTestSetResponse(ctx context.Context, sel ast.SelectionSet, obj *model.RunTestSetResponse) graphql.Marshaler {
-	fields := graphql.CollectFields(ec.OperationContext, sel, runTestSetResponseImplementors)
+func (ec *executionContext) _TestRunInfo(ctx context.Context, sel ast.SelectionSet, obj *model.TestRunInfo) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, testRunInfoImplementors)
 
 	out := graphql.NewFieldSet(fields)
 	deferred := make(map[string]*graphql.FieldSet)
 	for i, field := range fields {
 		switch field.Name {
 		case "__typename":
-			out.Values[i] = graphql.MarshalString("RunTestSetResponse")
-		case "success":
-			out.Values[i] = ec._RunTestSetResponse_success(ctx, field, obj)
+			out.Values[i] = graphql.MarshalString("TestRunInfo")
+		case "appId":
+			out.Values[i] = ec._TestRunInfo_appId(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
 		case "testRunId":
-			out.Values[i] = ec._RunTestSetResponse_testRunId(ctx, field, obj)
+			out.Values[i] = ec._TestRunInfo_testRunId(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
-		case "message":
-			out.Values[i] = ec._RunTestSetResponse_message(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -3171,18 +3286,19 @@ func (ec *executionContext) marshalNBoolean2bool(ctx context.Context, sel ast.Se
 	return res
 }
 
-func (ec *executionContext) marshalNRunTestSetResponse2goᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v model.RunTestSetResponse) graphql.Marshaler {
-	return ec._RunTestSetResponse(ctx, sel, &v)
+func (ec *executionContext) unmarshalNInt2int(ctx context.Context, v interface{}) (int, error) {
+	res, err := graphql.UnmarshalInt(v)
+	return res, graphql.ErrorOnPath(ctx, err)
 }
 
-func (ec *executionContext) marshalNRunTestSetResponse2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐRunTestSetResponse(ctx context.Context, sel ast.SelectionSet, v *model.RunTestSetResponse) graphql.Marshaler {
-	if v == nil {
+func (ec *executionContext) marshalNInt2int(ctx context.Context, sel ast.SelectionSet, v int) graphql.Marshaler {
+	res := graphql.MarshalInt(v)
+	if res == graphql.Null {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			ec.Errorf(ctx, "the requested element is null which the schema does not allow")
 		}
-		return graphql.Null
 	}
-	return ec._RunTestSetResponse(ctx, sel, v)
+	return res
 }
 
 func (ec *executionContext) unmarshalNString2string(ctx context.Context, v interface{}) (string, error) {
@@ -3232,11 +3348,25 @@ func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel
 	return ret
 }
 
-func (ec *executionContext) marshalNTestSetStatus2goᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v model.TestSetStatus) graphql.Marshaler {
+func (ec *executionContext) marshalNTestRunInfo2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestRunInfo(ctx context.Context, sel ast.SelectionSet, v model.TestRunInfo) graphql.Marshaler {
+	return ec._TestRunInfo(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNTestRunInfo2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestRunInfo(ctx context.Context, sel ast.SelectionSet, v *model.TestRunInfo) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._TestRunInfo(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNTestSetStatus2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v model.TestSetStatus) graphql.Marshaler {
 	return ec._TestSetStatus(ctx, sel, &v)
 }
 
-func (ec *executionContext) marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋpkgᚋserviceᚋserveᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v *model.TestSetStatus) graphql.Marshaler {
+func (ec *executionContext) marshalNTestSetStatus2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestSetStatus(ctx context.Context, sel ast.SelectionSet, v *model.TestSetStatus) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
 			ec.Errorf(ctx, "the requested element is null which the schema does not allow")

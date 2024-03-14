@@ -1,27 +1,18 @@
+// Package graph provides the resolver implementation for the GraphQL schema.
 package graph
 
 import (
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/service/test"
+	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
 
 // This file will not be regenerated automatically.
 //
 // It serves as dependency injection for your app, add any dependencies you require here.
-var Emoji = "\U0001F430" + " Keploy:"
+
+//go:generate go run github.com/99designs/gqlgen generate
 
 type Resolver struct {
-	Tester         test.Tester
-	TestReportFS   platform.TestReportDB
-	YS             platform.TestCaseDB
-	LoadedHooks    *hooks.Hook
-	Logger         *zap.Logger
-	Path           string
-	TestReportPath string
-	Delay          uint64
-	AppPid         uint32
-	ApiTimeout     uint64
-	ServeTest      bool
+	logger *zap.Logger
+	replay replay.Service
 }

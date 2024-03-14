@@ -20,7 +20,7 @@ python3 manage.py makemigrations
 python3 manage.py migrate
 
 # Generate the keploy-config file.
-./../../../keployv2 generate-config
+./../../../keployv2 config --generate
 
 #Clean any keploy folders.
 sudo rm -rf keploy/

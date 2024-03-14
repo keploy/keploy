@@ -9,21 +9,53 @@
 <p align="center">
 🌟 The must-have tool for developers in the AI-Gen era 🌟
 </p>
-<p align="center">
 
-<a href="CODE_OF_CONDUCT.md" alt="Contributions welcome">
+---
+
+<h4 align="center">
+
+  <a href="CODE_OF_CONDUCT.md" alt="Contributions welcome">
     <img src="https://img.shields.io/badge/Contributions-Welcome-brightgreen?logo=github" /></a>
   <a href="https://github.com/keploy/keploy/actions" alt="Tests">
-    <img src="https://github.com/keploy/keploy/actions/workflows/go.yml/badge.svg" /></a>
-
   <a href="https://goreportcard.com/report/github.com/keploy/keploy" alt="Go Report Card">
     <img src="https://goreportcard.com/badge/github.com/keploy/keploy" /></a>
-
   <a href="https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA" alt="Slack">
     <img src=".github/slack.svg" /></a>
-
-  <a href="https://docs.keploy.io" alt="Docs">
-    <img src=".github/docs.svg" /></a></p>
+  <a href="https://keploy.io/docs" alt="Docs">
+    <img src=".github/docs.svg" /></a>
+   <a href="https://github.com/Keploy/Keploy/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/Licence-Apache-blue" alt="Keploy is released under the Apache License">
+  </a>
+  <a href="https://keploy.io/"><img src="https://img.shields.io/website?url=https://keploy.io/&up_message=Keploy&up_color=%232635F1&label=Accelerator&down_color=%232635F1&down_message=Keploy"></a>
+  <a href="https://github.com/keploy/keploy/releases">
+    <img title="Release" src="https://img.shields.io/github/v/release/keploy/keploy?logo=github"/>
+  </a>
+  <a href="https://github.com/Keploy/Keploy/releases">
+    <img title="Release date" src="https://img.shields.io/github/release-date/Keploy/Keploy?logo=github"/>
+  </a>
+  <a href="https://github.com/Keploy/Keploy/graphs/contributors">
+    <img title="Contributors" src="https://img.shields.io/github/contributors/Keploy/Keploy?logo=github"/>
+  </a>
+  <a href="https://github.com/Keploy/Keploy/pulls?q=is%3Apr+is%3Aclosed">
+    <img title="Pull Requests" src="https://img.shields.io/github/issues-pr-closed/Keploy/Keploy?logo=github"/>
+  </a>
+  <a href="https://github.com/Keploy/Keploy/pulls?q=is%3Apr+is%3Aclosed">
+    <img title="Release Build" src="https://img.shields.io/github/actions/workflow/status/Keploy/Keploy/release.yml?logo=github&label=Release Build"/>
+  </a>
+  <a href="https://github.com/Keploy/Keploy/blob/main/CONTRIBUTING.md">
+    <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen?logo=github" alt="PRs welcome!" />
+  </a>
+  <a href="https://github.com/Keploy/Keploy/issues">
+    <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help us reach 4k stars! Now at:" alt="Help us reach 1k stars!" />
+  </a>
+  <a href="https://Keploy.io/docs">
+    <img src="https://img.shields.io/badge/Join-Community!-orange" alt="Join our Community!" />
+  </a>
+  
+  <a href="https://twitter.com/Keploy_io">
+    <img src="https://img.shields.io/badge/follow-%40keployio-1DA1F2?logo=twitter&style=social" alt="Keploy Twitter" />
+  </a>
+</h4>
 
 ## 🎤 Presentando Keploy 🐰
 Keploy es una herramienta de prueba de backend centrada en el **desarrollador**. Realiza pruebas de backend con **mocks incorporados**, más rápido que las pruebas unitarias, a partir del tráfico del usuario, lo que lo hace **fácil de usar, potente y extensible**. 🛠

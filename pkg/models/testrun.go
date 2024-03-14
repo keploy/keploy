@@ -1,5 +1,9 @@
 package models
 
+import (
+	"errors"
+)
+
 type TestReport struct {
 	Version Version      `json:"version" yaml:"version"`
 	Name    string       `json:"name" yaml:"name"`
@@ -24,8 +28,8 @@ type TestResult struct {
 	TestCasePath string     `json:"testCasePath" yaml:"test_case_path"`
 	MockPath     string     `json:"mockPath" yaml:"mock_path"`
 	TestCaseID   string     `json:"testCaseID" yaml:"test_case_id"`
-	Req          HttpReq    `json:"req" yaml:"req,omitempty"`
-	Res          HttpResp   `json:"resp" yaml:"resp,omitempty"`
+	Req          HTTPReq    `json:"req" yaml:"req,omitempty"`
+	Res          HTTPResp   `json:"resp" yaml:"resp,omitempty"`
 	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
 	Result       Result     `json:"result" yaml:"result"`
 }
@@ -34,16 +38,37 @@ func (tr *TestResult) GetKind() string {
 	return string(tr.Kind)
 }
 
-type TestRunStatus string
+type TestSetStatus string
 
+// constants for testSet status
 const (
-	TestRunStatusRunning      TestRunStatus = "RUNNING"
-	TestRunStatusFailed       TestRunStatus = "FAILED"
-	TestRunStatusPassed       TestRunStatus = "PASSED"
-	TestRunStatusAppHalted    TestRunStatus = "APP_HALTED"
-	TestRunStatusUserAbort    TestRunStatus = "USER_ABORT"
-	TestRunStatusFaultUserApp TestRunStatus = "APP_FAULT"
+	TestSetStatusRunning      TestSetStatus = "RUNNING"
+	TestSetStatusFailed       TestSetStatus = "FAILED"
+	TestSetStatusPassed       TestSetStatus = "PASSED"
+	TestSetStatusAppHalted    TestSetStatus = "APP_HALTED"
+	TestSetStatusUserAbort    TestSetStatus = "USER_ABORT"
+	TestSetStatusFaultUserApp TestSetStatus = "APP_FAULT"
+	TestSetStatusInternalErr  TestSetStatus = "INTERNAL_ERR"
 )
+
+func StringToTestSetStatus(s string) (TestSetStatus, error) {
+	switch s {
+	case "RUNNING":
+		return TestSetStatusRunning, nil
+	case "FAILED":
+		return TestSetStatusFailed, nil
+	case "PASSED":
+		return TestSetStatusPassed, nil
+	case "APP_HALTED":
+		return TestSetStatusAppHalted, nil
+	case "USER_ABORT":
+		return TestSetStatusUserAbort, nil
+	case "APP_FAULT":
+		return TestSetStatusFaultUserApp, nil
+	default:
+		return "", errors.New("invalid TestSetStatus value")
+	}
+}
 
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
@@ -91,6 +116,7 @@ type BodyResult struct {
 
 type TestStatus string
 
+// constants for test status
 const (
 	TestStatusPending TestStatus = "PENDING"
 	TestStatusRunning TestStatus = "RUNNING"

@@ -1,117 +1,20 @@
+// Package yaml provides utility functions for working with YAML files.
 package yaml
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
+
 	"strconv"
 	"strings"
 
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
-
-func FlattenHttpResponse(h http.Header, body string) (map[string][]string, error) {
-	m := map[string][]string{}
-	for k, v := range h {
-		m["header."+k] = []string{strings.Join(v, "")}
-	}
-	err := AddHttpBodyToMap(body, m)
-	if err != nil {
-		return m, err
-	}
-	return m, nil
-}
-
-// Flatten takes a map and returns a new one where nested maps are replaced
-// by dot-delimited keys.
-// examples of valid jsons - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse#examples
-func Flatten(j interface{}) map[string][]string {
-	if j == nil {
-		return map[string][]string{"": {""}}
-	}
-	o := make(map[string][]string)
-	x := reflect.ValueOf(j)
-	switch x.Kind() {
-	case reflect.Map:
-		m, ok := j.(map[string]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for k, v := range m {
-			nm := Flatten(v)
-			for nk, nv := range nm {
-				fk := k
-				if nk != "" {
-					fk = fk + "." + nk
-				}
-				o[fk] = nv
-			}
-		}
-	case reflect.Bool:
-		o[""] = []string{strconv.FormatBool(x.Bool())}
-	case reflect.Float64:
-		o[""] = []string{strconv.FormatFloat(x.Float(), 'E', -1, 64)}
-	case reflect.String:
-		o[""] = []string{x.String()}
-	case reflect.Slice:
-		child, ok := j.([]interface{})
-		if !ok {
-			return map[string][]string{}
-		}
-		for _, av := range child {
-			nm := Flatten(av)
-			for nk, nv := range nm {
-				if ov, exists := o[nk]; exists {
-					o[nk] = append(ov, nv...)
-				} else {
-					o[nk] = nv
-				}
-			}
-		}
-	default:
-		fmt.Println(Emoji, "found invalid value in json", j, x.Kind())
-	}
-	return o
-}
-
-func AddHttpBodyToMap(body string, m map[string][]string) error {
-	// add body
-	if json.Valid([]byte(body)) {
-		var result interface{}
-
-		err := json.Unmarshal([]byte(body), &result)
-		if err != nil {
-			return err
-		}
-		j := Flatten(result)
-		for k, v := range j {
-			nk := "body"
-			if k != "" {
-				nk = nk + "." + k
-			}
-			m[nk] = v
-		}
-	} else {
-		// add it as raw text
-		m["body"] = []string{body}
-	}
-	return nil
-}
-
-func FindNoisyFields(m map[string][]string, comparator func(string, []string) bool) []string {
-	var noise []string
-	for k, v := range m {
-		if comparator(k, v) {
-			noise = append(noise, k)
-		}
-	}
-	return noise
-}
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
 	if res == nil {
@@ -252,7 +155,7 @@ func Contains(elems []string, v string) bool {
 
 func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 	indx := 0
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
 		return fmt.Sprintf("%s%v", models.TestSetPattern, indx), nil
@@ -281,23 +184,54 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 	return fmt.Sprintf("%s%v", models.TestSetPattern, indx), nil
 }
 
-func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
-	indices := []string{}
-	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
-	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
+func ValidatePath(path string) (string, error) {
+	// Validate the input to prevent directory traversal attack
+	if strings.Contains(path, "..") {
+		return "", errors.New("invalid path: contains '..' indicating directory traversal")
 	}
+	return path, nil
+}
 
+// FindLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
+func FindLastIndex(path string, _ *zap.Logger) (int, error) {
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		return 1, nil
+	}
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return indices, err
+		return 1, nil
 	}
 
+	lastIndex := 0
 	for _, v := range files {
-		if v.Name() != "testReports" {
-			indices = append(indices, v.Name())
+		if v.Name() == "mocks.yaml" || v.Name() == "config.yaml" {
+			continue
+		}
+		fileName := filepath.Base(v.Name())
+		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
+		fileNameParts := strings.Split(fileNameWithoutExt, "-")
+		if len(fileNameParts) != 2 || (fileNameParts[0] != "test" && fileNameParts[0] != "report") {
+			continue
+		}
+		indxStr := fileNameParts[1]
+		indx, err := strconv.Atoi(indxStr)
+		if err != nil {
+			continue
+		}
+		if indx > lastIndex {
+			lastIndex = indx
 		}
 	}
-	return indices, nil
+	lastIndex++
+
+	return lastIndex, nil
+}
+
+func ReadDir(path string, fileMode fs.FileMode) (*os.File, error) {
+	dir, err := os.OpenFile(path, os.O_RDONLY, fileMode)
+	if err != nil {
+		return nil, err
+	}
+	return dir, nil
 }
