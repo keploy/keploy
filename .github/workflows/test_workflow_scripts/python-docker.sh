@@ -9,7 +9,7 @@ docker network create backend
 rm -rf keploy/
 
 # Generate the keploy-config file.
-docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 generate-config
+docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 config --generate
 
 # Update the global noise to ignore the Allow header.
 config_file="./keploy-config.yaml"
