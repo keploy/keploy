@@ -118,7 +118,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -270,7 +270,7 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
-	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
+	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD})
 	if err != nil {
 		stopReason = "failed to start the hooks and proxy"
 		utils.LogError(r.logger, err, stopReason)
