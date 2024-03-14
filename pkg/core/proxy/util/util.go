@@ -39,7 +39,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 	for {
 		select {
 		case <-ctx.Done():
-			errChannel <- ctx.Err()
+			// errChannel <- ctx.Err()
 			return
 		default:
 			if conn == nil {
@@ -48,6 +48,9 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			buffer, err := ReadBytes(ctx, logger, conn)
 			if err != nil {
 				utils.LogError(logger, err, "failed to read the packet message in proxy")
+				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
+					return
+				}
 				errChannel <- err
 				return
 			}

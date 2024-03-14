@@ -46,18 +46,26 @@ type ctxWriter struct {
 
 func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 	for len(p) > 0 {
-		select {
-		case <-cw.ctx.Done():
-			return n, cw.ctx.Err()
-		default:
-			var written int
-			written, err = cw.writer.Write(p)
-			n += written
-			if err != nil {
-				return n, err
-			}
-			p = p[written:]
+		// select {
+		// case <-cw.ctx.Done():
+		// 	fmt.Println("context done !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		// 	var written int
+		// 	written, err = cw.writer.Write(p)
+		// 	fmt.Println(written, "THIS IS THE WRITTEN VALUE")
+		// 	n += written
+		// 	if err != nil {
+		// 		return n, err
+		// 	}
+		// 	p = p[written:]
+		// default:
+		var written int
+		written, err = cw.writer.Write(p)
+		n += written
+		if err != nil {
+			return n, err
 		}
+		p = p[written:]
+		// }
 	}
 	return n, nil
 }
@@ -95,9 +103,9 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 
 	_, err = cw.Write(docData)
 	if err != nil {
-		if err == ctx.Err() {
-			return nil // Ignore context cancellation error
-		}
+		// if err == ctx.Err() {
+		// 	return nil // Ignore context cancellation error
+		// }
 		utils.LogError(logger, err, "failed to write the yaml document", zap.String("yaml file name", fileName))
 		return err
 	}

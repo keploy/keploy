@@ -292,6 +292,7 @@ func (r *recorder) StartMock(ctx context.Context) error {
 			g.Go(func() error {
 				err := r.mockDB.InsertMock(ctx, mock, "")
 				if err != nil {
+					fmt.Println("error in inserting mock", err)
 					insertMockErrChan <- err
 				}
 				return nil
