@@ -234,6 +234,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		return errors.New(errMsg)
 	}
 
+	viper.AutomaticEnv()
+	viper.SetEnvPrefix("KEPLOY")
 	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
@@ -244,7 +246,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		viper.SetConfigType("yml")
 		viper.AddConfigPath(configPath)
 		if err := viper.ReadInConfig(); err != nil {
-			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			var configFileNotFoundError viper.ConfigFileNotFoundError
+			if !errors.As(err, &configFileNotFoundError) {
 				errMsg := "failed to read config file"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
@@ -289,6 +292,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		}
 
 		if c.cfg.InDocker {
+			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {
 				curDir, err := os.Getwd()
 				if err != nil {
