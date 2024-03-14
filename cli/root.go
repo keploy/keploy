@@ -2,10 +2,13 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -25,6 +28,29 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	rootCmd.SetHelpTemplate(provider.RootCustomHelpTemplate)
 
 	rootCmd.SetVersionTemplate(provider.VersionTemplate)
+
+	currentVersion := utils.Version
+	// Show update message only if it's not a dev version
+	if !strings.HasSuffix(currentVersion, "dev") {
+		// Check for the latest release version
+		releaseInfo, err := utils.GetLatestGitHubRelease(ctx, logger)
+		if err != nil {
+			logger.Debug("Failed to fetch the latest release version", zap.Error(err))
+		} else {
+			if releaseInfo.TagName != currentVersion {
+				updatetext := models.HighlightGrayString("keploy update")
+				const msg string = `
+               ╭─────────────────────────────────────╮
+               │ New version available:              │
+               │ %v  ---->   %v       │
+               │ Run %v to update         │
+               ╰─────────────────────────────────────╯
+			   `
+				versionmsg := fmt.Sprintf(msg, currentVersion, releaseInfo.TagName, updatetext)
+				fmt.Println(versionmsg)
+			}
+		}
+	}
 
 	err := cmdConfigurator.AddFlags(rootCmd, conf)
 	if err != nil {
