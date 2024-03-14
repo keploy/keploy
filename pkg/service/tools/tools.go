@@ -209,6 +209,11 @@ func extractTarGz(gzipPath, destDir string) error {
 			return err
 		}
 
+		fileName := filepath.Clean(header.Name)
+		if strings.Contains(fileName, "..") {
+			return fmt.Errorf("invalid file path: %s", fileName)
+		}
+
 		target := filepath.Join(destDir, header.Name)
 
 		switch header.Typeflag {
