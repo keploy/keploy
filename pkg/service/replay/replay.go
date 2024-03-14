@@ -316,7 +316,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 
-	for n, testCase := range testCases {
+	for _, testCase := range testCases {
 
 		// Checking for errors in the mocking and application
 		select {
@@ -350,17 +350,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to set mocks")
 			break
 		}
-		println("=======================================================")
-		fmt.Printf("[Test-%v]SortedTcsMocks: ->\n", n)
-		for _, mock := range filteredMocks {
-			fmt.Printf("Mock: %v\n", mock.Name)
-		}
-		println("-------------------------------------------------------")
-		fmt.Printf("[Test-%v]SortedConfigMocks: ->\n", n)
-		for _, mock := range unfilteredMocks {
-			fmt.Printf("Mock: %v\n", mock.Name)
-		}
-		println("=======================================================")
 
 		started := time.Now().UTC()
 		resp, loopErr := r.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)

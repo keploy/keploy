@@ -453,13 +453,13 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	}
 
 	//sending keploy pid to kernel to get filtered
-	kInode, err := getSelfInodeNumber()
+	inode, err := getSelfInodeNumber()
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
 		return err
 	}
-	h.logger.Debug("", zap.Any("Keploy Inode number", kInode))
-	err = h.SendNameSpaceID(1, kInode)
+	h.logger.Debug("", zap.Any("Keploy Inode number", inode))
+	err = h.SendNameSpaceID(1, inode)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the namespace id to the epbf program")
 		return err
