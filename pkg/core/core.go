@@ -35,13 +35,14 @@ func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// create a new app and store it in the map
 	id := uint64(c.id.Next())
-	a := app.NewApp(c.logger, id, cmd)
+	a := app.NewApp(c.logger, id, cmd, app.Options{
+		DockerNetwork: opts.DockerNetwork,
+		Container:     opts.Container,
+		DockerDelay:   opts.DockerDelay,
+	})
 	c.apps.Store(id, a)
 
-	err := a.Setup(ctx, app.Options{
-
-		DockerNetwork: opts.DockerNetwork,
-	})
+	err := a.Setup(ctx)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to setup app")
 		return 0, err
@@ -200,7 +201,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(appErrCh)
-		appErr := a.Run(runAppCtx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
+		appErr := a.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr, "error while running the app")
 			appErrCh <- appErr
