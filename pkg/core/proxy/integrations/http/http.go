@@ -46,7 +46,7 @@ type finalHTTP struct {
 // MatchType function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
-	isHttp := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
+	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buf[:], []byte("GET ")) ||
 		bytes.HasPrefix(buf[:], []byte("POST ")) ||
 		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
@@ -54,8 +54,8 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
 		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
 		bytes.HasPrefix(buf[:], []byte("HEAD "))
-	h.logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHttp))
-	return isHttp
+	h.logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
+	return isHTTP
 }
 
 func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
