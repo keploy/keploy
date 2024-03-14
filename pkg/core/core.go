@@ -120,18 +120,13 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 			utils.LogError(c.logger, err, "failed to unload the hooks")
 		}
 
-		if opts.Mode != models.MODE_TEST {
-			return nil
-		}
-
 		// reset the hosts config in nsswitch.conf of the system (in test mode)
-		if c.hostConfigStr != "" {
+		if opts.Mode == models.MODE_TEST && c.hostConfigStr != "" {
 			err := c.resetNsSwitchConfig()
 			if err != nil {
 				utils.LogError(c.logger, err, "")
 			}
 		}
-
 		return nil
 	})
 
@@ -173,13 +168,12 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	c.proxyStarted = true
 
-	if opts.Mode != models.MODE_TEST {
-		return nil
-	}
-	// setting up the dns routing in test mode (helpful in fedora distro)
-	err = c.setupNsswitchConfig()
-	if err != nil {
-		return err
+	if opts.Mode == models.MODE_TEST {
+		// setting up the dns routing in test mode (helpful in fedora distro)
+		err = c.setupNsswitchConfig()
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
