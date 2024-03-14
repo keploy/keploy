@@ -305,12 +305,12 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
-	selecetedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
+	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
 	testCasesCount := len(testCases)
 
-	if len(selecetedTests) != 0 {
-		testCasesCount = len(selecetedTests)
+	if len(selectedTests) != 0 {
+		testCasesCount = len(selectedTests)
 	}
 
 	// Inserting the initial report for the test set
@@ -333,7 +333,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	for _, testCase := range testCases {
 
-		if _, ok := selecetedTests[testCase.Name]; !ok && len(selecetedTests) != 0 {
+		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
 			continue
 		}
 
