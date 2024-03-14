@@ -101,7 +101,13 @@ func (r *replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
+
 	for _, testSetID := range testSetIDs {
+
+		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
+			continue
+		}
+
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -316,7 +322,13 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 
+	selecetedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
+
 	for _, testCase := range testCases {
+
+		if _, ok := selecetedTests[testCase.Name]; !ok && len(selecetedTests) != 0 {
+			continue
+		}
 
 		// Checking for errors in the mocking and application
 		select {
