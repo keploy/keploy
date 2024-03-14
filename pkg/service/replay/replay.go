@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -400,8 +401,8 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Binary:        testCase.HTTPResp.Binary,
 					Timestamp:     testCase.HTTPResp.Timestamp,
 				},
-				TestCasePath: r.config.Path,
-				MockPath:     r.config.Path,
+				TestCasePath: filepath.Join(r.config.Path, testSetID),
+				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
