@@ -32,8 +32,8 @@ type MockDB interface {
 }
 
 type Telemetry interface {
-	RecordedTestSuite(ctx context.Context, testSet string, testsTotal int, mockTotal map[string]int)
-	RecordedTestCaseMock(ctx context.Context, mockType string)
-	RecordedMocks(ctx context.Context, mockTotal map[string]int)
-	RecordedTestAndMocks(ctx context.Context)
+	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int)
+	RecordedTestCaseMock(mockType string)
+	RecordedMocks(mockTotal map[string]int)
+	RecordedTestAndMocks()
 }
