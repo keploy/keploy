@@ -305,12 +305,21 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
+	selecetedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
+
+	testCasesCount := len(testCases)
+
+	if len(selecetedTests) != 0 {
+		testCasesCount = len(selecetedTests)
+	}
+
 	// Inserting the initial report for the test set
 	testReport := &models.TestReport{
 		Version: models.GetVersion(),
-		Total:   len(testCases),
+		Total:   testCasesCount,
 		Status:  string(models.TestStatusRunning),
 	}
+
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
@@ -321,8 +330,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var exitLoop bool
 	// var to store the error in the loop
 	var loopErr error
-
-	selecetedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
 	for _, testCase := range testCases {
 
@@ -457,7 +464,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Version: models.GetVersion(),
 		TestSet: testSetID,
 		Status:  string(testSetStatus),
-		Total:   len(testCases),
+		Total:   testCasesCount,
 		Success: success,
 		Failure: failure,
 		Tests:   testCaseResults,
