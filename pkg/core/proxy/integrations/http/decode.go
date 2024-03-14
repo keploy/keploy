@@ -35,6 +35,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		for {
 			//Check if the expected header is present
 			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
+				logger.Debug("The expect header is present in the request buffer and writing the 100 continue response to the client")
 				//Send the 100 continue response
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
@@ -45,6 +46,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					errCh <- err
 					return
 				}
+				logger.Debug("The 100 continue response has been sent to the user application")
 				//Read the request buffer again
 				newRequest, err := util.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
@@ -56,6 +58,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				reqBuf = append(reqBuf, newRequest...)
 			}
 
+			logger.Debug("handling the chunked requests to read the complete request")
 			err := handleChunkedRequests(ctx, logger, &reqBuf, clientConn, nil)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle chunked requests")
@@ -90,7 +93,10 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			match, stub, err := match(ctx, logger, param, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching http mocks", zap.Any("metadata", getReqMeta(request)))
+				errCh <- err
+				return
 			}
+			logger.Debug("after matching the http request", zap.Any("isMatched", match), zap.Any("stub", stub), zap.Error(err))
 
 			if !match {
 				if !isPassThrough(logger, request, dstCfg.Port, opts) {

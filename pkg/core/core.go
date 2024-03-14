@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -16,12 +18,13 @@ import (
 )
 
 type Core struct {
-	logger       *zap.Logger
-	id           utils.AutoInc
-	apps         sync.Map
-	hook         Hooks
-	proxy        Proxy
-	proxyStarted bool
+	logger        *zap.Logger
+	id            utils.AutoInc
+	apps          sync.Map
+	hook          Hooks
+	proxy         Proxy
+	proxyStarted  bool
+	hostConfigStr string // hosts string in the nsswitch.conf of linux system. To restore the system hosts configuration after completion of test
 }
 
 func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
@@ -63,7 +66,7 @@ func (c *Core) getApp(id uint64) (*app.App, error) {
 	return h, nil
 }
 
-func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error {
+func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
 	hookErr := errors.New("failed to hook into the app")
 
 	a, err := c.getApp(id)
@@ -117,6 +120,18 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 			utils.LogError(c.logger, err, "failed to unload the hooks")
 		}
 
+		if opts.Mode != models.MODE_TEST {
+			return nil
+		}
+
+		// reset the hosts config in nsswitch.conf of the system (in test mode)
+		if c.hostConfigStr != "" {
+			err := c.resetNsSwitchConfig()
+			if err != nil {
+				utils.LogError(c.logger, err, "")
+			}
+		}
+
 		return nil
 	})
 
@@ -157,6 +172,16 @@ func (c *Core) Hook(ctx context.Context, id uint64, _ models.HookOptions) error 
 	}
 
 	c.proxyStarted = true
+
+	if opts.Mode != models.MODE_TEST {
+		return nil
+	}
+	// setting up the dns routing in test mode (helpful in fedora distro)
+	err = c.setupNsswitchConfig()
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -226,4 +251,66 @@ func (c *Core) GetAppIP(_ context.Context, id uint64) (string, error) {
 	}
 
 	return a.ContainerIPv4Addr(), nil
+}
+
+// setting up the dns routing for the linux system
+func (c *Core) setupNsswitchConfig() error {
+	nsSwitchConfig := "/etc/nsswitch.conf"
+
+	// Check if the nsswitch.conf present for the system
+	if _, err := os.Stat(nsSwitchConfig); err == nil {
+		// Read the current nsswitch.conf
+		data, err := os.ReadFile(nsSwitchConfig)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to read the nsswitch.conf file from system")
+			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
+		}
+
+		// Replace the hosts field value if it exists
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, "hosts:") {
+				c.hostConfigStr = lines[i]
+				lines[i] = "hosts: files dns"
+			}
+		}
+
+		// Write the modified nsswitch.conf back to the file
+		err = os.WriteFile("/etc/nsswitch.conf", []byte(strings.Join(lines, "\n")), 0644)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy")
+			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
+		}
+
+		c.logger.Debug("Successfully written to nsswitch config of linux")
+	}
+	return nil
+}
+
+// resetNsSwitchConfig resets the hosts config of nsswitch of the system
+func (c *Core) resetNsSwitchConfig() error {
+	nsSwitchConfig := "/etc/nsswitch.conf"
+	data, err := os.ReadFile(nsSwitchConfig)
+	if err != nil {
+		c.logger.Error("failed to read the nsswitch.conf file from system", zap.Error(err))
+		return errors.New("failed to reset the nsswitch.conf back to the original state")
+	}
+
+	// Replace the hosts field value if it exists with the actual system hosts value
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "hosts:") {
+			lines[i] = c.hostConfigStr
+		}
+	}
+
+	// Write the modified nsswitch.conf back to the file
+	err = os.WriteFile(nsSwitchConfig, []byte(strings.Join(lines, "\n")), 0644)
+	if err != nil {
+		c.logger.Error("failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy", zap.Error(err))
+		return errors.New("failed to reset the nsswitch.conf back to the original state")
+	}
+
+	c.logger.Debug("Successfully reset the nsswitch config of linux")
+	return nil
 }
