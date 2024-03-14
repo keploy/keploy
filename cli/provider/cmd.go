@@ -281,6 +281,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
 
+		defer utils.GenerateGithubActions(c.logger, cfg.Command)
+
 		if cfg.InDocker {
 			if len(cfg.Path) > 0 {
 				curDir, err := os.Getwd()

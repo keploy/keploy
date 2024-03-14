@@ -312,8 +312,8 @@ jobs:
 	logger.Info("GitHub Actions workflow file generated successfully", zap.String("path", filePath))
 }
 
-// getLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
-func GetLatestGitHubRelease() (GitHubRelease, error) {
+// GetLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
+func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRelease, error) {
 	// GitHub repository details
 	repoOwner := "keploy"
 	repoName := "keploy"
