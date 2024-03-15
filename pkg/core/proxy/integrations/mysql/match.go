@@ -9,6 +9,7 @@ import (
 
 func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, int, string, error) {
 	//TODO: any reason to write the similar code twice?
+	fmt.Println("matchRequestWithMock...")
 	allMocks := append([]*models.Mock(nil), configMocks...)
 	allMocks = append(allMocks, tcsMocks...)
 	var bestMatch *models.MySQLResponse

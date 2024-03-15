@@ -18,6 +18,9 @@ keploy.yml
 keploy-logs.txt
 
 
+# add fuse hidden files
+.fuse_hidden*
+
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 .deploy.sh

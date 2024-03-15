@@ -49,7 +49,7 @@ func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 
-	err := decodeMySQL(ctx, logger, src, dstCfg, mockDb, opts)
+	err := decodeOutgoingMySQL(ctx, logger, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
 		return err

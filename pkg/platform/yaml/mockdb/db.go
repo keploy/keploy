@@ -47,8 +47,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-	fmt.Println(mock.Name, "THis is the mock name ")
-	fmt.Printf("Mock:%v", mock)
 	data, err := yamlLib.Marshal(&mockYaml)
 	if err != nil {
 		return err

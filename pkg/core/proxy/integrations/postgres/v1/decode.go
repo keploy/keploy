@@ -21,6 +21,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, pgRequests [][]byte) {
+		// close should be called from the producer of the channel
 		defer close(errCh)
 		for {
 			// Since protocol packets have to be parsed for checking stream end,
