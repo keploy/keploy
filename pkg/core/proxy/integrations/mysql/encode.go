@@ -3,9 +3,10 @@ package mysql
 import (
 	"context"
 	"errors"
-	"golang.org/x/sync/errgroup"
 	"net"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"

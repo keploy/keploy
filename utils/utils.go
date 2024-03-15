@@ -251,7 +251,7 @@ func Recover(logger *zap.Logger) {
 		stackTrace := debug.Stack()
 		LogError(logger, nil, "Recovered from panic", zap.String("stack trace", string(stackTrace)))
 		//stopping the global context
-		err = Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+		// err = Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
 			//return
