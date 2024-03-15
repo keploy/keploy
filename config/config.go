@@ -15,8 +15,8 @@ type Config struct {
 	ContainerName   string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName     string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
 	BuildDelay      time.Duration `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test            Test          `json:"test" yaml:"test" mapstructure:",squash"`
-	Record          Record        `json:"record" yaml:"record" mapstructure:",squash"`
+	Test            Test          `json:"test" yaml:"test" mapstructure:"test"`
+	Record          Record        `json:"record" yaml:"record" mapstructure:"record"`
 	ConfigPath      string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules     []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	KeployContainer string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
@@ -82,7 +82,10 @@ func GetByPassPorts(conf *Config) []uint {
 }
 
 func SetSelectedTests(conf *Config, testSets []string) {
-	conf.Test.SelectedTests = make(map[string][]string)
+	if conf.Test.SelectedTests == nil {
+		conf.Test.SelectedTests = make(map[string][]string)
+	}
+
 	for _, testSet := range testSets {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}

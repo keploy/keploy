@@ -101,7 +101,13 @@ func (r *replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
+
 	for _, testSetID := range testSetIDs {
+
+		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
+			continue
+		}
+
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -138,7 +144,7 @@ func (r *replayer) Start(ctx context.Context) error {
 	if testRunResult {
 		testRunStatus = "pass"
 	}
-	r.telemetry.TestRun(ctx, totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
+	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
@@ -175,7 +181,7 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
@@ -299,12 +305,21 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
+	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
+
+	testCasesCount := len(testCases)
+
+	if len(selectedTests) != 0 {
+		testCasesCount = len(selectedTests)
+	}
+
 	// Inserting the initial report for the test set
 	testReport := &models.TestReport{
 		Version: models.GetVersion(),
-		Total:   len(testCases),
+		Total:   testCasesCount,
 		Status:  string(models.TestStatusRunning),
 	}
+
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
@@ -316,7 +331,11 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 
-	for n, testCase := range testCases {
+	for _, testCase := range testCases {
+
+		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
+			continue
+		}
 
 		// Checking for errors in the mocking and application
 		select {
@@ -350,17 +369,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to set mocks")
 			break
 		}
-		println("=======================================================")
-		fmt.Printf("[Test-%v]SortedTcsMocks: ->\n", n)
-		for _, mock := range filteredMocks {
-			fmt.Printf("Mock: %v\n", mock.Name)
-		}
-		println("-------------------------------------------------------")
-		fmt.Printf("[Test-%v]SortedConfigMocks: ->\n", n)
-		for _, mock := range unfilteredMocks {
-			fmt.Printf("Mock: %v\n", mock.Name)
-		}
-		println("=======================================================")
 
 		started := time.Now().UTC()
 		resp, loopErr := r.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
@@ -456,7 +464,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Version: models.GetVersion(),
 		TestSet: testSetID,
 		Status:  string(testSetStatus),
-		Total:   len(testCases),
+		Total:   testCasesCount,
 		Success: success,
 		Failure: failure,
 		Tests:   testCaseResults,
@@ -482,7 +490,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
 
-	r.telemetry.TestSetRun(runTestSetCtx, testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
+	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 	return testSetStatus, nil
 }
 
