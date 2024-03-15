@@ -6,7 +6,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -153,6 +155,14 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 			err = file.Close()
 			if err != nil {
 				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+
+			basePath := path[:strings.LastIndex(path, "/")]
+			cmd := exec.Command("sudo", "chmod", "-R", "777", basePath)
+			err = cmd.Run()
+			if err != nil {
+				utils.LogError(Logger, err, "failed to change the permissions of the directory", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
 			return true, nil
