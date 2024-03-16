@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"regexp"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -133,6 +136,13 @@ func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byt
 	}
 	return data, nil
 }
+func validateBasePath(basePath string) error {
+	var basePathRegex = regexp.MustCompile(`test-set-\d+$`)
+	if !basePathRegex.MatchString(basePath) {
+		return errors.New("invalid base path format")
+	}
+	return nil
+}
 
 func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
@@ -164,6 +174,12 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 				utils.LogError(Logger, err, "failed to validate the base path", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
+			err = validateBasePath(basePath)
+			if err != nil {
+				utils.LogError(Logger, err, "failed to validate the base path", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+
 			cmd := exec.Command("sudo", "chmod", "-R", "777", basePath)
 			err = cmd.Run()
 			if err != nil {
