@@ -87,11 +87,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}
 
 	// set up the CA for tls connections
-	// err = SetupCA(ctx, p.logger)
-	// if err != nil {
-	// 	utils.LogError(p.logger, err, "failed to setup CA")
-	// 	return err
-	// }
+	err = SetupCA(ctx, p.logger)
+	if err != nil {
+		utils.LogError(p.logger, err, "failed to setup CA")
+		return err
+	}
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return errors.New("failed to get the error group from the context")
