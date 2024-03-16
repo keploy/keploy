@@ -2,14 +2,18 @@ package graph
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -39,12 +43,43 @@ func (g *Graph) Serve(ctx context.Context) error {
 		g.config.Port = defaultPort
 	}
 
+	graphGrp, graphCtx := errgroup.WithContext(ctx)
+
+	resolver := &Resolver{
+		logger: g.logger,
+		replay: g.replay,
+	}
+
 	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
-		Resolvers: &Resolver{
-			logger: g.logger,
-			replay: g.replay,
-		},
+		Resolvers: resolver,
 	}))
+
+	defer func() {
+		// cancel the context of the hooks to stop proxy and ebpf hooks
+		if hookCancel := resolver.getHookCancel(); hookCancel != nil {
+			hookCancel()
+		}
+		println("waiting for the hooks to stop")
+		time.Sleep(2 * time.Second)
+
+		// cancel the context of the app in case of sudden stop if the app was started
+		appCtx, appCancel := resolver.getAppCtxWithCancel()
+		if appCtx != nil && appCancel != nil {
+			appCancel()
+			appErrGrp, ok := appCtx.Value(models.ErrGroupKey).(*errgroup.Group)
+			if ok {
+				if err := appErrGrp.Wait(); err != nil {
+					utils.LogError(g.logger, err, "failed to stop the application gracefully")
+				}
+			}
+		}
+
+		err := graphGrp.Wait()
+		if err != nil {
+			utils.LogError(g.logger, err, "failed to the graphql server gracefully")
+		}
+		println("graph server stopped after waiting")
+	}()
 
 	http.Handle("/", playground.Handler("GraphQL playground", "/query"))
 	http.Handle("/query", srv)
@@ -55,25 +90,30 @@ func (g *Graph) Serve(ctx context.Context) error {
 		Handler: nil, // Use the default http.DefaultServeMux
 	}
 
-	go func() {
+	graphGrp.Go(func() error {
 		defer utils.Recover(g.logger)
-		<-ctx.Done()
-		g.stopGraphqlServer(ctx, httpSrv)
-	}()
+		return g.stopGraphqlServer(graphCtx, httpSrv)
+	})
 
-	//TODO: start the test cmd like "mvn test" and use select statement to listen for error channel
-
-	log.Printf(utils.Emoji+"connect to http://localhost:%d/ for GraphQL playground", g.config.Port)
+	g.logger.Debug(fmt.Sprintf("connect to http://localhost:%d/ for GraphQL playground", int(g.config.Port)))
+	g.logger.Info("Graphql server started", zap.Int("port", int(g.config.Port)))
 	if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatalf(utils.Emoji+"listen: %s\n", err)
+		stopErr := utils.Stop(g.logger, "Graphql server failed to start")
+		if stopErr != nil {
+			utils.LogError(g.logger, stopErr, "failed to stop Graphql server gracefully")
+		}
+		return err
 	}
 	g.logger.Debug("Graphql server stopped gracefully")
 	return nil
 }
 
 // Gracefully shut down the HTTP server
-func (g *Graph) stopGraphqlServer(ctx context.Context, httpSrv *http.Server) {
+func (g *Graph) stopGraphqlServer(ctx context.Context, httpSrv *http.Server) error {
+	<-ctx.Done()
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		utils.LogError(g.logger, err, "Graphql server shutdown failed")
+		return err
 	}
+	return nil
 }

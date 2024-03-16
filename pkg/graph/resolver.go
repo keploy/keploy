@@ -2,6 +2,8 @@
 package graph
 
 import (
+	"context"
+
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
@@ -13,6 +15,17 @@ import (
 //go:generate go run github.com/99designs/gqlgen generate
 
 type Resolver struct {
-	logger *zap.Logger
-	replay replay.Service
+	logger     *zap.Logger
+	replay     replay.Service
+	hookCancel context.CancelFunc
+	appCtx     context.Context
+	appCancel  context.CancelFunc
+}
+
+func (r *Resolver) getHookCancel() context.CancelFunc {
+	return r.hookCancel
+}
+
+func (r *Resolver) getAppCtxWithCancel() (context.Context, context.CancelFunc) {
+	return r.appCtx, r.appCancel
 }
