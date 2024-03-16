@@ -159,6 +159,11 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 			}
 
 			basePath := path[:strings.LastIndex(path, "/")]
+			basePath, err = ValidatePath(basePath)
+			if err != nil {
+				utils.LogError(Logger, err, "failed to validate the base path", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
 			cmd := exec.Command("sudo", "chmod", "-R", "777", basePath)
 			err = cmd.Run()
 			if err != nil {
