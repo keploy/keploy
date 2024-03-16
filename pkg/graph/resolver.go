@@ -17,13 +17,14 @@ import (
 type Resolver struct {
 	logger     *zap.Logger
 	replay     replay.Service
+	hookCtx    context.Context
 	hookCancel context.CancelFunc
 	appCtx     context.Context
 	appCancel  context.CancelFunc
 }
 
-func (r *Resolver) getHookCancel() context.CancelFunc {
-	return r.hookCancel
+func (r *Resolver) getHookCtxWithCancel() (context.Context, context.CancelFunc) {
+	return r.hookCtx, r.hookCancel
 }
 
 func (r *Resolver) getAppCtxWithCancel() (context.Context, context.CancelFunc) {

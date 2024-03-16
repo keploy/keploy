@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -56,11 +55,16 @@ func (g *Graph) Serve(ctx context.Context) error {
 
 	defer func() {
 		// cancel the context of the hooks to stop proxy and ebpf hooks
-		if hookCancel := resolver.getHookCancel(); hookCancel != nil {
+		hookCtx, hookCancel := resolver.getHookCtxWithCancel()
+		if hookCtx != nil && hookCancel != nil {
 			hookCancel()
+			hookErrGrp, ok := hookCtx.Value(models.ErrGroupKey).(*errgroup.Group)
+			if ok {
+				if err := hookErrGrp.Wait(); err != nil {
+					utils.LogError(g.logger, err, "failed to stop the hooks gracefully")
+				}
+			}
 		}
-		println("waiting for the hooks to stop")
-		time.Sleep(2 * time.Second)
 
 		// cancel the context of the app in case of sudden stop if the app was started
 		appCtx, appCancel := resolver.getAppCtxWithCancel()
@@ -76,9 +80,8 @@ func (g *Graph) Serve(ctx context.Context) error {
 
 		err := graphGrp.Wait()
 		if err != nil {
-			utils.LogError(g.logger, err, "failed to the graphql server gracefully")
+			utils.LogError(g.logger, err, "failed to stop the graphql server gracefully")
 		}
-		println("graph server stopped after waiting")
 	}()
 
 	http.Handle("/", playground.Handler("GraphQL playground", "/query"))
@@ -104,7 +107,7 @@ func (g *Graph) Serve(ctx context.Context) error {
 		}
 		return err
 	}
-	g.logger.Debug("Graphql server stopped gracefully")
+	g.logger.Info("Graphql server stopped gracefully")
 	return nil
 }
 

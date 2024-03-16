@@ -44,6 +44,8 @@ func (r *mutationResolver) StartHooks(ctx context.Context) (*model.TestRunInfo, 
 	ctx = context.WithoutCancel(ctx)
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	r.hookCtx = ctx
+
 	testRunId, appId, hookCancel, err := r.replay.BootReplay(ctx)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to boot replay")
