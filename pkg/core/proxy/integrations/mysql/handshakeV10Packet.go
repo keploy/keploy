@@ -102,7 +102,7 @@ func min(a, b int) int {
 }
 func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, error) {
 	buf := new(bytes.Buffer)
-	fmt.Println(packet, buf, "encodeHandshakePacket")
+
 	// Protocol version
 	buf.WriteByte(packet.ProtocolVersion)
 
@@ -151,6 +151,6 @@ func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, erro
 		buf.WriteString(packet.AuthPluginName)
 		buf.WriteByte(0x00) // Null terminator
 	}
-	fmt.Println("RETURNING SOME BYTES HAHAHAA")
+
 	return buf.Bytes(), nil
 }

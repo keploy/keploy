@@ -3,8 +3,8 @@ package mysql
 import "fmt"
 
 type QueryPacket struct {
-	Command byte   `json:"command,omitempty" yaml:"command,omitempty,flow"`
-	Query   string `json:"query,omitempty" yaml:"query,omitempty,flow"`
+	Command byte   `yaml:"command"`
+	Query   string `yaml:"query"`
 }
 
 func decodeMySQLQuery(data []byte) (*QueryPacket, error) {
