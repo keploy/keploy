@@ -49,4 +49,6 @@ type MockMemDb interface {
 	UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool
 	DeleteFilteredMock(mock *models.Mock) bool
 	DeleteUnFilteredMock(mock *models.Mock) bool
+	SetUnFilteredMocks(mocks []*models.Mock)
+	SetFilteredMocks(mocks []*models.Mock)
 }

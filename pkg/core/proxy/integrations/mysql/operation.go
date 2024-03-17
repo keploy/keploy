@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// common
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
 	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
@@ -64,17 +65,14 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 	if ok {
 		packet = *innerPacket
 	}
-	fmt.Println("ENCODE To BINARY")
 	switch operation {
 	case "MySQLHandshakeV10":
-		fmt.Println("MySQLHandshakeV10")
 		p, ok := packet.(*models.MySQLHandshakeV10Packet)
 		if !ok {
 			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
 		}
 		data, err = encodeHandshakePacket(p)
 	case "HANDSHAKE_RESPONSE_OK":
-		fmt.Println("HANDSHAKE_RESPONSE_OK")
 		bypassHeader = true
 		p, ok := packet.(*models.MySQLHandshakeResponseOk)
 		if !ok {
@@ -82,7 +80,6 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		}
 		data, err = encodeHandshakeResponseOk(p)
 	case "AUTH_SWITCH_REQUEST":
-		fmt.Println("AUTH_SWITCH_REQUEST")
 		p, ok := packet.(*models.AuthSwitchRequestPacket)
 		if !ok {
 			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
@@ -93,7 +90,6 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		if !ok {
 			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
 		}
-		fmt.Println("AUTH_SWITCH_RESPONSE")
 		data, err = encodeAuthSwitchResponse(p)
 
 	case "MySQLOK":
@@ -101,7 +97,6 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		if !ok {
 			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
 		}
-		fmt.Println("MySQLOK")
 		data, err = encodeMySQLOK(p, header)
 		bypassHeader = true
 	case "COM_STMT_PREPARE_OK":
@@ -109,7 +104,6 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		if !ok {
 			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
 		}
-		fmt.Println("COM_STMT_PREPARE_OK")
 		data, err = encodeStmtPrepareOk(p)
 		bypassHeader = true
 	case "RESULT_SET_PACKET":
@@ -117,7 +111,6 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		if !ok {
 			return nil, fmt.Errorf("invalid packet for result set")
 		}
-		fmt.Println("RESULT_SET_PACKET")
 		data, err = encodeMySQLResultSet(p)
 		bypassHeader = true
 	default:
@@ -132,8 +125,9 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		binary.LittleEndian.PutUint32(header, uint32(len(data)))
 		header[3] = byte(sequence)
 		return append(header, data...), nil
+	} else {
+		return data, nil
 	}
-	return data, nil
 }
 
 func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPacketHeader, interface{}, error) {
@@ -142,7 +136,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPac
 	var packetData interface{}
 	var packetType string
 	var err error
-	fmt.Println("HAHAHAHHAHAHAHAH")
+	fmt.Println("Inside DecodeMySQLPacket")
 	if len(data) < 1 {
 		return "", MySQLPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
 	}
@@ -152,20 +146,23 @@ func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPac
 		switch {
 		case data[0] == 0x00: // OK Packet
 			packetType = "MySQLOK"
-			fmt.Println("MySQLOK")
+			fmt.Println("MySQLOK , Data: ", data)
 			packetData, err = decodeMySQLOK(data)
 			lastCommand = 0x00 // Reset the last command
 
 		case data[0] == 0xFF: // Error Packet
 			packetType = "MySQLErr"
-			fmt.Println("MySQLErr")
+			fmt.Println("MySQLErr , Data: ", data)
 			packetData, err = decodeMySQLErr(data)
 			lastCommand = 0x00 // Reset the last command
-
+		case data[0] == 0x03 || data[0] == 35: // MySQLQuery
+			packetType = "MySQLQuery"
+			fmt.Println("MySQLQuery , Data: ", data)
+			packetData, err = decodeMySQLQuery(data)
+			lastCommand = 0x03
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			packetType = "RESULT_SET_PACKET"
-			fmt.Println("RESULT_SET_PACKET")
-
+			fmt.Println("RESULT_SET_PACKET , Data: ", data)
 			packetData, err = parseResultSet(data)
 			if err != nil {
 				fmt.Println("Error parsing result set: ", err)
@@ -173,114 +170,112 @@ func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPac
 			lastCommand = 0x00 // Reset the last command
 		default:
 			packetType = "Unknown"
+
 			packetData = data
 			logger.Debug("unknown packet type after COM_QUERY", zap.Int("unknownPacketTypeInt", int(data[0])))
 		}
 	case data[0] == 0x0e: // COM_PING
 		packetType = "COM_PING"
-		fmt.Println("COM_PING")
+		fmt.Println("COM_PING , Data: ", data)
 		packetData, err = decodeComPing(data)
 		lastCommand = 0x0e
 	case data[0] == 0x17: // COM_STMT_EXECUTE
 		packetType = "COM_STMT_EXECUTE"
-		fmt.Println("COM_STMT_EXECUTE")
+		fmt.Println("COM_STMT_EXECUTE , Data: ", data)
 		packetData, err = decodeComStmtExecute(data)
 		lastCommand = 0x17
 	case data[0] == 0x1c: // COM_STMT_FETCH
 		packetType = "COM_STMT_FETCH"
-		fmt.Println("COM_STMT_FETCH")
+		fmt.Println("COM_STMT_FETCH , Data: ", data)
 		packetData, err = decodeComStmtFetch(data)
 		lastCommand = 0x1c
 	case data[0] == 0x16: // COM_STMT_PREPARE
 		packetType = "COM_STMT_PREPARE"
-		fmt.Println("COM_STMT_PREPARE")
+		fmt.Println("COM_STMT_PREPARE , Data: ", data)
 		packetData, err = decodeComStmtPrepare(data)
 		lastCommand = 0x16
 	case data[0] == 0x19: // COM_STMT_CLOSE
 		if len(data) > 11 {
 
 			packetType = "COM_STMT_CLOSE_WITH_PREPARE"
-			fmt.Println("COM_STMT_CLOSE_WITH_PREPARE")
+			fmt.Println("COM_STMT_CLOSE_WITH_PREPARE , Data: ", data)
 			packetData, err = decodeComStmtCloseMoreData(data)
 			lastCommand = 0x16
 		} else {
 			packetType = "COM_STMT_CLOSE"
-			fmt.Println("COM_STMT_CLOSE")
+			fmt.Println("COM_STMT_CLOSE , Data: ", data)
 			packetData, err = decodeComStmtClose(data)
 			lastCommand = 0x19
 		}
 	case data[0] == 0x11: // COM_CHANGE_USER
 		packetType = "COM_CHANGE_USER"
-		fmt.Println("COM_CHANGE_USER")
+		fmt.Println("COM_CHANGE_USER , Data: ", data)
 		packetData, err = decodeComChangeUser(data)
 		lastCommand = 0x11
 
 	case data[0] == 0x04: // Result Set Packet
 		packetType = "RESULT_SET_PACKET"
-		fmt.Println("RESULT_SET_PACKET")
+		fmt.Println("RESULT_SET_PACKET 2, Data: ", data)
 		packetData, err = parseResultSet(data)
 		lastCommand = 0x04
 	case data[0] == 0x0A: // MySQLHandshakeV10
 		packetType = "MySQLHandshakeV10"
-		fmt.Println("MySQLHandshakeV10")
+		fmt.Println("MySQLHandshakeV10 , Data: ", data)
 		packetData, err = decodeMySQLHandshakeV10(data)
 		handshakePacket, _ := packetData.(*HandshakeV10Packet)
 		handshakePluginName = handshakePacket.AuthPluginName
 		lastCommand = 0x0A
-	case data[0] == 0x03: // MySQLQuery
-		packetType = "MySQLQuery"
-		fmt.Println("MySQLQuery")
-		packetData, err = decodeMySQLQuery(data)
-		lastCommand = 0x03
+	// case data[0] == 0x03: // MySQLQuery
+	// 	packetType = "MySQLQuery"
+	// 	fmt.Println("MySQLQuery , Data: ", data)
+	// 	packetData, err = decodeMySQLQuery(data)
+	// 	lastCommand = 0x03
 	case data[0] == 0x00: // MySQLOK or COM_STMT_PREPARE_OK
 		if lastCommand == 0x16 {
+			fmt.Println("COM_STMT_PREPARE_OK , Data: ", data)
 			packetType = "COM_STMT_PREPARE_OK"
-			fmt.Println("COM_STMT_PREPARE_OK")
 			packetData, err = decodeComStmtPrepareOk(data)
 		} else {
 			packetType = "MySQLOK"
-			fmt.Println("MySQLOK")
+			fmt.Println("MySQLOK 2, Data: ", data)
 			packetData, err = decodeMySQLOK(data)
 		}
 		lastCommand = 0x00
 	case data[0] == 0xFF: // MySQLErr
 		packetType = "MySQLErr"
-		fmt.Println("MySQLErr")
+		fmt.Println("MySQLErr 2, Data: ", data)
 		packetData, err = decodeMySQLErr(data)
 		lastCommand = 0xFF
 	case data[0] == 0xFE && len(data) > 1: // Auth Switch Packet
 		packetType = "AUTH_SWITCH_REQUEST"
-		fmt.Println("AUTH_SWITCH_REQUEST")
+		fmt.Println("AUTH_SWITCH_REQUEST , Data: ", data)
 		packetData, err = decodeAuthSwitchRequest(data)
 		lastCommand = 0xFE
 	case data[0] == 0xFE || expectingAuthSwitchResponse:
 		packetType = "AUTH_SWITCH_RESPONSE"
-		fmt.Println("AUTH_SWITCH_RESPONSE")
+		fmt.Println("AUTH_SWITCH_RESPONSE , Data: ", data)
 		packetData, err = decodeAuthSwitchResponse(data)
 		expectingAuthSwitchResponse = false
 	case data[0] == 0xFE: // EOF packet
 		packetType = "MySQLEOF"
-		fmt.Println("MySQLEOF")
+		fmt.Println("MySQLEOF , Data: ", data)
 		packetData, err = decodeMYSQLEOF(data)
 		lastCommand = 0xFE
 	case data[0] == 0x02: // New packet type
 		packetType = "AUTH_MORE_DATA"
-		fmt.Println("AUTH_MORE_DATA")
+		fmt.Println("AUTH_MORE_DATA , Data: ", data)
 		packetData, err = decodeAuthMoreData(data)
 		lastCommand = 0x02
 	case data[0] == 0x18: // SEND_LONG_DATA Packet
 		packetType = "COM_STMT_SEND_LONG_DATA"
-		fmt.Println("COM_STMT_SEND_LONG_DATA")
 		packetData, err = decodeComStmtSendLongData(data)
 		lastCommand = 0x18
 	case data[0] == 0x1a: // STMT_RESET Packet
 		packetType = "COM_STMT_RESET"
-		fmt.Println("COM_STMT_RESET")
 		packetData, err = decodeComStmtReset(data)
 		lastCommand = 0x1a
 	case data[0] == 0x8d || expectingHandshakeResponse || expectingHandshakeResponseTest: // Handshake Response packet
 		packetType = "HANDSHAKE_RESPONSE"
-		fmt.Println("HANDSHAKE_RESPONSE")
 		packetData, err = decodeHandshakeResponse(data)
 		lastCommand = 0x8d // This value may differ depending on the handshake response protocol version
 	case data[0] == 0x01: // Handshake Response packet
@@ -289,7 +284,6 @@ func DecodeMySQLPacket(logger *zap.Logger, packet MySQLPacket) (string, MySQLPac
 			packetData = nil
 		} else {
 			packetType = "HANDSHAKE_RESPONSE_OK"
-			fmt.Println("HANDSHAKE_RESPONSE_OK")
 			packetData, err = decodeHandshakeResponseOk(data)
 		}
 	default:

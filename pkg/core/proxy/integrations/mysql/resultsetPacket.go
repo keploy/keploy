@@ -143,6 +143,7 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 	if len(b) > 1 {
 		b = b[1:] // Skip the next byte (length of the fixed-length fields)
 	}
+	fmt.Println(len(b), "LENGTH of B")
 	packet.CharacterSet = binary.LittleEndian.Uint16(b)
 	if len(b) > 2 {
 		b = b[2:]

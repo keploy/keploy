@@ -1,7 +1,6 @@
 package mysql
 
 import (
-	// "encoding/base64"
 	"encoding/binary"
 	"fmt"
 )

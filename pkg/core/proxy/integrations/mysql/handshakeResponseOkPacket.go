@@ -111,7 +111,6 @@ func encodeHandshakeResponseOk(packet *models.MySQLHandshakeResponseOk) ([]byte,
 			var authData byte
 			switch packet.PluginDetails.Type {
 			case "cachingSha2PasswordFastAuthSuccess":
-				fmt.Println("cachingSha2PasswordFastAuthSuccess")
 				authData = models.CachingSha2PasswordFastAuthSuccess
 			case "cachingSha2PasswordPerformFullAuthentication":
 				authData = models.CachingSha2PasswordPerformFullAuthentication

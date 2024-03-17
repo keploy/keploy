@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, int, string, error) {
-	//TODO: any reason to write the similar code twice?
-	fmt.Println("matchRequestWithMock...")
+func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock, mockDb integrations.MockMemDb) (*models.MySQLResponse, int, string, error) {
+	fmt.Println("INSIDE matchRequestWithMock")
 	allMocks := append([]*models.Mock(nil), configMocks...)
 	allMocks = append(allMocks, tcsMocks...)
+	fmt.Println(len(allMocks), "allMocks")
+	fmt.Println(len(configMocks), "configMocks")
+	fmt.Println(len(tcsMocks), "tcsMocks")
 	var bestMatch *models.MySQLResponse
 	var matchedIndex int
 	var matchedReqIndex int
@@ -19,13 +22,7 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 	maxMatchCount := 0
 
 	for i, mock := range allMocks {
-		if ctx.Err() != nil {
-			return nil, -1, "", ctx.Err()
-		}
 		for j, mockReq := range mock.Spec.MySQLRequests {
-			if ctx.Err() != nil {
-				return nil, -1, "", ctx.Err()
-			}
 			matchCount := compareMySQLRequests(mysqlRequest, mockReq)
 			if matchCount > maxMatchCount {
 				maxMatchCount = matchCount
@@ -54,7 +51,11 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		}
 		configMocks[matchedIndex].Spec.MySQLRequests = append(configMocks[matchedIndex].Spec.MySQLRequests[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
 		configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
-		//h.SetConfigMocks(configMocks)
+
+		if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
+			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
+		}
+		mockDb.SetUnFilteredMocks(configMocks)
 	} else {
 		realIndex := matchedIndex - len(configMocks)
 		if realIndex < 0 || realIndex >= len(tcsMocks) {
@@ -62,7 +63,11 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		}
 		tcsMocks[realIndex].Spec.MySQLRequests = append(tcsMocks[realIndex].Spec.MySQLRequests[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
 		tcsMocks[realIndex].Spec.MySQLResponses = append(tcsMocks[realIndex].Spec.MySQLResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
-		//h.SetTcsMocks(tcsMocks)
+
+		if len(tcsMocks[realIndex].Spec.MySQLResponses) == 0 {
+			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
+		}
+		mockDb.SetFilteredMocks(tcsMocks)
 	}
 
 	return bestMatch, matchedIndex, mockType, nil

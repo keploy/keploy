@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"bytes"
-	// "encoding/base64"
 	"encoding/binary"
 	"errors"
 )
