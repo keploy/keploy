@@ -76,7 +76,12 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 		docData = append(data, docData...)
 		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 	}
-	yamlPath := filepath.Join(path, fileName+".yaml")
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	if err != nil {
+		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
+		return err
+	}
+
 	file, err := os.OpenFile(yamlPath, flag, fs.ModePerm)
 	if err != nil {
 		utils.LogError(logger, err, "failed to open file for writing", zap.String("file", yamlPath))
@@ -105,7 +110,11 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 }
 
 func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byte, error) {
-	filePath := filepath.Join(path, name+".yaml")
+	filePath, err := ValidatePath(filepath.Join(path, name+".yaml"))
+	if err != nil {
+		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", name))
+		return nil, err
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the file: %v", err)
