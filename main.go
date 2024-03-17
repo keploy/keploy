@@ -19,18 +19,6 @@ import (
 var version string
 var dsn string
 
-const logo string = `
-       ▓██▓▄
-    ▓▓▓▓██▓█▓▄
-     ████████▓▒
-          ▀▓▓███▄      ▄▄   ▄               ▌
-         ▄▌▌▓▓████▄    ██ ▓█▀  ▄▌▀▄  ▓▓▌▄   ▓█  ▄▌▓▓▌▄ ▌▌   ▓
-       ▓█████████▌▓▓   ██▓█▄  ▓█▄▓▓ ▐█▌  ██ ▓█  █▌  ██  █▌ █▓
-      ▓▓▓▓▀▀▀▀▓▓▓▓▓▓▌  ██  █▓  ▓▌▄▄ ▐█▓▄▓█▀ █▓█ ▀█▄▄█▀   █▓█
-       ▓▌                           ▐█▌                   █▌
-        ▓
-`
-
 func main() {
 	printLogo()
 	ctx := utils.NewCtx()
@@ -43,7 +31,7 @@ func printLogo() {
 	}
 	utils.Version = version
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
-		fmt.Println(logo, " ")
+		cli.PrintKeployLogo(true)
 		fmt.Printf("version: %v\n\n", version)
 	} else {
 		fmt.Println("Starting keploy in docker environment.")
