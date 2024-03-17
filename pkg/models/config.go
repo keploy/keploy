@@ -1,61 +1,7 @@
+// Package models provides data models for the keploy.
 package models
 
 import "time"
-
-const DefaultConfig = `
-record:
-  path: ""
-  # mandatory
-  command: ""
-  proxyport: 0
-  containerName: ""
-  networkName: ""
-  delay: 5
-  buildDelay: 30s
-  tests: 
-    filters:
-      - path: ""
-        urlMethods: []
-        headers: {}
-        host: ""
-  stubs:
-    filters:
-      - path: ""
-        host: ""
-        ports: 0
-test:
-  path: ""
-  # mandatory
-  command: ""
-  proxyport: 0
-  containerName: ""
-  networkName: ""
-  # example: "test-set-1": ["test-1", "test-2", "test-3"]
-  selectedTests: 
-  # to use globalNoise, please follow the guide at the end of this file.
-  globalNoise:
-    global:
-      body: {}
-      header: {}
-  delay: 5
-  buildDelay: 30s
-  apiTimeout: 5
-  ignoreOrdering: false
-  stubs:
-    filters:
-      - path: ""
-        host: ""
-        ports: 0
-  withCoverage: false
-  generateTestReport: true
-  coverageReportPath: ""
-`
-
-
-type Config struct {
-	Record Record `json:"record" yaml:"record"`
-	Test   Test   `json:"test" yaml:"test"`
-}
 
 type Record struct {
 	Path          string        `json:"path" yaml:"path"`
@@ -78,7 +24,7 @@ type Stubs struct {
 }
 type Filters struct {
 	Path       string            `json:"path" yaml:"path"`
-	UrlMethods []string          `json:"urlMethods" yaml:"urlMethods"`
+	URLMethods []string          `json:"urlMethods" yaml:"urlMethods"`
 	Host       string            `json:"host" yaml:"host"`
 	Headers    map[string]string `json:"headers" yaml:"headers"`
 	Port       uint              `json:"ports" yaml:"ports"`
@@ -98,12 +44,11 @@ type Test struct {
 	GlobalNoise             Globalnoise         `json:"globalNoise" yaml:"globalNoise"`
 	Delay                   uint64              `json:"delay" yaml:"delay"`
 	BuildDelay              time.Duration       `json:"buildDelay" yaml:"buildDelay"`
-	ApiTimeout              uint64              `json:"apiTimeout" yaml:"apiTimeout"`
+	APITimeout              uint64              `json:"apiTimeout" yaml:"apiTimeout"`
 	PassThroughPorts        []uint              `json:"passThroughPorts" yaml:"passThroughPorts"`
 	BypassEndpointsRegistry []string            `json:"bypassEndpointsRegistry" yaml:"bypassEndpointsRegistry"`
 	WithCoverage            bool                `json:"withCoverage" yaml:"withCoverage"`             // boolean to capture the coverage in test
 	CoverageReportPath      string              `json:"coverageReportPath" yaml:"coverageReportPath"` // directory path to store the coverage files
-	GenerateTestReport      bool                `json:"generateTestReport" yaml:"generateTestReport"` 
 	IgnoreOrdering          bool                `json:"ignoreOrdering" yaml:"ignoreOrdering"`
 	Stubs                   Stubs               `json:"stubs" yaml:"stubs"`
 }
