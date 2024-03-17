@@ -91,6 +91,12 @@ func getCaPaths() ([]string, error) {
 
 // to extract ca certificate to temp
 func extractCertToTemp() (string, error) {
+	utils.SetUmask(0)
+
+	if err := utils.SetUmask(0022); err != nil {
+		return "failed to reset the permission", err
+	}
+
 	tempFile, err := os.CreateTemp("", "ca.crt")
 
 	if err != nil {
@@ -102,12 +108,6 @@ func extractCertToTemp() (string, error) {
 			return
 		}
 	}(tempFile)
-
-	// Change the file permissions to allow read access for all users
-	err = os.Chmod(tempFile.Name(), 0666)
-	if err != nil {
-		return "", err
-	}
 
 	// Write to the file
 	_, err = tempFile.Write(caCrt)
