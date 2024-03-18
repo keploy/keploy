@@ -150,7 +150,6 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 
 		// Assuming modern Java structure (without /jre/)
 		cacertsPath := fmt.Sprintf("%s/lib/security/cacerts", javaHome)
-		println("cacertsPath: ", cacertsPath)
 		// You can modify these as per your requirements
 		storePass := "changeit"
 		alias := "keployCA"
