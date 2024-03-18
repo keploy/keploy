@@ -127,6 +127,13 @@ To get started let's set Keploy alias by running.
 curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
 
+# Integrate Keploy with CI
+
+integrate Keploy with your Continuous Integration (CI) workflow by running.
+
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh -isCI
+```
 ## Capturing Testcases
 
 To initiate the recording of API calls, execute this command in your terminal:
