@@ -1,4 +1,3 @@
-
 # GraphQL schema example
 #
 # https://gqlgen.com/getting-started/
@@ -16,11 +15,12 @@ type TestSetStatus {
 type Query {
   testSets: [String!]!
   testSetStatus(testRunId: String!, testSetId: String!): TestSetStatus!
-  stop: Boolean!
 }
 
 type Mutation {
-  runTestSet(testSetId: String!, testRunId: String!, appId: Int!): String!
-  start: TestRunInfo!
+  runTestSet(testSetId: String!, testRunId: String!, appId: Int!): Boolean!
+  startHooks: TestRunInfo!
+  startApp(appId: Int!): Boolean!
+  stopHooks: Boolean!
+  stopApp(appId: Int!): Boolean!
 }
-
