@@ -177,10 +177,8 @@ func (p *Proxy) stopDNSServers(_ context.Context) error {
 		return err
 	}
 	// stop udp dns server
-	if err := p.stopUDPDNSServer(); err != nil {
-		return err
-	}
-	return nil
+	err := p.stopUDPDNSServer()
+	return err
 }
 
 func (p *Proxy) stopTCPDNSServer() error {
