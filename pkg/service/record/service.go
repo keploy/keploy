@@ -20,6 +20,7 @@ type Instrumentation interface {
 type Service interface {
 	Start(ctx context.Context) error
 	StartMock(ctx context.Context) error
+	ReRecord(ctx context.Context) error
 }
 
 type TestDB interface {
@@ -32,8 +33,8 @@ type MockDB interface {
 }
 
 type Telemetry interface {
-	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int)
-	RecordedTestCaseMock(mockType string)
-	RecordedMocks(mockTotal map[string]int)
-	RecordedTestAndMocks()
+	RecordedTestSuite(ctx context.Context, testSet string, testsTotal int, mockTotal map[string]int)
+	RecordedTestCaseMock(ctx context.Context, mockType string)
+	RecordedMocks(ctx context.Context, mockTotal map[string]int)
+	RecordedTestAndMocks(ctx context.Context)
 }

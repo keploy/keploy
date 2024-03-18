@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path"
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -68,7 +71,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
+			r.telemetry.RecordedTestSuite(ctx, newTestSetID, testCount, mockCountMap)
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
@@ -118,7 +121,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -150,7 +153,7 @@ func (r *recorder) Start(ctx context.Context) error {
 				insertTestErrChan <- err
 			} else {
 				testCount++
-				r.telemetry.RecordedTestAndMocks()
+				r.telemetry.RecordedTestAndMocks(ctx)
 			}
 		}
 		return nil
@@ -175,7 +178,7 @@ func (r *recorder) Start(ctx context.Context) error {
 				insertMockErrChan <- err
 			} else {
 				mockCountMap[mock.GetKind()]++
-				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				r.telemetry.RecordedTestCaseMock(ctx, mock.GetKind())
 			}
 		}
 		return nil
@@ -270,7 +273,7 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
-	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD})
+	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
 	if err != nil {
 		stopReason = "failed to start the hooks and proxy"
 		utils.LogError(r.logger, err, stopReason)
@@ -308,4 +311,70 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	}
 	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf(stopReason)
+}
+
+func (r *recorder) ReRecord(ctx context.Context) error {
+    var httpCommands []*models.TestCase
+
+    // Load HTTP commands from your configuration
+    if len(r.config.ReRecord) != 0 {
+        for _, testSet := range r.config.ReRecord {
+            filepath := path.Join(r.config.Path, testSet, "tests")
+            files, err := os.ReadDir(filepath)
+            if err != nil {
+                r.logger.Error("Failed to read directory", zap.String("filepath", filepath), zap.Error(err))
+                return err
+            }
+
+            for _, file := range files {
+                if file.IsDir() {
+                    continue
+                }
+                testCase, err := ReadTestCase(filepath, file) // Assuming ReadTestCase is implemented elsewhere
+                if err != nil {
+                    r.logger.Error("Failed to read test case", zap.String("file", file.Name()), zap.Error(err))
+                    return err
+                }
+                httpCommands = append(httpCommands, &testCase)
+            }
+        }
+    }
+
+    if len(httpCommands) == 0 {
+        r.logger.Info("No HTTP commands to re-record")
+        return nil
+    }
+
+    // Use a channel to signal when the server is ready
+    serverReady := make(chan struct{})
+
+    // Start the server in a separate goroutine
+    go func() {
+        if err := r.Start(ctx); err != nil {
+            r.logger.Error("Failed to start server", zap.Error(err))
+            close(serverReady) // Ensure to close the channel even on failure
+            return
+        }
+        close(serverReady) // Close the channel to signal the server is ready
+    }()
+
+    // Wait for the server to be ready
+    <-serverReady
+
+    // Execute the HTTP commands
+    for _, cmd := range httpCommands {
+        go func(cmd *models.TestCase) {
+            r.logger.Info("Executing HTTP command", zap.String("command", cmd.Curl))
+            if output, err := exec.Command("sh", "-c", cmd.Curl).CombinedOutput(); err != nil {
+                r.logger.Error("Failed to execute HTTP command", zap.String("command", cmd.Curl), zap.String("output", string(output)), zap.Error(err))
+            } else {
+                r.logger.Info("Successfully executed HTTP command", zap.String("command", cmd.Curl), zap.String("output", string(output)))
+            }
+        }(cmd)
+    }
+
+    // Optionally, wait for all HTTP commands to complete
+    // This part is skipped for brevity but consider using a sync.WaitGroup or similar mechanism
+
+    return nil
 }
