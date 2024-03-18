@@ -53,7 +53,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	return rootCmd
 }
 
-// Print Keploy logo with a gradient color
+// PrintKeployLogo prints the Keploy logo to the console, optionally with a gradient color effect.
 func PrintKeployLogo(useColor bool) {
 	// ANSI escape code to reset color
 	const reset = "\033[0m"
@@ -62,7 +62,7 @@ func PrintKeployLogo(useColor bool) {
 		lines := strings.Split(logo, "\n")
 		for i, line := range lines {
 			for j, char := range line {
-				var color string = getLogoColor(i, j)
+				var color = getLogoColor(i, j)
 
 				// Print each character
 				fmt.Print(color, string(char), reset)
@@ -70,7 +70,8 @@ func PrintKeployLogo(useColor bool) {
 			fmt.Println()
 		}
 	} else {
-		fmt.Println(logo)
+		fmt.Print(logo)
+		fmt.Println()
 	}
 
 }
