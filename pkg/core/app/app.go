@@ -49,7 +49,6 @@ type App struct {
 	keployNetwork    string
 	keployContainer  string
 	keployIPv4       string
-	inode            uint64
 	inodeChan        chan uint64
 }
 
@@ -259,34 +258,34 @@ func (a *App) injectNetwork(network string) error {
 
 func (a *App) handleDockerEvents(ctx context.Context, e events.Message) error {
 	switch e.Action {
-	case "create":
+	case "start":
 		// Fetch container details by inspecting using container ID to check if container is created
-		c, err := a.docker.ContainerInspect(ctx, e.ID)
+		info, err := a.docker.ContainerInspect(ctx, e.ID)
 		if err != nil {
 			a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
 			return err
 		}
 
 		// Check if the container's name matches the desired name
-		if c.Name != "/"+a.container {
-			a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", c.Name))
-			return nil
-		}
-		// Set Docker Container ID
-		a.docker.SetContainerID(e.ID)
-	case "connect":
-		// check if the container exists
-		if a.docker.GetContainerID() == "" {
-			a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
+		if info.Name != "/"+a.container {
+			a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
 			return nil
 		}
 
-		//Inspecting the application container again since the ip and pid takes some time to be linked to the container.
-		info, err := a.docker.ContainerInspect(ctx, a.container)
+		// Set Docker Container ID
+		a.docker.SetContainerID(e.ID)
+		a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
+		if info.State.Pid == 0 {
+			return errors.New("failed to get the pid of the container")
+		}
+		a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
+		inode, err := getInode(info.State.Pid)
 		if err != nil {
 			return err
 		}
 
+		a.inodeChan <- inode
+		a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
 		if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
 			a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
 			return nil
@@ -298,34 +297,6 @@ func (a *App) handleDockerEvents(ctx context.Context, e events.Message) error {
 			return nil
 		}
 		a.containerIPv4 = n.IPAddress
-		a.logger.Info("successfully deleted container network and  ip settings", zap.Any("ip ", a.keployIPv4))
-	case "start":
-		if a.docker.GetContainerID() == "" {
-			a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
-			return nil
-		}
-		if a.containerIPv4 == "" {
-			return errors.New("docker container started but ip not yet available")
-		}
-
-		//Inspecting the application container again since the ip and pid takes some time to be linked to the container.
-		info, err := a.docker.ContainerInspect(ctx, a.container)
-		if err != nil {
-			return err
-		}
-
-		a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
-		if info.State.Pid == 0 {
-			return errors.New("failed to get the pid of the container")
-		}
-		a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
-		a.inode, err = getInode(info.State.Pid)
-		if err != nil {
-			return err
-		}
-
-		a.inodeChan <- a.inode
-		a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", a.inode))
 	}
 	return nil
 }
@@ -372,8 +343,8 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				err := a.handleDockerEvents(ctx, e)
 				if err != nil {
 					errCh <- err
+					return nil
 				}
-				return nil
 			// for debugging purposes
 			case <-logTicker.C:
 				a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
