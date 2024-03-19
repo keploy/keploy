@@ -172,12 +172,9 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
 	})
 
-	// if len(unfilteredMocks) > 100 {
-	// 	unfilteredMocks = unfilteredMocks[:100]
+	// if len(unfilteredMocks) > 10 {
+	// 	unfilteredMocks = unfilteredMocks[:10]
 	// }
-	for _, v := range filteredMocks {
-		fmt.Println("SORTED MOCKSS ", v.Name)
-	}
 	mocks := append(filteredMocks, unfilteredMocks...)
 
 	return mocks, nil

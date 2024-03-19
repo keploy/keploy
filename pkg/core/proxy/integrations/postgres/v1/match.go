@@ -74,7 +74,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 			}
-			
+
 			ConnectionID := ctx.Value("connectionId").(string)
 
 			recordedPrep := getRecordPrepStatement(tcsMocks)
@@ -195,7 +195,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Info("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 			var matched, sorted bool
 			var idx int
@@ -218,7 +218,6 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					matchedMock = tcsMocks[idx]
 					// fmt.Println("Matched In Binary Matching for Sorted", matchedMock.Name)
 				}
-
 			}
 
 			if !matched {
@@ -238,7 +237,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 				var isValid = true
 				if idx != -1 && len(sortedTcsMocks) != 0 {
 					isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger)
-					logger.Info("Is Valid", zap.Bool("Is Valid", isValid))
+					logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
 				}
 				if idx != -1 && !matched {
 					matched = true
