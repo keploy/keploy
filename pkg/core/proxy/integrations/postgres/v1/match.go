@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"strconv"
 	"strings"
 
 	"github.com/jackc/pgproto3/v2"
@@ -526,25 +525,6 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 }
 
-func logRangeofMocks(mock *models.Mock, first, second int, actualPgReq *models.Backend, logger *zap.Logger, connectionID string) {
-
-	mockNum := mock.Name
-	mockNum = mockNum[5:]
-	num, err := strconv.Atoi(mockNum)
-	if err != nil {
-		return
-	}
-	if num >= first && num <= second {
-
-		fmt.Println("------", mock.Name, "------")
-		fmt.Println("PACKETS", actualPgReq.PacketTypes, "MOCK PACKETS", actualPgReq.PacketTypes)
-		fmt.Println("ActualPgReq", actualPgReq, "MOCK REQ", mock.Spec.PostgresRequests[0])
-		fmt.Println("TestMap", testmap)
-		fmt.Println("ConnectionId ⚡⚡⚡⚡⚡", connectionID)
-		fmt.Println("-------------------------------")
-	}
-}
-
 func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionId string, recordedPrep PrepMap) (bool, []string, error) {
 	// fmt.Println("Inside PreparedStatementMatch")
 	// check the current Query associated with the connection id and Identifier
@@ -598,29 +578,8 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 	if foo {
 		return true, newBinPreparedStatement, nil
 	}
-	// if len(newBinPreparedStatement) > 0 && len(binds) == len(newBinPreparedStatement) {
-	// 	return true, newBinPreparedStatement, nil
-	// }
+
 	return false, nil, nil
-
-	// check what was the prepared statement recorded
-	// old_ps := ""
-	// for _, ps := range recordedPrep {
-	// 	for _, v := range ps {
-	// 		if currentQuery == v.Query && currentPs != v.PrepIdentifier {
-	// 			// fmt.Println("Matched with the recorded prepared statement with Identifier and connectionID is", v.PrepIdentifier, ", conn- ", conn, "and current identifier is", currentPs, "FOR QUERY", currentQuery)
-	// 			// fmt.Println("MOCK NUMBER IS ", mock.Name)
-	// 			currentPs = v.PrepIdentifier
-	// 			break
-	// 		}
-	// 	}
-	// }
-
-	// if strings.Contains(currentPs, "S_") && currentPs != "" {
-	// 	newBinPreparedStatement = append(newBinPreparedStatement, currentPs)
-	// }
-	// }
-
 }
 
 func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionId string, isSorted bool, recordedPrep PrepMap) (bool, error) {
