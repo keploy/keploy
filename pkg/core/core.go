@@ -192,7 +192,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	inodeErrCh := make(chan error, 1)
 	appErrCh := make(chan models.AppError, 1)
-	inodeChan := make(chan uint64) //send inode to the hook
+	inodeChan := make(chan uint64, 1) //send inode to the hook
 
 	defer func() {
 		err := runAppErrGrp.Wait()
@@ -208,11 +208,16 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		if a.Kind(ctx) == utils.Native {
 			return nil
 		}
-		inode := <-inodeChan
-		err := c.Hooks.SendInode(ctx, id, inode)
-		if err != nil {
-			utils.LogError(c.logger, err, "")
-			inodeErrCh <- errors.New("failed to send inode to the kernel")
+		select {
+		case inode := <-inodeChan:
+			err := c.Hooks.SendInode(ctx, id, inode)
+			if err != nil {
+				utils.LogError(c.logger, err, "")
+
+				inodeErrCh <- errors.New("failed to send inode to the kernel")
+			}
+		case <-ctx.Done():
+			return nil
 		}
 		return nil
 	})

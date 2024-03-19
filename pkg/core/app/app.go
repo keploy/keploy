@@ -305,7 +305,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	// listen for the docker daemon events
 	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	timer := time.NewTimer(a.containerDelay)
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
@@ -325,7 +325,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		errCh <- errors.New("failed to get the error group from the context")
-		return nil
+		return errCh
 	}
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
