@@ -43,7 +43,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	DeleteMocks(ctx context.Context, testSetId string, mockNames map[string]bool) error
+	DeleteMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error
 }
 
 type ReportDB interface {

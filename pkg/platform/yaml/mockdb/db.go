@@ -39,14 +39,14 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 // DeleteMocks deletes the mocks from the mock file with given names
 //
 // mockNames is a map which contains the name of the mocks as key and a isConfig boolean as value
-func (ys *MockYaml) DeleteMocks(ctx context.Context, testSetId string, mockNames map[string]bool) error {
+func (ys *MockYaml) DeleteMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
 	}
-	path := filepath.Join(ys.MockPath, testSetId)
-	ys.Logger.Debug("logging the names of the unused mocks to be removed", zap.Any("mockNames", mockNames), zap.Any("for testset", testSetId), zap.Any("at path", filepath.Join(path, mockFileName+".yaml")))
-	
+	path := filepath.Join(ys.MockPath, testSetID)
+	ys.Logger.Debug("logging the names of the unused mocks to be removed", zap.Any("mockNames", mockNames), zap.Any("for testset", testSetID), zap.Any("at path", filepath.Join(path, mockFileName+".yaml")))
+
 	// Read the mocks from the yaml file
 	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
 	if err != nil {
@@ -89,7 +89,7 @@ func (ys *MockYaml) DeleteMocks(ctx context.Context, testSetId string, mockNames
 			continue
 		}
 	}
-	ys.Logger.Debug("logging the names of the used mocks", zap.Any("mockNames", newMocks), zap.Any("for testset", testSetId))
+	ys.Logger.Debug("logging the names of the used mocks", zap.Any("mockNames", newMocks), zap.Any("for testset", testSetID))
 
 	// remove the old mock yaml file
 	err = os.Remove(filepath.Join(path, mockFileName+".yaml"))
@@ -101,17 +101,17 @@ func (ys *MockYaml) DeleteMocks(ctx context.Context, testSetId string, mockNames
 	for _, newMock := range newMocks {
 		mockYaml, err := EncodeMock(newMock, ys.Logger)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to encode the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetId))
+			utils.LogError(ys.Logger, err, "failed to encode the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetID))
 			return err
 		}
 		data, err = yamlLib.Marshal(&mockYaml)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetId))
+			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetID))
 			return err
 		}
 		err = yaml.WriteFile(ctx, ys.Logger, path, mockFileName, data, true)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to write the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetId))
+			utils.LogError(ys.Logger, err, "failed to write the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetID))
 			return err
 		}
 	}

@@ -56,7 +56,10 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 		if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
 			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
-			mockDb.FlagMockAsUsed(configMocks[matchedIndex])
+			err := mockDb.FlagMockAsUsed(configMocks[matchedIndex])
+			if err != nil {
+				return nil, -1, "", fmt.Errorf("failed to flag mock as used: %v", err.Error())
+			}
 			// deleteConfigMock
 		}
 		//h.SetConfigMocks(configMocks)
@@ -69,7 +72,10 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		tcsMocks[realIndex].Spec.MySQLResponses = append(tcsMocks[realIndex].Spec.MySQLResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 		if len(tcsMocks[realIndex].Spec.MySQLResponses) == 0 {
 			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
-			mockDb.FlagMockAsUsed(tcsMocks[realIndex])
+			err := mockDb.FlagMockAsUsed(tcsMocks[realIndex])
+			if err != nil {
+				return nil, -1, "", fmt.Errorf("failed to flag mock as used: %v", err.Error())
+			}
 			// deleteTcsMock
 		}
 		//h.SetTcsMocks(tcsMocks)

@@ -74,7 +74,12 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 				if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
 					configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
-					mockDb.FlagMockAsUsed(configMocks[matchedIndex])
+					err = mockDb.FlagMockAsUsed(configMocks[matchedIndex])
+					if err != nil {
+						utils.LogError(logger, err, "Failed to flag mock as used")
+						errCh <- err
+						return
+					}
 				}
 				//h.SetConfigMocks(configMocks)
 				firstLoop = false
