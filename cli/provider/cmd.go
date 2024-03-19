@@ -263,6 +263,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 		}
 	}
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", cfg))
+
 	switch cmd.Name() {
 	case "record", "test":
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
