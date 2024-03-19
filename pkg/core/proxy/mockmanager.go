@@ -25,11 +25,10 @@ type MockManager struct {
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb) *MockManager {
-	usedMap := make(map[string][]string)
 	return &MockManager{
 		filtered:   filtered,
 		unfiltered: unfiltered,
-		usedMocks:  usedMap,
+		usedMocks:  make(map[string][]string),
 	}
 }
 
@@ -79,7 +78,6 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
 	updated := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
-	println("printing the update mocks for name: ", old.Name, "and isUpdated: ", updated)
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
 		m.usedMocks[old.Name] = []string{unFilteredMock, totalMock}

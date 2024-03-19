@@ -329,8 +329,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to insert report")
 		return models.TestSetStatusFailed, err
 	}
-	consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
-	fmt.Println("the consumed mocks before the testcase runs: ", consumedMocks)
 
 	// var to exit the loop
 	var exitLoop bool
@@ -488,7 +486,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset
-	if r.config.Test.ClearUnusedMocks {
+	if r.config.Test.RemoveUnusedMocks {
 
 		// fetch the consumed mocks by the testcases of the testset
 		consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)

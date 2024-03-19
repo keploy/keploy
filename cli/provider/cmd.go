@@ -196,8 +196,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			cmd.Flags().StringP("language", "l", cfg.Test.Language, "application programming language")
 			cmd.Flags().Bool("ignoreOrdering", cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
-			cmd.Flags().Bool("clearUnusedMocks", false, "Clear the unused mocks for the passed test-sets")
-			cmd.Flags().Lookup("clearUnusedMocks").NoOptDefVal = "true"
+			cmd.Flags().Bool("removeUnusedMocks", false, "Clear the unused mocks for the passed test-sets")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}

@@ -31,7 +31,7 @@ test:
   ignoreOrdering: true
   mongoPassword: "default@123"
   language: ""
-  clearUnusedMocks: false
+  removeUnusedMocks: false
 record:
   recordTimer: 0s
   filters: []
