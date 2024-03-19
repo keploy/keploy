@@ -100,7 +100,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" && mock.Kind != "Postgres" {
+			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" && mock.Kind != "Postgres" { //&& mock.Kind == "PostgresV2" {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
@@ -172,10 +172,12 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
 	})
 
-	if len(unfilteredMocks) > 10 {
-		unfilteredMocks = unfilteredMocks[:10]
+	// if len(unfilteredMocks) > 100 {
+	// 	unfilteredMocks = unfilteredMocks[:100]
+	// }
+	for _, v := range filteredMocks {
+		fmt.Println("SORTED MOCKSS ", v.Name)
 	}
-
 	mocks := append(filteredMocks, unfilteredMocks...)
 
 	return mocks, nil

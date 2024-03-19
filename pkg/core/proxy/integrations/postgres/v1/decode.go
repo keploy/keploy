@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -56,7 +57,6 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				logger.Debug("the postgres request buffer is empty")
 				continue
 			}
-
 			matched, pgResponses, err := matchingReadablePG(ctx, logger, pgRequests, mockDb)
 			if err != nil {
 				errCh <- fmt.Errorf("error while matching tcs mocks %v", err)
@@ -97,4 +97,47 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	case err := <-errCh:
 		return err
 	}
+}
+
+type QueryData struct {
+	PrepIdentifier string `json:"PrepIdentifier" yaml:"PrepIdentifier"`
+	Query          string `json:"Query" yaml:"Query"`
+}
+
+type PrepMap map[string][]QueryData
+
+type TestPrepMap map[string][]QueryData
+
+func getRecordPrepStatement(allMocks []*models.Mock) PrepMap {
+	preparedstatement := make(PrepMap)
+	for _, v := range allMocks {
+		if v.Kind != "Postgres" {
+			continue
+		}
+		for _, req := range v.Spec.PostgresRequests {
+			var querydata []QueryData
+			psMap := make(map[string]string)
+			if len(req.PacketTypes) > 0 && req.PacketTypes[0] != "p" && req.Identfier != "StartupRequest" {
+				p := 0
+				for _, header := range req.PacketTypes {
+					if header == "P" {
+						if strings.Contains(req.Parses[p].Name, "S_") {
+							psMap[req.Parses[p].Query] = req.Parses[p].Name
+							querydata = append(querydata, QueryData{PrepIdentifier: req.Parses[p].Name,
+								Query: req.Parses[p].Query,
+							})
+
+						}
+						p++
+					}
+				}
+			}
+			// also append the query data for the prepared statement
+			if len(querydata) > 0 {
+				preparedstatement[v.ConnectionID] = append(preparedstatement[v.ConnectionID], querydata...)
+			}
+		}
+
+	}
+	return preparedstatement
 }

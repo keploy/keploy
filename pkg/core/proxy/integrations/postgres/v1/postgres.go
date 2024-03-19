@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -67,7 +68,7 @@ func (p *PostgresV1) RecordOutgoing(ctx context.Context, src net.Conn, dst net.C
 
 func (p *PostgresV1) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := p.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
-
+	fmt.Println("MockOutgoing PostgresV1")
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial postgres message")
@@ -76,7 +77,6 @@ func (p *PostgresV1) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *int
 
 	err = decodePostgres(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		//TODO: why debug log sarthak?
 		logger.Debug("failed to decode the postgres message from the yaml")
 		return err
 	}
