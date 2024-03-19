@@ -437,6 +437,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	generic := true
+	clientConnId := util.GetNextID()
+	parserCtx = context.WithValue(ctx, "connectionId", fmt.Sprint(clientConnId))
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {

@@ -12,7 +12,6 @@ const ProtocolVersionNumber uint32 = 196608
 type PostgresSpec struct {
 	Metadata map[string]string `json:"metadata" yaml:"metadata"`
 
-	// Objects  []*models.OutputBinary          `json:"objects" yaml:"objects"`
 	PostgresRequests  []Backend  `json:"RequestBin,omitempty"`
 	PostgresResponses []Frontend `json:"ResponseBin,omitempty"`
 

@@ -13,9 +13,10 @@ import (
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 	yamlDoc := yaml.NetworkTrafficDoc{
-		Version: mock.Version,
-		Kind:    mock.Kind,
-		Name:    mock.Name,
+		Version:      mock.Version,
+		Kind:         mock.Kind,
+		Name:         mock.Name,
+		ConnectionID: mock.ConnectionID,
 	}
 	switch mock.Kind {
 	case models.Mongo:
@@ -88,6 +89,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.Postgres:
+		// case models.PostgresV2:
 
 		postgresSpec := models.PostgresSpec{
 			Metadata:          mock.Spec.Metadata,
@@ -167,9 +169,10 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 	for _, m := range yamlMocks {
 		mock := models.Mock{
-			Version: m.Version,
-			Name:    m.Name,
-			Kind:    m.Kind,
+			Version:      m.Version,
+			Name:         m.Name,
+			Kind:         m.Kind,
+			ConnectionID: m.ConnectionID,
 		}
 		mockCheck := strings.Split(string(m.Kind), "-")
 		if len(mockCheck) > 1 {
@@ -235,6 +238,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 
 		case models.Postgres:
+			// case models.PostgresV2:
 
 			PostSpec := models.PostgresSpec{}
 			err := m.Spec.Decode(&PostSpec)
