@@ -260,7 +260,6 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			return errors.New(errMsg)
 		}
 	}
-	c.logger.Debug("hi")
 	switch cmd.Name() {
 	case "record", "test":
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
