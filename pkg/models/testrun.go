@@ -65,6 +65,8 @@ func StringToTestSetStatus(s string) (TestSetStatus, error) {
 		return TestSetStatusUserAbort, nil
 	case "APP_FAULT":
 		return TestSetStatusFaultUserApp, nil
+	case "INTERNAL_ERR":
+		return TestSetStatusInternalErr, nil
 	default:
 		return "", errors.New("invalid TestSetStatus value")
 	}
