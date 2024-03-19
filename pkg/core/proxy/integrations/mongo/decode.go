@@ -183,6 +183,8 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
 					continue
 				}
+				// set the config as used in the mockManager
+				mockDb.FlagMockAsUsed(configMocks[bestMatchIndex])
 				for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
 					switch mongoResponse.Header.Opcode {
 					case wiremessage.OpReply:
