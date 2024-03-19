@@ -406,7 +406,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
 			dialer := &net.Dialer{
-				Timeout: 1 * time.Second,
+				Timeout: 4 * time.Second,
 			}
 			dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
 			if err != nil {
@@ -555,4 +555,21 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 	}
 
 	return nil
+}
+
+// GetConsumedFilteredMocks returns the consumed filtered mocks for a given app id
+func (p *Proxy) GetConsumedFilteredMocks(_ context.Context, id uint64) ([]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
+	}
+	return m.(*MockManager).GetConsumedFilteredMocks(), nil
+}
+
+func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) (map[string][]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get consumed mocks")
+	}
+	return m.(*MockManager).GetConsumedMocks(), nil
 }
