@@ -483,12 +483,24 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		total:  testReport.Total,
 		failed: testReport.Failure,
 		passed: testReport.Success,
+		status: testSetStatus == models.TestSetStatusPassed,
 	}
 
 	completeTestReport[testSetID] = verdict
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
+
+	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
+		if testSetStatus == models.TestSetStatusFailed {
+			pp.SetColorScheme(models.FailingColorScheme)
+		} else {
+			pp.SetColorScheme(models.PassingColorScheme)
+		}
+		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+			utils.LogError(r.logger, err, "failed to print testrun summary")
+		}
+	}
 
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 	return testSetStatus, nil
@@ -572,6 +584,11 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		for _, testSuiteName := range testSuiteNames {
+			if completeTestReport[testSuiteName].status {
+				pp.SetColorScheme(models.PassingColorScheme)
+			} else {
+				pp.SetColorScheme(models.FailingColorScheme)
+			}
 			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
 				return
@@ -633,6 +650,7 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
+
 	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(ctx, "", time.Time{}, time.Now())
 	if err != nil {
 		stopReason = "failed to get unfiltered mocks"
