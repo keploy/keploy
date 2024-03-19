@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock, mockDb integrations.MockMemDb,) (*models.MySQLResponse, int, string, error) {
+func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock, mockDb integrations.MockMemDb) (*models.MySQLResponse, int, string, error) {
 	//TODO: any reason to write the similar code twice?
 	allMocks := append([]*models.Mock(nil), configMocks...)
 	allMocks = append(allMocks, tcsMocks...)

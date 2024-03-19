@@ -18,11 +18,11 @@ import (
 )
 
 type Core struct {
-	Proxy // embedding the Proxy interface to transfer the proxy methods to the core object
-	Hooks // embedding the Hooks interface to transfer the hooks methods to the core object
-	logger *zap.Logger
-	id     utils.AutoInc
-	apps   sync.Map
+	Proxy         // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks         // embedding the Hooks interface to transfer the hooks methods to the core object
+	logger        *zap.Logger
+	id            utils.AutoInc
+	apps          sync.Map
 	proxyStarted  bool
 	hostConfigStr string // hosts string in the nsswitch.conf of linux system. To restore the system hosts configuration after completion of test
 }
@@ -30,7 +30,7 @@ type Core struct {
 func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
 	return &Core{
 		logger: logger,
-		Hooks:   hook,
+		Hooks:  hook,
 		Proxy:  proxy,
 	}
 }
