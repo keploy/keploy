@@ -196,6 +196,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			cmd.Flags().StringP("language", "l", cfg.Test.Language, "application programming language")
 			cmd.Flags().Bool("ignoreOrdering", cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
+			cmd.Flags().Bool("removeUnusedMocks", false, "Clear the unused mocks for the passed test-sets")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
@@ -260,6 +261,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			return errors.New(errMsg)
 		}
 	}
+	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", cfg))
+
 	switch cmd.Name() {
 	case "record", "test":
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
