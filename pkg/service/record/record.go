@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -339,7 +342,7 @@ func (r *recorder) ReRecord(ctx context.Context) error {
 				if file.IsDir() {
 					continue
 				}
-				testCase, err := ReadTestCase(filepath, file) // Assuming ReadTestCase is implemented elsewhere
+				testCase, err := ReadTestCase(filepath, file) // Assumes ReadTestCase is a predefined function
 				if err != nil {
 					r.logger.Error("Failed to read test case", zap.String("file", file.Name()), zap.Error(err))
 					return err
@@ -354,22 +357,68 @@ func (r *recorder) ReRecord(ctx context.Context) error {
 		return nil
 	}
 
-	// Signal channel to indicate readiness for executing HTTP commands
-	// Execute the HTTP commands after recording environment is ready
 	for _, cmd := range httpCommands {
-		r.logger.Info("Executing HTTP command", zap.String("command", cmd.Curl))
-		if output, err := exec.Command("sh", "-c", cmd.Curl).CombinedOutput(); err != nil {
+		host, port, err := extractHostAndPort(cmd.Curl)
+		if err != nil {
+			r.logger.Error("Failed to extract host and port", zap.Error(err))
+			continue // Proceed with the next command
+		}
+
+		if err := waitForPort(ctx, host, port); err != nil {
+			r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
+			continue // Proceed with the next command
+		}
+
+		output, err := exec.Command("sh", "-c", cmd.Curl).CombinedOutput()
+		if err != nil {
 			r.logger.Error("Failed to execute HTTP command", zap.String("command", cmd.Curl), zap.String("output", string(output)), zap.Error(err))
 		} else {
 			r.logger.Info("Successfully executed HTTP command", zap.String("command", cmd.Curl), zap.String("output", string(output)))
 		}
 	}
 
-	// Optionally, perform additional steps before stopping the server
-	// ...
-
-	// No explicit stop for the server is shown here since the server should stop
-	// as part of the cleanup in the Start function or based on the specific logic you implement
-
 	return nil
+}
+
+// extractHostAndPort parses the CURL command to extract the host and port.
+func extractHostAndPort(curlCmd string) (string, string, error) {
+    // Split the command string to find the URL
+    parts := strings.Split(curlCmd, " ")
+    for _, part := range parts {
+        if strings.HasPrefix(part, "http") {
+            u, err := url.Parse(part)
+            if err != nil {
+                return "", "", err
+            }
+            host := u.Hostname()
+            port := u.Port()
+            if port == "" {
+                // Default HTTP/HTTPS ports if not specified
+                if u.Scheme == "https" {
+                    port = "443"
+                } else {
+                    port = "80"
+                }
+            }
+            return host, port, nil
+        }
+    }
+    return "", "", fmt.Errorf("no URL found in CURL command")
+}
+
+// waitForPort attempts to connect to a given host and port until successful or a context deadline is exceeded.
+func waitForPort(ctx context.Context, host, port string) error {
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        default:
+            conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 1*time.Second)
+            if err == nil {
+                conn.Close()
+                return nil // Success
+            }
+            time.Sleep(1 * time.Second) // Wait before trying again
+        }
+    }
 }
