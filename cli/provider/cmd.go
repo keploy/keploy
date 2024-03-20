@@ -209,26 +209,29 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
-		if err != nil {
-			errMsg := "failed to bind flag to config"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
 	default:
 		return errors.New("unknown command name")
 	}
 	return nil
 }
 
-func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
+func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
+	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	err := viper.BindPFlags(cmd.Flags())
-	utils.BindFlagsToViper(c.logger, cmd, "")
 	if err != nil {
 		errMsg := "failed to bind flags to config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
+	//used to bind flags specific to the command for eg: testsets, delay, recordTimer etc. (nested flags)
+	err = utils.BindFlagsToViper(c.logger, cmd, "")
+	if err != nil {
+		errMsg := "failed to bind cmd specific flags to viper"
+		utils.LogError(c.logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+
 	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
