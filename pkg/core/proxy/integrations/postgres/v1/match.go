@@ -157,10 +157,10 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 			if matched {
 				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
 				if matchedMock.TestModeInfo.IsFiltered {
-					originalMatchedMock := matchedMock
+					originalMatchedMock := *matchedMock
 					matchedMock.TestModeInfo.IsFiltered = false
 					matchedMock.TestModeInfo.SortOrder = math.MaxInt
-					updated := mockDb.UpdateUnFilteredMock(originalMatchedMock, matchedMock)
+					updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 					if !updated {
 						continue
 					}
