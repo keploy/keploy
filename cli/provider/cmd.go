@@ -171,6 +171,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			return errors.New(errMsg)
 		}
 	case "record", "test":
+		cmd.Flags().StringArrayP("rerecord", "r", cfg.ReRecord, "Rerecord the selected testsets") 
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")

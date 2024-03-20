@@ -1,0 +1,31 @@
+name: keploy
+description: |
+  Keploy creates backend API tests with built-in-mocks or stubs by recording 
+  your application network calls making your testing process not only faster 
+  than unit tests but also incredibly efficient.
+version: "git" # version can be set to 'git' to indicate a development version
+summary: Test generation for Developers. Generate tests and stubs for your application
+grade: stable # consider changing to 'devel' if this is a development version
+confinement: devmode
+
+base: core20
+
+parts:
+  keploy:
+    plugin: go
+    source-type: git
+    source: https://github.com/keploy/keploy.git
+    build-packages:
+      - golang-go
+    override-build: |
+      snapcraftctl build
+      go build -o keploy
+      mkdir -p $SNAPCRAFT_PART_INSTALL/usr/local/bin
+      mv keploy $SNAPCRAFT_PART_INSTALL/usr/local/bin
+
+apps:
+  keploy:
+    command: usr/local/bin/keploy
+    plugs:
+      - home
+      - network
