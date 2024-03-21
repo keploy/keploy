@@ -24,13 +24,14 @@ test:
   globalNoise:
     global: {}
     test-sets: {}
-  delay: 10
+  delay: 5
   apiTimeout: 5
   coverage: false
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"
   language: ""
+  removeUnusedMocks: false
 record:
   recordTimer: 0s
   filters: []

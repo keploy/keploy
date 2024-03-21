@@ -163,7 +163,7 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 }
 
 func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]string, error) {
-	indices := []string{}
+	var indices []string
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
@@ -176,7 +176,7 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	}
 
 	for _, v := range files {
-		if v.Name() != "reports" {
+		if v.Name() != "reports" && v.Name() != "testReports" {
 			indices = append(indices, v.Name())
 		}
 	}

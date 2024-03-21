@@ -197,6 +197,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			cmd.Flags().StringP("language", "l", cfg.Test.Language, "application programming language")
 			cmd.Flags().Bool("ignoreOrdering", cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
+			cmd.Flags().Bool("removeUnusedMocks", false, "Clear the unused mocks for the passed test-sets")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
@@ -209,26 +210,29 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
-		if err != nil {
-			errMsg := "failed to bind flag to config"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
 	default:
 		return errors.New("unknown command name")
 	}
 	return nil
 }
 
-func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
+func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, cfg *config.Config) error {
+	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	err := viper.BindPFlags(cmd.Flags())
-	utils.BindFlagsToViper(c.logger, cmd, "")
 	if err != nil {
 		errMsg := "failed to bind flags to config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
+	//used to bind flags specific to the command for eg: testsets, delay, recordTimer etc. (nested flags)
+	err = utils.BindFlagsToViper(c.logger, cmd, "")
+	if err != nil {
+		errMsg := "failed to bind cmd specific flags to viper"
+		utils.LogError(c.logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+
 	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
@@ -261,7 +265,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command, 
 			return errors.New(errMsg)
 		}
 	}
-	c.logger.Debug("hi")
+	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", cfg))
+
 	switch cmd.Name() {
 	case "record", "test":
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")

@@ -226,13 +226,13 @@ func (a *App) injectNetwork(network string) error {
 	a.keployNetwork = network
 
 	//sending new proxy ip to kernel, since dynamically injected new network has different ip for keploy.
-	kInspect, err := a.docker.ContainerInspect(context.Background(), a.keployContainer)
+	inspect, err := a.docker.ContainerInspect(context.Background(), a.keployContainer)
 	if err != nil {
-		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", kInspect))
+		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
 		return err
 	}
 
-	keployNetworks := kInspect.NetworkSettings.Networks
+	keployNetworks := inspect.NetworkSettings.Networks
 	//Here we considering that the application would use only one custom network.
 	//TODO: handle for application having multiple custom networks
 	//TODO: check the logic for correctness
@@ -444,6 +444,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	username := os.Getenv("SUDO_USER")
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
 	if username != "" {
+		// print all environment variables
+		a.logger.Debug("env inherited from the cmd", zap.Any("env", os.Environ()))
 		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
 		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", a.cmd)
 	}
@@ -459,9 +461,6 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
-
-	// Explicitly set the environment for cmd
-	cmd.Env = os.Environ()
 
 	// Set the output of the command
 	cmd.Stdout = os.Stdout
@@ -482,9 +481,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	default:
 		if err != nil {
 			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
-		} else {
-			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 		}
+		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 	}
 }
 

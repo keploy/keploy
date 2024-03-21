@@ -74,7 +74,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			r.telemetry.RecordedTestSuite(ctx, newTestSetID, testCount, mockCountMap)
+			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
@@ -124,7 +124,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -157,7 +157,7 @@ func (r *recorder) Start(ctx context.Context) error {
 			} else {
 
 				testCount++
-				r.telemetry.RecordedTestAndMocks(ctx)
+				r.telemetry.RecordedTestAndMocks()
 			}
 		}
 		return nil
@@ -182,7 +182,7 @@ func (r *recorder) Start(ctx context.Context) error {
 				insertMockErrChan <- err
 			} else {
 				mockCountMap[mock.GetKind()]++
-				r.telemetry.RecordedTestCaseMock(ctx, mock.GetKind())
+				r.telemetry.RecordedTestCaseMock(mock.GetKind())
 			}
 		}
 		return nil
@@ -285,7 +285,7 @@ func (r *recorder) StartMock(ctx context.Context) error {
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
-	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{})
+	err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD})
 	if err != nil {
 		stopReason = "failed to start the hooks and proxy"
 		utils.LogError(r.logger, err, stopReason)

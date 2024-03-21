@@ -41,15 +41,15 @@ func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb) *Servic
 }
 
 func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
-	installtionID, err := n.configDb.GetInstallationID(ctx)
+	installationID, err := n.configDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
 	}
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
-		Enabled:        config.DisableTele,
+		Enabled:        !config.DisableTele,
 		Version:        utils.Version,
 		GlobalMap:      map[string]interface{}{},
-		InstallationID: installtionID,
+		InstallationID: installationID,
 	},
 	), nil
 }
@@ -74,7 +74,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string, config con
 	if err != nil {
 		return nil, err
 	}
-	tel.Ping(ctx)
+	tel.Ping()
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, tel), nil
