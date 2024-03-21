@@ -39,7 +39,7 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 				return errors.New("both --record and --replay flags are set")
 			}
 			if record {
-				svc, err := serviceFactory.GetService(ctx, "record", *cfg)
+				svc, err := serviceFactory.GetService(ctx, "record")
 				if err != nil {
 					utils.LogError(logger, err, "failed to get service")
 					return err
@@ -54,7 +54,7 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 
 			}
 			if replay {
-				svc, err := serviceFactory.GetService(ctx, "replay", *cfg)
+				svc, err := serviceFactory.GetService(ctx, "replay")
 				if err != nil {
 					utils.LogError(logger, err, "failed to get service")
 					return err
@@ -71,7 +71,7 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 
 		},
 	}
-	if err := cmdConfigurator.AddFlags(cmd, cfg); err != nil {
+	if err := cmdConfigurator.AddFlags(cmd); err != nil {
 		utils.LogError(logger, err, "failed to add flags")
 		return nil
 	}
