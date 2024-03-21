@@ -248,7 +248,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	if configData != "" {
 		data = []byte(configData)
 	} else {
-		configData, err = config.Merge(config.InternalConfig, config.DefaultConfig)
+		configData, err = config.Merge(config.InternalConfig, config.GetDefaultConfig())
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to create default config string")
 			return nil

@@ -24,7 +24,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		Short:   "manage keploy configuration file",
 		Example: "keploy config --generate --path /path/to/localdir",
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd, cfg)
+			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 
@@ -46,7 +46,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 						return nil
 					}
 				}
-				svc, err := servicefactory.GetService(ctx, cmd.Name(), *cfg)
+				svc, err := servicefactory.GetService(ctx, cmd.Name())
 				if err != nil {
 					utils.LogError(logger, err, "failed to get service")
 					return err
@@ -66,7 +66,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			return errors.New("only generate flag is supported in the config command")
 		},
 	}
-	if err := cmdConfigurator.AddFlags(cmd, cfg); err != nil {
+	if err := cmdConfigurator.AddFlags(cmd); err != nil {
 		utils.LogError(logger, err, "failed to add flags")
 		return nil
 	}

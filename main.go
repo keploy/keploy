@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
@@ -63,8 +64,9 @@ func start(ctx context.Context) {
 		utils.SentryInit(logger, dsn)
 		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
-	svcProvider := provider.NewServiceProvider(logger, configDb)
-	cmdConfigurator := provider.NewCmdConfigurator(logger)
+	conf := config.New()
+	svcProvider := provider.NewServiceProvider(logger, configDb, conf)
+	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
