@@ -222,6 +222,8 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr, "error while running the app")
 			appErrCh <- appErr
+		} else if appErr.AppErrorType == models.ErrCtxCanceled {
+			c.Proxy.SetUserAppTerminateInitiated(true)
 		}
 		return nil
 	})

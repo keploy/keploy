@@ -40,6 +40,8 @@ type Proxy interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedFilteredMocks(ctx context.Context, id uint64) ([]string, error)
 	GetConsumedMocks(ctx context.Context, id uint64) (map[string][]string, error)
+	IsUserAppTerminateInitiated() bool 
+	SetUserAppTerminateInitiated(state bool)
 }
 
 type ProxyOptions struct {

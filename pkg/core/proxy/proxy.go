@@ -43,6 +43,9 @@ type Proxy struct {
 
 	connMutex *sync.Mutex
 	ipMutex   *sync.Mutex
+	appMutex  *sync.Mutex
+
+	userAppShutdownInitiated bool
 
 	clientConnections []net.Conn
 
@@ -572,4 +575,16 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) (map[string][]str
 		return nil, fmt.Errorf("mock manager not found to get consumed mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
+}
+
+func (p *Proxy) IsUserAppTerminateInitiated() bool {
+	p.appMutex.Lock()
+	defer p.appMutex.Unlock()
+	return p.userAppShutdownInitiated
+}
+
+func (p *Proxy) SetUserAppTerminateInitiated(state bool) {
+	p.appMutex.Lock()
+	defer p.appMutex.Unlock()
+	p.userAppShutdownInitiated = state
 }
