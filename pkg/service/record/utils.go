@@ -1,35 +1,78 @@
 package record
 
 import (
+	"context"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path"
+	"strings"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
 func ReadTestCase(filepath string, fileName os.DirEntry) (models.TestCase, error) {
-    // Get the path or name from the DirEntry
-    filePath := fileName.Name() // This gets just the name, assuming you're in the correct directory
-	absPath := path.Join(filepath, filePath) // This gets the full path (directory + name
+
+    filePath := fileName.Name() 
+	absPath := path.Join(filepath, filePath) 
 
     // Read file content
-    testCaseContent, err := os.ReadFile(absPath) // Use filePath here
+    testCaseContent, err := os.ReadFile(absPath) 
     if err != nil {
-        // Return an empty TestCase struct and the error
+
         return models.TestCase{}, err
     }
 
-    // Initialize an instance of TestCase to unmarshal the data into
+
     var testCase models.TestCase
 
-    // Parse file content into testCase
     err = yaml.Unmarshal(testCaseContent, &testCase)
     if err != nil {
-        // Return an empty TestCase struct and the error if parsing fails
+
         return models.TestCase{}, err
     }
 
-    // Return the populated TestCase struct and nil for the error if parsing succeeds
     return testCase, nil
+}
+func extractHostAndPort(curlCmd string) (string, string, error) {
+    // Split the command string to find the URL
+    parts := strings.Split(curlCmd, " ")
+    for _, part := range parts {
+        if strings.HasPrefix(part, "http") {
+            u, err := url.Parse(part)
+            if err != nil {
+                return "", "", err
+            }
+            host := u.Hostname()
+            port := u.Port()
+            if port == "" {
+                if u.Scheme == "https" {
+                    port = "443"
+                } else {
+                    port = "80"
+                }
+            }
+            return host, port, nil
+        }
+    }
+    return "", "", fmt.Errorf("no URL found in CURL command")
+}
+
+func waitForPort(ctx context.Context, host, port string) error {
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        default:
+            conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 1*time.Second)
+            if err == nil {
+                conn.Close()
+                return nil 
+            }
+            time.Sleep(1 * time.Second)
+        }
+    }
 }

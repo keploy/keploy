@@ -5,12 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"path"
-	"strings"
+
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -198,13 +196,12 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	})
 	time.Sleep(2 * time.Second) // Example sleep, adjust according to your application's startup time
-
+    go func(){
 	if len(r.config.ReRecord) != 0 {
 		err = r.ReRecord(ctx)
-		if err != nil {
-			return err
-		}
+
 	}
+}()
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
@@ -369,56 +366,14 @@ func (r *recorder) ReRecord(ctx context.Context) error {
 			continue // Proceed with the next command
 		}
 
-		output, err := exec.Command("sh", "-c", cmd.Curl).CombinedOutput()
-		if err != nil {
-			r.logger.Error("Failed to execute HTTP command", zap.String("command", cmd.Curl), zap.String("output", string(output)), zap.Error(err))
-		} else {
-			r.logger.Info("Successfully executed HTTP command", zap.String("command", cmd.Curl), zap.String("output", string(output)))
-		}
+		curl := exec.Command("sh", "-c", cmd.Curl)
+        out, err := curl.Output()
+        if err != nil {
+            fmt.Println("erorr" , err)
+            return err
+        }
+        fmt.Println(out)
 	}
 
 	return nil
-}
-
-// extractHostAndPort parses the CURL command to extract the host and port.
-func extractHostAndPort(curlCmd string) (string, string, error) {
-    // Split the command string to find the URL
-    parts := strings.Split(curlCmd, " ")
-    for _, part := range parts {
-        if strings.HasPrefix(part, "http") {
-            u, err := url.Parse(part)
-            if err != nil {
-                return "", "", err
-            }
-            host := u.Hostname()
-            port := u.Port()
-            if port == "" {
-                // Default HTTP/HTTPS ports if not specified
-                if u.Scheme == "https" {
-                    port = "443"
-                } else {
-                    port = "80"
-                }
-            }
-            return host, port, nil
-        }
-    }
-    return "", "", fmt.Errorf("no URL found in CURL command")
-}
-
-// waitForPort attempts to connect to a given host and port until successful or a context deadline is exceeded.
-func waitForPort(ctx context.Context, host, port string) error {
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        default:
-            conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 1*time.Second)
-            if err == nil {
-                conn.Close()
-                return nil // Success
-            }
-            time.Sleep(1 * time.Second) // Wait before trying again
-        }
-    }
 }
