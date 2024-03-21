@@ -336,7 +336,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		//mock the outgoing message
 		err := p.Integrations["mysql"].MockOutgoing(parserCtx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
-		if err != nil {
+		if err != nil && !p.IsUserAppTerminateInitiated() {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			return err
 		}
@@ -451,7 +451,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				}
 			} else {
 				err := parser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-				if err != nil {
+				if err != nil && !p.IsUserAppTerminateInitiated() {
 					utils.LogError(logger, err, "failed to mock the outgoing message")
 					return err
 				}
@@ -470,7 +470,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		} else {
 			err := p.Integrations["generic"].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil {
+			if err != nil && !p.IsUserAppTerminateInitiated() {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				return err
 			}
