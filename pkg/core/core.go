@@ -18,11 +18,11 @@ import (
 )
 
 type Core struct {
+	Proxy         // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks         // embedding the Hooks interface to transfer the hooks methods to the core object
 	logger        *zap.Logger
 	id            utils.AutoInc
 	apps          sync.Map
-	hook          Hooks
-	proxy         Proxy
 	proxyStarted  bool
 	hostConfigStr string // hosts string in the nsswitch.conf of linux system. To restore the system hosts configuration after completion of test
 }
@@ -30,8 +30,8 @@ type Core struct {
 func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
 	return &Core{
 		logger: logger,
-		hook:   hook,
-		proxy:  proxy,
+		Hooks:  hook,
+		Proxy:  proxy,
 	}
 }
 
@@ -131,7 +131,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	})
 
 	//load hooks
-	err = c.hook.Load(hookCtx, id, HookCfg{
+	err = c.Hooks.Load(hookCtx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
 		IsDocker:   isDocker,
@@ -156,8 +156,8 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	// TODO: Hooks can be loaded multiple times but proxy should be started only once
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
-	//start proxy
-	err = c.proxy.StartProxy(proxyCtx, ProxyOptions{
+	// start proxy
+	err = c.Proxy.StartProxy(proxyCtx, ProxyOptions{
 		DNSIPv4Addr: a.KeployIPv4Addr(),
 		//DnsIPv6Addr: ""
 	})
@@ -207,7 +207,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 			return nil
 		}
 		inode := <-inodeChan
-		err := c.hook.SendInode(ctx, id, inode)
+		err := c.Hooks.SendInode(ctx, id, inode)
 		if err != nil {
 			utils.LogError(c.logger, err, "")
 			inodeErrCh <- errors.New("failed to send inode to the kernel")

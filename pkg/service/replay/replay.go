@@ -246,7 +246,11 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{})
+	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+		Rules:         r.config.BypassRules,
+		MongoPassword: r.config.Test.MongoPassword,
+		SQLDelay:      time.Duration(r.config.Test.Delay),
+	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
@@ -378,7 +382,12 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
-			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)))
+			// log the consumed mocks during the test run of the test case for test set
+			consumedFilteredMocks, err := r.instrumentation.GetConsumedFilteredMocks(runTestSetCtx, appID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+			}
+			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)), zap.Any("consumed mocks", consumedFilteredMocks))
 		} else {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
 		}
@@ -388,6 +397,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			testStatus = models.TestStatusFailed
 			failure++
+			testSetStatus = models.TestSetStatusFailed
 		}
 
 		if testResult != nil {
@@ -430,9 +440,6 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				break
 			}
-			if !testPass {
-				testSetStatus = models.TestSetStatusFailed
-			}
 		} else {
 			utils.LogError(r.logger, nil, "test result is nil")
 			break
@@ -447,7 +454,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// Checking errors for fina iteration
+	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
 		testSetStatus = models.TestSetStatusInternalErr
@@ -478,17 +485,58 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
 	}
 
+	// remove the unused mocks by the test cases of a testset
+	if r.config.Test.RemoveUnusedMocks {
+
+		// fetch the consumed mocks by the testcases of the testset
+		consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get consumed mocks", zap.Any("for test-set", testSetID))
+		}
+		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", consumedMocks))
+		// if the mock is not consumed by the testset then it is unused
+		unusedMocks := map[string]bool{}
+		for _, filteredMock := range filteredMocks {
+			if _, ok := consumedMocks[filteredMock.Name]; !ok {
+				unusedMocks[filteredMock.Name] = false
+			}
+		}
+		for _, unfilteredMock := range unfilteredMocks {
+			if _, ok := consumedMocks[unfilteredMock.Name]; !ok {
+				unusedMocks[unfilteredMock.Name] = true
+			}
+		}
+
+		// delete the unused mocks from the data store
+		err = r.mockDB.DeleteMocks(runTestSetCtx, testSetID, unusedMocks)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to delete unused mocks")
+		}
+	}
+
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
 		total:  testReport.Total,
 		failed: testReport.Failure,
 		passed: testReport.Success,
+		status: testSetStatus == models.TestSetStatusPassed,
 	}
 
 	completeTestReport[testSetID] = verdict
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
+
+	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
+		if testSetStatus == models.TestSetStatusFailed {
+			pp.SetColorScheme(models.FailingColorScheme)
+		} else {
+			pp.SetColorScheme(models.PassingColorScheme)
+		}
+		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+			utils.LogError(r.logger, err, "failed to print testrun summary")
+		}
+	}
 
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 	return testSetStatus, nil
@@ -572,6 +620,11 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		for _, testSuiteName := range testSuiteNames {
+			if completeTestReport[testSuiteName].status {
+				pp.SetColorScheme(models.PassingColorScheme)
+			} else {
+				pp.SetColorScheme(models.FailingColorScheme)
+			}
 			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
 				return
@@ -633,6 +686,7 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
+
 	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(ctx, "", time.Time{}, time.Now())
 	if err != nil {
 		stopReason = "failed to get unfiltered mocks"
