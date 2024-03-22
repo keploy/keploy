@@ -343,11 +343,11 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				errCh <- ctx.Err()
 				return nil
 			case e := <-messages:
-				inodeFound, err := a.handleDockerEvents(ctx, e)
+				eventCaptured, err := a.handleDockerEvents(ctx, e)
 				if err != nil {
 					errCh <- err
 					return nil
-				} else if inodeFound {
+				} else if eventCaptured {
 					return nil
 				}
 			// for debugging purposes
