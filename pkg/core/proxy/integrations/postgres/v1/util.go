@@ -308,13 +308,15 @@ func checkIfps(array []string) bool {
 	return true
 }
 
-func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, actualPgReq *models.Backend, ps_case int) *models.Mock {
+func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, actualPgReq *models.Backend, psCase int) *models.Mock {
 
-	switch ps_case {
+	logger.Debug("Inside Slice Command Tag for ", zap.Int("psCase", psCase))
+	logger.Debug("Prep Query Data", zap.Any("prep", prep))
+	switch psCase {
 	case 1:
 
 		copyMock := *mock
-		// fmt.Println("Inside Slice Command Tag for ", ps_case)
+		// fmt.Println("Inside Slice Command Tag for ", psCase)
 		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
 		for idx, v := range mockPackets {
 			if v == "1" {
@@ -328,7 +330,7 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 	case 2:
 		// ["2", D, C, Z]
 		copyMock := *mock
-		// fmt.Println("Inside Slice Command Tag for ", ps_case)
+		// fmt.Println("Inside Slice Command Tag for ", psCase)
 		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
 		for idx, v := range mockPackets {
 			if v == "1" || v == "T" {
@@ -370,9 +372,9 @@ func getChandedDataRow(input string) (string, error) {
 		// fmt.Printf("Difference in days from epoch: %.2f days\n", difference)
 		binary.BigEndian.PutUint32(buffer, uint32(difference))
 		return ("b64:" + util.EncodeBase64(buffer)), nil
-	} else {
-		return "b64:AAAAAA==", err
 	}
+	return "b64:AAAAAA==", errors.New("Invalid input")
+
 }
 
 func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
@@ -417,7 +419,7 @@ func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
 			i += (5 + pg.BackendWrapper.BodyLen)
 		}
 
-		pg_mock := &models.Backend{
+		pgMock := &models.Backend{
 			PacketTypes: pg.BackendWrapper.PacketTypes,
 			Identfier:   "ClientRequest",
 			Length:      uint32(len(buffer)),
@@ -448,7 +450,7 @@ func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
 			MsgType:             pg.BackendWrapper.MsgType,
 			AuthType:            pg.BackendWrapper.AuthType,
 		}
-		return pg_mock
+		return pgMock
 	}
 
 	return nil

@@ -347,7 +347,7 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 				}
 
 				// here handle cases of prepared statement very carefully
-				match, err := compareExactMatch(mock, actualPgReq, logger, connectionID, isSorted, recordedPrep)
+				match, err := compareExactMatch(mock, actualPgReq, logger)
 				if err != nil {
 					logger.Error("Error while matching exact match", zap.Error(err))
 					continue
@@ -410,9 +410,9 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 
 							if ischanged {
 								return idx, newMock
-							} else {
-								continue
 							}
+							continue
+
 						}
 
 					}
@@ -525,7 +525,7 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 }
 
-func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionId string, recordedPrep PrepMap) (bool, []string, error) {
+func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionID string, recordedPrep PrepMap) (bool, []string, error) {
 	// fmt.Println("Inside PreparedStatementMatch")
 	// check the current Query associated with the connection id and Identifier
 	ifps := checkIfps(actualPgReq.PacketTypes)
@@ -550,7 +550,7 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 	var foo = false
 	for idx, bind := range binds {
 		currentPs := bind.PreparedStatement
-		currentQuerydata := testmap[ConnectionId]
+		currentQuerydata := testmap[ConnectionID]
 		currentQuery := ""
 		// check in the map that what's the current query for this preparedstatement
 		// then will check what is the recorded prepared statement for this query
@@ -582,8 +582,8 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 	return false, nil, nil
 }
 
-func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionId string, isSorted bool, recordedPrep PrepMap) (bool, error) {
-
+func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger) (bool, error) {
+	logger.Debug("Inside CompareExactMatch")
 	// have to ignore first parse message of begin read only
 	// should compare only query in the parse message
 	if len(actualPgReq.PacketTypes) != len(mock.Spec.PostgresRequests[0].PacketTypes) {
