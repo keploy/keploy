@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -483,7 +484,7 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	}
 
 	children = append(children, ppid)
-
+	sort.Slice(children, func(i, j int) bool { return children[i] > children[j] })
 	for _, pid := range children {
 		if cmd.ProcessState == nil {
 			err := syscall.Kill(pid, sig)
