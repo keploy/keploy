@@ -142,33 +142,31 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		}
 	})
 
-	if models.GetMode() == models.MODE_TEST {
-		p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave in test mode if you have provided wrong domain name in your application code.")
-		// start the UDP DNS server
-		p.logger.Debug("Starting Udp Dns Server in Test mode...")
-		g.Go(func() error {
-			utils.Recover(p.logger)
-			errCh := make(chan error, 1)
-			go func(errCh chan error) {
-				err := p.startUDPDNSServer(ctx)
-				if err != nil {
-					errCh <- err
-				}
-			}(errCh)
+	// start the UDP DNS server
+	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
+	g.Go(func() error {
+		utils.Recover(p.logger)
+		errCh := make(chan error, 1)
+		go func(errCh chan error) {
+			err := p.startUDPDNSServer(ctx)
+			if err != nil {
+				errCh <- err
+			}
+		}(errCh)
 
-			select {
-			case <-ctx.Done():
-				err := p.UDPDNSServer.Shutdown()
-				if err != nil {
-					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-					return err
-				}
-				return nil
-			case err := <-errCh:
+		select {
+		case <-ctx.Done():
+			err := p.UDPDNSServer.Shutdown()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
 				return err
 			}
-		})
-	}
+			return nil
+		case err := <-errCh:
+			return err
+		}
+	})
+	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
 	return nil
@@ -399,7 +397,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//make new connection to the destination server
 	if isTLS {
-		logger.Debug("", zap.Any("isTLS connection", isTLS))
+		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
@@ -408,7 +406,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
 			dialer := &net.Dialer{
-				Timeout: 1 * time.Second,
+				Timeout: 4 * time.Second,
 			}
 			dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
 			if err != nil {
@@ -557,4 +555,21 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 	}
 
 	return nil
+}
+
+// GetConsumedFilteredMocks returns the consumed filtered mocks for a given app id
+func (p *Proxy) GetConsumedFilteredMocks(_ context.Context, id uint64) ([]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
+	}
+	return m.(*MockManager).GetConsumedFilteredMocks(), nil
+}
+
+func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) (map[string][]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get consumed mocks")
+	}
+	return m.(*MockManager).GetConsumedMocks(), nil
 }

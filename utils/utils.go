@@ -28,7 +28,8 @@ import (
 
 var WarningSign = "\U000026A0"
 
-func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) {
+func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
+	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		// Construct the Viper key and the env variable name
 		if viperKeyPrefix == "" {
@@ -43,14 +44,17 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 		err := viper.BindPFlag(viperKey, flag)
 		if err != nil {
 			LogError(logger, err, "failed to bind flag to config")
+			bindErr = err
 		}
 
 		// Tell Viper to also read this flag's value from the corresponding env variable
 		err = viper.BindEnv(viperKey, envVarName)
 		if err != nil {
 			LogError(logger, err, "failed to bind environment variables to config")
+			bindErr = err
 		}
 	})
+	return bindErr
 }
 
 //func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentry.Client, configDb *configdb.ConfigDb) *zap.Logger {

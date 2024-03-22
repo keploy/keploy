@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -45,7 +46,7 @@ type finalHTTP struct {
 // MatchType function determines if the outgoing network call is HTTP by comparing the
 // message format with that of an HTTP text message.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
-	return bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
+	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
 		bytes.HasPrefix(buf[:], []byte("GET ")) ||
 		bytes.HasPrefix(buf[:], []byte("POST ")) ||
 		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
@@ -53,17 +54,20 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
 		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
 		bytes.HasPrefix(buf[:], []byte("HEAD "))
+	h.logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
+	return isHTTP
 }
 
 func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	h.logger.Debug("Recording the outgoing http call in record mode")
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-
 	err = encodeHTTP(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
@@ -74,6 +78,8 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 
 func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+
+	h.logger.Debug("Mocking the outgoing http call in test mode")
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
