@@ -258,6 +258,7 @@ func (a *App) injectNetwork(network string) error {
 
 func (a *App) handleDockerEvents(ctx context.Context, e events.Message) (bool, error) {
 	var inode uint64
+	var iPAddress string
 	switch e.Action {
 	case "start":
 		// Fetch container details by inspecting using container ID to check if container is created
@@ -298,8 +299,9 @@ func (a *App) handleDockerEvents(ctx context.Context, e events.Message) (bool, e
 			return false, nil
 		}
 		a.containerIPv4 = n.IPAddress
+		iPAddress = n.IPAddress
 	}
-	return inode != 0, nil
+	return inode != 0 && iPAddress != "", nil
 }
 
 func (a *App) getDockerMeta(ctx context.Context) <-chan error {
