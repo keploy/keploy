@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -484,7 +483,7 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	}
 
 	children = append(children, ppid)
-	sort.Slice(children, func(i, j int) bool { return children[i] > children[j] })
+	children, _ = uniqueProcessGroups(children)
 	for _, pid := range children {
 		if cmd.ProcessState == nil {
 			err := syscall.Kill(pid, sig)
@@ -494,6 +493,53 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 		}
 	}
 	return nil
+}
+
+func uniqueProcessGroups(pids []int) ([]int, error) {
+	uniqueGroups := make(map[int]bool)
+	var uniquePIDs []int
+
+	for _, pid := range pids {
+		pgid, err := getProcessGroupID(pid)
+		if err != nil {
+			return nil, err
+		}
+		if !uniqueGroups[pgid] {
+			uniqueGroups[pgid] = true
+			uniquePIDs = append(uniquePIDs, pid)
+		}
+	}
+
+	return uniquePIDs, nil
+}
+
+func getProcessGroupID(pid int) (int, error) {
+	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
+	statusBytes, err := os.ReadFile(statusPath)
+	if err != nil {
+		return 0, err
+	}
+
+	status := string(statusBytes)
+	for _, line := range strings.Split(status, "\n") {
+		if strings.HasPrefix(line, "NSpgid:") {
+			return extractIDFromStatusLine(line), nil
+		}
+	}
+
+	return 0, nil
+}
+
+// extractIDFromStatusLine extracts the ID from a status line in the format "Key:\tValue".
+func extractIDFromStatusLine(line string) int {
+	fields := strings.Fields(line)
+	if len(fields) == 2 {
+		id, err := strconv.Atoi(fields[1])
+		if err == nil {
+			return id
+		}
+	}
+	return -1
 }
 
 // findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
