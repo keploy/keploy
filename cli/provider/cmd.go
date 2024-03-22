@@ -209,6 +209,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command, cfg *config.Config) error
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		cmd.PersistentFlags().Bool("enableTesting", cfg.EnableTesting, "Enable testing keploy with keploy")
+		err = cmd.PersistentFlags().MarkHidden("enableTesting")
+		if err != nil {
+			errMsg := "failed to mark enableTesting as hidden flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	default:
 		return errors.New("unknown command name")
 	}
@@ -264,6 +271,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command,
 			return errors.New(errMsg)
 		}
 	}
+	if cfg.EnableTesting {
+		// Add mode to logger to debug the keploy during testing
+		logger, err := log.AddModeTologger(cmd.Name())
+		*c.logger = *logger
+		if err != nil {
+			errMsg := "failed to add mode to logger"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		cfg.DisableTele = true
+	}
+
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", cfg))
 
 	switch cmd.Name() {

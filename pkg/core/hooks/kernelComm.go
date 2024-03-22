@@ -174,3 +174,53 @@ func (h *Hooks) SendPassThroughPorts(filterPorts []uint) error {
 	}
 	return nil
 }
+
+// For keploy test bench
+// The below function is used to send the keploy record binary server port to the ebpf so that the flow first reaches to the keploy record proxy and then keploy test proxy
+
+// TransmitTestBenchKeployPorts is used to send keploy recordServer(key-0) or testServer(key-1) Port to the ebpf program
+func (h *Hooks) TransmitTestBenchKeployPorts(key, port uint32) error {
+
+	var mode string
+	if key == 0 {
+		mode = "record"
+		h.logger.Debug("sending keploy record server port", zap.Any("port", port))
+	} else if key == 1 {
+		mode = "test"
+		h.logger.Debug("sending keploy test server port", zap.Any("port", port))
+	} else {
+		h.logger.Debug("unknown", zap.Any("key", key), zap.Any("port", port))
+		return nil
+	}
+
+	err := h.tbenchFilterPort.Update(uint32(key), &port, ebpf.UpdateAny)
+	if err != nil {
+		utils.LogError(h.logger, err, fmt.Sprintf("failed to send keploy %v server port to the epbf program", mode), zap.Any("Keploy server port", port))
+		return err
+	}
+	return nil
+}
+
+// TransmitTestBenchKeployPIDs is used to send keploy recordServer(key-0) or testServer(key-1) Pid to the ebpf program
+func (h *Hooks) TransmitTestBenchKeployPIDs(key, pid uint32) error {
+	var mode string
+	if key == 0 {
+		mode = "record"
+		h.logger.Debug("sending keploy record server pid", zap.Any("pid", pid))
+	} else if key == 1 {
+		mode = "test"
+		h.logger.Debug("sending keploy test server pid", zap.Any("pid", pid))
+	} else {
+		h.logger.Debug("unknown", zap.Any("key", key), zap.Any("pid", pid))
+		return nil
+	}
+
+	err := h.tbenchFilterPid.Update(uint32(key), &pid, ebpf.UpdateAny)
+	if err != nil {
+		utils.LogError(h.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", mode), zap.Any("Keploy Pid", pid))
+		return err
+	}
+	return nil
+}
+
+//---------------------------

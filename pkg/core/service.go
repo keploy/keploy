@@ -14,6 +14,7 @@ type Hooks interface {
 	AppInfo
 	DestInfo
 	OutgoingInfo
+	TestBenchInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64) (<-chan *models.TestCase, error)
 }
@@ -56,6 +57,11 @@ type DestInfo interface {
 
 type AppInfo interface {
 	SendInode(ctx context.Context, id uint64, inode uint64) error
+}
+
+type TestBenchInfo interface {
+	TransmitTestBenchKeployPIDs(key, pid uint32) error
+	TransmitTestBenchKeployPorts(key, port uint32) error
 }
 
 type OutgoingInfo interface {

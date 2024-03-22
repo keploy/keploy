@@ -40,6 +40,7 @@ bypassRules: []
 `
 
 const InternalConfig = `
+enableTesting: false
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 `
@@ -51,7 +52,7 @@ func New() *Config {
 	mergedConfig, err := Merge(DefaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
-
+		
 	}
 	err = yaml3.Unmarshal([]byte(mergedConfig), config)
 	if err != nil {

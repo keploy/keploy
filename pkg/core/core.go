@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -176,6 +177,22 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		}
 	}
 
+	// For keploy test bench
+	if opts.EnableTesting {
+		if opts.Mode == models.MODE_TEST {
+			err := c.setUpReplayTesting(ctx)
+			if err != nil {
+				return err
+			}
+			return nil
+		}
+
+		err := c.setUpRecordTesting(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -306,5 +323,88 @@ func (c *Core) resetNsSwitchConfig() error {
 	}
 
 	c.logger.Debug("Successfully reset the nsswitch config of linux")
+	return nil
+}
+
+const (
+	kTestPort   = 56789
+	kRecordPort = 36789
+)
+
+func (c *Core) setUpReplayTesting(ctx context.Context) error {
+	setUpErr := errors.New("failed to setup the keploy replay testing")
+
+	kRecordPid, err := utils.GetPIDByPort(ctx, c.logger, kRecordPort)
+	if err != nil {
+		c.logger.Error("failed to get the keployRecord pid", zap.Error(err))
+		utils.LogError(c.logger, err, "failed to get the keployRecord pid from port", zap.Any("port", kRecordPort))
+		return setUpErr
+	}
+	c.logger.Debug(fmt.Sprintf("keployRecord pid:%v", kRecordPid))
+	println("keploy record pid :", kRecordPid)
+
+	err = c.TransmitTestBenchKeployPIDs(0, uint32(kRecordPid))
+	if err != nil {
+		return setUpErr
+	}
+
+	err = c.TransmitTestBenchKeployPorts(0, uint32(kRecordPort))
+	if err != nil {
+		return setUpErr
+	}
+
+	err = c.TransmitTestBenchKeployPorts(1, uint32(kTestPort))
+	if err != nil {
+		return setUpErr
+	}
+
+	// to get the pid of keployTest binary in keployRecord binary, we have to wait for some time till the proxy server is started
+	// TODO: find other way to filter child process (keployTest) pid in parent process binary (keployRecord)
+	time.Sleep(30 * time.Second) // just for test bench.
+
+	return nil
+}
+
+func (c *Core) setUpRecordTesting(ctx context.Context) error {
+
+	go func() {
+		timeout := 30 * time.Second
+		startTime := time.Now()
+
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				kTestPid, err := utils.GetPIDByPort(ctx, c.logger, kTestPort)
+				if err != nil {
+					c.logger.Debug("failed to get the keploytest pid", zap.Error(err))
+					continue
+				}
+
+				fmt.Println("keploy test pid:", kTestPid)
+				if kTestPid == 0 {
+					continue
+				}
+
+				c.logger.Debug("keploytest pid", zap.Int("pid", kTestPid))
+
+				// sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
+				_ = c.Hooks.TransmitTestBenchKeployPIDs(1, uint32(kTestPid))
+
+				return
+
+			case <-time.After(timeout - time.Since(startTime)):
+				println("Timeout reached, exiting loop")
+				return // Exit the goroutine
+
+			case <-ctx.Done():
+				println("Context cancelled, exiting loop from setupRecordTesting")
+				return // Exit the goroutine
+			}
+		}
+	}()
+
 	return nil
 }

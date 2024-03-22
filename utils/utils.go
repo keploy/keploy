@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -542,4 +543,33 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	findDescendants(parentPID)
 
 	return childPIDs, nil
+}
+
+func GetPIDByPort(ctx context.Context, logger *zap.Logger, port int) (int, error) {
+	// Run the lsof command to find the process using the given port
+	cmd := exec.CommandContext(ctx, "lsof", "-n", "-i", fmt.Sprintf(":%d", port))
+	logger.Debug("Getting pid using port", zap.String("command", cmd.String()))
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse the output of lsof
+	lines := strings.Split(out.String(), "\n")
+	if len(lines) > 1 {
+		fields := strings.Fields(lines[1])
+		if len(fields) >= 2 {
+			pid, err := strconv.Atoi(fields[1])
+			if err != nil {
+				return 0, err
+			}
+			return pid, nil
+		}
+	}
+
+	// If we get here, no process was found using the given port
+	return 0, fmt.Errorf("no process found using port %d", port)
 }
