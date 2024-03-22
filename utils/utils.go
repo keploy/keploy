@@ -483,8 +483,12 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	}
 
 	children = append(children, ppid)
-	children, _ = uniqueProcessGroups(children)
-	for _, pid := range children {
+	uniqueProcess, err := uniqueProcessGroups(children)
+	if err != nil {
+		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
+		uniqueProcess = children
+	}
+	for _, pid := range uniqueProcess {
 		if cmd.ProcessState == nil {
 			err := syscall.Kill(pid, sig)
 			if err != nil {
