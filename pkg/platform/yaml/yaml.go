@@ -47,18 +47,6 @@ type ctxWriter struct {
 
 func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 	for len(p) > 0 {
-		// select {
-		// case <-cw.ctx.Done():
-		// 	fmt.Println("context done !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		// 	var written int
-		// 	written, err = cw.writer.Write(p)
-		// 	fmt.Println(written, "THIS IS THE WRITTEN VALUE")
-		// 	n += written
-		// 	if err != nil {
-		// 		return n, err
-		// 	}
-		// 	p = p[written:]
-		// default:
 		var written int
 		written, err = cw.writer.Write(p)
 		n += written
@@ -66,7 +54,6 @@ func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 			return n, err
 		}
 		p = p[written:]
-		// }
 	}
 	return n, nil
 }
