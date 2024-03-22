@@ -64,6 +64,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
 		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
+		appMutex:     &sync.Mutex{},
 		DestInfo:     info,
 		sessions:     core.NewSessions(),
 		MockManagers: sync.Map{},
