@@ -8,6 +8,7 @@ type Mock struct {
 	Kind         Kind         `json:"Kind,omitempty" bson:"Kind,omitempty"`
 	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
 	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
+	ConnectionID string       `json:"ConnectionId,omitempty" bson:"ConnectionId,omitempty"`
 }
 
 type TestModeInfo struct {

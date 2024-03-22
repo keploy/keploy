@@ -233,7 +233,7 @@ func (p *Proxy) start(ctx context.Context) error {
 			clientConnErrGrp.Go(func() error {
 				utils.Recover(p.logger)
 				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
 				}
 				return nil
@@ -437,6 +437,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	generic := true
+
+	parserCtx = context.WithValue(ctx, "connectionId", fmt.Sprint(clientConnID))
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {
@@ -448,7 +450,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				}
 			} else {
 				err := parser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-				if err != nil {
+				if err != nil && err != io.EOF{
 					utils.LogError(logger, err, "failed to mock the outgoing message")
 					return err
 				}

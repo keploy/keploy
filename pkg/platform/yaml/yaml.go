@@ -16,11 +16,12 @@ import (
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
 type NetworkTrafficDoc struct {
-	Version models.Version `json:"version" yaml:"version"`
-	Kind    models.Kind    `json:"kind" yaml:"kind"`
-	Name    string         `json:"name" yaml:"name"`
-	Spec    yamlLib.Node   `json:"spec" yaml:"spec"`
-	Curl    string         `json:"curl" yaml:"curl,omitempty"`
+	Version      models.Version `json:"version" yaml:"version"`
+	Kind         models.Kind    `json:"kind" yaml:"kind"`
+	Name         string         `json:"name" yaml:"name"`
+	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
+	Curl         string         `json:"curl" yaml:"curl,omitempty"`
+	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
@@ -46,18 +47,26 @@ type ctxWriter struct {
 
 func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 	for len(p) > 0 {
-		select {
-		case <-cw.ctx.Done():
-			return n, cw.ctx.Err()
-		default:
-			var written int
-			written, err = cw.writer.Write(p)
-			n += written
-			if err != nil {
-				return n, err
-			}
-			p = p[written:]
+		// select {
+		// case <-cw.ctx.Done():
+		// 	fmt.Println("context done !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		// 	var written int
+		// 	written, err = cw.writer.Write(p)
+		// 	fmt.Println(written, "THIS IS THE WRITTEN VALUE")
+		// 	n += written
+		// 	if err != nil {
+		// 		return n, err
+		// 	}
+		// 	p = p[written:]
+		// default:
+		var written int
+		written, err = cw.writer.Write(p)
+		n += written
+		if err != nil {
+			return n, err
 		}
+		p = p[written:]
+		// }
 	}
 	return n, nil
 }

@@ -125,6 +125,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionID: ctx.Value("connectionId").(string),
 				}
 				return ctx.Err()
 			}
@@ -153,6 +154,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionID: ctx.Value("connectionId").(string),
 				}
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
@@ -295,17 +297,19 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						}
 						if pg.FrontendWrapper.MsgType == 'C' {
 							pg.FrontendWrapper.CommandComplete = *msg.(*pgproto3.CommandComplete)
+							// empty the command tag
+							pg.FrontendWrapper.CommandComplete.CommandTag = []byte{}
 							pg.FrontendWrapper.CommandCompletes = append(pg.FrontendWrapper.CommandCompletes, pg.FrontendWrapper.CommandComplete)
 						}
-						if pg.FrontendWrapper.DataRow.RowValues != nil {
+						if pg.FrontendWrapper.MsgType == 'D' && pg.FrontendWrapper.DataRow.RowValues != nil {
 							// Create a new slice for each DataRow
 							valuesCopy := make([]string, len(pg.FrontendWrapper.DataRow.RowValues))
 							copy(valuesCopy, pg.FrontendWrapper.DataRow.RowValues)
 
 							row := pgproto3.DataRow{
 								RowValues: valuesCopy, // Use the copy of the values
+								Values:    pg.FrontendWrapper.DataRow.Values,
 							}
-							// fmt.Println("row is ", row)
 							dataRows = append(dataRows, row)
 						}
 					}
@@ -362,7 +366,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
-					if (len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "R") || len(pgMock.DataRows) > 0 {
+					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "R" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
 						pgMock.Payload = bufStr
 					}
