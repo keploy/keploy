@@ -288,10 +288,10 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
 
-		defer utils.GenerateGithubActions(c.logger, cfg.Command)
+		defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 
-		if cfg.InDocker {
-			if len(cfg.Path) > 0 {
+		if c.cfg.InDocker {
+			if len(c.cfg.Path) > 0 {
 				curDir, err := os.Getwd()
 				if err != nil {
 					errMsg := "failed to get current working directory"

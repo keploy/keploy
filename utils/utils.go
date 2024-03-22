@@ -267,21 +267,7 @@ func Recover(logger *zap.Logger) {
 // GenerateGithubActions generates a GitHub Actions workflow file for Keploy
 func GenerateGithubActions(logger *zap.Logger, appCmd string) {
 	// Determine the path based on the alias "keploy"
-	var keployPath string
-	isDockerCmd := len(os.Getenv("IS_DOCKER_CMD")) > 0
-	if isDockerCmd {
-		logger.Info("Running in docker environment, skipping the path determination")
-		keployPath = "./"
-	} else {
-		logger.Info("Determining the path of the keploy binary based on the alias \"keploy\"")
-		keployPath = "/usr/local/bin/keploybin" // Default path
-		aliasCmd := exec.Command("which", "keploy")
-		aliasOutput, err := aliasCmd.Output()
-		if err == nil && len(aliasOutput) > 0 {
-			keployPath = strings.TrimSpace(string(aliasOutput))
-		}
-		logger.Info("Path of the keploy binary determined successfully", zap.String("path", keployPath))
-	}
+	logger.Debug("Generating GitHub Actions workflow file")
 	// Define the content of the GitHub Actions workflow file
 	actionsFileContent := `name: Keploy
 on:
@@ -300,13 +286,18 @@ jobs:
         uses: keploy/testgpt@main
         with:
           working-directory: ./
-          keploy-path: ` + keployPath + `
+          keploy-path: ./
           command: ` + appCmd + `
 `
 
 	// Define the file path where the GitHub Actions workflow file will be saved
 	filePath := "/githubactions/keploy.yml"
 
+	//create the file path
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		logger.Error("Error creating directory for GitHub Actions workflow file", zap.Error(err))
+		return
+	}
 	// Write the content to the file
 	if err := os.WriteFile(filePath, []byte(actionsFileContent), 0644); err != nil {
 		logger.Error("Error writing GitHub Actions workflow file", zap.Error(err))
