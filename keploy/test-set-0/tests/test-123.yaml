@@ -1,0 +1,73 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-123
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/api/v4/cloud/products/selfhosted
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en
+            Connection: keep-alive
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2FOKjxmu75iA4LK17CYZaQrGkIf27elpIfPB5yPcSEjrlxCiHg3RO7CvXXc0U4r0txqMk3iO72s%2Bg%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B8hxrGknuWFlLiC5AzeHiihLa0RK%2FEwfI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2Bs3Dacoviy4rvwFvwkm2S%2FN6DmJAsn5q0%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX1%2FP4xxVx3mz5RDuYHVPiuq1wXsZ5HVIYSfWa%2BPOE2oD4x94%2FlGaAEn0; rl_trait=RudderEncrypt%3AU2FsdGVkX18%2BQ2%2FzXd8k24DD3xSZ6fyJS86KjE1NawY%3D
+            Host: localhost:8065
+            Sec-Ch-Ua: '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"macOS"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+            X-Page-Load-Context: page_load
+            X-Requested-With: XMLHttpRequest
+        body: ""
+        timestamp: 2024-03-22T12:55:31.624568943Z
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "827"
+            Content-Type: application/json
+            Date: Fri, 22 Mar 2024 12:55:31 GMT
+            Expires: "0"
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Request-Id: ws6arr5oobrszr6tpodwmn34hr
+            X-Version-Id: 9.5.2.8115857622.09e35101703738e85bee6f7091163f71.false
+        body: '[{"id":"prod_KN57afoYaL5jzW","name":"Self-Hosted Enterprise","description":"Built to scale for high-trust organizations and companies in regulated industries.","price_per_seat":30,"add_ons":[{"id":"premiersupport","name":"premiersupport","display_name":"Premier Support","price_per_seat":2.0833333333333335}],"sku":"enterprise","price_id":"price_1JiKwpI67GP2qpb49IqQXzUH","product_family":"on-prem","recurring_interval":"year","billing_scheme":"sales_serve","cross_sells_to":""},{"id":"prod_KN56te5TVMFcyj","name":"Self-Hosted Professional","description":"Ideal for small companies and departments with data security requirements","price_per_seat":10,"add_ons":null,"sku":"professional","price_id":"price_1JiKwRI67GP2qpb4cUBWyLHs","product_family":"on-prem","recurring_interval":"year","billing_scheme":"","cross_sells_to":""}]'
+        status_message: OK
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2024-03-22T12:55:32.220001971Z
+    objects: []
+    assertions:
+        noise:
+            body.billing_scheme: []
+            body.price_id: []
+            body.recurring_interval: []
+            body.sku: []
+            header.Date: []
+    created: 1711112132
+curl: |
+    curl --request GET \
+      --url http://localhost:8065/api/v4/cloud/products/selfhosted \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'Accept: */*' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2FOKjxmu75iA4LK17CYZaQrGkIf27elpIfPB5yPcSEjrlxCiHg3RO7CvXXc0U4r0txqMk3iO72s%2Bg%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B8hxrGknuWFlLiC5AzeHiihLa0RK%2FEwfI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2Bs3Dacoviy4rvwFvwkm2S%2FN6DmJAsn5q0%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX1%2FP4xxVx3mz5RDuYHVPiuq1wXsZ5HVIYSfWa%2BPOE2oD4x94%2FlGaAEn0; rl_trait=RudderEncrypt%3AU2FsdGVkX18%2BQ2%2FzXd8k24DD3xSZ6fyJS86KjE1NawY%3D' \
+      --header 'Connection: keep-alive' \
+      --header 'X-Page-Load-Context: page_load' \
+      --header 'Sec-Ch-Ua: "Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' \
+      --header 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Accept-Language: en' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Host: localhost:8065' \
+      --header 'Sec-Ch-Ua-Platform: "macOS"' \

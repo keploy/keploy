@@ -1,0 +1,70 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-107
+spec:
+    metadata: {}
+    req:
+        method: DELETE
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/api/v4/posts/xukrcyzawtyt9g3595q9h5i19c
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en
+            Connection: keep-alive
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D
+            Host: localhost:8065
+            Origin: http://localhost:8065
+            Sec-Ch-Ua: '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"macOS"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+            X-Csrf-Token: e9exguakwpngdfyb7twejwkhoc
+            X-Requested-With: XMLHttpRequest
+        body: ""
+        timestamp: 2024-03-22T12:55:20.733761604Z
+    resp:
+        status_code: 200
+        header:
+            Content-Length: "15"
+            Content-Type: application/json
+            Date: Fri, 22 Mar 2024 12:55:20 GMT
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Request-Id: rm4sxo7wq3dhbcoa55dgshnemy
+            X-Version-Id: 9.5.2.8115857622.09e35101703738e85bee6f7091163f71.false
+        body: '{"status":"OK"}'
+        status_message: OK
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2024-03-22T12:55:22.771230842Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1711112122
+curl: |
+    curl --request DELETE \
+      --url http://localhost:8065/api/v4/posts/xukrcyzawtyt9g3595q9h5i19c \
+      --header 'Accept-Language: en' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Accept: */*' \
+      --header 'Sec-Ch-Ua-Platform: "macOS"' \
+      --header 'X-Csrf-Token: e9exguakwpngdfyb7twejwkhoc' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'Origin: http://localhost:8065' \
+      --header 'Host: localhost:8065' \
+      --header 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Connection: keep-alive' \
+      --header 'Sec-Ch-Ua: "Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' \

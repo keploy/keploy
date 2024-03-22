@@ -1,0 +1,80 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-179
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/api/v4/users/ys39xtsrzibu7x66aeiae4ze7a/teams/r6drm3hpw3yjxpqfxmjrhwcj8h/channels/categories
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en
+            Connection: keep-alive
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2FRpkBfr6VErz1prRzwz4m%2BAtDgwFX8dQ2svylLf%2BLHfi0qJCsTEZJvfdYn2YlqB8NkM291MZU%2BrQ%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B6MoWXLJuiG8NASVFTsppkBJyMfgfPNtg%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX19YyrIDTVO3tXERHQx93htNk0erxs8ywzY%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX1%2B24orPSEZC8K2oyL7R1HZCkXFGIiKE7ZvgEPrKlSawxAAEX18Aw6x6; rl_trait=RudderEncrypt%3AU2FsdGVkX1%2B42ReoNNDzbI5zRk3n8KHNdKDmbextqKA%3D
+            Host: localhost:8065
+            Sec-Ch-Ua: '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"macOS"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+            X-Page-Load-Context: page_load
+            X-Requested-With: XMLHttpRequest
+        body: ""
+        timestamp: 2024-03-22T12:55:44.291777573Z
+    resp:
+        status_code: 200
+        header:
+            Content-Encoding: gzip
+            Content-Length: "518"
+            Content-Type: application/json
+            Date: Fri, 22 Mar 2024 12:55:44 GMT
+            Expires: "0"
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Request-Id: 1pu55est4byfpenzeth1za137w
+            X-Version-Id: 9.5.2.8115857622.09e35101703738e85bee6f7091163f71.false
+        body: !!binary |
+            H4sIAAAJbogA/8xUzW6cMBB+lWjOHLr18rfXVr31CaIVMvbYGNbG2KbYRHn3ioRq00aJlD
+            aVcsQzjL6fme8OGA0oR6fQw+n2DhSHEwj6Y3QqoG+SJ3UM3q2qnctYFBQVxeOKJW1cwZ0m
+            nV1I6qOdRNS96xbWVx1kMHt0zcOslydABgGpfmx7dZofXWhGx9HB6dPjpzISTrCNSBafQo
+            YMuPL2QlNjqN5K336xgQz0HJDDSdCLxwzYeLlQ65++dNQYvDSKb3Kc77NdkX61xPIlVqIK
+            iump6o56yOPC8L+SPbzAls0+jPo5VYPLzW5o+ge2+/tHtP/zS4rskJ9r8uVaeZv74MUhCc
+            Wl6GURdS/5lJNaos83UAc3kU4MgRAR1lRPfGUz8bKOm/AiddpaPYeyImVcV57s5Fa2UAcZ
+            xMWMXSBOC27KVnWUmfyoy7lgkMGyOBMI7yrCo3JaJDaPuBalXbY/V85k7VXXy7aOXPt1zq
+            kf6nnbQrJo6ozsc2sGYYbyKKntQtvmm9I9rcfaWa2ISWU65jYEbivSrltxiEnnlmLRy74V
+            06HNq7l1eNAOrhfAlUMWGo3eU/khk4H8thoOGZpwDYg/8D/fk68PDTffrw1vXBdm1dH0Nt
+            HStITncSmZHSw/IIXz/TmD/aZv3yFeX42jHdbfW/Q+Vp/vfw4APEe2f10GAAA=
+        status_message: OK
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2024-03-22T12:55:45.562052547Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1711112145
+curl: |
+    curl --request GET \
+      --url http://localhost:8065/api/v4/users/ys39xtsrzibu7x66aeiae4ze7a/teams/r6drm3hpw3yjxpqfxmjrhwcj8h/channels/categories \
+      --header 'Accept-Language: en' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX1%2FRpkBfr6VErz1prRzwz4m%2BAtDgwFX8dQ2svylLf%2BLHfi0qJCsTEZJvfdYn2YlqB8NkM291MZU%2BrQ%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX1%2B6MoWXLJuiG8NASVFTsppkBJyMfgfPNtg%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX19YyrIDTVO3tXERHQx93htNk0erxs8ywzY%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX1%2B24orPSEZC8K2oyL7R1HZCkXFGIiKE7ZvgEPrKlSawxAAEX18Aw6x6; rl_trait=RudderEncrypt%3AU2FsdGVkX1%2B42ReoNNDzbI5zRk3n8KHNdKDmbextqKA%3D' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Connection: keep-alive' \
+      --header 'Sec-Ch-Ua: "Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' \
+      --header 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Host: localhost:8065' \
+      --header 'X-Page-Load-Context: page_load' \
+      --header 'Sec-Ch-Ua-Platform: "macOS"' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Accept: */*' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Sec-Fetch-Site: same-origin' \

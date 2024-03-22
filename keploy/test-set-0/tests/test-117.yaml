@@ -1,0 +1,117 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-117
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/api/v4/roles/names
+        header:
+            Accept: '*/*'
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-US,en;q=0.9
+            Connection: keep-alive
+            Content-Length: "30"
+            Content-Type: application/json
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D
+            Host: localhost:8065
+            Origin: http://localhost:8065
+            Sec-Ch-Ua: '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"macOS"'
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+            X-Csrf-Token: e9exguakwpngdfyb7twejwkhoc
+            X-Page-Load-Context: page_load
+            X-Requested-With: XMLHttpRequest
+        body: '["system_admin","system_user"]'
+        timestamp: 2024-03-22T12:55:31.561087109Z
+    resp:
+        status_code: 200
+        header:
+            Content-Encoding: gzip
+            Content-Type: application/json
+            Date: Fri, 22 Mar 2024 12:55:31 GMT
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            Vary: Accept-Encoding
+            X-Content-Type-Options: nosniff
+            X-Request-Id: efefe4rawpnmtjibm89tiush1o
+            X-Version-Id: 9.5.2.8115857622.09e35101703738e85bee6f7091163f71.false
+        body: !!binary |
+            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
+            mogiAAA=
+        status_message: OK
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2024-03-22T12:55:31.950422846Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1711112131
+curl: |-
+    curl --request POST \
+      --url http://localhost:8065/api/v4/roles/names \
+      --header 'Host: localhost:8065' \
+      --header 'Connection: keep-alive' \
+      --header 'X-Page-Load-Context: page_load' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'X-Csrf-Token: e9exguakwpngdfyb7twejwkhoc' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Accept: */*' \
+      --header 'Content-Type: application/json' \
+      --header 'Sec-Ch-Ua-Platform: "macOS"' \
+      --header 'Sec-Fetch-Dest: empty' \
+      --header 'Sec-Ch-Ua: "Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Accept-Language: en-US,en;q=0.9' \
+      --header 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \
+      --header 'Origin: http://localhost:8065' \
+      --data '["system_admin","system_user"]'

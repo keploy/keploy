@@ -1,0 +1,106 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-114
+spec:
+    metadata: {}
+    req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8065/keploy/channels/of
+        header:
+            Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
+            Accept-Encoding: gzip, deflate, br
+            Accept-Language: en-US,en;q=0.9
+            Cache-Control: max-age=0
+            Connection: keep-alive
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D
+            Host: localhost:8065
+            Sec-Ch-Ua: '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
+            Sec-Ch-Ua-Mobile: ?0
+            Sec-Ch-Ua-Platform: '"macOS"'
+            Sec-Fetch-Dest: document
+            Sec-Fetch-Mode: navigate
+            Sec-Fetch-Site: same-origin
+            Sec-Fetch-User: ?1
+            Upgrade-Insecure-Requests: "1"
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+        body: ""
+        timestamp: 2024-03-22T12:55:31.421913693Z
+    resp:
+        status_code: 200
+        header:
+            Cache-Control: no-cache, max-age=31556926, public
+            Content-Security-Policy: frame-ancestors 'self' teams.microsoft.com; script-src 'self' cdn.rudderlabs.com js.stripe.com/v3
+            Content-Type: text/html
+            Date: Fri, 22 Mar 2024 12:55:31 GMT
+            Permissions-Policy: ""
+            Referrer-Policy: no-referrer
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: SAMEORIGIN
+            X-Request-Id: q6k6cwnombg35gqqdqmz1dcfmw
+            X-Version-Id: 9.5.2.8115857622.09e35101703738e85bee6f7091163f71.false
+        body: |-
+            <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer"><title>Mattermost</title><meta name="mobile-web-app-capable" content="yes"><meta name="application-name" content="Mattermost"><meta name="format-detection" content="telephone=no"><link rel="icon" type="image/png" href="/static/images/favicon/favicon-default-16x16.png" sizes="16x16"><link rel="icon" type="image/png" href="/static/images/favicon/favicon-default-24x24.png" sizes="24x24"><link rel="icon" type="image/png" href="/static/images/favicon/favicon-default-32x32.png" sizes="32x32"><link rel="icon" type="image/png" href="/static/images/favicon/favicon-default-64x64.png" sizes="64x64"><link rel="icon" type="image/png" href="/static/images/favicon/favicon-default-96x96.png" sizes="96x96"><link rel="stylesheet" class="code_theme"><style>.error-screen {
+                        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+                        padding-top: 50px;
+                        max-width: 750px;
+                        font-size: 14px;
+                        color: #333333;
+                        margin: auto;
+                        display: none;
+                        line-height: 1.5;
+                    }
+
+                    .error-screen h2 {
+                        font-size: 30px;
+                        font-weight: normal;
+                        line-height: 1.2;
+                    }
+
+                    .error-screen ul {
+                        padding-left: 15px;
+                        line-height: 1.7;
+                        margin-top: 0;
+                        margin-bottom: 10px;
+                    }
+
+                    .error-screen hr {
+                        color: #ddd;
+                        margin-top: 20px;
+                        margin-bottom: 20px;
+                        border: 0;
+                        border-top: 1px solid #eee;
+                    }
+
+                    .error-screen-visible {
+                        display: block;
+                    }</style><meta http-equiv="Content-Security-Policy" content="script-src 'self' cdn.rudderlabs.com/ js.stripe.com/v3"><script defer="defer" src="/static/main.520182e73a6f5be4fbac.js"></script><script defer="defer" src="/static/remote_entry.js?bt=1709319250029"></script><meta name="apple-mobile-web-app-title" content="Mattermost" /><meta name="apple-mobile-web-app-capable" content="yes" /><meta name="apple-mobile-web-app-status-bar-style" content="default" /><link rel="apple-touch-icon" sizes="76x76" href="/static/icon_76x76.png" /><link rel="apple-touch-icon" sizes="72x72" href="/static/icon_72x72.png" /><link rel="apple-touch-icon" sizes="60x60" href="/static/icon_60x60.png" /><link rel="apple-touch-icon" sizes="57x57" href="/static/icon_57x57.png" /><link rel="apple-touch-icon" sizes="152x152" href="/static/icon_152x152.png" /><link rel="apple-touch-icon" sizes="144x144" href="/static/icon_144x144.png" /><link rel="apple-touch-icon" sizes="120x120" href="/static/icon_120x120.png" /><link rel="manifest" href="/static/manifest.json" /></head><body class="font--open_sans enable-animations"><div id="root"><div class="error-screen"><h2>Cannot connect to Mattermost</h2><hr/><p>We're having trouble connecting to Mattermost. If refreshing this page (Ctrl+R or Command+R) does not work, please verify that your computer is connected to the internet.</p><br/></div><div class="loading-screen" style="position: relative"><div class="loading__content"><div class="round round-1"></div><div class="round round-2"></div><div class="round round-3"></div></div></div></div><div id="root-portal"></div><noscript>To use Mattermost, please enable JavaScript.</noscript></body></html>
+        status_message: OK
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2024-03-22T12:55:31.712548304Z
+    objects: []
+    assertions:
+        noise:
+            header.Date: []
+    created: 1711112131
+curl: |
+    curl --request GET \
+      --url http://localhost:8065/keploy/channels/of \
+      --header 'Sec-Ch-Ua-Platform: "macOS"' \
+      --header 'Cache-Control: max-age=0' \
+      --header 'Sec-Fetch-Dest: document' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D' \
+      --header 'Accept-Language: en-US,en;q=0.9' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Sec-Fetch-User: ?1' \
+      --header 'Sec-Fetch-Mode: navigate' \
+      --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Sec-Ch-Ua: "Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' \
+      --header 'Host: localhost:8065' \
+      --header 'Upgrade-Insecure-Requests: 1' \
+      --header 'Connection: keep-alive' \
+      --header 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7' \
+      --header 'Sec-Fetch-Site: same-origin' \
+      --header 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \

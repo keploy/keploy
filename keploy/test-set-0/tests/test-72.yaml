@@ -7,69 +7,74 @@ spec:
         method: GET
         proto_major: 1
         proto_minor: 1
-        url: http://localhost:8065/api/v4/channels/qaenjht9yj8qtmg1o3t1dddoke/stats?exclude_files_count=true
-        url_params:
-            exclude_files_count: "true"
+        url: http://localhost:8065/api/v4/users/ys39xtsrzibu7x66aeiae4ze7a/teams/r6drm3hpw3yjxpqfxmjrhwcj8h/channels/categories
         header:
             Accept: '*/*'
             Accept-Encoding: gzip, deflate, br
             Accept-Language: en
             Connection: keep-alive
-            Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19J%2FFVTnfr7wpbP41%2BgaL0xGfNL%2Fn50z53Giy6geJs%2BICqFLixVY5XPbxDpUwq%2FZ7%2BQga9%2F6s0n5Q%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19MbsFyYOIfVwQAVaTDhnfQ%2B9bNMLboIsQ%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2FPKd3vmwFpevV1%2FbJ5hjyTVWN0AOXoh3WAD%2BOSJyyB1%2Bi09rcCyOfa%22
+            Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D
             Host: localhost:8065
-            Sec-Ch-Ua: '"Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"'
+            Sec-Ch-Ua: '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
             Sec-Ch-Ua-Mobile: ?0
-            Sec-Ch-Ua-Platform: '"Linux"'
+            Sec-Ch-Ua-Platform: '"macOS"'
             Sec-Fetch-Dest: empty
             Sec-Fetch-Mode: cors
             Sec-Fetch-Site: same-origin
-            Sec-Gpc: "1"
-            User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+            User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+            X-Page-Load-Context: page_load
             X-Requested-With: XMLHttpRequest
         body: ""
-        body_type: ""
-        timestamp: 2023-12-27T07:15:54.287986949Z
-        host: ""
+        timestamp: 2024-03-22T12:54:54.564686259Z
     resp:
         status_code: 200
         header:
-            Content-Length: "115"
+            Content-Encoding: gzip
+            Content-Length: "518"
             Content-Type: application/json
-            Date: Wed, 27 Dec 2023 07:15:54 GMT
+            Date: Fri, 22 Mar 2024 12:54:54 GMT
             Expires: "0"
             Permissions-Policy: ""
             Referrer-Policy: no-referrer
             Vary: Accept-Encoding
             X-Content-Type-Options: nosniff
-            X-Request-Id: kfmdriz91tyq8ckpddzqxatu7e
-            X-Version-Id: 7.8.15.7.8.15.11eb342b774c4fd6fb19b80592b3a86a.false
-        body: |
-            {"channel_id":"qaenjht9yj8qtmg1o3t1dddoke","member_count":1,"guest_count":0,"pinnedpost_count":0,"files_count":-1}
-        body_type: ""
-        status_message: ""
+            X-Request-Id: yos635cnbjgy9g9x88dpcxxppw
+            X-Version-Id: 9.5.2.8115857622.09e35101703738e85bee6f7091163f71.false
+        body: !!binary |
+            H4sIAAAJbogA/8xUzW6cMBB+lWjOHLr18rfXVr31CaIVMvbYGNbG2KbYRHn3ioRq00aJlD
+            aVcsQzjL6fme8OGA0oR6fQw+n2DhSHEwj6Y3QqoG+SJ3UM3q2qnctYFBQVxeOKJW1cwZ0m
+            nV1I6qOdRNS96xbWVx1kMHt0zcOslydABgGpfmx7dZofXWhGx9HB6dPjpzISTrCNSBafQo
+            YMuPL2QlNjqN5K336xgQz0HJDDSdCLxwzYeLlQ65++dNQYvDSKb3Kc77NdkX61xPIlVqIK
+            iump6o56yOPC8L+SPbzAls0+jPo5VYPLzW5o+ge2+/tHtP/zS4rskJ9r8uVaeZv74MUhCc
+            Wl6GURdS/5lJNaos83UAc3kU4MgRAR1lRPfGUz8bKOm/AiddpaPYeyImVcV57s5Fa2UAcZ
+            xMWMXSBOC27KVnWUmfyoy7lgkMGyOBMI7yrCo3JaJDaPuBalXbY/V85k7VXXy7aOXPt1zq
+            kf6nnbQrJo6ozsc2sGYYbyKKntQtvmm9I9rcfaWa2ISWU65jYEbivSrltxiEnnlmLRy74V
+            06HNq7l1eNAOrhfAlUMWGo3eU/khk4H8thoOGZpwDYg/8D/fk68PDTffrw1vXBdm1dH0Nt
+            HStITncSmZHSw/IIXz/TmD/aZv3yFeX42jHdbfW/Q+Vp/vfw4APEe2f10GAAA=
+        status_message: OK
         proto_major: 0
         proto_minor: 0
-        timestamp: 2023-12-27T07:15:54.309027565Z
+        timestamp: 2024-03-22T12:54:55.480452885Z
     objects: []
     assertions:
         noise:
             header.Date: []
-    created: 1703661354
+    created: 1711112095
 curl: |
     curl --request GET \
-      --url http://localhost:8065/api/v4/channels/qaenjht9yj8qtmg1o3t1dddoke/stats?exclude_files_count=true \
+      --url http://localhost:8065/api/v4/users/ys39xtsrzibu7x66aeiae4ze7a/teams/r6drm3hpw3yjxpqfxmjrhwcj8h/channels/categories \
       --header 'Accept-Language: en' \
-      --header 'Sec-Ch-Ua: "Not_A Brand";v="8", "Chromium";v="120", "Brave";v="120"' \
-      --header 'Accept: */*' \
-      --header 'Cookie: MMAUTHTOKEN=qtc8arq6h3gojdbnwdewmr43ec; MMUSERID=r6jeh1ge9pg6ppj7db89mfyb8w; MMCSRF=orq9qechqbduxbjkobnkj6gjpy; rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX185zJUMmL2%2FfwlmIbKqhlgk9xeZpJ6cus4%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FH44nVlVBpmVrD3biAzzxtJOoKLOaH7kM%3D; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX19J%2FFVTnfr7wpbP41%2BgaL0xGfNL%2Fn50z53Giy6geJs%2BICqFLixVY5XPbxDpUwq%2FZ7%2BQga9%2F6s0n5Q%3D%3D; rl_trait=RudderEncrypt%3AU2FsdGVkX19MbsFyYOIfVwQAVaTDhnfQ%2B9bNMLboIsQ%3D; rl_user_id=%22RudderEncrypt%3AU2FsdGVkX1%2FPKd3vmwFpevV1%2FbJ5hjyTVWN0AOXoh3WAD%2BOSJyyB1%2Bi09rcCyOfa%22' \
-      --header 'Accept-Encoding: gzip, deflate, br' \
-      --header 'Sec-Ch-Ua-Platform: "Linux"' \
+      --header 'Sec-Ch-Ua-Platform: "macOS"' \
       --header 'Connection: keep-alive' \
-      --header 'Sec-Fetch-Mode: cors' \
-      --header 'Host: localhost:8065' \
-      --header 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
-      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'X-Page-Load-Context: page_load' \
       --header 'Sec-Fetch-Dest: empty' \
       --header 'Sec-Ch-Ua-Mobile: ?0' \
+      --header 'Cookie: rl_page_init_referrer=RudderEncrypt%3AU2FsdGVkX1%2BidFc1X9FohYbzr9TJ%2F797cNyL2J1HTlc%3D; rl_page_init_referring_domain=RudderEncrypt%3AU2FsdGVkX1%2FMFaSvybIxCRvBgmrub9Kb5wE%2FhuZzLSc%3D; __stripe_mid=764f6db5-f24a-4338-9e8d-5ed6304dbeffb73ddc; MMAUTHTOKEN=u8a5aizbf3yj3xc7xu1q1q698h; MMUSERID=ys39xtsrzibu7x66aeiae4ze7a; MMCSRF=e9exguakwpngdfyb7twejwkhoc; __stripe_sid=83587178-27fe-4178-ac3f-bd6e6b24b33d42fa85; rl_anonymous_id=RudderEncrypt%3AU2FsdGVkX188hDt%2FXMPRHlFpt9qbwpBR6LWkMcXix1yeshE8aHU%2BZ7rM454i9Iv%2FK49bjOBO1oVXMhBXFKJJSw%3D%3D; rl_group_id=RudderEncrypt%3AU2FsdGVkX19oqF%2FWSaHAv12nzHImlgHib11lVKUxDUI%3D; rl_group_trait=RudderEncrypt%3AU2FsdGVkX1%2BdxY%2BIoJZ0UWCKDNYlvIoEP20dq5eehhg%3D; rl_user_id=RudderEncrypt%3AU2FsdGVkX19NbwKXnIb388Y6iKaFg%2B%2B%2FCobmf5q8e%2F4scTVgPN%2Bfvxo6UeCZBcgt; rl_trait=RudderEncrypt%3AU2FsdGVkX19az5uEvByULZfw9m8Dzjly%2BUY8Dhzdals%3D' \
+      --header 'X-Requested-With: XMLHttpRequest' \
+      --header 'Accept: */*' \
+      --header 'Sec-Ch-Ua: "Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
       --header 'Sec-Fetch-Site: same-origin' \
-      --header 'Sec-Gpc: 1' \
+      --header 'Sec-Fetch-Mode: cors' \
+      --header 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \
+      --header 'Host: localhost:8065' \
