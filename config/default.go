@@ -46,7 +46,6 @@ func GetDefaultConfig() string {
 
 func SetDefaultConfig(cfgStr string) {
 	defaultConfig = cfgStr
-	return
 }
 
 const InternalConfig = `
