@@ -490,7 +490,7 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	}
 	for _, pid := range uniqueProcess {
 		if cmd.ProcessState == nil {
-			err := syscall.Kill(pid, sig)
+			err := syscall.Kill(-pid, sig)
 			if err != nil {
 				logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
 			}
