@@ -256,49 +256,50 @@ func (a *App) injectNetwork(network string) error {
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
 
-func (a *App) handleDockerEvents(ctx context.Context, e events.Message) error {
+func (a *App) handleDockerEvents(ctx context.Context, e events.Message) (bool, error) {
+	var inode uint64
 	switch e.Action {
 	case "start":
 		// Fetch container details by inspecting using container ID to check if container is created
 		info, err := a.docker.ContainerInspect(ctx, e.ID)
 		if err != nil {
 			a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
-			return err
+			return false, err
 		}
 
 		// Check if the container's name matches the desired name
 		if info.Name != "/"+a.container {
 			a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
-			return nil
+			return false, nil
 		}
 
 		// Set Docker Container ID
 		a.docker.SetContainerID(e.ID)
 		a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
 		if info.State.Pid == 0 {
-			return errors.New("failed to get the pid of the container")
+			return false, errors.New("failed to get the pid of the container")
 		}
 		a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
-		inode, err := getInode(info.State.Pid)
+		inode, err = getInode(info.State.Pid)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		a.inodeChan <- inode
 		a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
 		if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
 			a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
-			return nil
+			return false, nil
 		}
 
 		n, ok := info.NetworkSettings.Networks[a.containerNetwork]
 		if !ok || n == nil {
 			a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
-			return nil
+			return false, nil
 		}
 		a.containerIPv4 = n.IPAddress
 	}
-	return nil
+	return inode != 0, nil
 }
 
 func (a *App) getDockerMeta(ctx context.Context) <-chan error {
@@ -340,9 +341,11 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				errCh <- ctx.Err()
 				return nil
 			case e := <-messages:
-				err := a.handleDockerEvents(ctx, e)
+				inodeFound, err := a.handleDockerEvents(ctx, e)
 				if err != nil {
 					errCh <- err
+					return nil
+				} else if inodeFound {
 					return nil
 				}
 			// for debugging purposes
