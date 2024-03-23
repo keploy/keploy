@@ -26,7 +26,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
 type Proxy struct {
 	logger *zap.Logger
 
