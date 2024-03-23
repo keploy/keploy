@@ -189,3 +189,5 @@ const (
 type contextKey string
 
 const ErrGroupKey contextKey = "errGroup"
+const ConnectioIDKey contextKey = "connectionId"
+

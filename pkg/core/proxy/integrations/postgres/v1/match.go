@@ -74,7 +74,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 				return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 			}
 
-			ConnectionID := ctx.Value("connectionId").(string)
+			ConnectionID := ctx.Value(models.ConnectioIDKey).(string)
 
 			recordedPrep := getRecordPrepStatement(tcsMocks)
 			reqGoingOn := decodePgRequest(requestBuffers[0], logger)

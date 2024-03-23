@@ -26,6 +26,7 @@ import (
 	"go.uber.org/zap"
 )
 
+
 type Proxy struct {
 	logger *zap.Logger
 
@@ -438,7 +439,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	generic := true
 
-	parserCtx = context.WithValue(ctx, "connectionId", fmt.Sprint(clientConnID))
+	parserCtx = context.WithValue(ctx, models.ConnectioIDKey, fmt.Sprint(clientConnID))
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {

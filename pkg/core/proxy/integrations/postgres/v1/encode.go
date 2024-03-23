@@ -125,7 +125,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
-					ConnectionID: ctx.Value("connectionId").(string),
+					ConnectionID: ctx.Value(models.ConnectioIDKey).(string),
 				}
 				return ctx.Err()
 			}
@@ -154,7 +154,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
-					ConnectionID: ctx.Value("connectionId").(string),
+					ConnectionID: ctx.Value(models.ConnectioIDKey).(string),
 				}
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
