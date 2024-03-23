@@ -48,7 +48,7 @@ func (p *PostgresV1) MatchType(_ context.Context, reqBuf []byte) bool {
 }
 
 func (p *PostgresV1) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := p.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+	logger := p.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
@@ -57,7 +57,7 @@ func (p *PostgresV1) RecordOutgoing(ctx context.Context, src net.Conn, dst net.C
 	}
 	err = encodePostgres(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
-		// TODO: why debug log sarthak?
+		// TODO: why debug log?
 		logger.Debug("failed to encode the postgres message into the yaml")
 		return err
 	}

@@ -17,13 +17,6 @@ import (
 )
 
 func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
-	//closing the destination conn
-	defer func(destConn net.Conn) {
-		err := destConn.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the destination connection")
-		}
-	}(destConn)
 
 	logger.Debug("Inside the encodePostgresOutgoing function")
 	var pgRequests []models.Backend
@@ -79,10 +72,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
-	errChan := make(chan error)
-	defer close(clientBuffChan)
-	defer close(destBuffChan)
-	defer close(errChan)
+	errChan := make(chan error, 1)
 
 	//get the error group from the context
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -90,6 +80,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	// read requests from client
 	g.Go(func() error {
 		defer utils.Recover(logger)
+		defer close(clientBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 		return nil
 	})
@@ -97,9 +88,18 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	// read responses from destination
 	g.Go(func() error {
 		defer utils.Recover(logger)
+		defer close(destBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 		return nil
 	})
+
+	go func() {
+		err := g.Wait()
+		if err != nil {
+			logger.Info("error group is returning an error", zap.Error(err))
+		}
+		close(errChan)
+	}()
 
 	prevChunkWasReq := false
 	logger.Debug("the iteration for the pg request starts", zap.Any("pgReqs", len(pgRequests)), zap.Any("pgResps", len(pgResponses)))
@@ -125,7 +125,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
-					ConnectionID: ctx.Value(models.ConnectioIDKey).(string),
+					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
 				return ctx.Err()
 			}
@@ -154,7 +154,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
-					ConnectionID: ctx.Value(models.ConnectioIDKey).(string),
+					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
