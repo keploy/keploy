@@ -9,7 +9,7 @@ jobs:
 
     - name: Build docker image
       run: |
-        docker build -t keployv2 .
+        docker image build -t ghcr.io/keploy/keploy:v2-dev .
     - name: Checkout the samples-go repository
       uses: actions/checkout@v2
       with:
