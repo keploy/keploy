@@ -65,7 +65,7 @@ func Normalise(ctx context.Context, logger *zap.Logger, conf *config.Config, ser
 				utils.LogError(logger, nil, "Please enter the testcases to be normalised")
 				return err
 			}
-			svc, err := serviceFactory.GetService(ctx, "normalise", *conf)
+			svc, err := serviceFactory.GetService(ctx, "normalise")
 			if err != nil {
 				return err
 			}
@@ -82,7 +82,7 @@ func Normalise(ctx context.Context, logger *zap.Logger, conf *config.Config, ser
 			return nil
 		},
 	}
-	if err := cmdConfigurator.AddFlags(normaliseCmd, conf); err != nil {
+	if err := cmdConfigurator.AddFlags(normaliseCmd); err != nil {
 		utils.LogError(logger, err, "failed to add nornalise cmd flags")
 		return nil
 	}

@@ -363,6 +363,7 @@ func (t *Tools) Normalise(_ context.Context, path string, testSet string, testCa
 
 					// Unmarshal YAML into TestCase
 					var testCase TestCaseFile
+
 					err = yaml.Unmarshal(testCaseContent, &testCase)
 					if err != nil {
 						utils.LogError(t.logger, err, "Failed to unmarshal YAML")
