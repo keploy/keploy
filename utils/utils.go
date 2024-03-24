@@ -501,7 +501,7 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 
 func uniqueProcessGroups(pids []int) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
-	var uniquePIDs []int
+	var uniqueGPIDs []int
 
 	for _, pid := range pids {
 		pgid, err := getProcessGroupID(pid)
@@ -510,11 +510,11 @@ func uniqueProcessGroups(pids []int) ([]int, error) {
 		}
 		if !uniqueGroups[pgid] {
 			uniqueGroups[pgid] = true
-			uniquePIDs = append(uniquePIDs, pid)
+			uniqueGPIDs = append(uniqueGPIDs, pgid)
 		}
 	}
 
-	return uniquePIDs, nil
+	return uniqueGPIDs, nil
 }
 
 func getProcessGroupID(pid int) (int, error) {
