@@ -2,9 +2,10 @@ package utils
 
 import (
 	"context"
+	"os"
+
 	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
-	"os"
 )
 
 //func CheckPath(logger *zap.Logger, conf *config.Config, currDir string) error {
@@ -71,7 +72,7 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 		return nil
 	}
 	// pass the all the commands and args to the docker version of Keploy
-	err := RunInDocker(ctx, logger, os.Args[1:]...)
+	err := RunInDocker(ctx, logger)
 	if err != nil {
 		LogError(logger, err, "failed to run the command in docker")
 		return err
