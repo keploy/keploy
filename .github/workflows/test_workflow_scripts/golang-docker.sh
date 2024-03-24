@@ -64,6 +64,8 @@ done
 
 # Start the keploy in test mode.
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --containerName "ginApp" --apiTimeout 60 --delay 10
+docker rm -f ginApp
+docker rm -f keploy-v2
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
