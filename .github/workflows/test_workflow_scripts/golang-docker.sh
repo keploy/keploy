@@ -8,7 +8,7 @@ docker network create keploy-network
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
-sudo -E env PATH=$PATH ./../../../keployv2 config --generate
+sudo -E env PATH=$PATH ./../../keployv2 config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -21,7 +21,7 @@ docker logs mongoDb &
 # Start keploy in record mode.
 docker build -t gin-mongo .
 for i in {1..2}; do
-sudo -E env PATH=$PATH ./../../../keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' &
+sudo -E env PATH=$PATH ./../../keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' &
 
 # Wait for the application to start.
 app_started=false
@@ -58,7 +58,7 @@ docker stop ginApp
 done
 
 # Start the keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --apiTimeout 60 --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --apiTimeout 60 --delay 10
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
