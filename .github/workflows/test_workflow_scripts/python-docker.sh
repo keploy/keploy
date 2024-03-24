@@ -9,7 +9,7 @@ docker network create backend
 rm -rf keploy/
 
 # Generate the keploy-config file.
-sudo -E env PATH=$PATH ./../../../keployv2 config --generate
+sudo -E env PATH=$PATH ./../../keployv2 config --generate
 
 # Update the global noise to ignore the Allow header.
 config_file="./keploy.yml"
@@ -22,7 +22,7 @@ sleep 5
 docker build -t flask-app:1.0 .
 
 for i in {1..2}; do
-sudo -E env PATH=$PATH ./../../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s  &
+sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s  &
 
 # Wait for the application to start.
 app_started=false
@@ -50,7 +50,7 @@ docker rm -f flask-app
 done
 
 # Start the app in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40s --apiTimeout 60 --delay 20
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40s --apiTimeout 60 --delay 20
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
