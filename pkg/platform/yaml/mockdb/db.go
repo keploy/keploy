@@ -254,9 +254,9 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
 	})
 
-	if len(unfilteredMocks) > 10 {
-		unfilteredMocks = unfilteredMocks[:10]
-	}
+	// if len(unfilteredMocks) > 10 {
+	// 	unfilteredMocks = unfilteredMocks[:10]
+	// }
 
 	mocks := append(filteredMocks, unfilteredMocks...)
 
