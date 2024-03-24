@@ -15,50 +15,55 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
-rm -rf keploy/
+sudo rm -rf keploy/
 docker logs mongoDb &
 
 # Start keploy in record mode.
 docker build -t gin-mongo .
+docker rm -f ginApp 2>/dev/null || true
+
 for i in {1..2}; do
-sudo -E env PATH=$PATH ./../../keployv2 record -c 'docker run -p8080:8080 --net keploy-network --rm --name ginApp gin-mongo' &
+    container_name="ginApp_${i}"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" &
 
-# Wait for the application to start.
-app_started=false
-while [ "$app_started" = false ]; do
-    if curl -X GET http://localhost:8080/CJBKJd92; then
-        app_started=true
-    fi
-    sleep 3 # wait for 3 seconds before checking again.
-done
+    sleep 5
 
-# Start making curl calls to record the testcases and mocks.
-curl --request POST \
-  --url http://localhost:8080/url \
-  --header 'content-type: application/json' \
-  --data '{
-  "url": "https://google.com"
-}'
+    # Wait for the application to start.
+    app_started=false
+    while [ "$app_started" = false ]; do
+        if curl -X GET http://localhost:8080/CJBKJd92; then
+            app_started=true
+        fi
+        sleep 3 # wait for 3 seconds before checking again.
+    done
 
-curl --request POST \
-  --url http://localhost:8080/url \
-  --header 'content-type: application/json' \
-  --data '{
-  "url": "https://facebook.com"
-}'
+    # Start making curl calls to record the testcases and mocks.
+    curl --request POST \
+      --url http://localhost:8080/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://google.com"
+    }'
 
-curl -X GET http://localhost:8080/CJBKJd92
+    curl --request POST \
+      --url http://localhost:8080/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://facebook.com"
+    }'
 
-# Wait for 5 seconds for keploy to record the tcs and mocks.
-sleep 5
+    curl -X GET http://localhost:8080/CJBKJd92
 
-# Stop keploy.
-docker stop keploy-v2
-docker stop ginApp
+    # Wait for 5 seconds for keploy to record the tcs and mocks.
+    sleep 5
+
+    # Stop keploy.
+    docker rm -f keploy-v2
+    docker rm -f "${container_name}"
 done
 
 # Start the keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --apiTimeout 60 --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp gin-mongo' --containerName "ginApp" --apiTimeout 60 --delay 10
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
