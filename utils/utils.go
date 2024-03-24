@@ -377,7 +377,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	var ttyFlag string
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		ttyFlag = "-it"
+		ttyFlag = " -it "
 	} else {
 		ttyFlag = ""
 	}
