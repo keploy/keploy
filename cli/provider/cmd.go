@@ -237,9 +237,6 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
-
-	viper.AutomaticEnv()
-	viper.SetEnvPrefix("KEPLOY")
 	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
