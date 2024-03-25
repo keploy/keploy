@@ -28,7 +28,8 @@ import (
 
 var WarningSign = "\U000026A0"
 
-func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) {
+func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
+	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		// Construct the Viper key and the env variable name
 		if viperKeyPrefix == "" {
@@ -43,14 +44,17 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 		err := viper.BindPFlag(viperKey, flag)
 		if err != nil {
 			LogError(logger, err, "failed to bind flag to config")
+			bindErr = err
 		}
 
 		// Tell Viper to also read this flag's value from the corresponding env variable
 		err = viper.BindEnv(viperKey, envVarName)
 		if err != nil {
 			LogError(logger, err, "failed to bind environment variables to config")
+			bindErr = err
 		}
 	})
+	return bindErr
 }
 
 //func ModifyToSentryLogger(ctx context.Context, logger *zap.Logger, client *sentry.Client, configDb *configdb.ConfigDb) *zap.Logger {
@@ -297,47 +301,38 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	return release, nil
 }
 
-// SetUmask sets the umask to the given mask and returns an error if it fails
-func SetUmask(mask int) error {
-	prevUmask := syscall.Umask(mask)
-	// Check if there was an error in setting the umask
-	if prevUmask == mask {
-		return fmt.Errorf("failed to set umask to %o", mask)
-	}
-	return nil
-}
+// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
+func FindDockerCmd(cmd string) CmdType {
+	// Convert command to lowercase for case-insensitive comparison
+	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
-// It checks if the cmd is related to docker or not, it also returns if its a docker compose file
-func IsDockerRelatedCmd(cmd string) (bool, string) {
+	// Define patterns for Docker and Docker Compose
+	dockerPatterns := []string{"docker", "sudo docker"}
+	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
+
+	// Check for Docker Compose command patterns and file extensions
+	for _, pattern := range dockerComposePatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerCompose
+		}
+	}
 	// Check for Docker command patterns
-	dockerCommandPatterns := []string{
-		"docker-compose ",
-		"sudo docker-compose ",
-		"docker compose ",
-		"sudo docker compose ",
-		"docker ",
-		"sudo docker ",
-	}
-
-	for _, pattern := range dockerCommandPatterns {
-		if strings.HasPrefix(strings.ToLower(cmd), pattern) {
-			if strings.Contains(pattern, "compose") {
-				return true, "docker-compose"
-			}
-			return true, "docker"
+	for _, pattern := range dockerPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return Docker
 		}
 	}
-
-	// Check for Docker Compose file extension
-	dockerComposeFileExtensions := []string{".yaml", ".yml"}
-	for _, extension := range dockerComposeFileExtensions {
-		if strings.HasSuffix(strings.ToLower(cmd), extension) {
-			return true, "docker-compose"
-		}
-	}
-
-	return false, ""
+	return Native
 }
+
+type CmdType string
+
+// CmdType constants
+const (
+	Docker        CmdType = "docker"
+	DockerCompose CmdType = "docker-compose"
+	Native        CmdType = "native"
+)
 
 type RecordFlags struct {
 	Path             string
@@ -494,7 +489,14 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	}
 	return nil
 }
-
+func SetUmask(mask int) error {
+	prevUmask := syscall.Umask(mask)
+	// Check if there was an error in setting the umask
+	if prevUmask == mask {
+		return fmt.Errorf("failed to set umask to %o", mask)
+	}
+	return nil
+}
 // findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
 func findChildPIDs(parentPID int) ([]int, error) {
 	var childPIDs []int
