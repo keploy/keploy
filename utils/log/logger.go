@@ -19,6 +19,10 @@ func New() (*zap.Logger, error) {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewColor(config , true ), nil
 	})
+	_ = zap.RegisterEncoder("nonColorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
+		return NewColor(config , false ), nil
+	})
+	
 
 	logCfg = zap.NewDevelopmentConfig()
 
@@ -82,27 +86,13 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	return logger, nil
 }
 
-func ChangeColorEncoding() {
-	// Update the encoding configuration to disable ANSI colors
-	_ = zap.RegisterEncoder("nonColorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
-		return NewColor(config , false ), nil
-	})
-
-	logCfg.Encoding = "nonColorConsole"
-
-	// Customize the encoder config to remove color encoding
-	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
-
-	// Rebuild the logger with updated configuration
-	logger, err := logCfg.Build()
-	if err != nil {
-		// Handle error
-		log.Printf("%s failed to build logger with updated configuration: %v", Emoji, err)
-		return
-	}
-
-	// Replace the global logger with the new one
-	zap.ReplaceGlobals(logger)
+func ChangeColorEncoding( )(*zap.Logger, error)  {
+		logCfg.Encoding = "nonColorConsole"
+		logger, err := logCfg.Build()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build config for logger: %v", err)
+		}
+	return logger , nil
 }
 
 
