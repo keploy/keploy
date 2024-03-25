@@ -193,8 +193,10 @@ func (p *Proxy) start(ctx context.Context) error {
 		p.logger.Info("proxy stopped...")
 	}(listener)
 
-	clientConnErrGrp, clientConnCtx := errgroup.WithContext(ctx)
+	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
+	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
+		clientConnCancel()
 		err := clientConnErrGrp.Wait()
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
@@ -231,9 +233,9 @@ func (p *Proxy) start(ctx context.Context) error {
 		// handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
-				utils.Recover(p.logger)
+				defer utils.Recover(p.logger)
 				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
 				}
 				return nil
@@ -254,7 +256,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
-	p.logger.Debug("New client connection", zap.Any("connectionID", clientConnID))
+	p.logger.Info("New client connection", zap.Any("connectionID", clientConnID))
+
+	// dstConn stores conn with actual destination for the outgoing network call
+	var dstConn net.Conn
+
+	//Dialing for tls conn
+	destConnID := util.GetNextID()
 
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
@@ -294,11 +302,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
+	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
+	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 	defer func() {
+		parserCtxCancel()
+
 		err := srcConn.Close()
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to close the source connection")
 			return
+		}
+
+		if dstConn != nil {
+			err = dstConn.Close()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to close the destination connection")
+				return
+			}
 		}
 
 		err = parserErrGrp.Wait()
@@ -383,12 +404,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger: p.logger,
 	}
 
-	// dstConn stores conn with actual destination for the outgoing network call
-	var dstConn net.Conn
-
-	//Dialing for tls conn
-	destConnID := util.GetNextID()
-
 	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
 
 	dstCfg := &integrations.ConditionalDstCfg{
@@ -437,6 +452,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	generic := true
+
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {
@@ -448,7 +464,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				}
 			} else {
 				err := parser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					utils.LogError(logger, err, "failed to mock the outgoing message")
 					return err
 				}
