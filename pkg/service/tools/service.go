@@ -10,7 +10,7 @@ import (
 type Service interface {
 	Update(ctx context.Context) error
 	CreateConfig(ctx context.Context, filePath string, config string) error
-	Normalise(ctx context.Context, path string, testSet string, testCases string) error
+	Normalise(ctx context.Context) error
 }
 
 type teleDB interface {

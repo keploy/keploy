@@ -159,7 +159,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		return nil
 	case "normalise":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
-		cmd.Flags().String("test-set", "", "Test Set to be normalised")
+		cmd.Flags().String("test-report-name", "", "Test Report to be normalised")
 		cmd.Flags().String("test-cases", "", "Test Cases to be normalised")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
@@ -363,6 +363,35 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 				}
 			}
 		}
+	case "Normalise":
+		path :=  viper.GetString("path")
+			//if user provides relative path
+			if len(path) > 0 && path[0] != '/' {
+				absPath, err := filepath.Abs(path)
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
+				}
+				path = absPath
+			} else if len(path) == 0 { // if user doesn't provide any path
+				cdirPath, err := os.Getwd()
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get the path of current directory")
+				}
+				path = cdirPath
+			}
+			path += "/keploy"
+			viper.Set("path", path)
+			testSet := viper.GetString("test-set")
+			if (testSet == "") {
+				utils.LogError(c.logger, nil, "test-set is required")
+				return errors.New("test-set is required")
+			}
+			testCases := viper.GetString("test-cases")
+			if (testCases == "") {
+				utils.LogError(c.logger, nil, "test-cases is required")
+				return errors.New("test-cases is required")
+			}
 	}
+	
 	return nil
 }

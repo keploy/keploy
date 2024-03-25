@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
@@ -34,37 +32,11 @@ func Normalise(ctx context.Context, logger *zap.Logger, conf *config.Config, ser
 		Use:     "normalise",
 		Short:   "Normalise Keploy",
 		Example: "keploy normalise --path /path/to/localdir --test-set testset --test-cases testcases",
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			return cmdConfigurator.ValidateFlags(ctx, cmd)
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path, err := cmd.Flags().GetString("path")
-			if err != nil {
-				utils.LogError(logger, err, "Error in getting path")
-				return err
-			}
-			//if user provides relative path
-			if len(path) > 0 && path[0] != '/' {
-				absPath, err := filepath.Abs(path)
-				if err != nil {
-					utils.LogError(logger, err, "failed to get the absolute path from relative path")
-				}
-				path = absPath
-			} else if len(path) == 0 { // if user doesn't provide any path
-				cdirPath, err := os.Getwd()
-				if err != nil {
-					utils.LogError(logger, err, "failed to get the path of current directory")
-				}
-				path = cdirPath
-			}
-			path += "/keploy"
-			testSet, err := cmd.Flags().GetString("test-set")
-			if err != nil || len(testSet) == 0 {
-				utils.LogError(logger, nil, "Please enter the testset to be normalised")
-				return err
-			}
-			testCases, err := cmd.Flags().GetString("test-cases")
-			if err != nil || len(testCases) == 0 {
-				utils.LogError(logger, nil, "Please enter the testcases to be normalised")
-				return err
-			}
+			
 			svc, err := serviceFactory.GetService(ctx, "normalise")
 			if err != nil {
 				return err
@@ -75,7 +47,7 @@ func Normalise(ctx context.Context, logger *zap.Logger, conf *config.Config, ser
 				utils.LogError(logger, nil, "service doesn't satisfy normalise service interface")
 				return nil
 			}
-			if err := tools.Normalise(ctx, path, testSet, testCases); err != nil {
+			if err := tools.Normalise(ctx); err != nil {
 				utils.LogError(logger, err, "failed to normalise test cases")
 				return err
 			}

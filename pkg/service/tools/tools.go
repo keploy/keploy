@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -288,7 +289,10 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 }
 
 // Normalise initiates the normalise process for normalising the test cases.
-func (t *Tools) Normalise(_ context.Context, path string, testSet string, testCases string) error {
+func (t *Tools) Normalise(_ context.Context,) error {
+	path:= viper.GetString("path")
+	testSet:= viper.GetString("test-set")
+	testCases:= viper.GetString("test-cases")
 	t.logger.Info("Test cases and Mock Path", zap.String("path", path))
 	testReportPath := filepath.Join(path, "testReports")
 
