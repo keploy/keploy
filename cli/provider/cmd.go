@@ -205,12 +205,36 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
+		cmd.PersistentFlags().Bool("enableANSIColor", c.cfg.EnableANSIColor, "Enable ANSI color in logs")
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
+		if err != nil {
+			errMsg := "failed to bind flag to config"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		err = viper.BindPFlag("enableANSIColor", cmd.PersistentFlags().Lookup("enableANSIColor"))
+		if err != nil {
+			errMsg := "failed to bind flag to config"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		// enableANSIColor := cmd.PersistentFlags().Lookup("enableANSIColor").Value
+		// fmt.Println("Value of enableANSIColor hehe:", enableANSIColor)
+		// err = viper.BindPFlag("enableANSIColor", cmd.PersistentFlags().Lookup("enableANSIColor"))
+		// if err != nil {
+		// 	errMsg := "failed to bind flag to config"
+		// 	utils.LogError(c.logger, err, errMsg)
+		// 	return errors.New(errMsg)
+		// }
+
 	default:
 		return errors.New("unknown command name")
 	}
@@ -268,6 +292,9 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 	}
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
+	// fmt.Println("Value of enableANSIColor:", c.cfg.EnableANSIColor)
+	// *EnableANSIColor = c.cfg.EnableANSIColor
+	c.logger.Debug("hi")
 	switch cmd.Name() {
 	case "record", "test":
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")

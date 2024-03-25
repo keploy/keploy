@@ -15,6 +15,7 @@ port: 0
 proxyPort: 16789
 dnsPort: 26789
 debug: false
+enableANSIColor: true
 disableTele: false
 inDocker: false
 containerName: ""

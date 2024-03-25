@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -14,7 +15,13 @@ var Emoji = "\U0001F430" + " Keploy:"
 // TODO find better way than global variable
 var logCfg zap.Config
 
+
 func New() (*zap.Logger, error) {
+	enableANSIColor:= viper.GetBool("enableANSIColor")
+	fmt.Println("enableANSIColor in logger.go", enableANSIColor)
+	debug := viper.GetBool("debug")
+	fmt.Println("debug in logger.go", debug)
+
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewColor(config), nil
 	})
@@ -79,4 +86,8 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
 	}
 	return logger, nil
+}
+
+func ChangeColorEncoding() {
+	logCfg.Encoding = "console"
 }

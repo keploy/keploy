@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
@@ -53,6 +54,11 @@ func printLogo() {
 
 func start(ctx context.Context) {
 	logger, err := log.New()
+	//how to get value of enableANSIColor from registered rootCmd
+	enableANSIColor:= viper.GetBool("enableANSIColor")
+	fmt.Println("enableANSIColor in main.go", enableANSIColor)
+	debug := viper.GetBool("debug")
+	fmt.Println("debug in main.go", debug)
 	if err != nil {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
