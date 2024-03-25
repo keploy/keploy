@@ -7,7 +7,7 @@ import (
 )
 
 func (c *Core) GetIncoming(ctx context.Context, id uint64, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
-	return c.hook.Record(ctx, id)
+	return c.Hooks.Record(ctx, id)
 }
 
 func (c *Core) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -15,13 +15,13 @@ func (c *Core) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingO
 
 	ports := GetPortToSendToKernel(ctx, opts.Rules)
 	if len(ports) > 0 {
-		err := c.hook.PassThroughPortsInKernel(ctx, id, ports)
+		err := c.Hooks.PassThroughPortsInKernel(ctx, id, ports)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	err := c.proxy.Record(ctx, id, m, opts)
+	err := c.Proxy.Record(ctx, id, m, opts)
 	if err != nil {
 		return nil, err
 	}

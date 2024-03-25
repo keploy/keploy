@@ -44,7 +44,7 @@ func NewConfigDb(logger *zap.Logger) *ConfigDb {
 func (cdb *ConfigDb) GetInstallationID(ctx context.Context) (string, error) {
 	var id string
 	id = getInstallationFromFile(cdb.logger)
-	if id != "" {
+	if id == "" {
 		id = primitive.NewObjectID().String()
 		err := cdb.setInstallationID(ctx, id)
 		if err != nil {
@@ -82,11 +82,6 @@ func getInstallationFromFile(logger *zap.Logger) string {
 
 func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 	path := UserHomeDir()
-	_, err := yaml.CreateYamlFile(ctx, cdb.logger, path, "installation-id")
-	if err != nil {
-		return fmt.Errorf("failed to create yaml file. error: %s", err.Error())
-	}
-
 	data := []byte{}
 
 	d, err := yamlLib.Marshal(&id)
