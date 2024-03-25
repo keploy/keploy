@@ -482,7 +482,7 @@ func SentryInit(logger *zap.Logger, dsn string) {
 //}
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
-func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal) error {
+func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal, dockerCmd string) error {
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
@@ -490,7 +490,6 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	if err != nil {
 		return err
 	}
-	fmt.Println(children, "children")
 
 	children = append(children, ppid)
 	uniqueProcess, err := uniqueProcessGroups(children)
@@ -498,7 +497,25 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
 	}
-	fmt.Println(uniqueProcess, "uniqueProcess")
+
+	cmdType := FindDockerCmd(dockerCmd)
+	if cmdType == Docker {
+		containerName := extractContainerNameFromDockerCmd(dockerCmd)
+		dockerCmd := exec.Command("docker", "inspect", "--format", "{{.State.Pid}}", containerName)
+		output, err := dockerCmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to get main PID of container %s: %w", containerName, err)
+		}
+		mainPID, err := strconv.Atoi(strings.TrimSpace(string(output)))
+		if err != nil {
+			return fmt.Errorf("failed to convert main PID to int: %w", err)
+		}
+		ppid, err := findParentPID(mainPID)
+		if err != nil {
+			return fmt.Errorf("failed to find parent PID: %w", err)
+		}
+		uniqueProcess = append(uniqueProcess, ppid)
+	}
 
 	for _, pid := range uniqueProcess {
 
@@ -611,4 +628,47 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	findDescendants(parentPID)
 
 	return childPIDs, nil
+}
+
+func extractContainerNameFromDockerCmd(dockerCmd string) string {
+	parts := strings.Fields(dockerCmd)
+	for i, part := range parts {
+		if part == "--name" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+func EnsureRmBeforeName(cmd string) string {
+	parts := strings.Split(cmd, " ")
+	rmIndex := -1
+	nameIndex := -1
+
+	for i, part := range parts {
+		if part == "--rm" {
+			rmIndex = i
+		} else if part == "--name" {
+			nameIndex = i
+			break // Assuming --name will always have an argument, we can break here
+		}
+	}
+	if rmIndex == -1 && nameIndex != -1 {
+		parts = append(parts[:nameIndex], append([]string{"--rm"}, parts[nameIndex:]...)...)
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func findParentPID(pid int) (int, error) {
+	cmd := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid))
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+	ppid, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return 0, err
+	}
+	return ppid, nil
 }

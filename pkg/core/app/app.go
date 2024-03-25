@@ -422,19 +422,24 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 
 func (a *App) run(ctx context.Context) models.AppError {
 	// Run the app as the user who invoked sudo
+	userCmd := a.cmd
 	username := os.Getenv("SUDO_USER")
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.cmd)
+
+	if utils.FindDockerCmd(a.cmd) == utils.Docker {
+		userCmd = utils.EnsureRmBeforeName(userCmd)
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
 		// print all environment variables
 		a.logger.Debug("env inherited from the cmd", zap.Any("env", os.Environ()))
 		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
-		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", a.cmd)
+		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", userCmd)
 	}
 
 	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 
-		return utils.InterruptProcessTree(cmd, a.logger, cmd.Process.Pid, syscall.SIGINT)
+		return utils.InterruptProcessTree(cmd, a.logger, cmd.Process.Pid, syscall.SIGINT, userCmd)
 	}
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = 10 * time.Second
