@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -17,13 +16,8 @@ var logCfg zap.Config
 
 
 func New() (*zap.Logger, error) {
-	enableANSIColor:= viper.GetBool("enableANSIColor")
-	fmt.Println("enableANSIColor in logger.go", enableANSIColor)
-	debug := viper.GetBool("debug")
-	fmt.Println("debug in logger.go", debug)
-
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
-		return NewColor(config), nil
+		return NewColor(config , true ), nil
 	})
 
 	logCfg = zap.NewDevelopmentConfig()
@@ -89,5 +83,29 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 }
 
 func ChangeColorEncoding() {
-	logCfg.Encoding = "console"
+	// Update the encoding configuration to disable ANSI colors
+	_ = zap.RegisterEncoder("nonColorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
+		return NewColor(config , false ), nil
+	})
+
+	logCfg.Encoding = "nonColorConsole"
+
+	// Customize the encoder config to remove color encoding
+	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+
+	// Rebuild the logger with updated configuration
+	logger, err := logCfg.Build()
+	if err != nil {
+		// Handle error
+		log.Printf("%s failed to build logger with updated configuration: %v", Emoji, err)
+		return
+	}
+
+	// Replace the global logger with the new one
+	zap.ReplaceGlobals(logger)
 }
+
+
+
+
+

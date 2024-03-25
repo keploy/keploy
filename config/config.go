@@ -11,6 +11,7 @@ type Config struct {
 	ProxyPort       uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug           bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele     bool          `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	EnableANSIColor bool          `json:"enableANSIColor" yaml:"enableANSIColor" mapstructure:"enableANSIColor"`
 	InDocker        bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
 	ContainerName   string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName     string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
@@ -21,7 +22,7 @@ type Config struct {
 	BypassRules     []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	KeployContainer string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork   string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	EnableANSIColor bool          `json:"enableANSIColor" yaml:"enableANSIColor" mapstructure:"enableANSIColor"`
+	
 }
 
 type Record struct {

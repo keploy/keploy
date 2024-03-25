@@ -363,7 +363,6 @@ type TestFlags struct {
 	CoverageReportPath string
 	EnableTele         bool
 	WithCoverage       bool
-	EnableANSIColor    *bool
 }
 
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
