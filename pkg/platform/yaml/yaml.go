@@ -16,11 +16,12 @@ import (
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
 type NetworkTrafficDoc struct {
-	Version models.Version `json:"version" yaml:"version"`
-	Kind    models.Kind    `json:"kind" yaml:"kind"`
-	Name    string         `json:"name" yaml:"name"`
-	Spec    yamlLib.Node   `json:"spec" yaml:"spec"`
-	Curl    string         `json:"curl" yaml:"curl,omitempty"`
+	Version      models.Version `json:"version" yaml:"version"`
+	Kind         models.Kind    `json:"kind" yaml:"kind"`
+	Name         string         `json:"name" yaml:"name"`
+	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
+	Curl         string         `json:"curl" yaml:"curl,omitempty"`
+	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
@@ -46,18 +47,13 @@ type ctxWriter struct {
 
 func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 	for len(p) > 0 {
-		select {
-		case <-cw.ctx.Done():
-			return n, cw.ctx.Err()
-		default:
-			var written int
-			written, err = cw.writer.Write(p)
-			n += written
-			if err != nil {
-				return n, err
-			}
-			p = p[written:]
+		var written int
+		written, err = cw.writer.Write(p)
+		n += written
+		if err != nil {
+			return n, err
 		}
+		p = p[written:]
 	}
 	return n, nil
 }
@@ -163,7 +159,7 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 }
 
 func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]string, error) {
-	indices := []string{}
+	var indices []string
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
@@ -176,7 +172,7 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	}
 
 	for _, v := range files {
-		if v.Name() != "reports" || v.Name() != "testReports" {
+		if v.Name() != "reports" && v.Name() != "testReports" {
 			indices = append(indices, v.Name())
 		}
 	}
