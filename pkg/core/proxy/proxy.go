@@ -571,20 +571,11 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 	return nil
 }
 
-// GetConsumedFilteredMocks returns the consumed filtered mocks for a given app id
-func (p *Proxy) GetConsumedFilteredMocks(_ context.Context, id uint64) ([]string, error) {
+// GetConsumedMocks returns the consumed filtered mocks for a given app id
+func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]string, error) {
 	m, ok := p.MockManagers.Load(id)
 	if !ok {
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
-	return m.(*MockManager).GetConsumedFilteredMocks(), nil
-}
-
-// GetConsumedUnFilteredMocks returns the consumed unfiltered mocks for a given app id
-func (p *Proxy) GetConsumedUnFilteredMocks(_ context.Context, id uint64) ([]string, error) {
-	m, ok := p.MockManagers.Load(id)
-	if !ok {
-		return nil, fmt.Errorf("mock manager not found to get consumed unfiltered mocks")
-	}
-	return m.(*MockManager).GetConsumedUnFilteredMocks(), nil
+	return m.(*MockManager).GetConsumedMocks(), nil
 }

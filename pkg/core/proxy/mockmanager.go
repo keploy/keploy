@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -9,26 +12,23 @@ import (
 )
 
 type MockManager struct {
-	filtered                *TreeDb
-	unfiltered              *TreeDb
-	logger                  *zap.Logger
-	utilizedFilteredMocks   sync.Map
-	utilizedUnFilteredMocks sync.Map
+	filtered      *TreeDb
+	unfiltered    *TreeDb
+	logger        *zap.Logger
+	consumedMocks sync.Map
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
 	return &MockManager{
-		filtered:                filtered,
-		unfiltered:              unfiltered,
-		logger:                  logger,
-		utilizedFilteredMocks:   sync.Map{},
-		utilizedUnFilteredMocks: sync.Map{},
+		filtered:      filtered,
+		unfiltered:    unfiltered,
+		logger:        logger,
+		consumedMocks: sync.Map{},
 	}
 }
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
-	m.utilizedFilteredMocks = sync.Map{}
 	for index, mock := range mocks {
 		mock.TestModeInfo.SortOrder = index
 		mock.TestModeInfo.ID = index
@@ -88,12 +88,7 @@ func (m *MockManager) FlagMockAsUsed(mock *models.Mock) error {
 	if mock == nil {
 		return fmt.Errorf("mock is empty")
 	}
-	if mockType, ok := mock.Spec.Metadata["type"]; ok && mockType == "config" {
-		// mark the unfiltered mock as used for the current simulated test-case
-		m.utilizedUnFilteredMocks.Store(mock.Name, true)
-	} else {
-		m.utilizedFilteredMocks.Store(mock.Name, true)
-	}
+	m.consumedMocks.Store(mock.Name, true)
 	return nil
 }
 
@@ -121,24 +116,19 @@ func (m *MockManager) DeleteUnFilteredMock(mock *models.Mock) bool {
 	return isDeleted
 }
 
-func (m *MockManager) GetConsumedFilteredMocks() []string {
+func (m *MockManager) GetConsumedMocks() []string {
 	var keys []string
-	m.utilizedFilteredMocks.Range(func(key, _ interface{}) bool {
+	m.consumedMocks.Range(func(key, _ interface{}) bool {
 		if _, ok := key.(string); ok {
 			keys = append(keys, key.(string))
 		}
 		return true
 	})
-	return keys
-}
-
-func (m *MockManager) GetConsumedUnFilteredMocks() []string {
-	var keys []string
-	m.utilizedUnFilteredMocks.Range(func(key, _ interface{}) bool {
-		if _, ok := key.(string); ok {
-			keys = append(keys, key.(string))
-		}
-		return true
+	sort.Slice(keys, func(i, j int) bool {
+		numI, _ := strconv.Atoi(strings.Split(keys[i], "-")[1])
+		numJ, _ := strconv.Atoi(strings.Split(keys[j], "-")[1])
+		return numI < numJ
 	})
+	m.consumedMocks = sync.Map{}
 	return keys
 }
