@@ -3,7 +3,6 @@ package v1
 import (
 	"context"
 	"encoding/binary"
-	"io"
 	"net"
 	"strconv"
 	"time"
@@ -388,9 +387,6 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			logger.Debug("the iteration for the postgres response ends with no of postgresReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			prevChunkWasReq = false
 		case err := <-errChan:
-			if err == io.EOF {
-				return nil
-			}
 			return err
 		}
 	}

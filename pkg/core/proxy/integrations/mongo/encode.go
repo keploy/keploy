@@ -272,9 +272,6 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
 		return err
 	}
 }

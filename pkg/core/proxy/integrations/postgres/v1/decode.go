@@ -95,9 +95,6 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
 		return err
 	}
 }
