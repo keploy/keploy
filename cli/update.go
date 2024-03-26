@@ -15,7 +15,7 @@ func init() {
 }
 
 // Update retrieves the command to tools Keploy
-func Update(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Update(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var updateCmd = &cobra.Command{
 		Use:     "update",
 		Short:   "Update Keploy ",
