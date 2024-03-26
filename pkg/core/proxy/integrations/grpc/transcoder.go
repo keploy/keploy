@@ -126,11 +126,15 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		utils.LogError(srv.logger, err, "could not write the first set of headers onto client")
 		return err
 	}
+	var payload []byte
+	for _, mockBody := range grpcMockResp.Body {
 
-	payload, err := createPayloadFromLengthPrefixedMessage(grpcMockResp.Body)
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not create grpc payload from mocks")
-		return err
+		tempPayload, err := createPayloadFromLengthPrefixedMessage(mockBody)
+		if err != nil {
+			srv.logger.Error("could not create grpc payload from mocks", zap.Error(err))
+			return err
+		}
+		payload = append(payload, tempPayload...)
 	}
 
 	// Write the DATA frame with the payload.

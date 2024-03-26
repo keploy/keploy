@@ -31,8 +31,8 @@ type MockSpec struct {
 	MongoResponses    []MongoResponse   `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
 	PostgresRequests  []Backend         `json:"postgresRequests,omitempty" bson:"postgres_requests,omitempty"`
 	PostgresResponses []Frontend        `json:"postgresResponses,omitempty" bson:"postgres_responses,omitempty"`
-	GRPCReq           *GrpcReq          `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
-	GRPCResp          *GrpcResp         `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
+	GRPCReq           *GrpcFinalReq     `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
+	GRPCResp          *GrpcFinalResp    `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
 	MySQLRequests     []MySQLRequest    `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
 	MySQLResponses    []MySQLResponse   `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
 	ReqTimestampMock  time.Time         `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`

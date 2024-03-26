@@ -43,8 +43,8 @@ type TestCase struct {
 	HTTPReq  HTTPReq             `json:"http_req" bson:"http_req"`
 	HTTPResp HTTPResp            `json:"http_resp" bson:"http_resp"`
 	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys"`
-	GrpcResp GrpcResp            `json:"grpcResp" bson:"grpcResp"`
-	GrpcReq  GrpcReq             `json:"grpcReq" bson:"grpcReq"`
+	GrpcResp GrpcFinalResp            `json:"grpcResp" bson:"grpcResp"`
+	GrpcReq  GrpcFinalReq             `json:"grpcReq" bson:"grpcReq"`
 	Anchors  map[string][]string `json:"anchors" bson:"anchors"`
 	Noise    map[string][]string `json:"noise" bson:"noise"`
 	Mocks    []*Mock             `json:"mocks" bson:"mocks"`

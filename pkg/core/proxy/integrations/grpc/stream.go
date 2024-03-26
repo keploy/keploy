@@ -83,9 +83,13 @@ func (sic *StreamInfoCollection) AddPayloadForRequest(streamID uint32, payload [
 	defer sic.mutex.Unlock()
 
 	// We cannot modify non pointer values in nested entries in map.
-	// Create a copy and overwrite it.
+	// Use a left pointing linked list
 	info := sic.StreamInfo[streamID]
-	info.GrpcReq.Body = createLengthPrefixedMessageFromPayload(payload)
+	prefMessage := models.PrefMessagePointer{
+		Body: createLengthPrefixedMessageFromPayload(payload),
+		Left: info.GrpcReq.BodyPref.Left,
+	}
+	info.GrpcReq.BodyPref = &prefMessage
 	sic.StreamInfo[streamID] = info
 }
 
@@ -97,17 +101,28 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	defer sic.mutex.Unlock()
 
 	// We cannot modify non pointer values in nested entries in map.
-	// Create a copy and overwrite it.
+	// use a left pointing linked list
 	info := sic.StreamInfo[streamID]
-	info.GrpcResp.Body = createLengthPrefixedMessageFromPayload(payload)
+	prefMessage := models.PrefMessagePointer{
+		Body: createLengthPrefixedMessageFromPayload(payload),
+		Left: info.GrpcResp.BodyPref.Left,
+	}
+	info.GrpcResp.BodyPref = &prefMessage
 	sic.StreamInfo[streamID] = info
 }
 
 func (sic *StreamInfoCollection) PersistMockForStream(_ context.Context, streamID uint32, mocks chan<- *models.Mock) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
-	grpcReq := sic.StreamInfo[streamID].GrpcReq
-	grpcResp := sic.StreamInfo[streamID].GrpcResp
+	grpcReq := models.GrpcFinalReq{
+		Headers: sic.StreamInfo[streamID].GrpcReq.Headers,
+		Body:    createFinalMessageFromStream(sic.StreamInfo[streamID].GrpcReq.BodyPref),
+	}
+	grpcResp := models.GrpcFinalResp{
+		Headers:  sic.StreamInfo[streamID].GrpcResp.Headers,
+		Body:     createFinalMessageFromStream(sic.StreamInfo[streamID].GrpcResp.BodyPref),
+		Trailers: sic.StreamInfo[streamID].GrpcResp.Trailers,
+	}
 	// save the mock
 	mocks <- &models.Mock{
 		Version: models.GetVersion(),
@@ -122,7 +137,7 @@ func (sic *StreamInfoCollection) PersistMockForStream(_ context.Context, streamI
 	}
 }
 
-func (sic *StreamInfoCollection) FetchRequestForStream(streamID uint32) models.GrpcReq {
+func (sic *StreamInfoCollection) FetchRequestForStream(streamID uint32) models.GrpcReqStream {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 
@@ -176,4 +191,13 @@ func createPayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage
 	payload = append(payload, encodedData...)
 
 	return payload, nil
+}
+func createFinalMessageFromStream(streamMessage *models.PrefMessagePointer) []models.GrpcLengthPrefixedMessage {
+	var Body []models.GrpcLengthPrefixedMessage
+	curr := streamMessage.Left
+	for curr.Left != nil {
+		Body = append(Body, curr.Body)
+		curr = curr.Left
+	}
+	return Body
 }
