@@ -9,24 +9,26 @@ import (
 )
 
 type MockManager struct {
-	filtered      *TreeDb
-	unfiltered    *TreeDb
-	logger        *zap.Logger
-	utilizedMocks sync.Map
+	filtered                *TreeDb
+	unfiltered              *TreeDb
+	logger                  *zap.Logger
+	utilizedFilteredMocks   sync.Map
+	utilizedUnFilteredMocks sync.Map
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
 	return &MockManager{
-		filtered:      filtered,
-		unfiltered:    unfiltered,
-		logger:        logger,
-		utilizedMocks: sync.Map{},
+		filtered:                filtered,
+		unfiltered:              unfiltered,
+		logger:                  logger,
+		utilizedFilteredMocks:   sync.Map{},
+		utilizedUnFilteredMocks: sync.Map{},
 	}
 }
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
-	m.utilizedMocks = sync.Map{}
+	m.utilizedFilteredMocks = sync.Map{}
 	for index, mock := range mocks {
 		mock.TestModeInfo.SortOrder = index
 		mock.TestModeInfo.ID = index
@@ -86,7 +88,12 @@ func (m *MockManager) FlagMockAsUsed(mock *models.Mock) error {
 	if mock == nil {
 		return fmt.Errorf("mock is empty")
 	}
-	m.utilizedMocks.Load(mock.Name)
+	if mockType, ok := mock.Spec.Metadata["type"]; ok && mockType == "config" {
+		// mark the unfiltered mock as used for the current simulated test-case
+		m.utilizedUnFilteredMocks.Store(mock.Name, true)
+	} else {
+		m.utilizedFilteredMocks.Store(mock.Name, true)
+	}
 	return nil
 }
 
@@ -116,7 +123,18 @@ func (m *MockManager) DeleteUnFilteredMock(mock *models.Mock) bool {
 
 func (m *MockManager) GetConsumedFilteredMocks() []string {
 	var keys []string
-	m.utilizedMocks.Range(func(key, _ interface{}) bool {
+	m.utilizedFilteredMocks.Range(func(key, _ interface{}) bool {
+		if _, ok := key.(string); ok {
+			keys = append(keys, key.(string))
+		}
+		return true
+	})
+	return keys
+}
+
+func (m *MockManager) GetConsumedUnFilteredMocks() []string {
+	var keys []string
+	m.utilizedUnFilteredMocks.Range(func(key, _ interface{}) bool {
 		if _, ok := key.(string); ok {
 			keys = append(keys, key.(string))
 		}

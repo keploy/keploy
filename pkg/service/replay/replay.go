@@ -390,6 +390,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				consumedMocks[mockName] = true
 			}
 		}
+
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
@@ -491,10 +492,19 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
 	}
 
-	// remove the unused mocks by the test cases of a testset
+	consumedUnFilteredMocks, err := r.instrumentation.GetConsumedUnFilteredMocks(runTestSetCtx, appID)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+	}
 	if r.config.Test.RemoveUnusedMocks {
-		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", consumedMocks))
+		for _, mockName := range consumedUnFilteredMocks {
+			consumedMocks[mockName] = true
+		}
+	}
 
+	// remove the unused mocks by the test cases of a testset
+	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed {
+		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", consumedMocks))
 		// delete the unused mocks from the data store
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, consumedMocks)
 		if err != nil {

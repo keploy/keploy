@@ -256,8 +256,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
-	p.logger.Info("New client connection", zap.Any("connectionID", clientConnID))
-
 	// dstConn stores conn with actual destination for the outgoing network call
 	var dstConn net.Conn
 
@@ -580,4 +578,13 @@ func (p *Proxy) GetConsumedFilteredMocks(_ context.Context, id uint64) ([]string
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedFilteredMocks(), nil
+}
+
+// GetConsumedUnFilteredMocks returns the consumed unfiltered mocks for a given app id
+func (p *Proxy) GetConsumedUnFilteredMocks(_ context.Context, id uint64) ([]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get consumed unfiltered mocks")
+	}
+	return m.(*MockManager).GetConsumedUnFilteredMocks(), nil
 }
