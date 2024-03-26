@@ -17,14 +17,16 @@ type MockManager struct {
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
 	return &MockManager{
-		filtered:   filtered,
-		unfiltered: unfiltered,
-		logger:     logger,
+		filtered:      filtered,
+		unfiltered:    unfiltered,
+		logger:        logger,
+		utilizedMocks: sync.Map{},
 	}
 }
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
+	m.utilizedMocks = sync.Map{}
 	for index, mock := range mocks {
 		mock.TestModeInfo.SortOrder = index
 		mock.TestModeInfo.ID = index

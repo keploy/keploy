@@ -220,7 +220,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var appErr models.AppError
 	var success int
 	var failure int
-	var consumedMocks map[string]bool
+	var consumedMocks = map[string]bool{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -381,18 +381,18 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
 		}
+		consumedFilteredMocks, err := r.instrumentation.GetConsumedFilteredMocks(runTestSetCtx, appID)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+		}
+		if r.config.Test.RemoveUnusedMocks {
+			for _, mockName := range consumedFilteredMocks {
+				consumedMocks[mockName] = true
+			}
+		}
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
-			consumedFilteredMocks, err := r.instrumentation.GetConsumedFilteredMocks(runTestSetCtx, appID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
-			}
-			if r.config.Test.RemoveUnusedMocks {
-				for _, mock := range consumedFilteredMocks {
-					consumedMocks[mock] = true
-				}
-			}
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)), zap.Any("consumed mocks", consumedFilteredMocks))
 		} else {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
