@@ -531,7 +531,7 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 		OutgoingOptions: opts,
 	})
 
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
@@ -548,7 +548,7 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
@@ -580,12 +580,4 @@ func (p *Proxy) GetConsumedFilteredMocks(_ context.Context, id uint64) ([]string
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedFilteredMocks(), nil
-}
-
-func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) (map[string][]string, error) {
-	m, ok := p.MockManagers.Load(id)
-	if !ok {
-		return nil, fmt.Errorf("mock manager not found to get consumed mocks")
-	}
-	return m.(*MockManager).GetConsumedMocks(), nil
 }

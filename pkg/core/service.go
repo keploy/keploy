@@ -39,7 +39,6 @@ type Proxy interface {
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedFilteredMocks(ctx context.Context, id uint64) ([]string, error)
-	GetConsumedMocks(ctx context.Context, id uint64) (map[string][]string, error)
 }
 
 type ProxyOptions struct {

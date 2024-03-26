@@ -2,33 +2,24 @@ package proxy
 
 import (
 	"fmt"
-	"sort"
-	"strconv"
-	"strings"
+	"sync"
 
 	"go.keploy.io/server/v2/pkg/models"
-)
-
-const (
-	filteredMock   = "filtered"
-	unFilteredMock = "unfiltered"
-	totalMock      = "total"
+	"go.uber.org/zap"
 )
 
 type MockManager struct {
-	filtered   *TreeDb
-	unfiltered *TreeDb
-	// usedMocks contains the name of the mocks as key which were used by the parsers during the test execution.
-	//
-	// value is an array that will contain the type of mock
-	usedMocks map[string][]string
+	filtered      *TreeDb
+	unfiltered    *TreeDb
+	logger        *zap.Logger
+	utilizedMocks sync.Map
 }
 
-func NewMockManager(filtered, unfiltered *TreeDb) *MockManager {
+func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
 	return &MockManager{
 		filtered:   filtered,
 		unfiltered: unfiltered,
-		usedMocks:  make(map[string][]string),
+		logger:     logger,
 	}
 }
 
@@ -80,7 +71,11 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	updated := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
-		m.usedMocks[old.Name] = []string{unFilteredMock, totalMock}
+		go func() {
+			if err := m.FlagMockAsUsed(old); err != nil {
+				m.logger.Error("failed to flag mock as used", zap.Error(err))
+			}
+		}()
 	}
 	return updated
 }
@@ -89,64 +84,41 @@ func (m *MockManager) FlagMockAsUsed(mock *models.Mock) error {
 	if mock == nil {
 		return fmt.Errorf("mock is empty")
 	}
-
-	if mockType, ok := mock.Spec.Metadata["type"]; ok && mockType == "config" {
-		// mark the unfiltered mock as used for the current simulated test-case
-		m.usedMocks[mock.Name] = []string{unFilteredMock, totalMock}
-	} else {
-		// mark the filtered mock as used for the current simulated test-case
-		m.usedMocks[mock.Name] = []string{filteredMock, totalMock}
-	}
+	m.utilizedMocks.Load(mock.Name)
 	return nil
 }
 
 func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
-		// mark the unfiltered mock as used for the current simulated test-case
-		m.usedMocks[mock.Name] = []string{filteredMock, totalMock}
+		go func() {
+			if err := m.FlagMockAsUsed(mock); err != nil {
+				m.logger.Error("failed to flag mock as used", zap.Error(err))
+			}
+		}()
 	}
 	return isDeleted
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock *models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
+	if isDeleted {
+		go func() {
+			if err := m.FlagMockAsUsed(mock); err != nil {
+				m.logger.Error("failed to flag mock as used", zap.Error(err))
+			}
+		}()
+	}
 	return isDeleted
 }
 
 func (m *MockManager) GetConsumedFilteredMocks() []string {
-	var allNames []string
-	// Extract all names from the map
-	for mockName, typeList := range m.usedMocks {
-		for _, mockType := range typeList {
-			// add mock name which are consumed by the parsers during the test-case simulation.
-			// Since, test-case are simulated synchronously, so the order of the mock consumption is preserved.
-			if mockType == filteredMock || mockType == unFilteredMock {
-				allNames = append(allNames, mockName)
-			}
+	var keys []string
+	m.utilizedMocks.Range(func(key, _ interface{}) bool {
+		if _, ok := key.(string); ok {
+			keys = append(keys, key.(string))
 		}
-	}
-
-	// Custom sorting function to sort names by sequence number
-	sort.Slice(allNames, func(i, j int) bool {
-		seqNo1, _ := strconv.Atoi(strings.Split(allNames[i], "-")[1])
-		seqNo2, _ := strconv.Atoi(strings.Split(allNames[j], "-")[1])
-		return seqNo1 < seqNo2
+		return true
 	})
-
-	// add the consumed filtered mocks into the total consumed mocks
-	for mockName, typeList := range m.usedMocks {
-		for indx, mockType := range typeList {
-			// reset the consumed unfiltered slice for the test-case simulation.
-			if mockType == unFilteredMock || mockType == filteredMock {
-				m.usedMocks[mockName] = append(typeList[:indx], typeList[indx+1:]...)
-			}
-		}
-	}
-
-	return allNames
-}
-
-func (m *MockManager) GetConsumedMocks() map[string][]string {
-	return m.usedMocks
+	return keys
 }

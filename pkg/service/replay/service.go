@@ -17,8 +17,6 @@ type Instrumentation interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// GetConsumedFilteredMocks to log the names of the mocks that were consumed during the test run of failed test cases
 	GetConsumedFilteredMocks(ctx context.Context, id uint64) ([]string, error)
-	// GetConsumedMocks returns all the names of mock which are used in the test run of a test set
-	GetConsumedMocks(ctx context.Context, id uint64) (map[string][]string, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 
@@ -43,7 +41,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	DeleteMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error
 }
 
 type ReportDB interface {
