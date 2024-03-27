@@ -489,7 +489,14 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	}
 	return nil
 }
-
+func SetUmask(mask int) error {
+	prevUmask := syscall.Umask(mask)
+	// Check if there was an error in setting the umask
+	if prevUmask == mask {
+		return fmt.Errorf("failed to set umask to %o", mask)
+	}
+	return nil
+}
 // findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
 func findChildPIDs(parentPID int) ([]int, error) {
 	var childPIDs []int

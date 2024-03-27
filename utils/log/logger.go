@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -35,25 +36,21 @@ func New() (*zap.Logger, error) {
 	// Check if keploy-log.txt exists, if not create it.
 	_, err := os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
-		_, err := os.Create("keploy-logs.txt")
+		// Set the umask to 0 to ensure that the log file has the correct permissions.
+		err := utils.SetUmask(0)
+		if err != nil {
+			log.Println(Emoji, "failed to set umask", err)
+			return nil, fmt.Errorf("failed to set umask: %v", err)
+		}
+		_, err = os.Create("keploy-logs.txt")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create the log file: %v", err)
 		}
-	}
 
-	// Check if the permission of the log file is 777, if not set it to 777.
-	fileInfo, err := os.Stat("keploy-logs.txt")
-	if err != nil {
-		log.Println(Emoji, "failed to get the log file info", err)
-		return nil, fmt.Errorf("failed to get the log file info: %v", err)
-	}
-	if fileInfo.Mode().Perm() != 0777 {
-		// Set the permissions of the log file to 777.
-		err = os.Chmod("keploy-logs.txt", 0777)
-		if err != nil {
-			log.Println(Emoji, "failed to set the log file permission to 777", err)
-			return nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
+		if err := utils.SetUmask(0022); err != nil {
+			return nil, fmt.Errorf("failed to reset the permission: %v", err)
 		}
+
 	}
 
 	logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
