@@ -119,11 +119,11 @@ installKeploy (){
             network_alias="sudo"
         fi
         if ! $network_alias which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker and reinstall keploy if you have applications running on docker"
+            log_message "ERROR" "Docker not found on device, please install docker to use Keploy."
             return 0
         fi
         if ! $network_alias docker info &> /dev/null; then
-            echo "Please start Docker and reinstall keploy if you have applications running on docker"
+            log_message "ERROR" "Docker not running on device, please start docker to use Keploy."
             return 0
         fi
         return 1
@@ -138,12 +138,12 @@ installKeploy (){
             network_alias="sudo"
         fi
         if ! $network_alias which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker to use Keploy"
+            log_message "ERROR" "Docker not found on device, please install docker to use Keploy."
             return 0
         fi
         # Check if docker is running
         if ! $network_alias docker info &> /dev/null; then
-            echo "Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again."
+            log_message Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again.
             return 0
         fi
         return 1
@@ -189,15 +189,15 @@ installKeploy (){
             elif [ "$ARCH" = "aarch64" ]; then
                 install_keploy_arm
             else
-                echo "Unsupported architecture: $ARCH"
+                log_message "ERROR" "Unsupported architecture: $ARCH"
                 return
             fi
         elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
+            log_message "ERROR" "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
         elif [[ "$OS_NAME" == MINGW64_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
+            log_message "ERROR" "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
         else
-            echo "Unknown OS, install Linux to run Keploy"
+            log_message "ERROR" "Unknown OS, install Linux to run Keploy"
         fi
     else
         if [ "$ARCH" = "x86_64" ]; then
@@ -205,9 +205,31 @@ installKeploy (){
         elif [ "$ARCH" = "aarch64" ]; then
             install_keploy_arm
         else
-            echo "Unsupported architecture: $ARCH"
+            log_message "ERROR" "Unsupported architecture: $ARCH"
             return
         fi
+    fi
+}
+
+log_message() {
+    local level="$1"  # INFO, WARNING, ERROR
+    local message="$2"
+    local color="\033[0m"  # White
+    case "$level" in
+        INFO)
+            color="\033[1;34m"  # Blue
+            ;;
+        WARNING)
+            color="\033[1;33m"  # Yellow
+            ;;
+        ERROR)
+            color="\033[1;31m"  # Red
+            ;;
+    esac
+    echo -e "[${color}${level}\033[0m] ${message}"
+    if [ "$level" = "ERROR" ]; then
+        echo -e "${color}An error has occurred.Press Enter to continue.\033[0m"
+        read -r
     fi
 }
 
