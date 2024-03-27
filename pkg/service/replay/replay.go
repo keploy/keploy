@@ -166,7 +166,7 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 
 	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
 
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return "", 0, nil, err
