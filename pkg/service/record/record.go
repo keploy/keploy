@@ -374,6 +374,11 @@ func (r *recorder) ReRecord(ctx context.Context) error {
         }
         fmt.Println(out)
 	}
+	time.Sleep(10 * time.Second) // Example sleep, adjust according to your application's startup time
+	err:=utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to stop recording")
+	}
 
 	return nil
 }
