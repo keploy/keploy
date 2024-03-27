@@ -78,7 +78,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	}
 	tel.Ping()
 	switch cmd {
-	case "config", "update":
+	case "config", "update", "normalise":
 		return tools.NewTools(n.logger, tel), nil
 	// TODO: add case for mock
 	case "record", "test", "mock":

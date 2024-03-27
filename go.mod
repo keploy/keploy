@@ -120,6 +120,7 @@ require (
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
+	gopkg.in/yaml.v2 v2.4.0
 	github.com/yudai/gojsondiff v1.0.0
 	golang.org/x/sync v0.6.0
 	sigs.k8s.io/kustomize/kyaml v0.16.0
