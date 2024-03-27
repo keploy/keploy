@@ -296,7 +296,7 @@ func (a *App) handleDockerEvents(ctx context.Context, e events.Message) (bool, e
 		n, ok := info.NetworkSettings.Networks[a.containerNetwork]
 		if !ok || n == nil {
 			a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
-			return false, nil
+			return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
 		}
 		a.containerIPv4 = n.IPAddress
 		iPAddress = n.IPAddress
