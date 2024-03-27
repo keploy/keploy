@@ -39,12 +39,14 @@ func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// create a new app and store it in the map
 	id := uint64(c.id.Next())
-	a := app.NewApp(c.logger, id, cmd)
+	a := app.NewApp(c.logger, id, cmd, app.Options{
+		DockerNetwork: opts.DockerNetwork,
+		Container:     opts.Container,
+		DockerDelay:   opts.DockerDelay,
+	})
 	c.apps.Store(id, a)
 
-	err := a.Setup(ctx, app.Options{
-		DockerNetwork: opts.DockerNetwork,
-	})
+	err := a.Setup(ctx)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to setup app")
 		return 0, err
@@ -196,7 +198,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
-func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
+func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
 	a, err := c.getApp(id)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to get app")
@@ -207,7 +209,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	inodeErrCh := make(chan error, 1)
 	appErrCh := make(chan models.AppError, 1)
-	inodeChan := make(chan uint64) //send inode to the hook
+	inodeChan := make(chan uint64, 1) //send inode to the hook
 
 	defer func() {
 		err := runAppErrGrp.Wait()
@@ -223,11 +225,16 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		if a.Kind(ctx) == utils.Native {
 			return nil
 		}
-		inode := <-inodeChan
-		err := c.Hooks.SendInode(ctx, id, inode)
-		if err != nil {
-			utils.LogError(c.logger, err, "")
-			inodeErrCh <- errors.New("failed to send inode to the kernel")
+		select {
+		case inode := <-inodeChan:
+			err := c.Hooks.SendInode(ctx, id, inode)
+			if err != nil {
+				utils.LogError(c.logger, err, "")
+
+				inodeErrCh <- errors.New("failed to send inode to the kernel")
+			}
+		case <-ctx.Done():
+			return nil
 		}
 		return nil
 	})
@@ -235,7 +242,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(appErrCh)
-		appErr := a.Run(runAppCtx, inodeChan, app.Options{DockerDelay: opts.DockerDelay})
+		appErr := a.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr, "error while running the app")
 			appErrCh <- appErr
