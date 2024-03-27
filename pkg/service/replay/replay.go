@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,13 +182,17 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
-		if err != nil {
-			cancel()
-			if errors.Is(err, context.Canceled) {
-				return "", 0, nil, err
+		if len(r.config.ReRecord) > 0 {
+			err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD})
+		} else {
+			err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
+			if err != nil {
+				cancel()
+				if errors.Is(err, context.Canceled) {
+					return "", 0, nil, err
+				}
+				return "", 0, nil, fmt.Errorf("failed to start the hooks and proxy: %w", err)
 			}
-			return "", 0, nil, fmt.Errorf("failed to start the hooks and proxy: %w", err)
 		}
 	}
 
@@ -717,5 +722,63 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 	<-ctx.Done()
+	return nil
+}
+
+func (r *replayer) ReRecord(ctx context.Context) error {
+	g, ctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+
+	var stopReason = "re-record completed successfully"
+	var hookCancel context.CancelFunc
+
+	defer func() {
+		if hookCancel != nil {
+			hookCancel()
+		}
+		err := g.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop re-recording")
+		}
+		err = utils.Stop(r.logger, stopReason)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop re-recording")
+		}
+	}()
+
+	_, appID, hookCancel, err := r.BootReplay(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to boot re-record: %v", err)
+	}
+
+	g.Go(func() error {
+		return r.RunApplication(ctx, appID, models.RunOptions{})
+	})
+
+	// Check if port 8080 is listening, directly within this function.
+	for i := 0; i < 30; i++ { // Try for up to 30 seconds
+		conn, err := net.DialTimeout("tcp", "localhost:8080", time.Second)
+		if err == nil {
+			conn.Close() // Connection successful, close and proceed.
+			break
+		}
+		time.Sleep(1 * time.Second) // Wait a second before trying again.
+	}
+
+	// Re-recording the specified test sets
+	for _, testSet := range r.config.ReRecord {
+		testCases, err := r.testDB.GetTestCases(ctx, testSet)
+		if err != nil {
+			return err // Log the error as needed.
+		}
+
+		for _, tc := range testCases {
+			_, err := r.SimulateRequest(ctx, appID, tc, testSet)
+			if err != nil {
+				return err // Log the error as needed.
+			}
+		}
+	}
+
 	return nil
 }
