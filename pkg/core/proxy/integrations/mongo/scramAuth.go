@@ -314,10 +314,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	// generate the auth message from the recieved first request and recorded first response
 	authMessage := scram.GenerateAuthMessage(string(decodedActualReqPayload), newFirstAuthResponse, logger)
 	// store the auth message in the global map for the conversationId
-	// ------ sync map ------
 	authMessageMap.Store(conversationID, authMessage)
-	// authMessageMap[conversationID] = authMessage
-	// ----------------------
 
 	logger.Debug("genrate the new auth message for the recieved auth request", zap.String("msg", authMessage))
 
