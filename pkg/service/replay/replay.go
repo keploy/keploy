@@ -468,7 +468,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// Checking errors for final iteration
 	// Checking for errors in the loop
-	if loopErr != nil && !errors.Is(loopErr, ~context.Canceled) {
+	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
 		testSetStatus = models.TestSetStatusInternalErr
 	} else {
 		// Checking for errors in the mocking and application
