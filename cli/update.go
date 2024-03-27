@@ -15,13 +15,13 @@ func init() {
 }
 
 // Update retrieves the command to tools Keploy
-func Update(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Update(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var updateCmd = &cobra.Command{
 		Use:     "update",
 		Short:   "Update Keploy ",
 		Example: "keploy update",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, "update", *conf)
+			svc, err := serviceFactory.GetService(ctx, "update")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -39,7 +39,7 @@ func Update(ctx context.Context, logger *zap.Logger, conf *config.Config, servic
 			return nil
 		},
 	}
-	if err := cmdConfigurator.AddFlags(updateCmd, conf); err != nil {
+	if err := cmdConfigurator.AddFlags(updateCmd); err != nil {
 		utils.LogError(logger, err, "failed to add update cmd flags")
 		return nil
 	}
