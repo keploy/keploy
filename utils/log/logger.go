@@ -14,10 +14,15 @@ var Emoji = "\U0001F430" + " Keploy:"
 // TODO find better way than global variable
 var logCfg zap.Config
 
+
 func New() (*zap.Logger, error) {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
-		return NewColor(config), nil
+		return NewColor(config , true ), nil
 	})
+	_ = zap.RegisterEncoder("nonColorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
+		return NewColor(config , false ), nil
+	})
+	
 
 	logCfg = zap.NewDevelopmentConfig()
 
@@ -80,3 +85,17 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	}
 	return logger, nil
 }
+
+func ChangeColorEncoding( )(*zap.Logger, error)  {
+		logCfg.Encoding = "nonColorConsole"
+		logger, err := logCfg.Build()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build config for logger: %v", err)
+		}
+	return logger , nil
+}
+
+
+
+
+

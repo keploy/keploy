@@ -140,6 +140,7 @@ var RootExamples = `
 
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 
+
 type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
@@ -203,11 +204,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
 	case "keploy":
+		cmd.PersistentFlags().Bool("enableANSIColor", c.cfg.EnableANSIColor, "Enable ANSI color in logs")
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
+		if err != nil {
+			errMsg := "failed to bind flag to config"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
@@ -270,6 +278,17 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return errors.New(errMsg)
 		}
 	}
+	if !c.cfg.EnableANSIColor {
+		c.logger.Info("Color encoding is disabled")
+		logger, err := log.ChangeColorEncoding()
+		*c.logger = *logger
+		if err != nil {
+			errMsg := "failed to change color encoding"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+	}
+
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
