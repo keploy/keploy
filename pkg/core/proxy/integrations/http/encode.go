@@ -18,13 +18,6 @@ import (
 
 // encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
 func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	//closing the destination conn
-	defer func(destConn net.Conn) {
-		err := destConn.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the destination connection")
-		}
-	}(destConn)
 
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
@@ -255,6 +248,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
 		return err
 	}
 }
