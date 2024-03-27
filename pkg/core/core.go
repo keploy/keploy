@@ -181,7 +181,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
-func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
+func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
 	a, err := c.getApp(id)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to get app")
