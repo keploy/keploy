@@ -225,6 +225,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var appErr models.AppError
 	var success int
 	var failure int
+	var totalConsumedMocks = map[string]bool{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -385,14 +386,21 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
 		}
+
+		consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+		}
+		if r.config.Test.RemoveUnusedMocks {
+			for _, mockName := range consumedMocks {
+				totalConsumedMocks[mockName] = true
+			}
+		}
+
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
-			consumedFilteredMocks, err := r.instrumentation.GetConsumedFilteredMocks(runTestSetCtx, appID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
-			}
-			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)), zap.Any("consumed mocks", consumedFilteredMocks))
+			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)), zap.Any("consumed mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
 		}
@@ -491,29 +499,10 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset
-	if r.config.Test.RemoveUnusedMocks {
-
-		// fetch the consumed mocks by the testcases of the testset
-		consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to get consumed mocks", zap.Any("for test-set", testSetID))
-		}
-		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", consumedMocks))
-		// if the mock is not consumed by the testset then it is unused
-		unusedMocks := map[string]bool{}
-		for _, filteredMock := range filteredMocks {
-			if _, ok := consumedMocks[filteredMock.Name]; !ok {
-				unusedMocks[filteredMock.Name] = false
-			}
-		}
-		for _, unfilteredMock := range unfilteredMocks {
-			if _, ok := consumedMocks[unfilteredMock.Name]; !ok {
-				unusedMocks[unfilteredMock.Name] = true
-			}
-		}
-
+	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed {
+		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
-		err = r.mockDB.DeleteMocks(runTestSetCtx, testSetID, unusedMocks)
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
