@@ -1,36 +1,32 @@
+// Package graph provides the resolver implementation for the GraphQL schema.
 package graph
 
 import (
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/platform"
-	"go.keploy.io/server/pkg/proxy"
-	"go.keploy.io/server/pkg/service/test"
+	"context"
+
+	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
 
 // This file will not be regenerated automatically.
 //
 // It serves as dependency injection for your app, add any dependencies you require here.
-var Emoji = "\U0001F430" + " Keploy:"
+
+//go:generate go run github.com/99designs/gqlgen generate
 
 type Resolver struct {
-	Tester             test.Tester
-	TestFilter         map[string][]string
-	TestReportFS       platform.TestReportDB
-	Storage            platform.TestCaseDB
-	LoadedHooks        *hooks.Hook
-	ProxySet           *proxy.ProxySet
-	KeployServerPort   uint32
-	PassThroughPorts   []uint
-	ProxyPort          uint32
-	Lang               string
-	MongoPassword      string
-	Logger             *zap.Logger
-	Path               string
-	TestReportPath     string
-	GenerateTestReport bool
-	Delay              uint64
-	AppPid             uint32
-	ApiTimeout         uint64
-	ServeTest          bool
+	logger     *zap.Logger
+	replay     replay.Service
+	hookCtx    context.Context
+	hookCancel context.CancelFunc
+	appCtx     context.Context
+	appCancel  context.CancelFunc
+}
+
+func (r *Resolver) getHookCtxWithCancel() (context.Context, context.CancelFunc) {
+	return r.hookCtx, r.hookCancel
+}
+
+func (r *Resolver) getAppCtxWithCancel() (context.Context, context.CancelFunc) {
+	return r.appCtx, r.appCancel
 }
