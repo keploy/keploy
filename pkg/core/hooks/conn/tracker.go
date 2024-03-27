@@ -13,12 +13,19 @@ import (
 	// "log"
 )
 
+type EventChannelType struct {
+	DataChan chan SocketDataEvent
+	OpenChan chan SocketOpenEvent
+	CloseChan chan SocketCloseEvent
+}
 // Tracker is a routine-safe container that holds a conn with unique ID, and able to create new conn.
 type Tracker struct {
 	connID         ID
 	addr           SockAddrIn
 	openTimestamp  uint64
 	closeTimestamp uint64
+
+	eventChannel   EventChannelType
 
 	// Indicates the tracker stopped tracking due to closing the session.
 	lastActivityTimestamp uint64

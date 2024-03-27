@@ -86,6 +86,12 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 	tracker, ok := factory.connections[connectionID]
 	if !ok {
 		factory.connections[connectionID] = NewTracker(connectionID, factory.logger)
+		go func () {
+			select {
+			case <- factory.connections[connectionID].eventChannel.DataChan:
+				fmt.Println("we finally got a data event.")
+			}
+		}()
 		return factory.connections[connectionID]
 	}
 	return tracker

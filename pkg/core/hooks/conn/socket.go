@@ -173,7 +173,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					event.EntryTimestampNano += getRealTimeOffset()
 					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 				}
-
+				c.connections[event.ConnID].eventChannel.DataChan <- event
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
 		}()
