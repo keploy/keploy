@@ -30,7 +30,10 @@ func New(logger *zap.Logger, tcsPath string) *TestYaml {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
-	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	tcsPath, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests"))
+	if err != nil {
+		return err
+	}
 	var tcsName string
 	if tc.Name == "" {
 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
