@@ -433,12 +433,20 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		"-c",
 		keployAlias+" "+strings.Join(quotedArgs, " "),
 	)
+
+	cmd.Cancel = func() error {
+		return InterruptProcessTree(cmd, logger, cmd.Process.Pid, syscall.SIGINT)
+	}
+
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 	logger.Debug("running the following command in docker", zap.String("command", cmd.String()))
 	err = cmd.Run()
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return ctx.Err()
+		}
 		LogError(logger, err, "failed to start keploy in docker")
 		return err
 	}
@@ -482,7 +490,7 @@ func SentryInit(logger *zap.Logger, dsn string) {
 //}
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
-func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal, dockerCmd string) error {
+func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
@@ -498,27 +506,7 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 		uniqueProcess = children
 	}
 
-	cmdType := FindDockerCmd(dockerCmd)
-	if cmdType == Docker {
-		containerName := extractContainerNameFromDockerCmd(dockerCmd)
-		dockerCmd := exec.Command("docker", "inspect", "--format", "{{.State.Pid}}", containerName)
-		output, err := dockerCmd.Output()
-		if err != nil {
-			return fmt.Errorf("failed to get main PID of container %s: %w", containerName, err)
-		}
-		mainPID, err := strconv.Atoi(strings.TrimSpace(string(output)))
-		if err != nil {
-			return fmt.Errorf("failed to convert main PID to int: %w", err)
-		}
-		ppid, err := findParentPID(mainPID)
-		if err != nil {
-			return fmt.Errorf("failed to find parent PID: %w", err)
-		}
-		uniqueProcess = append(uniqueProcess, ppid)
-	}
-
 	for _, pid := range uniqueProcess {
-
 		if cmd.ProcessState == nil {
 			err := syscall.Kill(-pid, sig)
 			if err != nil {
@@ -630,16 +618,6 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	return childPIDs, nil
 }
 
-func extractContainerNameFromDockerCmd(dockerCmd string) string {
-	parts := strings.Fields(dockerCmd)
-	for i, part := range parts {
-		if part == "--name" && i+1 < len(parts) {
-			return parts[i+1]
-		}
-	}
-	return ""
-}
-
 func EnsureRmBeforeName(cmd string) string {
 	parts := strings.Split(cmd, " ")
 	rmIndex := -1
@@ -658,17 +636,4 @@ func EnsureRmBeforeName(cmd string) string {
 	}
 
 	return strings.Join(parts, " ")
-}
-
-func findParentPID(pid int) (int, error) {
-	cmd := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid))
-	output, err := cmd.Output()
-	if err != nil {
-		return 0, err
-	}
-	ppid, err := strconv.Atoi(strings.TrimSpace(string(output)))
-	if err != nil {
-		return 0, err
-	}
-	return ppid, nil
 }

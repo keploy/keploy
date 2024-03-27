@@ -158,7 +158,7 @@ func (a *App) SetupCompose() error {
 	info := a.docker.GetNetworkInfo(compose)
 
 	if info == nil {
-		err = a.docker.SetKeployNetwork(compose)
+		info, err = a.docker.SetKeployNetwork(compose)
 		if err != nil {
 			utils.LogError(a.logger, nil, "failed to set default network in the compose file", zap.String("network", a.keployNetwork))
 			return err
@@ -428,6 +428,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	if utils.FindDockerCmd(a.cmd) == utils.Docker {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 	}
+
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
 		// print all environment variables
@@ -439,7 +440,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 
-		return utils.InterruptProcessTree(cmd, a.logger, cmd.Process.Pid, syscall.SIGINT, userCmd)
+		return utils.InterruptProcessTree(cmd, a.logger, cmd.Process.Pid, syscall.SIGINT)
 	}
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = 10 * time.Second
