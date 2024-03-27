@@ -47,7 +47,7 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 
 // authMessageMap stores the auth message from the saslStart request for the converstionIds. So, that
 // it can be used in the saslContinue request to generate the new server proof
-var authMessageMap sync.Map = sync.Map{}
+var authMessageMap = sync.Map{}
 
 // handleScramAuth handles the SCRAM authentication requests by generating the
 // appropriate response string.
