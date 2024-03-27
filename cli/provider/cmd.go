@@ -325,7 +325,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
 			}
-			if strings.Contains(c.cfg.Command, "--name") {
+			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
 					utils.LogError(c.logger, nil, "Couldn't find containerName")
 					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
