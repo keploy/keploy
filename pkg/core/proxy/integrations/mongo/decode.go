@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{reqBuf}
 
@@ -220,7 +220,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						if len(configMocks[bestMatchIndex].Spec.MongoRequests) > 0 {
 							expectedRequestSections = configMocks[bestMatchIndex].Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 						}
-						message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, logger)
+						message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
 						if err != nil {
 							utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 							errCh <- err
@@ -264,7 +264,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					if len(matchedMock.Spec.MongoRequests) > 0 {
 						expectedRequestSections = matchedMock.Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 					}
-					message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, logger)
+					message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 						errCh <- err
