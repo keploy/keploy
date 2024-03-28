@@ -88,6 +88,11 @@ func NewTracker(connID ID, logger *zap.Logger) *Tracker {
 		logger:          logger,
 		firstRequest:    true,
 		isNewRequest:    true,
+		eventChannel: EventChannelType{
+			DataChan: make(chan SocketDataEvent),
+			OpenChan: make(chan SocketOpenEvent),
+			CloseChan: make(chan SocketCloseEvent),
+		},
 	}
 }
 

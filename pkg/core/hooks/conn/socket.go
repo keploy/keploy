@@ -40,16 +40,16 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		defer utils.Recover(l)
 		go func() {
 			defer utils.Recover(l)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					// TODO refactor this to directly consume the events from the maps
-					c.ProcessActiveTrackers(ctx, t)
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
+			// for {
+			// 	select {
+			// 	case <-ctx.Done():
+			// 		return
+			// 	default:
+			// 		// TODO refactor this to directly consume the events from the maps
+			// 		c.ProcessActiveTrackers(ctx, t)
+			// 		time.Sleep(100 * time.Millisecond)
+			// 	}
+			// }
 		}()
 		<-ctx.Done()
 		close(t)
@@ -225,6 +225,7 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				}
 
 				event.TimestampNano += getRealTimeOffset()
+				c.connections[event.ConnID].eventChannel.CloseChan <- event
 				c.GetOrCreate(event.ConnID).AddCloseEvent(event)
 			}
 		}()

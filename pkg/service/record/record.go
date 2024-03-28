@@ -139,7 +139,6 @@ func (r *recorder) Start(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
-
 	errGrp.Go(func() error {
 		for testCase := range incomingChan {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
