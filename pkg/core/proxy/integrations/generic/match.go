@@ -62,7 +62,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			}
 
 			totalMocks := append(filteredMocks, unfilteredMocks...)
-			index = findBinaryMatch(totalMocks, reqBuff, 0.5)
+			index = findBinaryMatch(totalMocks, reqBuff, 0.4)
 
 			if index != -1 {
 				responseMock := make([]models.GenericPayload, len(totalMocks[index].Spec.GenericResponses))
