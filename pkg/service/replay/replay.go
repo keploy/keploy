@@ -181,17 +181,13 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		if len(r.config.ReRecord) > 0 {
-			err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD})
-		} else {
-			err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
-			if err != nil {
-				cancel()
-				if errors.Is(err, context.Canceled) {
-					return "", 0, nil, err
-				}
-				return "", 0, nil, fmt.Errorf("failed to start the hooks and proxy: %w", err)
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
+		if err != nil {
+			cancel()
+			if errors.Is(err, context.Canceled) {
+				return "", 0, nil, err
 			}
+			return "", 0, nil, fmt.Errorf("failed to start the hooks and proxy: %w", err)
 		}
 	}
 
