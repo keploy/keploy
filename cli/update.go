@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
@@ -12,29 +11,35 @@ import (
 )
 
 func init() {
-	Register("tools", Update)
+	Register("update", Update)
 }
 
 // Update retrieves the command to tools Keploy
-func Update(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Update(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var updateCmd = &cobra.Command{
 		Use:     "update",
 		Short:   "Update Keploy ",
-		Example: "keploy tools",
+		Example: "keploy update",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, "tools", *conf)
+			svc, err := serviceFactory.GetService(ctx, "update")
 			if err != nil {
-				return err
+				utils.LogError(logger, err, "failed to get service")
+				return nil
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
-				return fmt.Errorf("svc is not of type tools")
+				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
+				return nil
 			}
-			return tools.Update(ctx)
+			err = tools.Update(ctx)
+			if err != nil {
+				utils.LogError(logger, err, "failed to update")
+			}
+			return nil
 		},
 	}
-	if err := cmdConfigurator.AddFlags(updateCmd, conf); err != nil {
+	if err := cmdConfigurator.AddFlags(updateCmd); err != nil {
 		utils.LogError(logger, err, "failed to add update cmd flags")
 		return nil
 	}
