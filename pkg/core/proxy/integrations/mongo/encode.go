@@ -17,13 +17,6 @@ import (
 )
 
 func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
-	//closing the destination conn
-	defer func(destConn net.Conn) {
-		err := destConn.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the destination connection")
-		}
-	}(destConn)
 
 	errCh := make(chan error, 1)
 
@@ -272,6 +265,9 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
 		return err
 	}
 }

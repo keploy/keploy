@@ -21,7 +21,6 @@ func init() {
 
 // TODO: Remove these global variables, and find a better way to handle this
 var configRequests = []string{""}
-var password string
 
 type Mongo struct {
 	logger *zap.Logger
@@ -60,7 +59,6 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 }
 
 func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	password = opts.MongoPassword
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {

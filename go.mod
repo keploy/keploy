@@ -68,6 +68,7 @@ require (
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
+	golang.org/x/term v0.18.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20230601164746-7562a1006961 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
