@@ -20,7 +20,11 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Short:   "record the keploy testcases from the API calls",
 		Example: `keploy record -c "/path/to/user/app"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd)
+			if err := cmdConfigurator.ValidateFlags(ctx, cmd); err != nil {
+				utils.LogError(logger, err, "failed to validate flags")
+				return err
+			}
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
@@ -49,7 +53,6 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		utils.LogError(logger, err, "failed to add record flags")
 		return nil
 	}
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
+
 	return cmd
 }

@@ -22,7 +22,12 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		Short:   "run the recorded testcases and execute assertions",
 		Example: `keploy test -c "/path/to/user/app" --delay 6`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd)
+			if err := cmdConfigurator.ValidateFlags(ctx, cmd); err != nil {
+				utils.LogError(logger, err, "failed to validate flags")
+				return err
+			}
+			return nil
+
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 
