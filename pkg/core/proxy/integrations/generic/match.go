@@ -55,13 +55,27 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 
 			index = findExactMatch(unfilteredMocks, reqBuff)
 
-			if index == -1 {
-				index = findBinaryMatch(unfilteredMocks, reqBuff, 0.5)
-			}
-
 			if index != -1 {
 				responseMock := make([]models.GenericPayload, len(unfilteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
+				return true, responseMock, nil
+			}
+
+			totalMocks := append(filteredMocks, unfilteredMocks...)
+			index = findBinaryMatch(totalMocks, reqBuff, 0.5)
+
+			if index != -1 {
+				responseMock := make([]models.GenericPayload, len(totalMocks[index].Spec.GenericResponses))
+				copy(responseMock, totalMocks[index].Spec.GenericResponses)
+				originalFilteredMock := *totalMocks[index]
+				if totalMocks[index].TestModeInfo.IsFiltered {
+					totalMocks[index].TestModeInfo.IsFiltered = false
+					totalMocks[index].TestModeInfo.SortOrder = math.MaxInt64
+					isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, totalMocks[index])
+					if isUpdated {
+						continue
+					}
+				}
 				return true, responseMock, nil
 			}
 			return false, nil, nil
