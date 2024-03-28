@@ -50,7 +50,9 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 					return
 				}
-				utils.LogError(logger, err, "failed to read the packet message in proxy")
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read the packet message in proxy")
+				}
 				errChannel <- err
 				return
 			}

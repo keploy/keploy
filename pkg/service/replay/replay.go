@@ -166,7 +166,7 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 
 	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
 
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return "", 0, nil, err
@@ -240,12 +240,12 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusPassed, nil
 	}
 
-	filteredMocks, err := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
+	filteredMocks, err := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
 		return models.TestSetStatusFailed, err
 	}
-	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
+	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return models.TestSetStatusFailed, err

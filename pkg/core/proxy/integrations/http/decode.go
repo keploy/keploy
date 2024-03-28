@@ -182,6 +182,9 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
 		return err
 	}
 }
