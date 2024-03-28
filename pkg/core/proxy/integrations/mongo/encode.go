@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	errCh := make(chan error, 1)
 
@@ -201,7 +201,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			if val, ok := mongoResponse.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for i := 0; ; i++ {
 					if i == 0 && isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
-						recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
+						m.recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 					}
 					started = time.Now()
 					responseBuffer, err = util.ReadBytes(ctx, logger, destConn)
@@ -256,7 +256,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 			}
 
-			recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
+			m.recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 			reqBuf = []byte("read form client conn")
 		}
 	})
