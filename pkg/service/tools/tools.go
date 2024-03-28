@@ -57,7 +57,7 @@ func (t *Tools) Update(ctx context.Context) error {
 		return fmt.Errorf("failed to fetch latest GitHub release version: %v", err)
 	}
 
-	latestVersion := releaseInfo.TagName
+	latestVersion := releaseInfo.TagName[1:]
 	changelog := releaseInfo.Body
 
 	if currentVersion == latestVersion {
