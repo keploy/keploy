@@ -5,38 +5,14 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
-	"path"
+
 	"strings"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
-	"sigs.k8s.io/kustomize/kyaml/yaml"
+
 )
 
-func ReadTestCase(filepath string, fileName os.DirEntry) (models.TestCase, error) {
 
-    filePath := fileName.Name() 
-	absPath := path.Join(filepath, filePath) 
-
-    // Read file content
-    testCaseContent, err := os.ReadFile(absPath) 
-    if err != nil {
-
-        return models.TestCase{}, err
-    }
-
-
-    var testCase models.TestCase
-
-    err = yaml.Unmarshal(testCaseContent, &testCase)
-    if err != nil {
-
-        return models.TestCase{}, err
-    }
-
-    return testCase, nil
-}
 func extractHostAndPort(curlCmd string) (string, string, error) {
     // Split the command string to find the URL
     parts := strings.Split(curlCmd, " ")

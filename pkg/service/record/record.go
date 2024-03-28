@@ -5,18 +5,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
+	"os"	
 	"path"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"time"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
+	"go.keploy.io/server/v2/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 type recorder struct {
@@ -53,6 +58,8 @@ func (r *recorder) Start(ctx context.Context) error {
 	hookCtx := context.WithoutCancel(ctx)
 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
 	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
+	reRecordCtx, reRecordCancel := context.WithCancel(ctx)
+    defer reRecordCancel() // Cancel the context when the function returns
 
 	var stopReason string
 
@@ -198,7 +205,9 @@ func (r *recorder) Start(ctx context.Context) error {
 	time.Sleep(2 * time.Second) // Example sleep, adjust according to your application's startup time
     go func(){
 	if len(r.config.ReRecord) != 0 {
-		err = r.ReRecord(ctx)
+		err = r.ReRecord(reRecordCtx)
+		time.Sleep(5 * time.Second) // Example sleep, adjust according to your application's startup time
+		reRecordCancel()
 
 	}
 }()
@@ -323,39 +332,9 @@ func (r *recorder) StartMock(ctx context.Context) error {
 }
 
 func (r *recorder) ReRecord(ctx context.Context) error {
-	var httpCommands []*models.TestCase
-
-	// Load HTTP commands from your configuration
-	if len(r.config.ReRecord) != 0 {
-		for _, testSet := range r.config.ReRecord {
-			filepath := path.Join(r.config.Path, testSet, "tests")
-			files, err := os.ReadDir(filepath)
-			if err != nil {
-				r.logger.Error("Failed to read directory", zap.String("filepath", filepath), zap.Error(err))
-				return err
-			}
-
-			for _, file := range files {
-				if file.IsDir() {
-					continue
-				}
-				testCase, err := ReadTestCase(filepath, file) // Assumes ReadTestCase is a predefined function
-				if err != nil {
-					r.logger.Error("Failed to read test case", zap.String("file", file.Name()), zap.Error(err))
-					return err
-				}
-				httpCommands = append(httpCommands, &testCase)
-			}
-		}
-	}
-
-	if len(httpCommands) == 0 {
-		r.logger.Info("No HTTP commands to re-record")
-		return nil
-	}
-
-	for _, cmd := range httpCommands {
-		host, port, err := extractHostAndPort(cmd.Curl)
+    tcs, err := r.ReadTestCase();
+	for _, tc := range tcs {
+		host, port, err := extractHostAndPort(tc.Curl)
 		if err != nil {
 			r.logger.Error("Failed to extract host and port", zap.Error(err))
 			continue // Proceed with the next command
@@ -366,19 +345,85 @@ func (r *recorder) ReRecord(ctx context.Context) error {
 			continue // Proceed with the next command
 		}
 
-		curl := exec.Command("sh", "-c", cmd.Curl)
-        out, err := curl.Output()
-        if err != nil {
-            fmt.Println("erorr" , err)
-            return err
+		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
+		if err != nil {
+			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
+			continue // Proceed with the next command
+		}
+		r.logger.Info("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response",(resp)))
+		select {
+        case <-ctx.Done():
+            return ctx.Err()
+        default:
         }
-        fmt.Println(out)
+
+
 	}
 	time.Sleep(10 * time.Second) // Example sleep, adjust according to your application's startup time
-	err:=utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
+	err=utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to stop recording")
 	}
 
 	return nil
+}
+
+func (r *recorder) ReadTestCase() ([]*models.TestCase, error) {
+    testSet := r.config.ReRecord
+	// Construct the full path to the test cases directory.
+	testCasesPath := path.Join(r.config.Path, testSet, "tests")
+
+	// Validate the path.
+	validPath, err := yaml.ValidatePath(testCasesPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the directory exists.
+	if _, err := os.Stat(validPath); err != nil {
+		r.logger.Debug("No tests are recorded for the session", zap.String("index", testSet))
+		return []*models.TestCase{}, nil // Return an empty slice instead of nil.
+	}
+
+	// Read the directory.
+	files, err := os.ReadDir(validPath)
+	if err != nil {
+		utils.LogError(r.logger, err, "Failed to open the directory containing yaml testcases", zap.Any("path", validPath))
+		return nil, err
+	}
+
+	var tcs []*models.TestCase
+	for _, file := range files {
+		if filepath.Ext(file.Name()) != ".yaml" || strings.Contains(file.Name(), "mocks") {
+			continue
+		}
+
+		filePath := filepath.Join(validPath, file.Name())
+		data, err := os.ReadFile(filePath) // Simplified file reading.
+		if err != nil {
+			utils.LogError(r.logger, err, "Failed to read the testcase from yaml", zap.String("file", filePath))
+			continue // Consider whether to continue or return an error.
+		}
+
+		var testCase yaml.NetworkTrafficDoc
+		if err := yamlLib.Unmarshal(data, &testCase); err != nil {
+			utils.LogError(r.logger, err, "Failed to unmarshall YAML data", zap.String("file", filePath))
+			continue // Consider whether to continue or return an error.
+		}
+
+		tc, err := testdb.Decode(&testCase, r.logger) // Assuming Decode exists and works correctly.
+		if err != nil {
+			utils.LogError(r.logger, err, "Failed to decode the testcase", zap.String("file", filePath))
+			continue // Consider whether to continue or return an error.
+		}
+
+		tcs = append(tcs, tc)
+	}
+
+	// Sort the slice before returning.
+	sort.SliceStable(tcs, func(i, j int) bool {
+		return tcs[i].HTTPReq.Timestamp.Before(tcs[j].HTTPReq.Timestamp)
+	})
+
+	return tcs, nil
 }
