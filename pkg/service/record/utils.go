@@ -45,7 +45,10 @@ func waitForPort(ctx context.Context, host, port string) error {
         default:
             conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 1*time.Second)
             if err == nil {
-                conn.Close()
+                err := conn.Close()
+                if err != nil {
+                    return err
+                }
                 return nil 
             }
             time.Sleep(1 * time.Second)
