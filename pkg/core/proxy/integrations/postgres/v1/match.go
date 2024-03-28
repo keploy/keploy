@@ -229,7 +229,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 
 			if !matched {
 				sorted = false
-				idx1, newMock := findPGStreamMatch(sortedTcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
+				idx1, newMock := findPGStreamMatch(tcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
 					matched = true
 					matchedMock = tcsMocks[idx1]
