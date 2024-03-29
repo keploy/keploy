@@ -25,7 +25,6 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		Example: "keploy config --generate --path /path/to/localdir",
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			if err := cmdConfigurator.ValidateFlags(ctx, cmd); err != nil {
-				utils.LogError(logger, err, "failed to validate flags")
 				return err
 			}
 			return nil

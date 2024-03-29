@@ -21,7 +21,6 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: `keploy record -c "/path/to/user/app"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			if err := cmdConfigurator.ValidateFlags(ctx, cmd); err != nil {
-				utils.LogError(logger, err, "failed to validate flags")
 				return err
 			}
 			return nil
