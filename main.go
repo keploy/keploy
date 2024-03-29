@@ -46,8 +46,6 @@ func printLogo() {
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
 		fmt.Println(logo, " ")
 		fmt.Printf("version: %v\n\n", version)
-	} else {
-		fmt.Println("Starting keploy in docker environment.")
 	}
 }
 

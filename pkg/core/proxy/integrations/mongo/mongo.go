@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -19,17 +20,15 @@ func init() {
 	integrations.Register("mongo", NewMongo)
 }
 
-// TODO: Remove these global variables, and find a better way to handle this
-var configRequests = []string{""}
-var password string
-
 type Mongo struct {
-	logger *zap.Logger
+	logger                 *zap.Logger
+	recordedConfigRequests sync.Map
 }
 
 func NewMongo(logger *zap.Logger) integrations.Integrations {
 	return &Mongo{
-		logger: logger,
+		logger:                 logger,
+		recordedConfigRequests: sync.Map{},
 	}
 }
 
@@ -51,7 +50,7 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 		return err
 	}
 
-	err = encodeMongo(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = m.encodeMongo(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mongo message into the yaml")
 		return err
@@ -60,7 +59,6 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 }
 
 func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	password = opts.MongoPassword
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
@@ -76,7 +74,7 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	return nil
 }
 
-func recordMessage(_ context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, reqTimestampMock time.Time, mocks chan<- *models.Mock) {
+func (m *Mongo) recordMessage(_ context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, reqTimestampMock time.Time, mocks chan<- *models.Mock) {
 	// capture if the wiremessage is a mongo operation call
 
 	shouldRecordCalls := true
@@ -89,29 +87,31 @@ func recordMessage(_ context.Context, logger *zap.Logger, mongoRequests []models
 	// See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
 	if isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 		meta1["type"] = "config"
-		for _, v := range configRequests {
-			for _, req := range mongoRequests {
 
-				switch req.Header.Opcode {
-				case wiremessage.OpQuery:
-					if req.Message.(*models.MongoOpQuery).Query == v {
-						shouldRecordCalls = false
-						break
-					}
-					configRequests = append(configRequests, req.Message.(*models.MongoOpQuery).Query)
-				case wiremessage.OpMsg:
-					if len(req.Message.(*models.MongoOpMessage).Sections) > 0 && req.Message.(*models.MongoOpMessage).Sections[0] == v {
-						shouldRecordCalls = false
-						break
-					}
-					configRequests = append(configRequests, req.Message.(*models.MongoOpMessage).Sections[0])
-				default:
-					if opReq.String() == v {
-						shouldRecordCalls = false
-						break
-					}
-					configRequests = append(configRequests, opReq.String())
+		for _, req := range mongoRequests {
+
+			switch req.Header.Opcode {
+			case wiremessage.OpQuery:
+				// check the opReq in the recorded config requests. if present then, skip recording
+				if _, ok := m.recordedConfigRequests.Load(req.Message.(*models.MongoOpQuery).Query); ok {
+					shouldRecordCalls = false
+					break
 				}
+				m.recordedConfigRequests.Store(req.Message.(*models.MongoOpQuery).Query, true)
+			case wiremessage.OpMsg:
+				// check the opReq in the recorded config requests. if present then, skip recording
+				if _, ok := m.recordedConfigRequests.Load(req.Message.(*models.MongoOpMessage).Sections[0]); ok {
+					shouldRecordCalls = false
+					break
+				}
+				m.recordedConfigRequests.Store(req.Message.(*models.MongoOpMessage).Sections[0], true)
+			default:
+				// check the opReq in the recorded config requests. if present then, skip recording
+				if _, ok := m.recordedConfigRequests.Load(opReq.String()); ok {
+					shouldRecordCalls = false
+					break
+				}
+				m.recordedConfigRequests.Store(opReq.String(), true)
 			}
 		}
 	}
