@@ -113,7 +113,7 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 					lastEventType = event.Direction
 
 				case <-factory.connections[connectionID].eventChannel.CloseChan:
-					fmt.Println("got the closed data event")
+					break
 				case <-time.After(2 * time.Second):
 					if lastEventType == EgressTraffic {
 						// We expect the response to be completed in the 2 sec
@@ -130,8 +130,7 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 					}
 				case <-time.After(60 * time.Second):
 					fmt.Println("This is the last event type", lastEventType)
-					// Closing the connection now.
-
+					break
 					// case <- ctx.Dome():   // TODO: Add condition for this.
 					// 	return
 				}
