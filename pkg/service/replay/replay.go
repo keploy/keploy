@@ -77,6 +77,18 @@ func (r *replayer) Start(ctx context.Context) error {
 		}
 	}()
 
+	absPath, err := filepath.Abs(r.config.Path)
+
+	if err != nil {
+		errMsg := "failed to get the absolute path from relative path"
+		utils.LogError(r.logger, err, errMsg)
+	}
+
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		errMsg := "keploy directory does not exist"
+		return fmt.Errorf(errMsg)
+	}
+
 	// BootReplay will start the hooks and proxy and return the testRunID and appID
 	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
 	if err != nil {

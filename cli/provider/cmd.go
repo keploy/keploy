@@ -346,13 +346,9 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+
 		c.cfg.Path = absPath + "/keploy"
 		if cmd.Name() == "test" {
-			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
-				errMsg := "keploy directory does not exist: "
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New("failed to get the keploy directory")
-			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
 			if err != nil {
