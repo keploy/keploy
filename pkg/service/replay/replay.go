@@ -236,12 +236,12 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusPassed, nil
 	}
 
-	filteredMocks, err := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
+	filteredMocks, err := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
 		return models.TestSetStatusFailed, err
 	}
-	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
+	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return models.TestSetStatusFailed, err
