@@ -200,6 +200,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("ignoreOrdering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
 			cmd.Flags().Bool("removeUnusedMocks", false, "Clear the unused mocks for the passed test-sets")
+			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
@@ -234,6 +235,10 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		return errors.New(errMsg)
 	}
 
+	// used to bind flags with environment variables
+	viper.AutomaticEnv()
+	viper.SetEnvPrefix("KEPLOY")
+
 	//used to bind flags specific to the command for eg: testsets, delay, recordTimer etc. (nested flags)
 	err = utils.BindFlagsToViper(c.logger, cmd, "")
 	if err != nil {
@@ -241,7 +246,6 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
-
 	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
@@ -252,7 +256,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		viper.SetConfigType("yml")
 		viper.AddConfigPath(configPath)
 		if err := viper.ReadInConfig(); err != nil {
-			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			var configFileNotFoundError viper.ConfigFileNotFoundError
+			if !errors.As(err, &configFileNotFoundError) {
 				errMsg := "failed to read config file"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
@@ -308,6 +313,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		}
 
 		if c.cfg.InDocker {
+			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {
 				curDir, err := os.Getwd()
 				if err != nil {
@@ -339,7 +345,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
 			}
-			if strings.Contains(c.cfg.Command, "--name") {
+			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
 					utils.LogError(c.logger, nil, "Couldn't find containerName")
 					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
