@@ -98,13 +98,11 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 				select {
 				case event := <-factory.connections[connectionID].eventChannel.DataChan:
 					fmt.Println("This is the event direction", event.Direction)
-					if event.Direction == IngressTraffic {
-						reqBytes = factory.connections[connectionID].req
-						fmt.Println("This is the req bytes"	, string(reqBytes))
-					}
+					fmt.Println("This is the len of user reqs", len(factory.connections[connectionID].userReqs))
+					fmt.Println("This is the len of the user resps", len(factory.connections[connectionID].userResps))
 					if event.Direction == EgressTraffic {
+						reqBytes = factory.connections[connectionID].userReqs[0]
 						respBytes = factory.connections[connectionID].resp
-						fmt.Println("This is the respBytes", string(respBytes))
 					}
 					if lastEventType == EgressTraffic && event.Direction == IngressTraffic {
 						// This means that we have received the response for the request.
@@ -127,8 +125,7 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 						if err != nil {
 							factory.logger.Error("failed to parse the http response from byte array", zap.Any("resp bytes", respBytes))
 						}
-						fmt.Println("Recording the testcase now.")
-						capture(context.Background(), factory.logger, factory.t, parsedHTTPReq, parsedHttpRes, time.Now(), time.Now())
+						capture(context.Background(), factory.logger, factory. t, parsedHTTPReq, parsedHttpRes, time.Now(), time.Now())
 						lastEventType = -1
 					}
 				case <-time.After(60 * time.Second):
