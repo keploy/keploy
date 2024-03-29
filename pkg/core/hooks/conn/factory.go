@@ -24,15 +24,17 @@ type Factory struct {
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
 	logger              *zap.Logger
+	t                   chan *models.TestCase
 }
 
 // NewFactory creates a new instance of the factory.
-func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory {
+func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger, t chan *models.TestCase) *Factory {
 	return &Factory{
 		connections:         make(map[ID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
 		logger:              logger,
+		t:                   t,
 	}
 }
 
@@ -88,7 +90,6 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 	if !ok {
 		factory.connections[connectionID] = NewTracker(connectionID, factory.logger)
 		go func() {
-			t := make(chan *models.TestCase, 500)
 			var lastEventType TrafficDirectionEnum // need a value for this variable
 			var reqBytes, respBytes []byte
 			lastEventType = -1
@@ -99,9 +100,11 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 					fmt.Println("This is the event direction", event.Direction)
 					if event.Direction == IngressTraffic {
 						reqBytes = factory.connections[connectionID].req
+						fmt.Println("This is the req bytes"	, string(reqBytes))
 					}
 					if event.Direction == EgressTraffic {
 						respBytes = factory.connections[connectionID].resp
+						fmt.Println("This is the respBytes", string(respBytes))
 					}
 					if lastEventType == EgressTraffic && event.Direction == IngressTraffic {
 						// This means that we have received the response for the request.
@@ -125,13 +128,12 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 							factory.logger.Error("failed to parse the http response from byte array", zap.Any("resp bytes", respBytes))
 						}
 						fmt.Println("Recording the testcase now.")
-						capture(context.Background(), factory.logger, t, parsedHTTPReq, parsedHttpRes, time.Now(), time.Now())
+						capture(context.Background(), factory.logger, factory.t, parsedHTTPReq, parsedHttpRes, time.Now(), time.Now())
 						lastEventType = -1
 					}
 				case <-time.After(60 * time.Second):
 					fmt.Println("This is the last event type", lastEventType)
 					// Closing the connection now.
-					
 
 					// case <- ctx.Dome():   // TODO: Add condition for this.
 					// 	return
@@ -190,7 +192,6 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		Noise: map[string][]string{},
 		// Mocks: mocks,
 	}
-	fmt.Println("This is the testcase that we are going to record", tc)
 	t <- tc
 	if err != nil {
 		utils.LogError(logger, err, "failed to record the ingress requests")
