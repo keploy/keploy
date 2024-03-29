@@ -636,7 +636,7 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
-		if r.config.Test.Coverage {
+		if r.config.Test.GoCoverage {
 			r.logger.Info("there is a opportunity to get the coverage here")
 			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 			output, err := coverCmd.Output()
