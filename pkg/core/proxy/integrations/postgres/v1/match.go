@@ -126,6 +126,10 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 						case mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && mock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && mock.Spec.PostgresResponses[requestIndex].AuthType == 10:
 							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
 							initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
+							err := mockDb.FlagMockAsUsed(&initMock)
+							if err != nil {
+								logger.Error("failed to flag mock as used", zap.Error(err))
+							}
 							return true, initMock.Spec.PostgresResponses, nil
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && mock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
 							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
@@ -185,6 +189,10 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 									Value: "Etc/UTC",
 								},
 							}
+							err := mockDb.FlagMockAsUsed(&initMock)
+							if err != nil {
+								logger.Error("failed to flag mock as used", zap.Error(err))
+							}
 							return true, initMock.Spec.PostgresResponses, nil
 						}
 
@@ -221,7 +229,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 
 			if !matched {
 				sorted = false
-				idx1, newMock := findPGStreamMatch(sortedTcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
+				idx1, newMock := findPGStreamMatch(tcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
 					matched = true
 					matchedMock = tcsMocks[idx1]
@@ -258,6 +266,14 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if !updated {
 						continue
 					}
+				} else {
+					err := mockDb.FlagMockAsUsed(matchedMock)
+					if err != nil {
+						logger.Error("failed to flag mock as used", zap.Error(err))
+					}
+				}
+				if err != nil {
+					logger.Error("failed to flag mock as used", zap.Error(err))
 				}
 				return true, matchedMock.Spec.PostgresResponses, nil
 			}

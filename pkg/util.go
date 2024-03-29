@@ -74,7 +74,6 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 		return nil, err
 	}
 	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
-	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 
