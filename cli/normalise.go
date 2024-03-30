@@ -27,7 +27,7 @@ func init() {
 }
 
 // Normalise retrieves the command to normalise Keploy
-func Normalise(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Normalise(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var normaliseCmd = &cobra.Command{
 		Use:     "normalise",
 		Short:   "Normalise Keploy",
@@ -35,8 +35,8 @@ func Normalise(ctx context.Context, logger *zap.Logger, conf *config.Config, ser
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			
+		RunE: func(_ *cobra.Command, _ []string) error {
+
 			svc, err := serviceFactory.GetService(ctx, "normalise")
 			if err != nil {
 				return err
