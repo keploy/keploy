@@ -29,6 +29,7 @@ test:
   delay: 5
   apiTimeout: 5
   coverage: false
+  goCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"
@@ -52,6 +53,7 @@ func SetDefaultConfig(cfgStr string) {
 const InternalConfig = `
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
+inDocker: false
 `
 
 var config = &Config{}
