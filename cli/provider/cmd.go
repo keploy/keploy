@@ -141,7 +141,6 @@ var RootExamples = `
 
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 
-
 type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
