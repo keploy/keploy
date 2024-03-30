@@ -22,7 +22,6 @@ type Config struct {
 	BypassRules     []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	KeployContainer string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork   string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	
 }
 
 type Record struct {

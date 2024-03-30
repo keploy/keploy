@@ -15,16 +15,15 @@ type color struct {
 }
 
 func NewColor(cfg zapcore.EncoderConfig, enableColor bool) (enc zapcore.Encoder) {
-    if enableColor {
-        return color{
-            EncoderConfig: &cfg,
-            Encoder:       zapcore.NewConsoleEncoder(cfg),
-        }
-    }
+	if enableColor {
+		return color{
+			EncoderConfig: &cfg,
+			Encoder:       zapcore.NewConsoleEncoder(cfg),
+		}
+	}
 	// fmt.Println("Color is disabled")
-    return zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
+	return zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
 }
-
 
 // EncodeEntry overrides ConsoleEncoder's EncodeEntry
 func (c color) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (buf *buffer.Buffer, err error) {
