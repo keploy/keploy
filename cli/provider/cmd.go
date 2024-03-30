@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -153,6 +154,15 @@ func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigura
 }
 
 func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
+	//sets the displayment of flag-related errors
+	cmd.SilenceErrors = true
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		color.Red(fmt.Sprintf("❌ error: %v", err))
+		fmt.Println()
+		return err
+	})
+
+	//add flags
 	var err error
 	switch cmd.Name() {
 	case "update":

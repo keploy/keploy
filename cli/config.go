@@ -27,7 +27,6 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-
 			isGenerate, err := cmd.Flags().GetBool("generate")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get generate flag")
