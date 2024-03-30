@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/utils"
 
@@ -73,115 +72,115 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 
 	if dataFrame.StreamEnded() {
 		defer srv.sic.ResetStream(dataFrame.StreamID)
-	}
+		grpcReq := srv.sic.FetchRequestForStream(id)
 
-	grpcReq := srv.sic.FetchRequestForStream(id)
+		// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
+		mock, err := FilterMocksBasedOnGrpcRequest(ctx, srv.logger, grpcReq, srv.mockDb)
+		if err != nil {
+			return fmt.Errorf("failed match mocks: %v", err)
+		}
+		if mock == nil {
+			utils.LogError(srv.logger, err, "failed to mock the output for unrecorded outgoing grpc call ")
+			return nil
+		}
 
-	// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
-	mock, err := FilterMocksBasedOnGrpcRequest(ctx, srv.logger, grpcReq, srv.mockDb)
-	if err != nil {
-		return fmt.Errorf("failed match mocks: %v", err)
-	}
-	if mock == nil {
-		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
-	}
+		grpcMockResp := mock.Spec.GRPCResp
 
-	grpcMockResp := mock.Spec.GRPCResp
+		// First, send the headers frame.
+		buf := new(bytes.Buffer)
+		encoder := hpack.NewEncoder(buf)
 
-	// First, send the headers frame.
-	buf := new(bytes.Buffer)
-	encoder := hpack.NewEncoder(buf)
+		// The pseudo headers should be written before ordinary ones.
+		for key, value := range grpcMockResp.Headers.PseudoHeaders {
+			err := encoder.WriteField(hpack.HeaderField{
+				Name:  key,
+				Value: value,
+			})
+			if err != nil {
+				utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
+				return err
+			}
+		}
+		for key, value := range grpcMockResp.Headers.OrdinaryHeaders {
+			err := encoder.WriteField(hpack.HeaderField{
+				Name:  key,
+				Value: value,
+			})
+			if err != nil {
+				utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
+				return err
+			}
+		}
 
-	// The pseudo headers should be written before ordinary ones.
-	for key, value := range grpcMockResp.Headers.PseudoHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
+		// The headers are prepared. Write the frame.
+		srv.logger.Info("Writing the first set of headers in a new HEADER frame.")
+		err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      id,
+			BlockFragment: buf.Bytes(),
+			EndStream:     false,
+			EndHeaders:    true,
 		})
 		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
+			utils.LogError(srv.logger, err, "could not write the first set of headers onto client")
 			return err
 		}
-	}
-	for key, value := range grpcMockResp.Headers.OrdinaryHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
+		var payload []byte
+		for _, mockBody := range grpcMockResp.Body {
+
+			tempPayload, err := createPayloadFromLengthPrefixedMessage(mockBody)
+			if err != nil {
+				srv.logger.Error("could not create grpc payload from mocks", zap.Error(err))
+				return err
+			}
+			payload = append(payload, tempPayload...)
+		}
+
+		// Write the DATA frame with the payload.
+		err = srv.framer.WriteData(id, false, payload)
+		if err != nil {
+			utils.LogError(srv.logger, err, "could not write the data frame onto the client")
+			return err
+		}
+
+		// Reset the buffer and start with a new encoding.
+		buf = new(bytes.Buffer)
+		encoder = hpack.NewEncoder(buf)
+
+		//Prepare the trailers.
+		//The pseudo headers should be written before ordinary ones.
+		for key, value := range grpcMockResp.Trailers.PseudoHeaders {
+			err := encoder.WriteField(hpack.HeaderField{
+				Name:  key,
+				Value: value,
+			})
+			if err != nil {
+				utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
+				return err
+			}
+		}
+		for key, value := range grpcMockResp.Trailers.OrdinaryHeaders {
+			err := encoder.WriteField(hpack.HeaderField{
+				Name:  key,
+				Value: value,
+			})
+			if err != nil {
+				utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
+				return err
+			}
+		}
+
+		// The trailer is prepared. Write the frame.
+		srv.logger.Info("Writing the trailers in a different HEADER frame")
+		err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      id,
+			BlockFragment: buf.Bytes(),
+			EndStream:     true,
+			EndHeaders:    true,
 		})
 		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
+			utils.LogError(srv.logger, err, "could not write the trailers onto client")
 			return err
 		}
-	}
-
-	// The headers are prepared. Write the frame.
-	srv.logger.Info("Writing the first set of headers in a new HEADER frame.")
-	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
-		StreamID:      id,
-		BlockFragment: buf.Bytes(),
-		EndStream:     false,
-		EndHeaders:    true,
-	})
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not write the first set of headers onto client")
-		return err
-	}
-	var payload []byte
-	for _, mockBody := range grpcMockResp.Body {
-
-		tempPayload, err := createPayloadFromLengthPrefixedMessage(mockBody)
-		if err != nil {
-			srv.logger.Error("could not create grpc payload from mocks", zap.Error(err))
-			return err
-		}
-		payload = append(payload, tempPayload...)
-	}
-
-	// Write the DATA frame with the payload.
-	err = srv.framer.WriteData(id, false, payload)
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not write the data frame onto the client")
-		return err
-	}
-
-	// Reset the buffer and start with a new encoding.
-	buf = new(bytes.Buffer)
-	encoder = hpack.NewEncoder(buf)
-
-	//Prepare the trailers.
-	//The pseudo headers should be written before ordinary ones.
-	for key, value := range grpcMockResp.Trailers.PseudoHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
-		})
-		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
-			return err
-		}
-	}
-	for key, value := range grpcMockResp.Trailers.OrdinaryHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
-		})
-		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
-			return err
-		}
-	}
-
-	// The trailer is prepared. Write the frame.
-	srv.logger.Info("Writing the trailers in a different HEADER frame")
-	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
-		StreamID:      id,
-		BlockFragment: buf.Bytes(),
-		EndStream:     true,
-		EndHeaders:    true,
-	})
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not write the trailers onto client")
-		return err
 	}
 
 	return nil
@@ -300,8 +299,8 @@ func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
 		default:
 			frame, err := srv.framer.ReadFrame()
 			if err != nil {
-				utils.LogError(srv.logger, err, "Failed to read frame")
-				return err
+				utils.LogError(srv.logger, err, "Failed to read frame , passing the request")
+				return nil
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()

@@ -69,15 +69,44 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq m
 					continue
 				}
 
-				//// Investigate the compression flag.
-				//if have.Body.CompressionFlag != grpcReq.Body.CompressionFlag {
-				//	continue
-				//}
-				//
-				//// Investigate the body.
-				//if have.Body.DecodedData != grpcReq.Body.DecodedData {
-				//	continue
-				//}
+				var reqBody []models.GrpcLengthPrefixedMessage
+				curr := grpcReq.BodyPref
+				if curr.Left == nil {
+					reqBody = append(reqBody, grpcReq.BodyPref.Body)
+				} else {
+					for curr.Left != nil {
+						reqBody = append(reqBody, curr.Body)
+						curr = curr.Left
+					}
+					// since we were backtracking , so reverse the array to get to original DATA stream
+					for i := 0; i < len(reqBody)/2; i++ {
+						j := len(reqBody) - i - 1
+						reqBody[i], reqBody[j] = reqBody[j], reqBody[i]
+					}
+				}
+
+				mockReqBody := have.Body
+				// Data frame matching
+				if len(mockReqBody) != len(reqBody) {
+					continue
+				} else {
+					loopStatus := 1
+					for i := 0; i < len(mockReqBody); i++ {
+						// Investigate the compression flag.
+						if mockReqBody[i].CompressionFlag != reqBody[i].CompressionFlag {
+							loopStatus = 0
+							break
+						}
+						// Investigate the body.
+						if mockReqBody[i].DecodedData != reqBody[i].DecodedData {
+							loopStatus = 0
+							break
+						}
+					}
+					if loopStatus == 0 {
+						continue
+					}
+				}
 
 				matchedMock = mock
 				isMatched = true
@@ -89,6 +118,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq m
 				if !isDeleted {
 					continue
 				}
+				fmt.Println("the mock was ==> ", matchedMock.Spec.GRPCResp.Body)
 				return matchedMock, nil
 			}
 			return nil, nil
