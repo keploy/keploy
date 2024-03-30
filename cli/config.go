@@ -24,10 +24,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		Short:   "manage keploy configuration file",
 		Example: "keploy config --generate --path /path/to/localdir",
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			if err := cmdConfigurator.ValidateFlags(ctx, cmd); err != nil {
-				return err
-			}
-			return nil
+			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			isGenerate, err := cmd.Flags().GetBool("generate")
