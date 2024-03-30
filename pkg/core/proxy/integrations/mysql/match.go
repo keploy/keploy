@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock) (*models.MySQLResponse, int, string, error) {
+func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest, configMocks, tcsMocks []*models.Mock, mockDb integrations.MockMemDb) (*models.MySQLResponse, int, string, error) {
 	//TODO: any reason to write the similar code twice?
 	allMocks := append([]*models.Mock(nil), configMocks...)
 	allMocks = append(allMocks, tcsMocks...)
@@ -53,6 +54,14 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		}
 		configMocks[matchedIndex].Spec.MySQLRequests = append(configMocks[matchedIndex].Spec.MySQLRequests[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
 		configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
+		if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
+			configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
+			err := mockDb.FlagMockAsUsed(configMocks[matchedIndex])
+			if err != nil {
+				return nil, -1, "", fmt.Errorf("failed to flag mock as used: %v", err.Error())
+			}
+			// deleteConfigMock
+		}
 		//h.SetConfigMocks(configMocks)
 	} else {
 		realIndex := matchedIndex - len(configMocks)
@@ -61,6 +70,14 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		}
 		tcsMocks[realIndex].Spec.MySQLRequests = append(tcsMocks[realIndex].Spec.MySQLRequests[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
 		tcsMocks[realIndex].Spec.MySQLResponses = append(tcsMocks[realIndex].Spec.MySQLResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
+		if len(tcsMocks[realIndex].Spec.MySQLResponses) == 0 {
+			tcsMocks = append(tcsMocks[:realIndex], tcsMocks[realIndex+1:]...)
+			err := mockDb.FlagMockAsUsed(tcsMocks[realIndex])
+			if err != nil {
+				return nil, -1, "", fmt.Errorf("failed to flag mock as used: %v", err.Error())
+			}
+			// deleteTcsMock
+		}
 		//h.SetTcsMocks(tcsMocks)
 	}
 

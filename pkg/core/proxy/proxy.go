@@ -142,33 +142,31 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		}
 	})
 
-	if models.GetMode() == models.MODE_TEST {
-		p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave in test mode if you have provided wrong domain name in your application code.")
-		// start the UDP DNS server
-		p.logger.Debug("Starting Udp Dns Server in Test mode...")
-		g.Go(func() error {
-			utils.Recover(p.logger)
-			errCh := make(chan error, 1)
-			go func(errCh chan error) {
-				err := p.startUDPDNSServer(ctx)
-				if err != nil {
-					errCh <- err
-				}
-			}(errCh)
+	// start the UDP DNS server
+	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
+	g.Go(func() error {
+		utils.Recover(p.logger)
+		errCh := make(chan error, 1)
+		go func(errCh chan error) {
+			err := p.startUDPDNSServer(ctx)
+			if err != nil {
+				errCh <- err
+			}
+		}(errCh)
 
-			select {
-			case <-ctx.Done():
-				err := p.UDPDNSServer.Shutdown()
-				if err != nil {
-					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-					return err
-				}
-				return nil
-			case err := <-errCh:
+		select {
+		case <-ctx.Done():
+			err := p.UDPDNSServer.Shutdown()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
 				return err
 			}
-		})
-	}
+			return nil
+		case err := <-errCh:
+			return err
+		}
+	})
+	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
 	return nil
@@ -195,8 +193,10 @@ func (p *Proxy) start(ctx context.Context) error {
 		p.logger.Info("proxy stopped...")
 	}(listener)
 
-	clientConnErrGrp, clientConnCtx := errgroup.WithContext(ctx)
+	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
+	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
+		clientConnCancel()
 		err := clientConnErrGrp.Wait()
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
@@ -233,9 +233,9 @@ func (p *Proxy) start(ctx context.Context) error {
 		// handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
-				utils.Recover(p.logger)
+				defer utils.Recover(p.logger)
 				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
 				}
 				return nil
@@ -256,7 +256,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
-	p.logger.Debug("New client connection", zap.Any("connectionID", clientConnID))
+	// dstConn stores conn with actual destination for the outgoing network call
+	var dstConn net.Conn
+
+	//Dialing for tls conn
+	destConnID := util.GetNextID()
 
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
@@ -296,11 +300,28 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
+	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
+	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 	defer func() {
+		parserCtxCancel()
+
 		err := srcConn.Close()
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to close the source connection")
 			return
+		}
+
+		if dstConn != nil {
+			err = dstConn.Close()
+			if err != nil {
+				// Use string matching as a last resort to check for the specific error
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					// Log other errors
+					utils.LogError(p.logger, err, "failed to close the destination connection")
+				}
+				return
+			}
 		}
 
 		err = parserErrGrp.Wait()
@@ -385,12 +406,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger: p.logger,
 	}
 
-	// dstConn stores conn with actual destination for the outgoing network call
-	var dstConn net.Conn
-
-	//Dialing for tls conn
-	destConnID := util.GetNextID()
-
 	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
 
 	dstCfg := &integrations.ConditionalDstCfg{
@@ -399,7 +414,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//make new connection to the destination server
 	if isTLS {
-		logger.Debug("", zap.Any("isTLS connection", isTLS))
+		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
@@ -408,7 +423,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
 			dialer := &net.Dialer{
-				Timeout: 1 * time.Second,
+				Timeout: 4 * time.Second,
 			}
 			dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
 			if err != nil {
@@ -439,6 +454,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	generic := true
+
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {
@@ -450,7 +466,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				}
 			} else {
 				err := parser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					utils.LogError(logger, err, "failed to mock the outgoing message")
 					return err
 				}
@@ -517,7 +533,7 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 		OutgoingOptions: opts,
 	})
 
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
@@ -534,7 +550,7 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
@@ -557,4 +573,13 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 	}
 
 	return nil
+}
+
+// GetConsumedMocks returns the consumed filtered mocks for a given app id
+func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
+	}
+	return m.(*MockManager).GetConsumedMocks(), nil
 }
