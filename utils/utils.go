@@ -645,4 +645,3 @@ func EnsureRmBeforeName(cmd string) string {
 
 	return strings.Join(parts, " ")
 }
-
