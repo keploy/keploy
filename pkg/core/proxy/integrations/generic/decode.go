@@ -3,6 +3,7 @@ package generic
 
 import (
 	"context"
+	"io"
 	"net"
 	"time"
 
@@ -111,6 +112,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
 		return err
 	}
 }

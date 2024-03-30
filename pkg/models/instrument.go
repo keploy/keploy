@@ -7,6 +7,7 @@ import (
 )
 
 type HookOptions struct {
+	Mode Mode
 }
 
 type OutgoingOptions struct {
@@ -23,9 +24,9 @@ type IncomingOptions struct {
 type SetupOptions struct {
 	Container     string
 	DockerNetwork string
+	DockerDelay   time.Duration
 }
 
 type RunOptions struct {
 	//IgnoreErrors bool
-	DockerDelay time.Duration
 }

@@ -22,7 +22,7 @@ type Client interface {
 
 	CreateNetwork(network string) error
 	MakeNetworkExternal(c *Compose) error
-	SetKeployNetwork(c *Compose) error
+	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
 }

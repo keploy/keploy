@@ -74,6 +74,12 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 				if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
 					configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
+					err = mockDb.FlagMockAsUsed(configMocks[matchedIndex])
+					if err != nil {
+						utils.LogError(logger, err, "Failed to flag mock as used")
+						errCh <- err
+						return
+					}
 				}
 				//h.SetConfigMocks(configMocks)
 				firstLoop = false
@@ -162,7 +168,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				}
 				//TODO: both in case of no match or some other error, we are receiving the error.
 				// Due to this, there will be no passthrough in case of no match.
-				matchedResponse, matchedIndex, _, err := matchRequestWithMock(ctx, mysqlRequest, configMocks, tcsMocks)
+				matchedResponse, matchedIndex, _, err := matchRequestWithMock(ctx, mysqlRequest, configMocks, tcsMocks, mockDb)
 				if err != nil {
 					utils.LogError(logger, err, "Failed to match request with mock")
 					errCh <- err

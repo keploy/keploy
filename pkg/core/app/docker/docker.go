@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	kDefaultTimeoutForDockerQuery = 1 * time.Minute
+	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
 type Impl struct {
@@ -38,7 +38,7 @@ func New(logger *zap.Logger) (Client, error) {
 	}
 	return &Impl{
 		APIClient:             dockerClient,
-		timeoutForDockerQuery: kDefaultTimeoutForDockerQuery,
+		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
 		logger:                logger,
 	}, nil
 }
@@ -458,13 +458,16 @@ func (idc *Impl) MakeNetworkExternal(c *Compose) error {
 
 // SetKeployNetwork adds the keploy-network network to the new docker compose file and copy rest of the contents from
 // existing user docker compose file
-func (idc *Impl) SetKeployNetwork(c *Compose) error {
+func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 	// Ensure that the top-level networks mapping exists.
 	if c.Networks.Content == nil {
 		c.Networks.Kind = yaml.MappingNode
 		c.Networks.Content = make([]*yaml.Node, 0)
 	}
-
+	networkInfo := &NetworkInfo{
+		Name:     "keploy-network",
+		External: true,
+	}
 	// Check if "keploy-network" already exists
 	exists := false
 	for i := 0; i < len(c.Networks.Content); i += 2 {
@@ -513,5 +516,5 @@ func (idc *Impl) SetKeployNetwork(c *Compose) error {
 			}
 		}
 	}
-	return nil
+	return networkInfo, nil
 }

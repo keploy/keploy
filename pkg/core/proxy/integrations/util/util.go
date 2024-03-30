@@ -31,12 +31,12 @@ func EncodeBase64(decoded []byte) string {
 
 // Functions related to fuzzy matching
 
-func AdaptiveK(length, kMin, kMax, N int) int {
+func AdaptiveK(length, min, max, N int) int {
 	k := length / N
-	if k < kMin {
-		return kMin
-	} else if k > kMax {
-		return kMax
+	if k < min {
+		return min
+	} else if k > max {
+		return max
 	}
 	return k
 }

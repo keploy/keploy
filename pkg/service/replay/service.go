@@ -15,6 +15,8 @@ type Instrumentation interface {
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
+	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
+	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 
@@ -39,6 +41,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error
 }
 
 type ReportDB interface {
@@ -50,7 +53,7 @@ type ReportDB interface {
 }
 
 type Telemetry interface {
-	TestSetRun(ctx context.Context, success int, failure int, testSet string, runStatus string)
-	TestRun(ctx context.Context, success int, failure int, testSets int, runStatus string)
-	MockTestRun(ctx context.Context, utilizedMocks int)
+	TestSetRun(success int, failure int, testSet string, runStatus string)
+	TestRun(success int, failure int, testSets int, runStatus string)
+	MockTestRun(utilizedMocks int)
 }
