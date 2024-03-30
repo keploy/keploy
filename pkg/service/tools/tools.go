@@ -289,10 +289,10 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 }
 
 // Normalise initiates the normalise process for normalising the test cases.
-func (t *Tools) Normalise(_ context.Context,) error {
-	path:= viper.GetString("path")
-	testSet:= viper.GetString("test-set")
-	testCases:= viper.GetString("test-cases")
+func (t *Tools) Normalise(_ context.Context) error {
+	path := viper.GetString("path")
+	testSet := viper.GetString("test-set")
+	testCases := viper.GetString("test-cases")
 	t.logger.Info("Test cases and Mock Path", zap.String("path", path))
 	testReportPath := filepath.Join(path, "testReports")
 
