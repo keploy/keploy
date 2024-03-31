@@ -89,10 +89,14 @@ func (r *replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(errMsg)
 	}
 
-	// BootReplay will start the hooks and proxy and return the testRunID and appID
-	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
+	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	if len(testSetIDs) == 0 {
+		errMsg := "No test-sets Identified in the Keploy folder"
+		return fmt.Errorf(errMsg)
+	}
+
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
+		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
 		if err == context.Canceled {
 			return err
@@ -100,9 +104,10 @@ func (r *replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	// BootReplay will start the hooks and proxy and return the testRunID and appID
+	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
+		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
 		utils.LogError(r.logger, err, stopReason)
 		if err == context.Canceled {
 			return err
