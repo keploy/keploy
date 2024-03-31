@@ -80,21 +80,26 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
 		return nil, err
 	}
-	files, err := dir.ReadDir(0)
+	tests, err := dir.ReadDir(0)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.Any("path", TestPath))
 		return nil, err
 	}
-	for _, j := range files {
-		if filepath.Ext(j.Name()) != ".yaml" || strings.Contains(j.Name(), "mocks") {
+	for _, testcase := range tests {
+		if filepath.Ext(testcase.Name()) != ".yaml" || strings.Contains(testcase.Name(), "mocks") {
 			continue
 		}
 
-		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
+		name := strings.TrimSuffix(testcase.Name(), filepath.Ext(testcase.Name()))
 		data, err := yaml.ReadFile(ctx, ts.logger, TestPath, name)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
+		}
+
+		if len(data) == 0 {
+			utils.LogError(ts.logger, err, "failed to run the testcase case: testcase is empty. continuing execution")
+			continue
 		}
 
 		var testCase *yaml.NetworkTrafficDoc
