@@ -43,18 +43,18 @@ var Examples = `
 Golang Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 2
 
-Java 
+Java
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -78,18 +78,18 @@ var ExampleOneClickInstall = `
 Golang Application
 	Record:
 	keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	keploy test -c "/path/to/user/app/binary" --delay 2
 
 Node Application
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	keploy test -c “npm start --prefix /path/to/node/app" --delay 2
 
-Java 
+Java
 	Record:
 	keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -264,7 +264,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			c.logger.Info("config file not found; proceeding with flags only")
+			c.logger.Info("config file not found; creating one and proceeding with flags for now.")
+			fmt.Println("This is the command", cmd.Name())
 		}
 	}
 	if err := viper.Unmarshal(c.cfg); err != nil {
