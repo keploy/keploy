@@ -91,7 +91,7 @@ func (r *replayer) Start(ctx context.Context) error {
 
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if len(testSetIDs) == 0 {
-		errMsg := "No test-sets Identified in the Keploy folder"
+		errMsg := "no test-sets Identified in the Keploy folder"
 		return fmt.Errorf(errMsg)
 	}
 
