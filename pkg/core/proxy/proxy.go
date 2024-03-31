@@ -392,13 +392,73 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
-	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err := util.ReadInitialBuf(parserCtx, p.logger, srcConn)
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to read the initial buffer")
-		return err
+	var wg sync.WaitGroup
+	wg.Add(2) // Two goroutines to wait for
+	initialBuf := []byte("")
+	var dstConn2 net.Conn
+	doneTls := false
+	isSmtp := false
+	var szSrc int
+	doneExchange := make(chan bool, 1)
+	if isTLS && dstURL == "smtp.gmail.com" {
+		isSmtp = true
+		doneTls = true
+		//Dialing for tls conn
+		destConnID := util.GetNextID()
+		logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
+		dstCfg := &integrations.ConditionalDstCfg{
+			Port: uint(destInfo.Port),
+		}
+		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
+		cfg := &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         dstURL,
+		}
+
+		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+
+		dialer := &net.Dialer{
+			Timeout: 1 * time.Second,
+		}
+		dstConn2, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
+		if err != nil {
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+			return err
+		}
+
+		dstCfg.TLSCfg = cfg
+		dstCfg.Addr = addr
+		go func() {
+			szSrc, initialBuf, err = transferData(srcConn, dstConn2, doneExchange)
+			if err != nil {
+				// Handle error within the goroutine
+			}
+			wg.Done()
+		}()
+		go func() {
+			transferDataReverse(srcConn, dstConn2, doneExchange)
+			wg.Done()
+		}()
+
+	} else {
+		//if not tls, then we will directly dial the destination server
+		doneExchange <- true
+	}
+	wg.Wait() // Block until both goroutines finish
+
+	if !doneTls {
+
+		// attempt to read conn until buffer is either filled or conn is closed
+		initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to read the initial buffer")
+			return err
+		}
 	}
 
+	if doneTls {
+		initialBuf = initialBuf[:szSrc]
+	}
 	//update the src connection to have the initial buffer
 	srcConn = &Conn{
 		Conn:   srcConn,
@@ -413,37 +473,39 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//make new connection to the destination server
-	if isTLS {
-		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
-		cfg := &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         dstURL,
-		}
-
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
-		if rule.Mode != models.MODE_TEST {
-			dialer := &net.Dialer{
-				Timeout: 4 * time.Second,
+	if !doneTls {
+		if isTLS {
+			logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
+			cfg := &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         dstURL,
 			}
-			dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
-				return err
-			}
-		}
 
-		dstCfg.TLSCfg = cfg
-		dstCfg.Addr = addr
-
-	} else {
-		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
-				return err
+			addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+			if rule.Mode != models.MODE_TEST {
+				dialer := &net.Dialer{
+					Timeout: 4 * time.Second,
+				}
+				dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
+				if err != nil {
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+					return err
+				}
 			}
+
+			dstCfg.TLSCfg = cfg
+			dstCfg.Addr = addr
+
+		} else {
+			if rule.Mode != models.MODE_TEST {
+				dstConn, err = net.Dial("tcp", dstAddr)
+				if err != nil {
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+					return err
+				}
+			}
+			dstCfg.Addr = dstAddr
 		}
-		dstCfg.Addr = dstAddr
 	}
 
 	// get the mock manager for the current app
@@ -478,11 +540,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
-				utils.LogError(logger, err, "failed to record the outgoing message")
-				return err
+			if isSmtp {
+				err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn2, rule.MC, rule.OutgoingOptions)
+				if err != nil {
+					utils.LogError(logger, err, "failed to record the outgoing message")
+					return err
+				}
+			} else {
+				err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+				if err != nil {
+					utils.LogError(logger, err, "failed to record the outgoing message")
+					return err
+				}
 			}
+
 		} else {
 			err := p.Integrations["generic"].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
@@ -559,6 +630,81 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 	//}
 
 	return nil
+}
+
+// Create a function to handle data transfer from srcConn to dstConn2
+func transferData(srcConn net.Conn, dstConn net.Conn, doneExchange chan bool) (int, []byte, error) {
+
+	// Define a buffer to read data from srcConn
+	buffer := make([]byte, 4096) // Adjust buffer size as needed
+	sz := 0
+	for {
+		//return after the exchange is done
+		select {
+		case <-doneExchange:
+			return sz, buffer, nil
+		default:
+			// Read data from srcConn
+			n, err := srcConn.Read(buffer)
+			sz = n
+			if err != nil {
+				// Handle read errors such as EOF
+				if err == io.EOF {
+					fmt.Println("Connection closed by client")
+					// doneExchange <- true
+					return sz, buffer, nil
+				}
+				return 0, nil, err
+			}
+			//print buffer message
+			fmt.Println("Src Buffer message:", string(buffer))
+			fmt.Println("-------------------------------------------------------------------")
+
+			// Write the read data to dstConn
+			_, err = dstConn.Write(buffer[:n])
+			if err != nil {
+				// Handle write errors
+				fmt.Println("Error writing to destination connection:", err)
+				return 0, nil, err
+			}
+		}
+
+	}
+}
+
+// Create a function to handle data transfer from dstConn2 to srcConn
+func transferDataReverse(srcConn net.Conn, dstConn net.Conn, doneExchange chan bool) {
+
+	// Define a buffer to read data from dstConn
+	buffer := make([]byte, 4096) // Adjust buffer size as needed
+
+	for {
+		// Read data from dstConn
+		n, err := dstConn.Read(buffer)
+
+		if err != nil {
+			// Handle read errors such as EOF
+			if err == io.EOF {
+				fmt.Println("Connection closed by server")
+			}
+			return
+		}
+		fmt.Println("Dst Buffer message:", string(buffer))
+		fmt.Println("-------------------------------------------------------------------")
+
+		// Write the read data to srcConn
+		_, err = srcConn.Write(buffer[:n])
+		if err != nil {
+			// Handle write errors
+			fmt.Println("Error writing to client connection:", err)
+			return
+		}
+		//check if there "Accepted" in buffer
+		if strings.Contains(string(buffer), "Accepted") {
+			doneExchange <- true
+			return
+		}
+	}
 }
 
 func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
