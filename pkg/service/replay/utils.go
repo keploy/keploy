@@ -19,6 +19,11 @@ type TestReportVerdict struct {
 	status bool
 }
 
+type Range struct {
+	Start int
+	End   int
+}
+
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
 	noise := globalNoise
 	for field, regexArr := range tsNoise["body"] {
