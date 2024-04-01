@@ -22,11 +22,10 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		Short:   "run the recorded testcases and execute assertions",
 		Example: `keploy test -c "/path/to/user/app" --delay 6`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd, cfg)
+			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-
-			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
+			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -55,7 +54,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		},
 	}
 
-	err := cmdConfigurator.AddFlags(testCmd, cfg)
+	err := cmdConfigurator.AddFlags(testCmd)
 	if err != nil {
 		utils.LogError(logger, err, "failed to add test flags")
 		return nil
