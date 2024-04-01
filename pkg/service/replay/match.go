@@ -592,7 +592,7 @@ func diffIndexRange(s1, s2 string) ([]Range, bool) {
 		maxLen = len(s2)
 	}
 
-	var startDiff int = -1
+	var startDiff = -1
 	for i := 0; i < maxLen; i++ {
 		char1, char2 := byte(0), byte(0)
 		if i < len(s1) {
