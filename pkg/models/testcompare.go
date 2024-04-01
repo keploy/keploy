@@ -16,7 +16,6 @@ type ReqResult struct {
 	ProtoMinor      IntResult         `json:"proto_minor" bson:"proto_minor" yaml:"proto_minor"`
 	HeaderResult    []HeaderResult    `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
 	BodyResult      BodyResult        `json:"body_result" bson:"body_result" yaml:"body_result"`
-	HostResult      StringResult      `json:"host_result" bson:"host_result" yaml:"host_result"`
 }
 
 type RespResult struct {
