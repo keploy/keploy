@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v2/utils/svc"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -376,7 +377,26 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := r.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+
+		cmdType := utils.FindDockerCmd(r.config.Command)
+
+		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+
+			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get the app ip")
+				break
+			}
+
+			testCase.HTTPReq.URL, err = replaceHostToIP(testCase.HTTPReq.URL, userIP)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
+				break
+			}
+			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
+		}
+		fmt.Println("HERE ITS", svc.GetTestUtilInstance())
+		resp, loopErr := svc.GetTestUtilInstance().SimulateRequest(runTestSetCtx, appID, testCase, testSetID, svc.SimOptions{APITimeout: r.config.Test.APITimeout, CmdType: cmdType})
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
@@ -541,35 +561,6 @@ func (r *replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 		return models.TestSetStatusFailed, fmt.Errorf("failed to convert string to test set status: %w", err)
 	}
 	return status, nil
-}
-
-func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
-	switch tc.Kind {
-	case models.HTTP:
-		r.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		cmdType := utils.FindDockerCmd(r.config.Command)
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
-			var err error
-
-			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the app ip")
-				return nil, err
-			}
-
-			tc.HTTPReq.URL, err = replaceHostToIP(tc.HTTPReq.URL, userIP)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
-			}
-			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
-		}
-		r.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, r.logger, r.config.Test.APITimeout)
-		r.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		r.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
-		return resp, err
-	}
-	return nil, nil
 }
 
 func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {

@@ -13,6 +13,7 @@ import (
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	testutils "go.keploy.io/server/v2/utils/svc"
 
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
@@ -87,6 +88,8 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, *n.cfg), nil
 		}
 		if cmd == "test" {
+			t := testutils.NewTestUtils(n.logger)
+			testutils.SetTestUtilInstance(t)
 			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, *n.cfg), nil
 		}
 		return nil, errors.New("invalid command")
