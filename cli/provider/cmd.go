@@ -303,6 +303,8 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
 
+		defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
+
 		if c.cfg.InDocker {
 			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {
