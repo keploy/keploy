@@ -523,13 +523,15 @@ func sprintDiffHeader(expect, actual map[string]string) string {
 		actValue := key + ": " + actual[key]
 		expValue = key + ": " + expValue
 		// Offset will be where the string start to unmatch
-		offset, _ := diffIndex(expValue, actValue)
+		offsets, _ := diffIndexRange(expValue, actValue)
 
 		// Color of the unmatch, can be changed
 		cE, cA := color.FgHiRed, color.FgHiGreen
 
-		expectAll += breakWithColor(expValue, &cE, offset)
-		actualAll += breakWithColor(actValue, &cA, offset)
+		expectAll += breakWithColor(expValue, &cE, offsets)
+
+		actualAll += breakWithColor(actValue, &cA, offsets)
+
 	}
 	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
 		return expectActualTable(expectAll, actualAll, "header", false) // Don't centerize
@@ -545,13 +547,17 @@ func sprintDiffHeader(expect, actual map[string]string) string {
 func sprintDiff(expect, actual, field string) string {
 
 	// Offset will be where the string start to unmatch
-	offset, _ := diffIndex(expect, actual)
-
+	offset, _ := diffIndexRange(expect, actual)
 	// Color of the unmatch, can be changed
 	cE, cA := color.FgHiRed, color.FgHiGreen
 
-	exp := breakWithColor(expect, &cE, offset)
-	act := breakWithColor(actual, &cA, offset)
+	var exp, act string
+
+	exp += breakWithColor(expect, &cE, offset)
+
+	act += breakWithColor(actual, &cA, offset)
+
+	// act := breakWithColor(actual, &cA, offset)
 	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
 		return expectActualTable(exp, act, field, false) // Don't centerize
 	}
@@ -577,27 +583,43 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 
 // Find the diff between two strings returning index where
 // the difference begin
-func diffIndex(s1, s2 string) (int, bool) {
+func diffIndexRange(s1, s2 string) ([]Range, bool) {
+	var ranges []Range
 	diff := false
-	i := -1
 
-	// Check if one string is smaller than another, if so theres a diff
-	if len(s1) < len(s2) {
-		i = len(s1)
-		diff = true
-	} else if len(s2) < len(s1) {
-		diff = true
-		i = len(s2)
+	maxLen := len(s1)
+	if len(s2) > maxLen {
+		maxLen = len(s2)
 	}
 
-	// Check for unmatched characters
-	for i := 0; i < len(s1) && i < len(s2); i++ {
-		if s1[i] != s2[i] {
-			return i, true
+	var startDiff int = -1
+	for i := 0; i < maxLen; i++ {
+		char1, char2 := byte(0), byte(0)
+		if i < len(s1) {
+			char1 = s1[i]
+		}
+		if i < len(s2) {
+			char2 = s2[i]
+		}
+
+		if char1 != char2 {
+			if startDiff == -1 {
+				startDiff = i
+			}
+			diff = true
+		} else {
+			if startDiff != -1 {
+				ranges = append(ranges, Range{Start: startDiff, End: i - 1})
+				startDiff = -1
+			}
 		}
 	}
 
-	return i, diff
+	if startDiff != -1 {
+		ranges = append(ranges, Range{Start: startDiff, End: maxLen - 1})
+	}
+
+	return ranges, diff
 }
 
 /* Will perform the calculation of the diffs, returning a string that
@@ -633,7 +655,6 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 	expect, actual := "", ""
 	diffLines := strings.Split(diffStr, "\n")
 	jsonPath := []string{} // Stack to keep track of nested paths
-
 	for i, line := range diffLines {
 		if len(line) > 0 {
 			noised := false
@@ -655,9 +676,11 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 				if strings.HasPrefix(currentPath, noisePath) {
 					line = " " + lineContent
 					if line[0] == '-' {
-						expect += breakWithColor(line, nil, 0)
+						line = " " + line[1:]
+						expect += breakWithColor(line, nil, []Range{})
 					} else if line[0] == '+' {
-						actual += breakWithColor(line, nil, 0)
+						line = " " + line[1:]
+						actual += breakWithColor(line, nil, []Range{})
 					}
 					noised = true
 					break
@@ -671,23 +694,34 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			// Process lines without noise
 			if line[0] == '-' {
 				c := color.FgRed
-				if i+1 < len(diffLines) && diffLines[i+1][0] == '+' {
-					offset, _ := diffIndex(lineContent, diffLines[i+1][1:])
-					expect += breakWithColor(line, &c, offset+1)
+				// Workaround to get the exact index where the diff begins
+				if i < len(diffLines)-1 && len(line) > 1 && diffLines[i+1] != "" && diffLines[i+1][0] == '+' {
+
+					/* As we want to get the exact difference where the line's
+					 * diff begin we must to, first, get the expect (this) and
+					 * the actual (next) line. Then we must to espace the first
+					 * char that is an "+" or "-" symbol so we end up having
+					 * just the contents of the line we want to compare */
+					offsets, _ := diffIndexRange(line[1:], diffLines[i+1][1:])
+					expect += breakWithColor(line, &c, offsets)
 				} else {
-					expect += breakWithColor(line, &c, 0)
+					// In the case where there isn't in fact an actual
+					// version to compare, it was just expect to have this
+					expect += breakWithColor(line, &c, []Range{{Start: 0, End: len(line) - 1}})
 				}
 			} else if line[0] == '+' {
 				c := color.FgGreen
-				if i > 0 && diffLines[i-1][0] == '-' {
-					offset, _ := diffIndex(lineContent, diffLines[i-1][1:])
-					actual += breakWithColor(line, &c, offset+1)
+				// Here we do the same thing as above, just inverted
+				if i > 0 && len(line) > 1 && diffLines[i-1] != "" && diffLines[i-1][0] == '-' {
+
+					offsets, _ := diffIndexRange(line[1:], diffLines[i-1][1:])
+					actual += breakWithColor(line, &c, offsets)
 				} else {
-					actual += breakWithColor(line, &c, 0)
+					actual += breakWithColor(line, &c, []Range{{Start: 0, End: len(line) - 1}})
 				}
 			} else {
-				expect += breakWithColor(line, nil, 0)
-				actual += breakWithColor(line, nil, 0)
+				expect += breakWithColor(line, nil, []Range{})
+				actual += breakWithColor(line, nil, []Range{})
 			}
 		}
 	}
@@ -696,42 +730,47 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 
 // Will colorize the strubg and do the job of break it if it pass MAX_LINE_LENGTH,
 // always respecting the reset of ascii colors before the break line to dont
-func breakWithColor(input string, c *color.Attribute, offset int) string {
-	var output []string
-	var paint func(a ...interface{}) string
-	colorize := false
-
+func breakWithColor(input string, c *color.Attribute, highlightRanges []Range) string {
+	paint := func(a ...interface{}) string { return "" }
 	if c != nil {
-		colorize = true
 		paint = color.New(*c).SprintFunc()
 	}
 
-	for i := 0; i < len(input); i += MAX_LINE_LENGTH {
-		end := i + MAX_LINE_LENGTH
+	var output strings.Builder
+	var isColorRange bool
+	lineLen := 0
 
-		if end > len(input) {
-			end = len(input)
+	for i, char := range input {
+		isColorRange = false // Reset for each character
+
+		// Determine if this character is within any of the color ranges
+		for _, r := range highlightRanges {
+			if i >= r.Start+1 && i < r.End+2 {
+				isColorRange = true
+				break
+			}
 		}
 
-		// This conditions joins if we are at line where the offset begins
-		if colorize && i+MAX_LINE_LENGTH > offset {
-			paintedStart := i
-			if paintedStart < offset {
-				paintedStart = offset
-			}
-
-			// Will basically concatenated the non-painted string with the
-			// painted
-			prePaint := input[i:paintedStart]           // Start at i ends at offset
-			postPaint := paint(input[paintedStart:end]) // Starts at offset (diff begins), goes til maxLength
-			substr := prePaint + postPaint + "\n"       // Concatenate
-			output = append(output, substr)
+		if isColorRange {
+			output.WriteString(paint(string(char)))
 		} else {
-			substr := input[i:end] + "\n"
-			output = append(output, substr)
+			output.WriteString(string(char))
+		}
+
+		// Increment line length, wrap line if necessary
+		lineLen++
+		if lineLen == MAX_LINE_LENGTH {
+			output.WriteString("\n")
+			lineLen = 0 // Reset line length after a newline
 		}
 	}
-	return strings.Join(output, "")
+
+	// Catch any case where the input does not end with a newline
+	if lineLen > 0 {
+		output.WriteString("\n")
+	}
+
+	return output.String()
 }
 
 // Will return a string in a two columns table where the left
