@@ -265,7 +265,6 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 				return errors.New(errMsg)
 			}
 			c.logger.Info("config file not found; creating one and proceeding with flags for now.")
-			fmt.Println("This is the command", cmd.Name())
 		}
 	}
 	if err := viper.Unmarshal(c.cfg); err != nil {

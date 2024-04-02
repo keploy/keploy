@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 type ServiceProvider struct {
@@ -82,6 +83,15 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return tools.NewTools(n.logger, tel), nil
 	// TODO: add case for mock
 	case "record", "test", "mock":
+		// Check if the config file exists on the path or not and if it does not, we create it.
+		if !utils.CheckFileExists(n.cfg.ConfigPath + "/keploy.yml") {
+			toolsService := tools.NewTools(n.logger, tel)
+			yamlData, err := yaml.Marshal(n.cfg)
+			if err != nil {
+				n.logger.Debug("failed to marshal the config")
+			}
+			toolsService.CreateConfig(ctx, n.cfg.ConfigPath+"/keploy.yml", string(yamlData))
+		}
 		commonServices := n.GetCommonServices(*n.cfg)
 		if cmd == "record" {
 			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, *n.cfg), nil
