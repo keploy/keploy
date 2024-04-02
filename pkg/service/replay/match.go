@@ -19,9 +19,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/k0kubun/pp/v3"
 	"github.com/olekukonko/tablewriter"
+	"github.com/tidwall/gjson"
 	"github.com/wI2L/jsondiff"
-	"github.com/yudai/gojsondiff"
-	"github.com/yudai/gojsondiff/formatter"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -626,31 +625,35 @@ func diffIndexRange(s1, s2 string) ([]Range, bool) {
  * minus or add symbol followed by the respective line.
  */
 func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
-	var diff = gojsondiff.New()
-	dObj, err := diff.Compare(json1, json2)
-	if err != nil {
-		return "", err
-	}
+	result1 := gjson.ParseBytes(json1)
+	result2 := gjson.ParseBytes(json2)
 
-	var jsonObject map[string]interface{}
-	err = json.Unmarshal([]byte(json1), &jsonObject)
-	if err != nil {
-		return "", err
-	}
+	var diffStrings []string
+	result1.ForEach(func(key, value gjson.Result) bool {
+		value2 := result2.Get(key.String())
+		if !value2.Exists() {
+			diffStrings = append(diffStrings, fmt.Sprintf("- \"%s\": %v", key, value))
+		} else if value.String() != value2.String() {
+			diffStrings = append(diffStrings, fmt.Sprintf("- \"%s\": %v", key, value))
+			diffStrings = append(diffStrings, fmt.Sprintf("+ \"%s\": %v", key, value2))
+		}
+		return true
+	})
 
-	diffString, _ := formatter.NewAsciiFormatter(jsonObject, formatter.AsciiFormatterConfig{
-		ShowArrayIndex: true,
-		Coloring:       false, // We will color our way
-	}).Format(dObj)
+	result2.ForEach(func(key, value gjson.Result) bool {
+		if !result1.Get(key.String()).Exists() {
+			diffStrings = append(diffStrings, fmt.Sprintf("+ \"%s\": %v", key, value))
+		}
+		return true
+	})
 
-	return diffString, nil
+	return strings.Join(diffStrings, "\n"), nil
 }
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
 func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
 	expect, actual := "", ""
-
 	diffLines := strings.Split(diffStr, "\n")
 	for i, line := range diffLines {
 		if len(line) > 0 {
@@ -674,10 +677,8 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			if noised {
 				continue
 			}
-
 			if line[0] == '-' {
 				c := color.FgRed
-				// fmt.Println(line, "line")
 				// Workaround to get the exact index where the diff begins
 				if diffLines[i+1][0] == '+' {
 
@@ -699,11 +700,7 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 				// Here we do the same thing as above, just inverted
 				if diffLines[i-1][0] == '-' {
 					offsets, _ := diffIndexRange(line[1:], diffLines[i-1][1:])
-					// for _, offset := range offset {
-					actual = breakWithColor(line, &c, offsets)
-					// }
-					// actual += breakWithColor(line, &c, offset+1)
-					// fmt.Println(offset, diffLines, "diffLines+")
+					actual += breakWithColor(line, &c, offsets)
 				} else {
 					actual += breakWithColor(line, &c, []Range{})
 				}
