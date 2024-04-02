@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/araddon/dateparse"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -60,8 +59,13 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 // IsTime verifies whether a given string represents a valid date or not.
 func IsTime(stringDate string) bool {
 	s := strings.TrimSpace(stringDate)
-	_, err := dateparse.ParseAny(s)
-	return err == nil
+	for _, dateFormat := range dateFormats {
+		_, err := time.Parse(dateFormat, s)
+		if err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
@@ -209,3 +213,27 @@ func NewID(IDs []string, identifier string) string {
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
 }
+
+var (
+	dateFormats = []string{
+		time.Layout,
+		time.ANSIC,
+		time.UnixDate,
+		time.RubyDate,
+		time.RFC822,
+		time.RFC822Z,
+		time.RFC850,
+		time.RFC1123,
+		time.RFC1123Z,
+		time.RFC3339,
+		time.RFC3339Nano,
+		time.Kitchen,
+		time.Stamp,
+		time.StampMilli,
+		time.StampMicro,
+		time.StampNano,
+		time.DateTime,
+		time.DateOnly,
+		time.TimeOnly,
+	}
+)

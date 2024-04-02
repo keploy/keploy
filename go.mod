@@ -12,7 +12,7 @@ require (
 	github.com/docker/docker v24.0.4+incompatible
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
-	github.com/fatih/color v1.15.0
+	github.com/fatih/color v1.16.0
 	github.com/k0kubun/pp/v3 v3.2.0
 	github.com/miekg/dns v1.1.55
 	github.com/moby/term v0.5.0 // indirect
@@ -47,28 +47,22 @@ require (
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
-	github.com/onsi/ginkgo v1.16.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.1.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
-	github.com/sergi/go-diff v1.3.1 // indirect
 	github.com/sosodev/duration v1.2.0 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.11.0 // indirect
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/tidwall/gjson v1.17.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/urfave/cli/v2 v2.27.1 // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
-	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
-	github.com/yudai/pp v2.0.1+incompatible // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
-	golang.org/x/term v0.18.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20230601164746-7562a1006961 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
@@ -116,19 +110,19 @@ require (
 	github.com/getsentry/sentry-go v0.17.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/spf13/viper v1.18.2
+	github.com/tidwall/gjson v1.17.1
 	github.com/vektah/gqlparser/v2 v2.5.11
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
-	github.com/yudai/gojsondiff v1.0.0
 	golang.org/x/sync v0.6.0
+	golang.org/x/term v0.18.0
 	sigs.k8s.io/kustomize/kyaml v0.16.0
 )
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
-	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/aymanbagabas/go-osc52 v1.0.3 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/dlclark/regexp2 v1.4.0 // indirect
