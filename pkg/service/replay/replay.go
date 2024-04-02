@@ -17,7 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
-	"go.keploy.io/server/v2/utils/svc"
+	// "go.keploy.io/server/v2/utils/svc"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -26,6 +26,22 @@ var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
 var totalTestFailed int
+
+// emulator contains the struct instance that implements RequestEmulator interface. This is done for
+// attaching the objects dynamically as plugins.
+var emulator RequestEmulator
+
+func SetTestUtilInstance(instance RequestEmulator) {
+	fmt.Println("Setting test utils")
+	fmt.Printf("Instance: %v\n", instance)
+	emulator = instance
+}
+
+// func GetTestUtilInstance() RequestEmulator {
+// 	fmt.Println("Getting test utils")
+// 	fmt.Printf("Instance: %v\n", emulator)
+// 	return emulator
+// }
 
 type replayer struct {
 	logger          *zap.Logger
@@ -38,6 +54,11 @@ type replayer struct {
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
+	// set the request emulator for simulating test case requests, if not set
+	if emulator == nil {
+		SetTestUtilInstance(NewTestUtils(config.Test.APITimeout, logger))
+	}
+
 	return &replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -395,8 +416,8 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
 		}
-		fmt.Println("HERE ITS", svc.GetTestUtilInstance())
-		resp, loopErr := svc.GetTestUtilInstance().SimulateRequest(runTestSetCtx, appID, testCase, testSetID, svc.SimOptions{APITimeout: r.config.Test.APITimeout, CmdType: cmdType})
+		// fmt.Println("HERE ITS", svc.GetTestUtilInstance())
+		resp, loopErr := emulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
