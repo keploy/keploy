@@ -225,7 +225,9 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				}
 
 				event.TimestampNano += getRealTimeOffset()
+				if c.connections[event.ConnID] != nil {
 				c.connections[event.ConnID].eventChannel.CloseChan <- event
+				}
 				c.GetOrCreate(event.ConnID).AddCloseEvent(event)
 			}
 		}()

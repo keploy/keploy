@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+
 	// "text/template/parse"
 	"time"
 
@@ -25,6 +26,9 @@ type Factory struct {
 	mutex               *sync.RWMutex
 	logger              *zap.Logger
 	t                   chan *models.TestCase
+	mu                  sync.Mutex
+	workers             int
+	connectionQueue     chan ID
 }
 
 // NewFactory creates a new instance of the factory.
@@ -35,6 +39,8 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger, t chan *m
 		inactivityThreshold: inactivityThreshold,
 		logger:              logger,
 		t:                   t,
+		workers:             10,
+		connectionQueue:     make(chan ID, 100),
 	}
 }
 
@@ -89,7 +95,18 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 	tracker, ok := factory.connections[connectionID]
 	if !ok {
 		factory.connections[connectionID] = NewTracker(connectionID, factory.logger)
+		factory.connectionQueue <- connectionID
+		if factory.workers < 0 {
+			fmt.Println("waiting for the worker to be free", factory.workers)
+			time.Sleep(2 * time.Second)
+		}
 		go func() {
+			connectionID := <-factory.connectionQueue
+			factory.mu.Lock()
+			factory.workers--
+			factory.mu.Unlock()
+			close := false
+			// timeout := time.After(5 * time.Second)
 			var lastEventType TrafficDirectionEnum // need a value for this variable
 			var reqBytes, respBytes []byte
 			lastEventType = -1
@@ -113,8 +130,9 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 					lastEventType = event.Direction
 
 				case <-factory.connections[connectionID].eventChannel.CloseChan:
-					break
+					close = true
 				case <-time.After(2 * time.Second):
+					fmt.Println("Processing after 2 seconds", lastEventType)
 					if lastEventType == EgressTraffic {
 						// We expect the response to be completed in the 2 sec
 						parsedHTTPReq, err := pkg.ParseHTTPRequest(reqBytes)
@@ -125,12 +143,29 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 						if err != nil {
 							factory.logger.Error("failed to parse the http response from byte array", zap.Any("resp bytes", respBytes))
 						}
-						capture(context.Background(), factory.logger, factory. t, parsedHTTPReq, parsedHttpRes, time.Now(), time.Now())
+						factory.mu.Lock()
+						// fmt.Println("This is the request and the response", string(reqBytes), string(respBytes))
+						capture(context.Background(), factory.logger, factory.t, parsedHTTPReq, parsedHttpRes, time.Now(), time.Now())
+						factory.mu.Unlock()
 						lastEventType = -1
 					}
-				case <-time.After(60 * time.Second):
+					fmt.Println("This is the value of close", close)
+					if close {
+						fmt.Println("Closing the connection")
+						factory.mu.Lock()
+						factory.workers++
+						factory.mu.Unlock()
+						fmt.Println("This is the value of workers", factory.workers)
+						return
+					}
+				case <-time.After(3 * time.Second):
 					fmt.Println("This is the last event type", lastEventType)
-					break
+					fmt.Println("We are now exiting the loop")
+					factory.mu.Lock()
+					factory.workers++
+					factory.mu.Unlock()
+					fmt.Println("This is the value of workers after 3 seconds", factory.workers)
+					return
 					// case <- ctx.Dome():   // TODO: Add condition for this.
 					// 	return
 				}
@@ -142,6 +177,7 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 }
 
 func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time) {
+	fmt.Println("capturing the testcase now")
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http request body")
