@@ -49,7 +49,6 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		utils.LogError(logger, err, "failed to add record flags")
 		return nil
 	}
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
+
 	return cmd
 }

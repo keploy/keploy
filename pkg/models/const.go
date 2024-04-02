@@ -1,6 +1,8 @@
 package models
 
 import (
+	"time"
+
 	"github.com/fatih/color"
 	"github.com/k0kubun/pp/v3"
 )
@@ -21,6 +23,8 @@ var (
 )
 
 var orangeColorSGR = []color.Attribute{38, 5, 208}
+
+var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
 var HighlightString = color.New(orangeColorSGR...).SprintFunc()
 var HighlightPassingString = color.New(color.FgGreen).SprintFunc()

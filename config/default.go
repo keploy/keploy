@@ -28,6 +28,7 @@ test:
   delay: 5
   apiTimeout: 5
   coverage: false
+  goCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"
