@@ -548,7 +548,7 @@ func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models
 	case models.HTTP:
 		r.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
 		cmdType := utils.FindDockerCmd(r.config.Command)
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+		if cmdType == utils.DockerRun || cmdType == utils.DockerStart || cmdType == utils.DockerCompose {
 			var err error
 
 			userIP, err := r.instrumentation.GetAppIP(ctx, appID)

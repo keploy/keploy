@@ -25,6 +25,8 @@ type Client interface {
 	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
+
+	IsContainerRunning(containerName string) (bool, error)
 }
 
 type NetworkInfo struct {

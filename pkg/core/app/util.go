@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -84,4 +85,17 @@ func getInode(pid int) (uint64, error) {
 		return 0, fmt.Errorf("failed to get the inode of the process")
 	}
 	return i, nil
+}
+
+func isAttachMode(command string) bool {
+	args := strings.Fields(command)
+	flags := []string{"-a", "--attach", "-i", "--interactive"}
+
+	for _, arg := range args {
+		if slices.Contains(flags, arg) {
+			return true
+		}
+	}
+
+	return false
 }

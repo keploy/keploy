@@ -352,7 +352,8 @@ func FindDockerCmd(cmd string) CmdType {
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
 	// Define patterns for Docker and Docker Compose
-	dockerPatterns := []string{"docker", "sudo docker"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start"}
 	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
 
 	// Check for Docker Compose command patterns and file extensions
@@ -361,10 +362,16 @@ func FindDockerCmd(cmd string) CmdType {
 			return DockerCompose
 		}
 	}
-	// Check for Docker command patterns
-	for _, pattern := range dockerPatterns {
+	// Check for Docker start command patterns
+	for _, pattern := range dockerStartPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
-			return Docker
+			return DockerStart
+		}
+	}
+	// Check for Docker run command patterns
+	for _, pattern := range dockerRunPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerRun
 		}
 	}
 	return Native
@@ -374,7 +381,8 @@ type CmdType string
 
 // CmdType constants
 const (
-	Docker        CmdType = "docker"
+	DockerRun     CmdType = "docker-run"
+	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
 	Native        CmdType = "native"
 )

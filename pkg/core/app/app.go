@@ -66,8 +66,13 @@ func (a *App) Setup(_ context.Context) error {
 		return err
 	}
 	a.docker = d
+
+	if a.kind == utils.DockerStart && !isAttachMode(a.cmd) {
+		return fmt.Errorf("docker start require --attach/-a or --interactive/-i flag")
+	}
+
 	switch a.kind {
-	case utils.Docker:
+	case utils.DockerRun, utils.DockerStart:
 		err := a.SetupDocker()
 		if err != nil {
 			return err
@@ -93,21 +98,33 @@ func (a *App) ContainerIPv4Addr() string {
 
 func (a *App) SetupDocker() error {
 	var err error
-	cont, net, err := parseDockerCmd(a.cmd)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
-		return err
-	}
-	if a.container == "" {
-		a.container = cont
-	} else if a.container != cont {
-		a.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", a.container, cont))
-	}
 
-	if a.containerNetwork == "" {
-		a.containerNetwork = net
-	} else if a.containerNetwork != net {
-		a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
+	if a.kind == utils.DockerRun {
+		cont, net, err := parseDockerCmd(a.cmd)
+
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
+			return err
+		}
+		if a.container == "" {
+			a.container = cont
+		} else if a.container != cont {
+			a.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", a.container, cont))
+		}
+
+		if a.containerNetwork == "" {
+			a.containerNetwork = net
+		} else if a.containerNetwork != net {
+			a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
+		}
+	} else {
+		running, err := a.docker.IsContainerRunning(a.container)
+		if err != nil {
+			return err
+		}
+		if running {
+			return fmt.Errorf("docker container is already in running state.")
+		}
 	}
 
 	//injecting appNetwork to keploy.
@@ -414,7 +431,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
 
-	if a.kind == utils.DockerCompose || a.kind == utils.Docker {
+	if a.kind == utils.DockerCompose || a.kind == utils.DockerRun || a.kind == utils.DockerStart {
 		return a.runDocker(ctx)
 	}
 	return a.run(ctx)
@@ -425,7 +442,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
 	username := os.Getenv("SUDO_USER")
 
-	if utils.FindDockerCmd(a.cmd) == utils.Docker {
+	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 	}
 
