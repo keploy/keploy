@@ -80,7 +80,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	isDocker := false
 	appKind := a.Kind(ctx)
 	//check if the app is docker/docker-compose or native
-	if appKind == utils.DockerRun || appKind == utils.DockerStart ||appKind == utils.DockerCompose {
+	if appKind == utils.DockerRun || appKind == utils.DockerStart || appKind == utils.DockerCompose {
 		isDocker = true
 	}
 
