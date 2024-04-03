@@ -265,6 +265,49 @@ func Recover(logger *zap.Logger) {
 	}
 }
 
+// GenerateGithubActions generates a GitHub Actions workflow file for Keploy
+func GenerateGithubActions(logger *zap.Logger, appCmd string) {
+	// Determine the path based on the alias "keploy"
+	logger.Debug("Generating GitHub Actions workflow file")
+	// Define the content of the GitHub Actions workflow file
+	actionsFileContent := `name: Keploy
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, reopened, synchronize]
+jobs:
+  e2e-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Test-Report
+        uses: keploy/testgpt@main
+        with:
+          working-directory: ./
+          keploy-path: ./
+          command: ` + appCmd + `
+`
+
+	// Define the file path where the GitHub Actions workflow file will be saved
+	filePath := "/githubactions/keploy.yml"
+
+	//create the file path
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		logger.Error("Error creating directory for GitHub Actions workflow file", zap.Error(err))
+		return
+	}
+	// Write the content to the file
+	if err := os.WriteFile(filePath, []byte(actionsFileContent), 0644); err != nil {
+		logger.Error("Error writing GitHub Actions workflow file", zap.Error(err))
+		return
+	}
+
+	logger.Info("GitHub Actions workflow file generated successfully", zap.String("path", filePath))
+}
+
 // GetLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
 func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRelease, error) {
 	// GitHub repository details
@@ -435,7 +478,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	)
 
 	cmd.Cancel = func() error {
-		return InterruptProcessTree(cmd, logger, cmd.Process.Pid, syscall.SIGINT)
+		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
 	}
 
 	cmd.Stdout = os.Stdout
@@ -490,7 +533,7 @@ func SentryInit(logger *zap.Logger, dsn string) {
 //}
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
-func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal) error {
+func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
