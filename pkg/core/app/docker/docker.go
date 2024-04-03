@@ -1,86 +1,82 @@
+// Package docker provides functionality for working with Docker containers.
 package docker
 
 import (
 	"context"
 	"fmt"
-
 	"os"
 	"path/filepath"
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
 	"github.com/docker/docker/api/types/network"
-
-	"go.keploy.io/server/pkg/clients"
 
 	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
 )
 
 const (
-	kDefaultTimeoutForDockerQuery = 1 * time.Minute
+	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
-type internalDockerClient struct {
+type Impl struct {
 	nativeDockerClient.APIClient
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
 	containerID           string
 }
 
-func NewInternalDockerClient(logger *zap.Logger) (clients.InternalDockerClient, error) {
+func New(logger *zap.Logger) (Client, error) {
 	dockerClient, err := nativeDockerClient.NewClientWithOpts(nativeDockerClient.FromEnv,
 		nativeDockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, err
 	}
-	return &internalDockerClient{
+	return &Impl{
 		APIClient:             dockerClient,
-		timeoutForDockerQuery: kDefaultTimeoutForDockerQuery,
+		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
 		logger:                logger,
 	}, nil
 }
 
-// Getter function for containerID
-func (idc *internalDockerClient) GetContainerID() string {
+// GetContainerID is a Getter function for containerID
+func (idc *Impl) GetContainerID() string {
 	return idc.containerID
 }
 
-// Setter function for containerID
-func (idc *internalDockerClient) SetContainerID(containerID string) {
+// SetContainerID is a Setter function for containerID
+func (idc *Impl) SetContainerID(containerID string) {
 	idc.containerID = containerID
 }
 
 // ExtractNetworksForContainer returns the list of all the networks that the container is a part of.
 // Note that if a user did not explicitly attach the container to a network, the Docker daemon attaches it
 // to a network called "bridge".
-func (idc *internalDockerClient) ExtractNetworksForContainer(containerName string) (map[string]*network.EndpointSettings, error) {
+func (idc *Impl) ExtractNetworksForContainer(containerName string) (map[string]*network.EndpointSettings, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
 	containerJSON, err := idc.ContainerInspect(ctx, containerName)
 	if err != nil {
-		idc.logger.Error("Could not inspect container via the Docker API", zap.Error(err),
-			zap.Any("container_name", containerName))
+		utils.LogError(idc.logger, err, "couldn't inspect container via the Docker API", zap.String("containerName", containerName))
 		return nil, err
 	}
 
 	if settings := containerJSON.NetworkSettings; settings != nil {
 		return settings.Networks, nil
-	} else {
-		// Docker attaches the container to "bridge" network by default.
-		// If the network list is empty, the docker daemon is possibly misbehaving,
-		// or the container is in a bad state.
-		idc.logger.Error("The network list for the given container is empty. This is unexpected.",
-			zap.Any("container_name", containerName))
-		return nil, fmt.Errorf("the container is not attached to any network")
 	}
+	// Docker attaches the container to "bridge" network by default.
+	// If the network list is empty, the docker daemon is possibly misbehaving,
+	// or the container is in a bad state.
+	utils.LogError(idc.logger, nil, "The network list for the given container is empty. This is unexpected.", zap.String("containerName", containerName))
+	return nil, fmt.Errorf("the container is not attached to any network")
 }
 
-func (idc *internalDockerClient) ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error {
+func (idc *Impl) ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error {
 	if settings == nil {
 		return fmt.Errorf("provided network settings is empty")
 	}
@@ -109,7 +105,7 @@ func (idc *internalDockerClient) ConnectContainerToNetworks(containerName string
 	return nil
 }
 
-func (idc *internalDockerClient) ConnectContainerToNetworksByNames(containerName string, networkNames []string) error {
+func (idc *Impl) AttachNetwork(containerName string, networkNames []string) error {
 	if len(networkNames) == 0 {
 		return fmt.Errorf("provided network names list is empty")
 	}
@@ -139,8 +135,8 @@ func (idc *internalDockerClient) ConnectContainerToNetworksByNames(containerName
 	return nil
 }
 
-// Stop and Remove the docker container
-func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
+// StopAndRemoveDockerContainer will Stop and Remove the docker container
+func (idc *Impl) StopAndRemoveDockerContainer() error {
 	dockerClient := idc
 	containerID := idc.containerID
 
@@ -172,7 +168,7 @@ func (idc *internalDockerClient) StopAndRemoveDockerContainer() error {
 }
 
 // NetworkExists checks if the given network exists locally or not
-func (idc *internalDockerClient) NetworkExists(networkName string) (bool, error) {
+func (idc *Impl) NetworkExists(networkName string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
@@ -192,8 +188,8 @@ func (idc *internalDockerClient) NetworkExists(networkName string) (bool, error)
 	return false, nil
 }
 
-// CreateCustomNetwork creates a custom docker network of type bridge.
-func (idc *internalDockerClient) CreateCustomNetwork(networkName string) error {
+// CreateNetwork creates a custom docker network of type bridge.
+func (idc *Impl) CreateNetwork(networkName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
@@ -214,21 +210,38 @@ type Compose struct {
 	Secrets  yaml.Node `yaml:"secrets,omitempty"`
 }
 
-// CheckBindMounts returns information about whether bind mounts if they are being used contain relative file names or not
-func (idc *internalDockerClient) CheckBindMounts(filePath string) bool {
+func (idc *Impl) ReadComposeFile(filePath string) (*Compose, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		idc.logger.Error("error reading file", zap.Any("filePath", filePath), zap.Error(err))
-		return false
+		return nil, err
 	}
 
 	var compose Compose
 	err = yaml.Unmarshal(data, &compose)
 	if err != nil {
-		idc.logger.Error("error unmarshalling YAML into compose struct", zap.Error(err))
-		return false
+		return nil, err
 	}
 
+	return &compose, nil
+}
+
+func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
+	data, err := yaml.Marshal(compose)
+	if err != nil {
+		return err
+	}
+
+	// write data to file
+
+	err = os.WriteFile(path, data, 0644)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// HasRelativePath returns information about whether bind mounts if they are being used contain relative file names or not
+func (idc *Impl) HasRelativePath(compose *Compose) bool {
 	if compose.Services.Content == nil {
 		return false
 	}
@@ -259,26 +272,13 @@ func (idc *internalDockerClient) CheckBindMounts(filePath string) bool {
 
 }
 
-// CheckNetworkInfo returns information about network name and also about whether the network is external or not in a docker-compose file.
-func (idc *internalDockerClient) CheckNetworkInfo(filePath string) (bool, bool, string) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		idc.logger.Error("error reading file", zap.Any("filePath", filePath), zap.Error(err))
-		return false, false, ""
-	}
-
-	var compose Compose
-	err = yaml.Unmarshal(data, &compose)
-	if err != nil {
-		idc.logger.Error("error unmarshalling YAML into compose struct", zap.Error(err))
-		return false, false, ""
-	}
-
+// GetNetworkInfo CheckNetworkInfo returns information about network name and also about whether the network is external or not in a docker-compose file.
+func (idc *Impl) GetNetworkInfo(compose *Compose) *NetworkInfo {
 	if compose.Networks.Content == nil {
-		return false, false, ""
+		return nil
 	}
 
-	var defaultNetworkName string
+	var defaultNetwork string
 
 	for i := 0; i < len(compose.Networks.Content); i += 2 {
 		if i+1 >= len(compose.Networks.Content) {
@@ -287,8 +287,8 @@ func (idc *internalDockerClient) CheckNetworkInfo(filePath string) (bool, bool, 
 		networkKeyNode := compose.Networks.Content[i]
 		networkValueNode := compose.Networks.Content[i+1]
 
-		if defaultNetworkName == "" {
-			defaultNetworkName = networkKeyNode.Value
+		if defaultNetwork == "" {
+			defaultNetwork = networkKeyNode.Value
 		}
 
 		isExternal := false
@@ -323,34 +323,35 @@ func (idc *internalDockerClient) CheckNetworkInfo(filePath string) (bool, bool, 
 		}
 
 		if isExternal {
+			n := &NetworkInfo{External: true, Name: networkKeyNode.Value}
 			if externalName != "" {
-				return true, true, externalName
+				n.Name = externalName
 			}
-			return true, true, networkKeyNode.Value
+			return n
 		}
 	}
 
-	if defaultNetworkName != "" {
-		return true, false, defaultNetworkName
+	if defaultNetwork != "" {
+		return &NetworkInfo{External: false, Name: defaultNetwork}
 	}
 
-	return false, false, ""
+	return nil
 }
 
-// Inspect Keploy docker container to get bind mount for current directory
-func (idc *internalDockerClient) GetHostWorkingDirectory() (string, error) {
+// GetHostWorkingDirectory Inspects Keploy docker container to get bind mount for current directory
+func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
 	curDir, err := os.Getwd()
 	if err != nil {
-		idc.logger.Error("failed to get current working directory", zap.Error(err))
+		utils.LogError(idc.logger, err, "failed to get current working directory")
 		return "", err
 	}
 
 	container, err := idc.ContainerInspect(ctx, "keploy-v2")
 	if err != nil {
-		idc.logger.Error("error inspecting keploy-v2 container", zap.Error(err))
+		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")
 		return "", err
 	}
 	containerMounts := container.Mounts
@@ -364,34 +365,23 @@ func (idc *internalDockerClient) GetHostWorkingDirectory() (string, error) {
 	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
 }
 
-// ReplaceRelativePaths replaces relative paths in bind mounts with absolute paths
-func (idc *internalDockerClient) ReplaceRelativePaths(dockerComposefilePath, newComposeFile string) error {
-	data, err := os.ReadFile(dockerComposefilePath)
-	if err != nil {
-		return err
-	}
-
-	var compose Compose
-	err = yaml.Unmarshal(data, &compose)
-	if err != nil {
-		return err
-	}
-
+// ForceAbsolutePath replaces relative paths in bind mounts with absolute paths
+func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
 	hostWorkingDirectory, err := idc.GetHostWorkingDirectory()
 	if err != nil {
 		return err
 	}
 
-	dockerComposeContext, err := filepath.Abs(filepath.Join(hostWorkingDirectory, dockerComposefilePath))
+	dockerComposeContext, err := filepath.Abs(filepath.Join(hostWorkingDirectory, basePath))
 	if err != nil {
-		idc.logger.Error("error getting absolute path for docker compose file", zap.Error(err))
+		utils.LogError(idc.logger, err, "error getting absolute path for docker compose file")
 		return err
 	}
 	dockerComposeContext = filepath.Dir(dockerComposeContext)
 	idc.logger.Debug("docker compose file location in host filesystem", zap.Any("dockerComposeContext", dockerComposeContext))
 
 	// Loop through all services in compose file
-	for _, service := range compose.Services.Content {
+	for _, service := range c.Services.Content {
 
 		for i, item := range service.Content {
 
@@ -419,42 +409,19 @@ func (idc *internalDockerClient) ReplaceRelativePaths(dockerComposefilePath, new
 			}
 		}
 	}
-
-	newData, err := yaml.Marshal(&compose)
-	if err != nil {
-		return err
-	}
-
-	newFilePath := filepath.Join(filepath.Dir(dockerComposefilePath), newComposeFile)
-	err = os.WriteFile(newFilePath, newData, 0644)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
 // MakeNetworkExternal makes the existing network of the user docker compose file external and save it to a new file
-func (idc *internalDockerClient) MakeNetworkExternal(dockerComposefilePath, newComposeFile string) error {
-	data, err := os.ReadFile(dockerComposefilePath)
-	if err != nil {
-		return err
-	}
-
-	var compose Compose
-	err = yaml.Unmarshal(data, &compose)
-	if err != nil {
-		return err
-	}
-
+func (idc *Impl) MakeNetworkExternal(c *Compose) error {
 	// Iterate over all networks and check the 'external' flag.
-	if compose.Networks.Content != nil {
-		for i := 0; i < len(compose.Networks.Content); i += 2 {
-			if i+1 >= len(compose.Networks.Content) {
+	if c.Networks.Content != nil {
+		for i := 0; i < len(c.Networks.Content); i += 2 {
+			if i+1 >= len(c.Networks.Content) {
 				break
 			}
 			// networkKeyNode := compose.Networks.Content[i]
-			networkValueNode := compose.Networks.Content[i+1]
+			networkValueNode := c.Networks.Content[i+1]
 
 			// If it's a shorthand notation or null value, initialize it as an empty mapping node
 			if (networkValueNode.Kind == yaml.ScalarNode && networkValueNode.Value == "") || networkValueNode.Tag == "!!null" {
@@ -486,45 +453,25 @@ func (idc *internalDockerClient) MakeNetworkExternal(dockerComposefilePath, newC
 			}
 		}
 	}
-
-	newData, err := yaml.Marshal(&compose)
-	if err != nil {
-		return err
-	}
-
-	newFilePath := filepath.Join(filepath.Dir(dockerComposefilePath), newComposeFile)
-	err = os.WriteFile(newFilePath, newData, 0644)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
-// AddNetworkToCompose adds the keploy-network network to the new docker compose file and copy rest of the contents from
+// SetKeployNetwork adds the keploy-network network to the new docker compose file and copy rest of the contents from
 // existing user docker compose file
-func (idc *internalDockerClient) AddNetworkToCompose(dockerComposefilePath, newComposeFile string) error {
-	data, err := os.ReadFile(dockerComposefilePath)
-	if err != nil {
-		return err
-	}
-
-	var compose Compose
-	err = yaml.Unmarshal(data, &compose)
-	if err != nil {
-		return err
-	}
-
+func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 	// Ensure that the top-level networks mapping exists.
-	if compose.Networks.Content == nil {
-		compose.Networks.Kind = yaml.MappingNode
-		compose.Networks.Content = make([]*yaml.Node, 0)
+	if c.Networks.Content == nil {
+		c.Networks.Kind = yaml.MappingNode
+		c.Networks.Content = make([]*yaml.Node, 0)
 	}
-
+	networkInfo := &NetworkInfo{
+		Name:     "keploy-network",
+		External: true,
+	}
 	// Check if "keploy-network" already exists
 	exists := false
-	for i := 0; i < len(compose.Networks.Content); i += 2 {
-		if compose.Networks.Content[i].Value == "keploy-network" {
+	for i := 0; i < len(c.Networks.Content); i += 2 {
+		if c.Networks.Content[i].Value == "keploy-network" {
 			exists = true
 			break
 		}
@@ -532,20 +479,17 @@ func (idc *internalDockerClient) AddNetworkToCompose(dockerComposefilePath, newC
 
 	if !exists {
 		// Add the keploy-network with external: true
-		compose.Networks.Content = append(compose.Networks.Content,
+		c.Networks.Content = append(c.Networks.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-network"},
-			&yaml.Node{
-				Kind: yaml.MappingNode,
-				Content: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "external"},
-					{Kind: yaml.ScalarNode, Value: "true"},
-				},
-			},
+			&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "external"},
+				{Kind: yaml.ScalarNode, Value: "true"},
+			}},
 		)
 	}
 
 	// Add or modify network for each service
-	for _, service := range compose.Services.Content {
+	for _, service := range c.Services.Content {
 		networksFound := false
 		for _, item := range service.Content {
 			if item.Value == "networks" {
@@ -572,18 +516,5 @@ func (idc *internalDockerClient) AddNetworkToCompose(dockerComposefilePath, newC
 			}
 		}
 	}
-
-	newData, err := yaml.Marshal(&compose)
-	if err != nil {
-		return err
-	}
-
-	newFilePath := filepath.Join(filepath.Dir(dockerComposefilePath), newComposeFile)
-	err = os.WriteFile(newFilePath, newData, 0644)
-	if err != nil {
-		return err
-	}
-
-	idc.logger.Debug("successfully created kdocker-compose.yaml file")
-	return nil
+	return networkInfo, nil
 }
