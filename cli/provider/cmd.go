@@ -223,12 +223,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		err := viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
-		if err != nil {
-			errMsg := "failed to bind flag to config"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
 	default:
 		return errors.New("unknown command name")
 	}
