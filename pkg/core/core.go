@@ -410,7 +410,6 @@ func (c *Core) setUpRecordTesting(ctx context.Context) error {
 				return // Exit the goroutine
 
 			case <-ctx.Done():
-				println("Context cancelled, exiting loop from setupRecordTesting")
 				c.logger.Debug("Context cancelled, exiting loop from setupRecordTesting")
 				return // Exit the goroutine
 			}
