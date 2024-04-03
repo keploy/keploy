@@ -184,6 +184,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		c.logger.Info("🧪 setting up environment for testing keploy with itself")
 		// enable testing in the app
 		a.EnableTesting = true
+		a.Mode = opts.Mode
 
 		if opts.Mode == models.MODE_TEST {
 			err := c.setUpReplayTesting(ctx)

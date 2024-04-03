@@ -227,6 +227,9 @@ func (r *recorder) Start(ctx context.Context) error {
 			return nil
 		case models.ErrCtxCanceled:
 			return nil
+		case models.ErrTestBinStopped:
+			stopReason = "keploy test mode binary stopped, hence stopping keploy"
+			return nil
 		default:
 			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
