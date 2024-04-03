@@ -455,6 +455,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// We need to sleep for a second to avoid mismatching of mocks during keploy testing via test-bench
 		if r.config.EnableTesting {
+			r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
 			time.Sleep(time.Second)
 		}
 	}

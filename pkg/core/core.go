@@ -181,6 +181,10 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	// For keploy test bench
 	if opts.EnableTesting {
+		c.logger.Info("🧪 setting up environment for testing keploy with itself")
+		// enable testing in the app
+		a.EnableTesting = true
+
 		if opts.Mode == models.MODE_TEST {
 			err := c.setUpReplayTesting(ctx)
 			if err != nil {
@@ -244,7 +248,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 		defer close(appErrCh)
 		appErr := a.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
-			utils.LogError(c.logger, appErr, "error while running the app")
+			utils.LogError(c.logger, appErr.Err, "error while running the app")
 			appErrCh <- appErr
 		}
 		return nil
