@@ -339,32 +339,32 @@ func (c *Core) resetNsSwitchConfig() error {
 }
 
 const (
-	kTestPort   = 56789
-	kRecordPort = 36789
+	keployTestPort   = 56789
+	keployRecordPort = 36789
 )
 
 func (c *Core) setUpReplayTesting(ctx context.Context) error {
 	setUpErr := errors.New("failed to setup the keploy replay testing")
 
-	kRecordPid, err := utils.GetPIDByPort(ctx, c.logger, kRecordPort)
+	keployRecordPid, err := utils.GetPIDByPort(ctx, c.logger, keployRecordPort)
 	if err != nil {
 		c.logger.Error("failed to get the keployRecord pid", zap.Error(err))
-		utils.LogError(c.logger, err, "failed to get the keployRecord pid from port", zap.Any("port", kRecordPort))
+		utils.LogError(c.logger, err, "failed to get the keployRecord pid from port", zap.Any("port", keployRecordPort))
 		return setUpErr
 	}
-	c.logger.Debug(fmt.Sprintf("keployRecord pid:%v", kRecordPid))
+	c.logger.Debug(fmt.Sprintf("keployRecord pid:%v", keployRecordPid))
 
-	err = c.TransmitTestBenchKeployPIDs(0, uint32(kRecordPid))
+	err = c.TransmitTestBenchKeployPIDs(0, uint32(keployRecordPid))
 	if err != nil {
 		return setUpErr
 	}
 
-	err = c.TransmitTestBenchKeployPorts(0, uint32(kRecordPort))
+	err = c.TransmitTestBenchKeployPorts(0, uint32(keployRecordPort))
 	if err != nil {
 		return setUpErr
 	}
 
-	err = c.TransmitTestBenchKeployPorts(1, uint32(kTestPort))
+	err = c.TransmitTestBenchKeployPorts(1, uint32(keployTestPort))
 	if err != nil {
 		return setUpErr
 	}
@@ -388,20 +388,20 @@ func (c *Core) setUpRecordTesting(ctx context.Context) error {
 		for {
 			select {
 			case <-ticker.C:
-				kTestPid, err := utils.GetPIDByPort(ctx, c.logger, kTestPort)
+				keployTestPid, err := utils.GetPIDByPort(ctx, c.logger, keployTestPort)
 				if err != nil {
 					c.logger.Debug("failed to get the keploytest pid", zap.Error(err))
 					continue
 				}
 
-				if kTestPid == 0 {
+				if keployTestPid == 0 {
 					continue
 				}
 
-				c.logger.Debug("keploytest pid", zap.Int("pid", kTestPid))
+				c.logger.Debug("keploytest pid", zap.Int("pid", keployTestPid))
 
 				// sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
-				_ = c.Hooks.TransmitTestBenchKeployPIDs(1, uint32(kTestPid))
+				_ = c.Hooks.TransmitTestBenchKeployPIDs(1, uint32(keployTestPid))
 
 				return
 
