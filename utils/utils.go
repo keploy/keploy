@@ -479,7 +479,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	)
 
 	cmd.Cancel = func() error {
-		return InterruptProcessTree(cmd, logger, cmd.Process.Pid, syscall.SIGINT)
+		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
 	}
 
 	cmd.Stdout = os.Stdout
@@ -534,7 +534,7 @@ func SentryInit(logger *zap.Logger, dsn string) {
 //}
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
-func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal) error {
+func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
