@@ -63,7 +63,7 @@ func New() *Config {
 	mergedConfig, err := Merge(defaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
-		
+
 	}
 	err = yaml3.Unmarshal([]byte(mergedConfig), config)
 	if err != nil {
