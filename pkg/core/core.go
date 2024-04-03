@@ -354,7 +354,7 @@ func (c *Core) setUpReplayTesting(ctx context.Context) error {
 	}
 	c.logger.Debug(fmt.Sprintf("keployRecord pid:%v", keployRecordPid))
 
-	err = c.TransmitTestBenchKeployPIDs(0, uint32(keployRecordPid))
+	err = c.TransmitTestBenchKeployPIDs(0, keployRecordPid)
 	if err != nil {
 		return setUpErr
 	}
@@ -398,10 +398,10 @@ func (c *Core) setUpRecordTesting(ctx context.Context) error {
 					continue
 				}
 
-				c.logger.Debug("keploytest pid", zap.Int("pid", keployTestPid))
+				c.logger.Debug("keploytest pid", zap.Uint32("pid", keployTestPid))
 
 				// sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
-				_ = c.Hooks.TransmitTestBenchKeployPIDs(1, uint32(keployTestPid))
+				_ = c.Hooks.TransmitTestBenchKeployPIDs(1, keployTestPid)
 
 				return
 

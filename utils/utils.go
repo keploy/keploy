@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -661,7 +662,7 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	return childPIDs, nil
 }
 
-func GetPIDByPort(ctx context.Context, logger *zap.Logger, port int) (int, error) {
+func GetPIDByPort(ctx context.Context, logger *zap.Logger, port int) (uint32, error) {
 	// Run the lsof command to find the process using the given port
 	cmd := exec.CommandContext(ctx, "lsof", "-n", "-i", fmt.Sprintf(":%d", port))
 	logger.Debug("Getting pid using port", zap.String("command", cmd.String()))
@@ -682,7 +683,11 @@ func GetPIDByPort(ctx context.Context, logger *zap.Logger, port int) (int, error
 			if err != nil {
 				return 0, err
 			}
-			return pid, nil
+			// GOOD: check for lower and upper bounds
+			if pid > 0 && pid <= math.MaxUint32 {
+				return uint32(pid), nil
+			}
+			return 0, fmt.Errorf("pid %d is out of bounds", pid)
 		}
 	}
 
