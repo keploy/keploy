@@ -9,11 +9,11 @@ docker network create backend
 rm -rf keploy/
 
 # Generate the keploy-config file.
-docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 generate-config
+sudo -E env PATH=$PATH ./../../keployv2 config --generate
 
 # Update the global noise to ignore the Allow header.
-config_file="./keploy-config.yaml"
-sed -i 's/"header": {}/"header":{"Allow":[]}/' "$config_file"
+config_file="./keploy.yml"
+sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "$config_file"
 
 # Wait for 5 seconds for it to complete.
 sleep 5
@@ -22,7 +22,7 @@ sleep 5
 docker build -t flask-app:1.0 .
 
 for i in {1..2}; do
-docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host  -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s  &
+sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s  &
 
 # Wait for the application to start.
 app_started=false
@@ -50,16 +50,16 @@ docker rm -f flask-app
 done
 
 # Start the app in test mode.
-docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40s --apiTimeout 60 --delay 20
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40s --apiTimeout 60 --delay 20
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-run-1/report-1.yaml"
+report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-run-1/report-1.yaml"
+report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-run-1/report-2.yaml"
+report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
