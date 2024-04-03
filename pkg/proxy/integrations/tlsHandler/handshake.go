@@ -150,6 +150,11 @@ func Handshake(requestBuffer []byte, clientConn, destConn net.Conn, logger *zap.
 		if typ == recordTypeApplicationData {
 			break
 		}
+		destBuffer, err := ReadBytes(destBufReader)
+		_, err = clientConn.Write(destBuffer)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	clientMultiReader := io.MultiReader(clientBufReader, clientConn)

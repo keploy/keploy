@@ -45,6 +45,7 @@ type TLSPassThroughConnection struct {
 	activeCall atomic.Int32
 
 	ClientRandom []byte
+	ServerRandom []byte
 	tmp          [16]byte
 }
 
@@ -123,21 +124,16 @@ func (hc *halfConn) setErrorLocked(err error) error {
 }
 
 // prepareCipherSpec sets the encryption and MAC states
-// that a subsequent changeCipherSpec will use.
+// that a subsequent ChangeCipherSpec will use.
 func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
 }
 
-func (hc *halfConn) prepareCipherSpecTLS13(version uint16, cipher any) {
-	hc.version = version
-	hc.cipher = cipher
-}
-
-// changeCipherSpec changes the encryption and MAC states
+// ChangeCipherSpec changes the encryption and MAC states
 // to the ones previously passed to prepareCipherSpec.
-func (hc *halfConn) changeCipherSpec() error {
+func (hc *halfConn) ChangeCipherSpec() error {
 	if hc.nextCipher == nil || hc.version == VersionTLS13 {
 		return alertInternalError
 	}
@@ -511,7 +507,7 @@ func (tpc *TLSPassThroughConnection) readRecord() (bool, error) {
 //
 // During the handshake one and only one of the following will happen:
 //   - tpc.hand grows
-//   - tpc.In.changeCipherSpec is called
+//   - tpc.In.ChangeCipherSpec is called
 //   - an error is returned
 //
 // After the handshake one and only one of the following will happen:
@@ -877,7 +873,7 @@ func (tpc *TLSPassThroughConnection) writeRecordLocked(typ recordType, data []by
 	}
 
 	if typ == recordTypeChangeCipherSpec && tpc.Vers != VersionTLS13 {
-		if err := tpc.Out.changeCipherSpec(); err != nil {
+		if err := tpc.Out.ChangeCipherSpec(); err != nil {
 			return n, tpc.sendAlertLocked(err.(alert))
 		}
 	}
