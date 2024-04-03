@@ -353,7 +353,6 @@ func (c *Core) setUpReplayTesting(ctx context.Context) error {
 		return setUpErr
 	}
 	c.logger.Debug(fmt.Sprintf("keployRecord pid:%v", kRecordPid))
-	println("keploy record pid :", kRecordPid)
 
 	err = c.TransmitTestBenchKeployPIDs(0, uint32(kRecordPid))
 	if err != nil {
@@ -395,7 +394,6 @@ func (c *Core) setUpRecordTesting(ctx context.Context) error {
 					continue
 				}
 
-				fmt.Println("keploy test pid:", kTestPid)
 				if kTestPid == 0 {
 					continue
 				}
@@ -408,11 +406,12 @@ func (c *Core) setUpRecordTesting(ctx context.Context) error {
 				return
 
 			case <-time.After(timeout - time.Since(startTime)):
-				println("Timeout reached, exiting loop")
+				c.logger.Debug("Timeout reached, exiting loop from setupRecordTesting")
 				return // Exit the goroutine
 
 			case <-ctx.Done():
 				println("Context cancelled, exiting loop from setupRecordTesting")
+				c.logger.Debug("Context cancelled, exiting loop from setupRecordTesting")
 				return // Exit the goroutine
 			}
 		}
