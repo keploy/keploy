@@ -63,32 +63,32 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	}
 
 	//compare http req
-	reqPass, reqResult := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
+	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !reqPass {
 		logger.Debug("test case http req is not equal", zap.Any("tcs1HttpReq", tcs1.HTTPReq), zap.Any("tcs2HttpReq", tcs2.HTTPReq))
 		pass = false
 	}
 
 	//compare http resp
-	respPass, respResult := CompareHTTPResp(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
+	respPass, respCompare := CompareHTTPResp(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !respPass {
 		logger.Debug("test case http resp is not equal", zap.Any("tcs1HttpResp", tcs1.HTTPResp), zap.Any("tcs2HttpResp", tcs2.HTTPResp))
 		pass = false
 	}
 
 	absResult.Kind = kindResult
-	absResult.ReqResult = reqResult
-	absResult.RespResult = respResult
+	absResult.Req = reqCompare
+	absResult.Resp = respCompare
 	absResult.CurlResult = curlResult
 
 	return pass, reqPass, respPass, absResult
 }
 
 // CompareHTTPReq compares two http requests and returns a boolean value indicating whether they are equal or not.
-func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, models.ReqResult) {
+func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, models.ReqCompare) {
 	pass := true
 	//compare http req
-	reqResult := models.ReqResult{
+	reqCompare := models.ReqCompare{
 		MethodResult: models.StringResult{
 			Normal:   true,
 			Expected: string(tcs1.HTTPReq.Method),
@@ -119,25 +119,25 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	}
 
 	if tcs1.HTTPReq.Method != tcs2.HTTPReq.Method {
-		reqResult.MethodResult.Normal = false
+		reqCompare.MethodResult.Normal = false
 		logger.Debug("test case http req method is not equal", zap.Any("tcs1HttpReqMethod", tcs1.HTTPReq.Method), zap.Any("tcs2HttpReqMethod", tcs2.HTTPReq.Method))
 		pass = false
 	}
 
 	if tcs1.HTTPReq.URL != tcs2.HTTPReq.URL {
-		reqResult.URLResult.Normal = false
+		reqCompare.URLResult.Normal = false
 		logger.Debug("test case http req url is not equal", zap.Any("tcs1HttpReqURL", tcs1.HTTPReq.URL), zap.Any("tcs2HttpReqURL", tcs2.HTTPReq.URL))
 		pass = false
 	}
 
 	if tcs1.HTTPReq.ProtoMajor != tcs2.HTTPReq.ProtoMajor {
-		reqResult.ProtoMajor.Normal = false
+		reqCompare.ProtoMajor.Normal = false
 		logger.Debug("test case http req proto major is not equal", zap.Any("tcs1HttpReqProtoMajor", tcs1.HTTPReq.ProtoMajor), zap.Any("tcs2HttpReqProtoMajor", tcs2.HTTPReq.ProtoMajor))
 		pass = false
 	}
 
 	if tcs1.HTTPReq.ProtoMinor != tcs2.HTTPReq.ProtoMinor {
-		reqResult.ProtoMinor.Normal = false
+		reqCompare.ProtoMinor.Normal = false
 		logger.Debug("test case http req proto minor is not equal", zap.Any("tcs1HttpReqProtoMinor", tcs1.HTTPReq.ProtoMinor), zap.Any("tcs2HttpReqProtoMinor", tcs2.HTTPReq.ProtoMinor))
 		pass = false
 	}
@@ -146,7 +146,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	urlParams1 := tcs1.HTTPReq.URLParams
 	urlParams2 := tcs2.HTTPReq.URLParams
 	if len(urlParams1) == len(urlParams2) {
-		ok := CompareURLParams(urlParams1, urlParams2, &reqResult.URLParamsResult)
+		ok := CompareURLParams(urlParams1, urlParams2, &reqCompare.URLParamsResult)
 		if !ok {
 			logger.Debug("test case http req url params are not equal", zap.Any("tcs1HttpReqURLParams", tcs1.HTTPReq.URLParams), zap.Any("tcs2HttpReqURLParams", tcs2.HTTPReq.URLParams))
 			pass = false
@@ -159,7 +159,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	reqHeaderNoise := map[string][]string{}
 
 	// compare http req headers
-	ok := CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPReq.Header), pkg.ToHTTPHeader(tcs2.HTTPReq.Header), &reqResult.HeaderResult, reqHeaderNoise)
+	ok := CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPReq.Header), pkg.ToHTTPHeader(tcs2.HTTPReq.Header), &reqCompare.HeaderResult, reqHeaderNoise)
 	if !ok {
 		logger.Debug("test case http req headers are not equal", zap.Any("tcs1HttpReqHeaders", tcs1.HTTPReq.Header), zap.Any("tcs2HttpReqHeaders", tcs2.HTTPReq.Header))
 		pass = false
@@ -181,8 +181,8 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	if bodyType1 != bodyType2 {
 		logger.Debug("test case http req body type is not equal", zap.Any("tcs1HttpReqBodyType", bodyType1), zap.Any("tcs2HttpReqBodyType", bodyType2))
 		pass = false
-		reqResult.BodyResult.Normal = false
-		return pass, reqResult
+		reqCompare.BodyResult.Normal = false
+		return pass, reqCompare
 	}
 
 	bodyRes := true
@@ -194,16 +194,16 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 		validatedJSON, err := ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
 			logger.Error("failed to validate and marshal json", zap.Error(err))
-			reqResult.BodyResult.Normal = false
-			return false, reqResult
+			reqCompare.BodyResult.Normal = false
+			return false, reqCompare
 		}
 		if validatedJSON.isIdentical {
 			jsonComparisonResult, err = JSONDiffWithNoiseControl(validatedJSON, reqBodyNoise, ignoreOrdering)
 			exact := jsonComparisonResult.isExact
 			if err != nil {
 				logger.Error("failed to compare json", zap.Error(err))
-				reqResult.BodyResult.Normal = false
-				return false, reqResult
+				reqCompare.BodyResult.Normal = false
+				return false, reqCompare
 			}
 
 			if !exact {
@@ -226,17 +226,17 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	}
 
 	if !bodyRes {
-		reqResult.BodyResult.Normal = false
+		reqCompare.BodyResult.Normal = false
 	}
 
-	return pass, reqResult
+	return pass, reqCompare
 }
 
 // CompareHTTPResp compares two http responses and returns a boolean value indicating whether they are equal or not.
-func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, models.RespResult) {
+func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, models.RespCompare) {
 	pass := true
 	//compare http resp
-	respResult := models.RespResult{
+	respCompare := models.RespCompare{
 		StatusCode: models.IntResult{
 			Normal:   true,
 			Expected: tcs1.HTTPResp.StatusCode,
@@ -251,7 +251,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	}
 
 	if tcs1.HTTPResp.StatusCode != tcs2.HTTPResp.StatusCode {
-		respResult.StatusCode.Normal = false
+		respCompare.StatusCode.Normal = false
 		logger.Debug("test case http resp status code is not equal", zap.Any("tcs1HttpRespStatusCode", tcs1.HTTPResp.StatusCode), zap.Any("tcs2HttpRespStatusCode", tcs2.HTTPResp.StatusCode))
 		pass = false
 	}
@@ -264,8 +264,8 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		logger.Debug("test case noise is not equal", zap.Any("tcs1Noise", tcs1.Noise), zap.Any("tcs2Noise", tcs2.Noise))
 		logger.Debug("response body and headers can not be compared because noise is not equal")
 		pass = false
-		respResult.BodyResult.Normal = false
-		return pass, respResult
+		respCompare.BodyResult.Normal = false
+		return pass, respCompare
 	}
 
 	noise := noise1
@@ -293,7 +293,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	}
 
 	// compare http resp headers
-	ok = CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPResp.Header), pkg.ToHTTPHeader(tcs2.HTTPResp.Header), &respResult.HeadersResult, headerNoise)
+	ok = CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPResp.Header), pkg.ToHTTPHeader(tcs2.HTTPResp.Header), &respCompare.HeadersResult, headerNoise)
 	if !ok {
 		logger.Debug("test case http resp headers are not equal", zap.Any("tcs1HttpRespHeaders", tcs1.HTTPResp.Header), zap.Any("tcs2HttpRespHeaders", tcs2.HTTPResp.Header))
 		pass = false
@@ -313,8 +313,8 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	if bodyType1 != bodyType2 {
 		logger.Debug("test case http resp body type is not equal", zap.Any("tcs1HttpRespBodyType", bodyType1), zap.Any("tcs2HttpRespBodyType", bodyType2))
 		pass = false
-		respResult.BodyResult.Normal = false
-		return pass, respResult
+		respCompare.BodyResult.Normal = false
+		return pass, respCompare
 	}
 
 	bodyRes := true
@@ -327,16 +327,16 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		validatedJSON, err := ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
 			logger.Error("failed to validate and marshal json", zap.Error(err))
-			respResult.BodyResult.Normal = false
-			return false, respResult
+			respCompare.BodyResult.Normal = false
+			return false, respCompare
 		}
 		if validatedJSON.isIdentical {
 			jsonComparisonResult, err = JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
 			exact := jsonComparisonResult.isExact
 			if err != nil {
 				logger.Error("failed to compare json", zap.Error(err))
-				respResult.BodyResult.Normal = false
-				return false, respResult
+				respCompare.BodyResult.Normal = false
+				return false, respCompare
 			}
 			if !exact {
 				pass = false
@@ -358,10 +358,10 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	}
 
 	if !bodyRes {
-		respResult.BodyResult.Normal = false
+		respCompare.BodyResult.Normal = false
 	}
 
-	return pass, respResult
+	return pass, respCompare
 }
 
 func CompareURLParams(urlParams1, urlParams2 map[string]string, urlParamsResult *[]models.URLParamsResult) bool {

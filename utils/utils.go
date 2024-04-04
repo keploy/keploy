@@ -2,13 +2,11 @@ package utils
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +20,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -662,32 +661,20 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	return childPIDs, nil
 }
 
-func GetPIDByPort(ctx context.Context, logger *zap.Logger, port int) (uint32, error) {
-	// Run the lsof command to find the process using the given port
-	cmd := exec.CommandContext(ctx, "lsof", "-n", "-i", fmt.Sprintf(":%d", port))
-	logger.Debug("Getting pid using port", zap.String("command", cmd.String()))
+func GetPIDByPort(_ context.Context, logger *zap.Logger, port int) (uint32, error) {
+	logger.Debug("Getting pid using port", zap.Int("port", port))
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
+	connections, err := netLib.Connections("inet")
 	if err != nil {
 		return 0, err
 	}
 
-	// Parse the output of lsof
-	lines := strings.Split(out.String(), "\n")
-	if len(lines) > 1 {
-		fields := strings.Fields(lines[1])
-		if len(fields) >= 2 {
-			pid, err := strconv.Atoi(fields[1])
-			if err != nil {
-				return 0, err
+	for _, conn := range connections {
+		if conn.Status == "LISTEN" && conn.Laddr.Port == uint32(port) {
+			if conn.Pid > 0 {
+				return uint32(conn.Pid), nil
 			}
-			// GOOD: check for lower and upper bounds
-			if pid > 0 && pid <= math.MaxUint32 {
-				return uint32(pid), nil
-			}
-			return 0, fmt.Errorf("pid %d is out of bounds", pid)
+			return 0, fmt.Errorf("pid %d is out of bounds", conn.Pid)
 		}
 	}
 

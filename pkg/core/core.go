@@ -371,7 +371,7 @@ func (c *Core) setUpReplayTesting(ctx context.Context) error {
 
 	// to get the pid of keployTest binary in keployRecord binary, we have to wait for some time till the proxy server is started
 	// TODO: find other way to filter child process (keployTest) pid in parent process binary (keployRecord)
-	time.Sleep(30 * time.Second) // just for test bench.
+	time.Sleep(10 * time.Second) // just for test bench.
 
 	return nil
 }
