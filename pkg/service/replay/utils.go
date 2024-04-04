@@ -54,7 +54,7 @@ type testUtils struct {
 	apiTimeout uint64
 }
 
-func NewTestUtils(apiTimeout uint64, logger *zap.Logger) *testUtils {
+func NewTestUtils(apiTimeout uint64, logger *zap.Logger) RequestEmulator {
 	return &testUtils{
 		logger:     logger,
 		apiTimeout: apiTimeout,
