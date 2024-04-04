@@ -76,15 +76,7 @@ func (r *replayer) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 	}()
-
-	absPath, err := filepath.Abs(r.config.Path)
-
-	if err != nil {
-		errMsg := "failed to get the absolute path from relative path"
-		utils.LogError(r.logger, err, errMsg)
-	}
-
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+	if _, err := os.Stat(r.config.Path); os.IsNotExist(err) {
 		errMsg := "keploy directory does not exist"
 		return fmt.Errorf(errMsg)
 	}

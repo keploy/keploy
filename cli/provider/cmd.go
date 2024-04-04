@@ -364,6 +364,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		if cmd.Name() == "test" {
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
+			c.logger.Warn(fmt.Sprintf("%v", testSets))
 			if err != nil {
 				errMsg := "failed to get the testsets"
 				utils.LogError(c.logger, err, errMsg)
