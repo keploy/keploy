@@ -382,7 +382,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		}
 	}()
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	errCh2 := a.getDockerMeta(ctx)
 
@@ -400,16 +400,16 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	select {
 	case err := <-errCh:
 		if err != nil && errors.Is(err, context.Canceled) {
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case err := <-errCh2:
 		if err != nil && errors.Is(err, context.Canceled) {
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
-		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	}
 }
 
