@@ -73,28 +73,28 @@ type Tracker struct {
 	isNewRequest  bool
 }
 
-func NewTracker(connID ID, logger *zap.Logger) *Tracker {
-	return &Tracker{
-		connID:          connID,
-		req:             []byte{},
-		resp:            []byte{},
-		kernelRespSizes: []uint64{},
-		kernelReqSizes:  []uint64{},
-		userRespSizes:   []uint64{},
-		userReqSizes:    []uint64{},
-		userResps:       [][]byte{},
-		userReqs:        [][]byte{},
-		mutex:           sync.RWMutex{},
-		logger:          logger,
-		firstRequest:    true,
-		isNewRequest:    true,
-		eventChannel: EventChannelType{
-			DataChan: make(chan SocketDataEvent),
-			OpenChan: make(chan SocketOpenEvent),
-			CloseChan: make(chan SocketCloseEvent),
-		},
-	}
-}
+// func NewTracker(connID ID, logger *zap.Logger) chan Event {
+// 	return &Tracker{
+// 		connID:          connID,
+// 		req:             []byte{},
+// 		resp:            []byte{},
+// 		kernelRespSizes: []uint64{},
+// 		kernelReqSizes:  []uint64{},
+// 		userRespSizes:   []uint64{},
+// 		userReqSizes:    []uint64{},
+// 		userResps:       [][]byte{},
+// 		userReqs:        [][]byte{},
+// 		mutex:           sync.RWMutex{},
+// 		logger:          logger,
+// 		firstRequest:    true,
+// 		isNewRequest:    true,
+// 		eventChannel: EventChannelType{
+// 			DataChan: make(chan SocketDataEvent),
+// 			OpenChan: make(chan SocketOpenEvent),
+// 			CloseChan: make(chan SocketCloseEvent),
+// 		},
+// 	}
+// }
 
 func (conn *Tracker) ToBytes() ([]byte, []byte) {
 	conn.mutex.RLock()

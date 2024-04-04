@@ -73,6 +73,25 @@ type SocketCloseEvent struct {
 	ReadBytes     int64
 }
 
+type EventType string
+
+const (
+	OpenEvent  EventType = "open"
+	CloseEvent EventType = "close"
+	DataEvent  EventType = "data"
+)
+
+type Event struct {
+	Type EventType
+	Msg  Events
+}
+
+type Events struct {
+	OpenEvent  *SocketOpenEvent
+	CloseEvent *SocketCloseEvent
+	DataEvent  *SocketDataEvent
+}
+
 // TrafficDirectionEnum is a GO-equivalent for the following enum.
 //
 //	enum traffic_direction_t {

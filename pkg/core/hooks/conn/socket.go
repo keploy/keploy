@@ -26,12 +26,13 @@ var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
+	event := make(chan Event, 1000)
 	err := initRealTimeOffset()
 	if err != nil {
 		utils.LogError(l, err, "failed to initialize real time offset")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	c := NewFactory(time.Minute, l, t)
+	c := NewFactory(time.Minute, l, t, event)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")
@@ -40,16 +41,15 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		defer utils.Recover(l)
 		go func() {
 			defer utils.Recover(l)
-			// for {
-			// 	select {
-			// 	case <-ctx.Done():
-			// 		return
-			// 	default:
-			// 		// TODO refactor this to directly consume the events from the maps
-			// 		c.ProcessActiveTrackers(ctx, t)
-			// 		time.Sleep(100 * time.Millisecond)
-			// 	}
-			// }
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event := <- c.EventChan:
+					fmt.Println("got an event")
+					c.ProcessActiveTrackers(ctx, t, event)
+				}
+			}
 		}()
 		<-ctx.Done()
 		close(t)
@@ -111,9 +111,14 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					utils.LogError(l, err, "failed to decode the received data from perf socketOpenEvent reader")
 					continue
 				}
-
 				event.TimestampNano += getRealTimeOffset()
-				c.GetOrCreate(event.ConnID).AddOpenEvent(event)
+				newEvent := Event{
+					Type: "open",
+					Msg: Events{
+						OpenEvent: &event,
+					},
+				}
+				c.EventChan <- newEvent
 			}
 		}()
 		<-ctx.Done() // Check for context cancellation
@@ -173,8 +178,17 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					event.EntryTimestampNano += getRealTimeOffset()
 					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 				}
-				c.GetOrCreate(event.ConnID).AddDataEvent(event)
-				c.connections[event.ConnID].eventChannel.DataChan <- event
+
+				// c.GetOrCreate(event.ConnID).AddDataEvent(event)
+				eventChan := c.EventChan
+				newEvent := Event{
+					Type: "data",
+					Msg: Events{
+						DataEvent: &event,
+					},
+				}
+				eventChan <- newEvent
+				// c.connections[event.ConnID].eventChannel.DataChan <- event
 			}
 		}()
 		<-ctx.Done() // Check for context cancellation
@@ -226,9 +240,8 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 
 				event.TimestampNano += getRealTimeOffset()
 				if c.connections[event.ConnID] != nil {
-				c.connections[event.ConnID].eventChannel.CloseChan <- event
+				// c.connections[event.ConnID].eventChannel.CloseChan <- event
 				}
-				c.GetOrCreate(event.ConnID).AddCloseEvent(event)
 			}
 		}()
 
