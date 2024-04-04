@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"sync"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -44,12 +45,15 @@ type Operation interface {
 }
 
 var lOgger *zap.Logger
+var mu sync.Mutex
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1361-L1426
 
 // Decode (wm []byte) (Operation, int32, int32, int32, int32, error) {
 func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, interface{}, error) {
+	mu.Lock()
 	lOgger = logger
+	mu.Unlock()
 	wmLength := len(wm)
 	length, reqID, responseTo, opCode, wmBody, ok := wiremessage.ReadHeader(wm)
 	messageHeader := models.MongoHeader{

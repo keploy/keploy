@@ -82,7 +82,7 @@ func (factory *Factory) Worker(ctx context.Context, t chan *models.TestCase, wor
 			}
 			if dataEvent.Direction == IngressTraffic && lastEventType == EgressTraffic {
 				// This means that the testcase is ready to be recorded.
-				fmt.Println("This is the request and the response", string(req), string(res))
+				// fmt.Println("This is the request and the response", string(req), string(res))
 				// Parsing the request and the response.
 				parsedHTTPReq, err := pkg.ParseHTTPRequest(req)
 				if err != nil {
