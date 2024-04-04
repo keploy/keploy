@@ -32,8 +32,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 		return nil
 	}
 
-	for name, cmd := range Registered {
-		println("registering cmd:", name)
+	for _, cmd := range Registered {
 		c := cmd(ctx, logger, conf, svcFactory, cmdConfigurator)
 		rootCmd.AddCommand(c)
 	}

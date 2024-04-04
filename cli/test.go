@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 
 	"go.keploy.io/server/v2/pkg/graph"
 	"go.keploy.io/server/v2/utils"
@@ -51,7 +50,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 				utils.LogError(logger, err, "failed to replay")
 				return nil
 			}
-			fmt.Println("AFTER REPLAY >... ..>. .> .. .> .")
+
 			return nil
 		},
 	}

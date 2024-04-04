@@ -62,7 +62,6 @@ func NewTestUtils(apiTimeout uint64, logger *zap.Logger) *testUtils {
 }
 
 func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
-	fmt.Println("OSS SIMULAte")
 	switch tc.Kind {
 	case models.HTTP:
 		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
