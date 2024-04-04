@@ -69,9 +69,6 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
 
-# Generate the keploy-config file.
-sudo ./../../keployv2 config --generate
-
 # Update the global noise to ts.
 config_file="./keploy.yml"
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "$config_file"

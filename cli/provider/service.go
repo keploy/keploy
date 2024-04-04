@@ -90,7 +90,10 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 			if err != nil {
 				n.logger.Debug("failed to marshal the config")
 			}
-			toolsService.CreateConfig(ctx, n.cfg.ConfigPath+"/keploy.yml", string(yamlData))
+			err = toolsService.CreateConfig(ctx, n.cfg.ConfigPath+"/keploy.yml", string(yamlData))
+			if err != nil {
+				n.logger.Debug("failed to create the config file", zap.Error(err))
+			}
 		}
 		commonServices := n.GetCommonServices(*n.cfg)
 		if cmd == "record" {
