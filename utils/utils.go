@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
+	"golang.org/x/term"
 )
 
 var WarningSign = "\U000026A0"
@@ -35,7 +36,6 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 		if viperKeyPrefix == "" {
 			viperKeyPrefix = cmd.Name()
 		}
-		viper.SetEnvPrefix("KEPLOY")
 		viperKey := viperKeyPrefix + "." + flag.Name
 		envVarName := strings.ToUpper(viperKeyPrefix + "_" + flag.Name)
 		envVarName = strings.ReplaceAll(envVarName, ".", "_") // Why do we need this?
@@ -49,6 +49,7 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 
 		// Tell Viper to also read this flag's value from the corresponding env variable
 		err = viper.BindEnv(viperKey, envVarName)
+		logger.Debug("Binding flag to viper", zap.String("viperKey", viperKey), zap.String("envVarName", envVarName))
 		if err != nil {
 			LogError(logger, err, "failed to bind environment variables to config")
 			bindErr = err
@@ -217,7 +218,7 @@ var Version string
 func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)
 	if err != nil {
-		return fmt.Errorf("Error opening log file: %s", err.Error())
+		return fmt.Errorf("error opening log file: %s", err.Error())
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
@@ -227,7 +228,7 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 
 	content, err := io.ReadAll(file)
 	if err != nil {
-		return fmt.Errorf("Error reading log file: %s", err.Error())
+		return fmt.Errorf("error reading log file: %s", err.Error())
 	}
 
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
@@ -264,6 +265,49 @@ func Recover(logger *zap.Logger) {
 	}
 }
 
+// GenerateGithubActions generates a GitHub Actions workflow file for Keploy
+func GenerateGithubActions(logger *zap.Logger, appCmd string) {
+	// Determine the path based on the alias "keploy"
+	logger.Debug("Generating GitHub Actions workflow file")
+	// Define the content of the GitHub Actions workflow file
+	actionsFileContent := `name: Keploy
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, reopened, synchronize]
+jobs:
+  e2e-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Test-Report
+        uses: keploy/testgpt@main
+        with:
+          working-directory: ./
+          keploy-path: ./
+          command: ` + appCmd + `
+`
+
+	// Define the file path where the GitHub Actions workflow file will be saved
+	filePath := "/githubactions/keploy.yml"
+
+	//create the file path
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		logger.Error("Error creating directory for GitHub Actions workflow file", zap.Error(err))
+		return
+	}
+	// Write the content to the file
+	if err := os.WriteFile(filePath, []byte(actionsFileContent), 0644); err != nil {
+		logger.Error("Error writing GitHub Actions workflow file", zap.Error(err))
+		return
+	}
+
+	logger.Info("GitHub Actions workflow file generated successfully", zap.String("path", filePath))
+}
+
 // GetLatestGitHubRelease fetches the latest version and release body from GitHub releases with a timeout.
 func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRelease, error) {
 	// GitHub repository details
@@ -283,7 +327,8 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 
 	resp, err := client.Do(req)
 	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
 			return GitHubRelease{}, ErrGitHubAPIUnresponsive
 		}
 		return GitHubRelease{}, err
@@ -368,10 +413,21 @@ type TestFlags struct {
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
-	//TODO: configure the hardcoded port mapping & check if (/.keploy-config:/root/.keploy-config) can be removed from all the aliases
+	//TODO: configure the hardcoded port mapping
+	img := "ghcr.io/keploy/keploy:" + "v" + Version
+	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
+
+	var ttyFlag string
+
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		ttyFlag = " -it "
+	} else {
+		ttyFlag = ""
+	}
+
 	switch osName {
 	case "linux":
-		alias := "sudo docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+		alias := "sudo docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -388,11 +444,12 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+			alias := "docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
+		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker run --pull always --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host -it -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy "
+		alias := "docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "Windows":
 		LogError(logger, nil, "Windows is not supported. Use WSL2 instead.")
@@ -401,30 +458,38 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	return "", errors.New("failed to get alias")
 }
 
-//func appendFlags(flagName string, flagValue string) string {
-//	if len(flagValue) > 0 {
-//		// Check for = in the flagName.
-//		if strings.Contains(flagName, "=") {
-//			return " --" + flagName + flagValue
-//		}
-//		return " --" + flagName + " " + flagValue
-//	}
-//	return ""
-//}
-
-func RunInDocker(ctx context.Context, logger *zap.Logger, command string) error {
+func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	//Get the correct keploy alias.
 	keployAlias, err := getAlias(ctx, logger)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", keployAlias+" "+command)
+	var quotedArgs []string
+
+	for _, arg := range os.Args[1:] {
+		quotedArgs = append(quotedArgs, strconv.Quote(arg))
+	}
+
+	cmd := exec.CommandContext(
+		ctx,
+		"sh",
+		"-c",
+		keployAlias+" "+strings.Join(quotedArgs, " "),
+	)
+
+	cmd.Cancel = func() error {
+		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
+	}
+
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
-	logger.Debug("This is the keploy alias", zap.String("keployAlias:", keployAlias))
+	logger.Debug("running the following command in docker", zap.String("command", cmd.String()))
 	err = cmd.Run()
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return ctx.Err()
+		}
 		LogError(logger, err, "failed to start keploy in docker")
 		return err
 	}
@@ -450,25 +515,25 @@ func SentryInit(logger *zap.Logger, dsn string) {
 	}
 }
 
-func FetchHomeDirectory(isNewConfigPath bool) string {
-	var configFolder = "/.keploy-config"
-
-	if isNewConfigPath {
-		configFolder = "/.keploy"
-	}
-	if runtime.GOOS == "windows" {
-		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
-		if home == "" {
-			home = os.Getenv("USERPROFILE")
-		}
-		return home + configFolder
-	}
-
-	return os.Getenv("HOME") + configFolder
-}
+//func FetchHomeDirectory(isNewConfigPath bool) string {
+//	var configFolder = "/.keploy-config"
+//
+//	if isNewConfigPath {
+//		configFolder = "/.keploy"
+//	}
+//	if runtime.GOOS == "windows" {
+//		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
+//		if home == "" {
+//			home = os.Getenv("USERPROFILE")
+//		}
+//		return home + configFolder
+//	}
+//
+//	return os.Getenv("HOME") + configFolder
+//}
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
-func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig syscall.Signal) error {
+func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
@@ -478,16 +543,67 @@ func InterruptProcessTree(cmd *exec.Cmd, logger *zap.Logger, ppid int, sig sysca
 	}
 
 	children = append(children, ppid)
+	uniqueProcess, err := uniqueProcessGroups(children)
+	if err != nil {
+		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
+		uniqueProcess = children
+	}
 
-	for _, pid := range children {
-		if cmd.ProcessState == nil {
-			err := syscall.Kill(pid, sig)
-			if err != nil {
-				logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
-			}
+	for _, pid := range uniqueProcess {
+		err := syscall.Kill(-pid, sig)
+		// ignore the ESRCH error as it means the process is already dead
+		if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
+			logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
 		}
 	}
 	return nil
+}
+
+func uniqueProcessGroups(pids []int) ([]int, error) {
+	uniqueGroups := make(map[int]bool)
+	var uniqueGPIDs []int
+
+	for _, pid := range pids {
+		pgid, err := getProcessGroupID(pid)
+		if err != nil {
+			return nil, err
+		}
+		if !uniqueGroups[pgid] {
+			uniqueGroups[pgid] = true
+			uniqueGPIDs = append(uniqueGPIDs, pgid)
+		}
+	}
+
+	return uniqueGPIDs, nil
+}
+
+func getProcessGroupID(pid int) (int, error) {
+	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
+	statusBytes, err := os.ReadFile(statusPath)
+	if err != nil {
+		return 0, err
+	}
+
+	status := string(statusBytes)
+	for _, line := range strings.Split(status, "\n") {
+		if strings.HasPrefix(line, "NSpgid:") {
+			return extractIDFromStatusLine(line), nil
+		}
+	}
+
+	return 0, nil
+}
+
+// extractIDFromStatusLine extracts the ID from a status line in the format "Key:\tValue".
+func extractIDFromStatusLine(line string) int {
+	fields := strings.Fields(line)
+	if len(fields) == 2 {
+		id, err := strconv.Atoi(fields[1])
+		if err == nil {
+			return id
+		}
+	}
+	return -1
 }
 
 // findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
@@ -542,4 +658,24 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	findDescendants(parentPID)
 
 	return childPIDs, nil
+}
+
+func EnsureRmBeforeName(cmd string) string {
+	parts := strings.Split(cmd, " ")
+	rmIndex := -1
+	nameIndex := -1
+
+	for i, part := range parts {
+		if part == "--rm" {
+			rmIndex = i
+		} else if part == "--name" {
+			nameIndex = i
+			break // Assuming --name will always have an argument, we can break here
+		}
+	}
+	if rmIndex == -1 && nameIndex != -1 {
+		parts = append(parts[:nameIndex], append([]string{"--rm"}, parts[nameIndex:]...)...)
+	}
+
+	return strings.Join(parts, " ")
 }

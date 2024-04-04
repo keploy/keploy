@@ -105,7 +105,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	newTestSetID = pkg.NewID(testSetIDs, models.TestSetPattern)
 
 	// setting up the environment for recording
-	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -263,7 +263,7 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	var outgoingChan <-chan *models.Mock
 	var insertMockErrChan = make(chan error)
 
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		stopReason = "failed to exeute mock record due to error while setting up the environment"
 		utils.LogError(r.logger, err, stopReason)

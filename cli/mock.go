@@ -16,7 +16,7 @@ func init() {
 	Register("mock", Mock)
 }
 
-func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Mock(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "mock",
 		Short:   "Record and replay ougoung network traffic for the user application",

@@ -44,16 +44,12 @@ type Operation interface {
 	TransactionDetails() *TransactionDetails
 }
 
-var lOgger *zap.Logger
-var mu sync.Mutex
+// var lOgger *zap.Logger
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1361-L1426
 
 // Decode (wm []byte) (Operation, int32, int32, int32, int32, error) {
 func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, interface{}, error) {
-	mu.Lock()
-	lOgger = logger
-	mu.Unlock()
 	wmLength := len(wm)
 	length, reqID, responseTo, opCode, wmBody, ok := wiremessage.ReadHeader(wm)
 	messageHeader := models.MongoHeader{
@@ -94,7 +90,8 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
-		op, err = decodeMsg(reqID, wmBody)
+
+		op, err = decodeMsg(reqID, wmBody, logger)
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
 		}
@@ -311,6 +308,7 @@ type opMsg struct {
 	flags    wiremessage.MsgFlag
 	sections []opMsgSection
 	checksum uint32
+	logger   *zap.Logger
 }
 
 type opMsgSection interface {
@@ -473,11 +471,12 @@ func extractSectionSingle(data string) (string, error) {
 	return content, nil
 }
 
-func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, logger *zap.Logger) (*opMsg, error) {
+func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, mongoPassword string, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
 		flags:    wiremessage.MsgFlag(responseOpMsg.FlagBits),
 		checksum: uint32(responseOpMsg.Checksum),
 		sections: []opMsgSection{},
+		logger:   logger,
 	}
 	for messageIndex, messageValue := range responseOpMsg.Sections {
 		switch {
@@ -509,7 +508,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 				return nil, err
 			}
 
-			resultStr, ok, err := handleScramAuth(actualRequestMsgSections, expectedRequestMsgSections, sectionStr, logger)
+			resultStr, ok, err := handleScramAuth(actualRequestMsgSections, expectedRequestMsgSections, sectionStr, mongoPassword, logger)
 			if err != nil {
 				return nil, err
 			}
@@ -536,10 +535,11 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 }
 
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1387-L1423
-func decodeMsg(reqID int32, wm []byte) (*opMsg, error) {
+func decodeMsg(reqID int32, wm []byte, logger *zap.Logger) (*opMsg, error) {
 	var ok bool
 	m := opMsg{
-		reqID: reqID,
+		reqID:  reqID,
+		logger: logger,
 	}
 
 	m.flags, wm, ok = wiremessage.ReadMsgFlags(wm)
@@ -594,7 +594,7 @@ func (m *opMsg) OpCode() wiremessage.OpCode {
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L898-L904
 func (m *opMsg) Encode(responseTo, requestID int32) []byte {
 	var buffer []byte
-	lOgger.Debug(fmt.Sprintf("the responseTo for the OpMsg: %v, for requestId: %v", responseTo, wiremessage.NextRequestID()))
+	m.logger.Debug(fmt.Sprintf("the responseTo for the OpMsg: %v, for requestId: %v", responseTo, wiremessage.NextRequestID()))
 
 	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestID, responseTo, wiremessage.OpMsg)
 	buffer = wiremessage.AppendMsgFlags(buffer, m.flags)
@@ -607,7 +607,7 @@ func (m *opMsg) Encode(responseTo, requestID int32) []byte {
 		buffer = appendi32(buffer, int32(m.checksum))
 	}
 	buffer = bsoncore.UpdateLength(buffer, idx, int32(len(buffer[idx:])))
-	lOgger.Debug(fmt.Sprintf("opmsg string: %v", m.String()))
+	m.logger.Debug(fmt.Sprintf("opmsg string: %v", m.String()))
 	return buffer
 }
 
