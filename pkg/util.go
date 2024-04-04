@@ -1,28 +1,29 @@
+// Package pkg provides utility functions for Keploy.
 package pkg
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
-	"math/rand"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/araddon/dateparse"
-	"go.keploy.io/server/pkg/models"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
 
-// UrlParams returns the Url and Query parameters from the request url.
-func UrlParams(r *http.Request) map[string]string {
+// URLParams returns the Url and Query parameters from the request url.
+func URLParams(r *http.Request) map[string]string {
 	qp := r.URL.Query()
 	result := make(map[string]string)
 
@@ -33,8 +34,8 @@ func UrlParams(r *http.Request) map[string]string {
 	return result
 }
 
-// ToYamlHttpHeader converts the http header into yaml format
-func ToYamlHttpHeader(httpHeader http.Header) map[string]string {
+// ToYamlHTTPHeader converts the http header into yaml format
+func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	header := map[string]string{}
 	for i, j := range httpHeader {
 		header[i] = strings.Join(j, ",")
@@ -42,7 +43,7 @@ func ToYamlHttpHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
-func ToHttpHeader(mockHeader map[string]string) http.Header {
+func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
 		match := IsTime(j)
@@ -63,19 +64,18 @@ func IsTime(stringDate string) bool {
 	return err == nil
 }
 
-func SimulateHttp(tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HttpResp, error) {
-	resp := &models.HttpResp{}
+func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+	var resp *models.HTTPResp
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-	req, err := http.NewRequest(string(tc.HttpReq.Method), tc.HttpReq.URL, bytes.NewBufferString(tc.HttpReq.Body))
+	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
 	if err != nil {
-		logger.Error("failed to create a http request from the yaml document", zap.Error(err))
+		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHttpHeader(tc.HttpReq.Header)
-	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
-	req.ProtoMajor = tc.HttpReq.ProtoMajor
-	req.ProtoMinor = tc.HttpReq.ProtoMinor
+	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
+	req.ProtoMajor = tc.HTTPReq.ProtoMajor
+	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
@@ -84,18 +84,18 @@ func SimulateHttp(tc models.TestCase, testSet string, logger *zap.Logger, apiTim
 
 	keepAlive, ok := req.Header["Connection"]
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
-		logger.Debug("simulating request with connection:keep-alive")
+		logger.Debug("simulating request with conn:keep-alive")
 		client = &http.Client{
 			Timeout: time.Second * time.Duration(apiTimeout),
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
-		logger.Debug("simulating request with connection:close")
+		logger.Debug("simulating request with conn:close")
 		client = &http.Client{
 			Timeout: time.Second * time.Duration(apiTimeout),
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
@@ -103,10 +103,10 @@ func SimulateHttp(tc models.TestCase, testSet string, logger *zap.Logger, apiTim
 			},
 		}
 	} else {
-		logger.Debug("simulating request with connection:keep-alive (maxIdleConn=1)")
+		logger.Debug("simulating request with conn:keep-alive (maxIdleConn=1)")
 		client = &http.Client{
 			Timeout: time.Second * time.Duration(apiTimeout),
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
@@ -116,31 +116,25 @@ func SimulateHttp(tc models.TestCase, testSet string, logger *zap.Logger, apiTim
 		}
 	}
 
-	httpResp, errHttpReq := client.Do(req)
-	if httpResp != nil {
-		// Cases covered, non-nil httpResp with non-nil errHttpReq and non-nil httpResp
-		// with nil errHttpReq
-		respBody, errReadRespBody := io.ReadAll(httpResp.Body)
-		if errReadRespBody != nil {
-			logger.Error("failed reading response body", zap.Error(errReadRespBody))
-			return nil, err
-		}
-
-		resp = &models.HttpResp{
-			StatusCode: httpResp.StatusCode,
-			Body:       string(respBody),
-			Header:     ToYamlHttpHeader(httpResp.Header),
-		}
-	} else if errHttpReq != nil {
-		// Case covered, nil HTTP response with non-nil error
-		logger.Error("failed sending testcase request to app", zap.Error(err))
-
-		resp = &models.HttpResp{
-			Body: errHttpReq.Error(),
-		}
+	httpResp, errHTTPReq := client.Do(req)
+	if errHTTPReq != nil {
+		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		return nil, errHTTPReq
 	}
 
-	return resp, errHttpReq
+	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
+	if errReadRespBody != nil {
+		utils.LogError(logger, errReadRespBody, "failed reading response body")
+		return nil, err
+	}
+
+	resp = &models.HTTPResp{
+		StatusCode: httpResp.StatusCode,
+		Body:       string(respBody),
+		Header:     ToYamlHTTPHeader(httpResp.Header),
+	}
+
+	return resp, errHTTPReq
 }
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
@@ -164,13 +158,6 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 	return response, nil
 }
 
-// Generate unique random id
-func GenerateRandomID() int {
-	rand.Seed(time.Now().UnixNano())
-	id := rand.Intn(1000000000) // Adjust the range as needed
-	return id
-}
-
 func MakeCurlCommand(method string, url string, header map[string]string, body string) string {
 	curl := fmt.Sprintf("curl --request %s \\\n", method)
 	curl = curl + fmt.Sprintf("  --url %s \\\n", url)
@@ -183,39 +170,6 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 		curl = curl + fmt.Sprintf("  --data '%s'", body)
 	}
 	return curl
-}
-
-func GetNextTestReportDir(testReportPath, subDirPrefix string) (string, error) {
-	latestReportNumber := 1
-
-	if _, err := os.Stat(testReportPath); !os.IsNotExist(err) {
-		file, err := os.Open(testReportPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to open directory: %w", err)
-		}
-		defer file.Close()
-
-		files, err := file.Readdir(-1) // -1 to read all files and directories
-		if err != nil {
-			return "", fmt.Errorf("failed to read directory: %w", err)
-		}
-
-		for _, f := range files {
-			if f.IsDir() && strings.HasPrefix(f.Name(), subDirPrefix) {
-				reportNumber, err := strconv.Atoi(strings.TrimPrefix(f.Name(), subDirPrefix))
-				if err != nil {
-					return "", fmt.Errorf("failed to parse report number: %w", err)
-				}
-				if reportNumber > latestReportNumber {
-					latestReportNumber = reportNumber
-				}
-			}
-		}
-		latestReportNumber++ // increment to create a new report directory
-	}
-
-	newTestReportPath := filepath.Join(testReportPath, fmt.Sprintf("%s%d", subDirPrefix, latestReportNumber))
-	return newTestReportPath, nil
 }
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
@@ -232,29 +186,26 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	}
 
 	for _, v := range files {
-		if v.Name() != "testReports" {
+		if v.Name() != "reports" {
 			indices = append(indices, v.Name())
 		}
 	}
-
 	return indices, nil
 }
 
-func DeleteTestReports(logger *zap.Logger, generateTestReport bool) {
-
-	if generateTestReport {
-		return
+func NewID(IDs []string, identifier string) string {
+	latestIndx := 0
+	for _, ID := range IDs {
+		namePackets := strings.Split(ID, "-")
+		if len(namePackets) == 3 {
+			Indx, err := strconv.Atoi(namePackets[2])
+			if err != nil {
+				continue
+			}
+			if latestIndx < Indx+1 {
+				latestIndx = Indx + 1
+			}
+		}
 	}
-
-	_, err := os.Stat("keploy/testReports")
-	if os.IsNotExist(err) {
-		return
-	}
-	err = os.RemoveAll("keploy/testReports")
-	if err != nil {
-		logger.Error("Error while removing test reports: %v", zap.String("error", err.Error()))
-		return
-	}
-
-	logger.Info("Test Reports are being removed since generateTestReport flag is set false")
+	return fmt.Sprintf("%s%v", identifier, latestIndx)
 }

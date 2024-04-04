@@ -2,23 +2,25 @@
 #
 # https://gqlgen.com/getting-started/
 
+type TestRunInfo {
+  appId: Int!
+  testRunId: String!
+}
 
 type TestSetStatus {
   status: String!
 }
 
-type RunTestSetResponse {
-  success: Boolean!
-  testRunId: String!
-  message: String
-}
 
 type Query {
   testSets: [String!]!
-  testSetStatus(testRunId: String!): TestSetStatus!
-  stopTest: Boolean!
+  testSetStatus(testRunId: String!, testSetId: String!): TestSetStatus!
 }
 
 type Mutation {
-  runTestSet(testSet: String!): RunTestSetResponse!
+  runTestSet(testSetId: String!, testRunId: String!, appId: Int!): Boolean!
+  startHooks: TestRunInfo!
+  startApp(appId: Int!): Boolean!
+  stopHooks: Boolean!
+  stopApp(appId: Int!): Boolean!
 }

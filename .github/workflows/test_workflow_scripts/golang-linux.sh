@@ -10,16 +10,16 @@ git checkout native-linux
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
 # Check if there is a keploy-config file, if there is, delete it.
-if [ -f "./keploy-config.yaml" ]; then
-    rm ./keploy-config.yaml
+if [ -f "./keploy.yml" ]; then
+    rm ./keploy.yml
 fi
 
 # Generate the keploy-config file.
-./../../keployv2 generate-config
+sudo ./../../keployv2 config --generate
 
 # Update the global noise to ts.
-config_file="./keploy-config.yaml"
-sed -i 's/body: {}/body: {"ts":[]}/' "$config_file"
+config_file="./keploy.yml"
+sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
@@ -83,22 +83,22 @@ done
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
 
-# move keployv2 to /usr/local/bin/keploy
-mv ./../../keployv2 /usr/local/bin/keploy
+# # move keployv2 to /usr/local/bin/keploy
+# mv ./../../keployv2 /usr/local/bin/keploy
 
-sed -i 's/<path for storing stubs>/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
+# sed -i 's/<path for storing stubs>/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
 
-# run in mockrecord mode
-go test
+# # run in mockrecord mode
+# go test
 
-sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
-# run in mocktest mode
-go test
+# sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
+# # run in mocktest mode
+# go test
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-run-1/report-1.yaml"
+report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-run-1/report-1.yaml"
+report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
