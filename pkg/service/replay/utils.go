@@ -1,11 +1,15 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
@@ -43,4 +47,29 @@ func replaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
 	// Return the modified URL
 	return parsedURL.String(), nil
+}
+
+type testUtils struct {
+	logger     *zap.Logger
+	apiTimeout uint64
+}
+
+func NewTestUtils(apiTimeout uint64, logger *zap.Logger) RequestEmulator {
+	return &testUtils{
+		logger:     logger,
+		apiTimeout: apiTimeout,
+	}
+}
+
+func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
+	switch tc.Kind {
+	case models.HTTP:
+		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
+		t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
+		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, t.logger, t.apiTimeout)
+		t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
+		t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
+		return resp, err
+	}
+	return nil, nil
 }
