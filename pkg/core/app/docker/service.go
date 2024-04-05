@@ -11,6 +11,7 @@ type Client interface {
 	ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error
 	AttachNetwork(containerName string, networkName []string) error
 	StopAndRemoveDockerContainer() error
+	StopAndRemoveByID(containerID string) error
 	GetContainerID() string
 	SetContainerID(containerID string)
 	NetworkExists(network string) (bool, error)

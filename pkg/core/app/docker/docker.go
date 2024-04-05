@@ -137,8 +137,13 @@ func (idc *Impl) AttachNetwork(containerName string, networkNames []string) erro
 
 // StopAndRemoveDockerContainer will Stop and Remove the docker container
 func (idc *Impl) StopAndRemoveDockerContainer() error {
-	dockerClient := idc
 	containerID := idc.containerID
+	return idc.StopAndRemoveByID(containerID)
+}
+
+// Stop and Remove the docker container using containerName
+func (idc *Impl) StopAndRemoveByID(containerID string) error {
+	dockerClient := idc
 
 	container, err := dockerClient.ContainerInspect(context.Background(), containerID)
 	if err != nil {

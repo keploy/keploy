@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	yaml "gopkg.in/yaml.v3"
 )
 
 func findComposeFile() string {
@@ -84,4 +86,27 @@ func getInode(pid int) (uint64, error) {
 		return 0, fmt.Errorf("failed to get the inode of the process")
 	}
 	return i, nil
+}
+
+
+// getContainerFromComposeFile parses docker-compose file to get all container names
+func getContainerFromComposeFile(filePath string) ([]string, error) {
+	yamlFile, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var composeConfig struct {
+		Services map[string]struct {
+			ContainerName string `yaml:"container_name"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(yamlFile, &composeConfig); err != nil {
+		return nil, err
+	}
+	var containerNames []string
+	for _, serviceConfig := range composeConfig.Services {
+		containerNames = append(containerNames, serviceConfig.ContainerName)
+	}
+	return containerNames, nil
 }
