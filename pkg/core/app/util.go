@@ -48,7 +48,7 @@ func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
 	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
 }
 
-func parseDockerCmd(cmd string) (string, string, error) {
+func ParseDockerCmd(cmd string) (string, string, error) {
 	// Regular expression patterns
 	containerNamePattern := `--name\s+([^\s]+)`
 	networkNamePattern := `(--network|--net)\s+([^\s]+)`

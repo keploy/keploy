@@ -100,7 +100,7 @@ func (a *App) SetupDocker() error {
 	var err error
 
 	if a.kind == utils.DockerRun {
-		cont, net, err := parseDockerCmd(a.cmd)
+		cont, net, err := ParseDockerCmd(a.cmd)
 
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
