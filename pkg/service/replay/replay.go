@@ -258,7 +258,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
 
 	if gocoverdirEnv != "" {
-		os.Setenv("GOCOVERDIR", filepath.Join(gocoverdirEnv, testSetID))
+		err := os.Setenv("GOCOVERDIR", filepath.Join(gocoverdirEnv, testSetID))
+		if err != nil {
+			utils.LogError(r.logger, err, fmt.Sprintf("failed to set GOCOVERDIR env to coverage/%s", testSetID), zap.Error(err))
+		}
 		if err := os.MkdirAll(os.Getenv("GOCOVERDIR"), 0777); err != nil {
 			utils.LogError(r.logger, err, fmt.Sprintf("failed to create coverage directory for %s", testSetID), zap.Error(err))
 		}

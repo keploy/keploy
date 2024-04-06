@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -73,5 +74,68 @@ func CalGoCoverage(ctx context.Context, logger *zap.Logger, testset string) map[
 		covPercentage := float64(lines[1]*100) / float64(lines[0])
 		coveragePerFile[filename] = strconv.FormatFloat(float64(covPercentage), 'f', 2, 64) + "%"
 	}
+	return coveragePerFile
+}
+
+type pyCoverage struct {
+	Meta struct {
+		Version        string `json:"version"`
+		Timestamp      string `json:"timestamp"`
+		BranchCoverage bool   `json:"branch_coverage"`
+		ShowContexts   bool   `json:"show_contexts"`
+	} `json:"meta"`
+	Files map[string]struct {
+		ExecutedLines []int `json:"executed_lines"`
+		Summary       struct {
+			CoveredLines          int     `json:"covered_lines"`
+			NumStatements         int     `json:"num_statements"`
+			PercentCovered        float64 `json:"percent_covered"`
+			PercentCoveredDisplay string  `json:"percent_covered_display"`
+			MissingLines          int     `json:"missing_lines"`
+			ExcludedLines         int     `json:"excluded_lines"`
+		} `json:"summary"`
+		MissingLines  []int `json:"missing_lines"`
+		ExcludedLines []int `json:"excluded_lines"`
+	} `json:"files"`
+	Totals struct {
+		CoveredLines          int     `json:"covered_lines"`
+		NumStatements         int     `json:"num_statements"`
+		PercentCovered        float64 `json:"percent_covered"`
+		PercentCoveredDisplay string  `json:"percent_covered_display"`
+		MissingLines          int     `json:"missing_lines"`
+		ExcludedLines         int     `json:"excluded_lines"`
+	} `json:"totals"`
+}
+
+func CalPythonCoverage(ctx context.Context, logger *zap.Logger) map[string]string {
+	covfile, err := utils.GetRecentFile(".", ".coverage.keploy")
+	fmt.Println(covfile)
+	if err != nil {
+		utils.LogError(logger, err, "failed to get the coverage data file")
+		return nil
+	}
+	generateCovJsonCmd := exec.CommandContext(ctx, "coverage", "json", "--data-file="+covfile)
+	fmt.Println(generateCovJsonCmd.String())
+	_, err = generateCovJsonCmd.Output()
+	if err != nil {
+		utils.LogError(logger, err, "failed to create a json report of coverage", zap.Any("cmd", generateCovJsonCmd.String()))
+		return nil
+	}
+	coverageData, err := os.ReadFile("coverage.json")
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the coverage.json file")
+		return nil
+	}
+	var cov pyCoverage
+	err = json.Unmarshal(coverageData, &cov)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal the coverage data")
+		return nil
+	}
+	coveragePerFile := make(map[string]string)
+	for filename, file := range cov.Files {
+		coveragePerFile[filename] = file.Summary.PercentCoveredDisplay
+	}
+	fmt.Println(coveragePerFile)
 	return coveragePerFile
 }

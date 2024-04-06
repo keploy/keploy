@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -128,7 +129,7 @@ func (r *queryResolver) TestSetStatus(ctx context.Context, testRunID string, tes
 }
 
 // StopApp is the resolver for the stopApp field.
-func (r *mutationResolver) StopApp(_ context.Context, appId int) (bool, error) {
+func (r *mutationResolver) StopApp(ctx context.Context, appId int) (bool, error) {
 	if r.Resolver == nil {
 		err := fmt.Errorf(utils.Emoji + "failed to get Resolver")
 		return false, err
@@ -157,6 +158,9 @@ func (r *mutationResolver) StopApp(_ context.Context, appId int) (bool, error) {
 		utils.LogError(r.logger, err, "failed to stop the app")
 		return false, err
 	}
+	coverageData := tools.CalPythonCoverage(ctx, r.logger)
+	fmt.Println(coverageData)
+	// TODO: update the test set report with the coverage entry 
 	r.logger.Info("application stopped successfully", zap.Int("appID", appId))
 
 	return true, nil
