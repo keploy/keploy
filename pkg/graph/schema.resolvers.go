@@ -160,7 +160,7 @@ func (r *mutationResolver) StopApp(ctx context.Context, appId int) (bool, error)
 	}
 	coverageData := tools.CalPythonCoverage(ctx, r.logger)
 	fmt.Println(coverageData)
-	// TODO: update the test set report with the coverage entry 
+	// TODO: update the test set report with the coverage entry
 	r.logger.Info("application stopped successfully", zap.Int("appID", appId))
 
 	return true, nil

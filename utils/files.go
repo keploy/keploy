@@ -13,7 +13,7 @@ type File struct {
 	path string
 }
 
-// Implements sort interface to sort by timestamp
+// ByTime Implements sort interface to sort by timestamp
 type ByTime []File
 
 func (b ByTime) Len() int {
@@ -28,8 +28,7 @@ func (b ByTime) Less(i, j int) bool {
 	return b[i].info.ModTime().Unix() > b[j].info.ModTime().Unix()
 }
 
-// Gets most recent file from dir.
-// Also allows you to search with specific match.
+// GetRecentFile Gets most recent file with name starting with prefix
 func GetRecentFile(path string, prefix string) (string, error) {
 	// Build up files array
 	files := ByTime{}
