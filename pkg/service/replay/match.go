@@ -786,28 +786,39 @@ func compareAndColorizeMaps(a, b JSONMap, indent string) (string, string) {
 		return string(bytes)
 	}
 
-	// Find keys that are in a but not in b (deleted in b)
+	// Compare the maps and build a serialized JSON string for each
+	var aSerialized, bSerialized strings.Builder
 	for key, aValue := range a {
-		bValue, exists := b[key]
-		if !exists {
-			// Key is missing in b, so it's a deletion
-			expectedOutput.WriteString(red(indent + "- \"" + key + "\": " + serialize(aValue) + "\n"))
-			continue
-		}
-
-		// If values are different, compare them
-		if !reflect.DeepEqual(aValue, bValue) {
-			expectedOutput.WriteString(indent + "\"" + key + "\": " + serialize(aValue) + "\n")
-			actualOutput.WriteString(indent + "\"" + key + "\": " + serialize(bValue) + "\n")
-		}
+		aSerialized.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, serialize(aValue)))
+	}
+	for key, bValue := range b {
+		bSerialized.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, serialize(bValue)))
 	}
 
-	// Find keys that are in b but not in a (added in b)
-	for key, bValue := range b {
-		if _, exists := a[key]; !exists {
-			// Key is new in b, so it's an addition
-			actualOutput.WriteString(green(indent + "+ \"" + key + "\": " + serialize(bValue) + "\n"))
+	// Split the serialized JSON into lines for line-by-line comparison
+	aLines := strings.Split(aSerialized.String(), "\n")
+	bLines := strings.Split(bSerialized.String(), "\n")
+
+	// Compare lines and colorize differences
+	for i, lineA := range aLines {
+		if i >= len(bLines) {
+			expectedOutput.WriteString(red(lineA) + "\n")
+			continue
 		}
+		lineB := bLines[i]
+		if lineA != lineB {
+			// If lines are different, colorize them
+			expectedOutput.WriteString(red(lineA) + "\n")
+			actualOutput.WriteString(green(lineB) + "\n")
+		} else {
+			// If lines are the same, write them without color
+			expectedOutput.WriteString(lineA + "\n")
+			actualOutput.WriteString(lineB + "\n")
+		}
+	}
+	// If b has more lines, colorize them as additions
+	for i := len(aLines); i < len(bLines); i++ {
+		actualOutput.WriteString(green(bLines[i]) + "\n")
 	}
 
 	return expectedOutput.String(), actualOutput.String()
