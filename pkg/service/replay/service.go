@@ -57,3 +57,9 @@ type Telemetry interface {
 	TestRun(success int, failure int, testSets int, runStatus string)
 	MockTestRun(utilizedMocks int)
 }
+
+// RequestEmulator is used to simulate the API requests to the user API. The requests are read from
+// the recorded test case of the user app.
+type RequestEmulator interface {
+	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
+}

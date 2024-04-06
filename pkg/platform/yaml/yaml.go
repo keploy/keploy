@@ -136,9 +136,14 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	}
 	if _, err := os.Stat(yamlPath); err != nil {
 		if ctx.Err() == nil {
-			err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
+			err = os.MkdirAll(filepath.Join(path), 0777)
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+			err = os.Chmod(path, 0777)
+			if err != nil {
+				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
 				return false, err
 			}
 			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
@@ -149,6 +154,11 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 			err = file.Close()
 			if err != nil {
 				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+			err = os.Chmod(yamlPath, 0777)
+			if err != nil {
+				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
 				return false, err
 			}
 			return true, nil
