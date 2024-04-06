@@ -214,9 +214,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
 	case "keploy":
-		cmd.PersistentFlags().Bool("enableANSIColor", c.cfg.EnableANSIColor, "Enable ANSI color in logs")
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
+		cmd.PersistentFlags().Bool("enableANSIColor", c.cfg.EnableANSIColor, "Enable ANSI color in logs")
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
