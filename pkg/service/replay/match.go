@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"bytes"
 	"os"
@@ -649,10 +650,233 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 
 	return strings.Join(diffStrings, "\n"), nil
 }
+func writeKeyValuePair(sb *strings.Builder, key string, value interface{}, isDifferent bool, indent string, colorize func(a ...interface{}) string) {
+	var valStr string
+	switch reflect.TypeOf(value).Kind() {
+	case reflect.Slice, reflect.Map:
+		marshaledValue, err := json.Marshal(value)
+		if err != nil {
+			valStr = "error"
+		} else {
+			valStr = string(marshaledValue)
+		}
+	default:
+		valStr = fmt.Sprint(value)
+	}
+
+	if isDifferent {
+		valStr = colorize(valStr)
+	}
+
+	sb.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, valStr))
+}
+
+// compareAndColorizeSlices compares two slices of interfaces and outputs color-coded differences.
+// compareAndColorizeSlices compares two slices of interfaces and outputs color-coded differences.
+func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
+	var expectedOutput strings.Builder
+	var actualOutput strings.Builder
+
+	maxLength := len(a)
+	if len(b) > maxLength {
+		maxLength = len(b)
+	}
+	reds := color.New(color.FgRed).SprintFunc()
+	greens := color.New(color.FgGreen).SprintFunc()
+	for i := 0; i < maxLength; i++ {
+		var aValue, bValue interface{}
+		var aExists, bExists bool
+
+		if i < len(a) {
+			aValue = a[i]
+			aExists = true
+		}
+
+		if i < len(b) {
+			bValue = b[i]
+			bExists = true
+		}
+
+		if aExists && bExists {
+			// Both slices have this index, compare values
+			expectedText, actualText := compareValues(aValue, bValue, indent+"  ", reds, greens)
+			if expectedText != "" {
+				expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, expectedText))
+			}
+			if actualText != "" {
+				actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, actualText))
+			}
+		} else if aExists {
+			// Only a has this index, it's a deletion
+			expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
+		} else if bExists {
+			// Only b has this index, it's an addition
+			actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
+		}
+	}
+
+	return expectedOutput.String(), actualOutput.String()
+}
+
+// compare compares the values and decides whether to call compareAndColorizeMap or compareAndColorizeSlices.
+func compare(key string, val1, val2 interface{}, indent string, expect, actual *strings.Builder, red, green func(a ...interface{}) string) {
+	switch v1 := val1.(type) {
+	case string:
+		if v2, ok := val2.(string); ok {
+			// When both values are strings, highlight word differences
+			diff1, diff2 := highlightDifferences(v1, v2, red, green)
+			writeKeyValuePair(expect, key, diff1, true, indent, red)
+			writeKeyValuePair(actual, key, diff2, true, indent, green)
+		}
+	default:
+		// Fallback to simple comparison for non-string types or if types differ
+		writeKeyValuePair(expect, key, val1, true, indent, red)
+		writeKeyValuePair(actual, key, val2, true, indent, green)
+	}
+}
+
+// highlightDifferences will compare words and wrap differences with ANSI color codes.
+func highlightDifferences(str1, str2 string, red, green func(a ...interface{}) string) (string, string) {
+	words1 := strings.Fields(str1)
+	words2 := strings.Fields(str2)
+	var diff1, diff2 []string
+
+	maxLen := len(words1)
+	if len(words2) > maxLen {
+		maxLen = len(words2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		word1 := ""
+		word2 := ""
+		if i < len(words1) {
+			word1 = words1[i]
+		}
+		if i < len(words2) {
+			word2 = words2[i]
+		}
+
+		if word1 != word2 {
+			diff1 = append(diff1, red(word1))
+			diff2 = append(diff2, green(word2))
+		} else {
+			diff1 = append(diff1, word1)
+			diff2 = append(diff2, word2)
+		}
+	}
+
+	return strings.Join(diff1, " "), strings.Join(diff2, " ")
+}
+
+type JSONMap map[string]interface{}
+
+func compareAndColorizeMaps(a, b JSONMap, indent string) (string, string) {
+	var expectedOutput strings.Builder
+	var actualOutput strings.Builder
+	red := color.New(color.FgRed).SprintFunc()
+	green := color.New(color.FgGreen).SprintFunc()
+
+	// Serialize the value to JSON, handle errors properly in your production code.
+	serialize := func(value interface{}) string {
+		bytes, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			// Handle error in your actual code
+			return "error"
+		}
+		return string(bytes)
+	}
+
+	// Find keys that are in a but not in b (deleted in b)
+	for key, aValue := range a {
+		bValue, exists := b[key]
+		if !exists {
+			// Key is missing in b, so it's a deletion
+			expectedOutput.WriteString(red(indent + "- \"" + key + "\": " + serialize(aValue) + "\n"))
+			continue
+		}
+
+		// If values are different, compare them
+		if !reflect.DeepEqual(aValue, bValue) {
+			expectedOutput.WriteString(indent + "\"" + key + "\": " + serialize(aValue) + "\n")
+			actualOutput.WriteString(indent + "\"" + key + "\": " + serialize(bValue) + "\n")
+		}
+	}
+
+	// Find keys that are in b but not in a (added in b)
+	for key, bValue := range b {
+		if _, exists := a[key]; !exists {
+			// Key is new in b, so it's an addition
+			actualOutput.WriteString(green(indent + "+ \"" + key + "\": " + serialize(bValue) + "\n"))
+		}
+	}
+
+	return expectedOutput.String(), actualOutput.String()
+}
+
+// writeKeyValuePair writes a key-value pair with optional color.
+// writeKeyValuePair writes a key-value pair with optional color.
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
 func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
+	lines := strings.Split(diffStr, "\n")
+	expects := make(map[string]interface{}, 0)
+	actuals := make(map[string]interface{}, 0)
+	s := true
+	sd, ad := "", ""
+	sds, ads := "", ""
+	for i, line := range lines {
+		if len(line) > 0 && line[0] == '-' && i != len(lines)-1 {
+
+			// Remove the leading "- " or "+ "
+			actualTrimmedLine := lines[i+1][3:]
+			actualkeyValue := strings.SplitN(actualTrimmedLine, ":", 2)
+			if len(actualkeyValue) == 2 {
+				key := strings.TrimSpace(actualkeyValue[0])
+				value := strings.TrimSpace(actualkeyValue[1])
+
+				var jsonObj map[string]interface{}
+				err := json.Unmarshal([]byte(value), &jsonObj)
+				if err != nil {
+					fmt.Println("Error parsing JSON:", err)
+					s = false
+				}
+
+				expects = map[string]interface{}{key: jsonObj}
+			}
+
+			// Remove the leading "- " or "+ "
+			expectedtrimmedLine := line[3:]
+			expectedkeyValue := strings.SplitN(expectedtrimmedLine, ":", 2)
+			if len(expectedkeyValue) == 2 {
+				key := strings.TrimSpace(expectedkeyValue[0])
+				value := strings.TrimSpace(expectedkeyValue[1])
+
+				var jsonObj map[string]interface{}
+				err := json.Unmarshal([]byte(value), &jsonObj)
+				if err != nil {
+					fmt.Println("Error parsing JSON:", err)
+					s = false
+				}
+
+				actuals = map[string]interface{}{key: jsonObj}
+
+			}
+			// diffs := diffJSONObjects(expects, actuals)
+			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ")
+			// sds, ads = diffJSONObjects(expects, actuals)
+			fmt.Println(expectedText, actualText)
+			sd += breakLines(sds)
+			ad += breakLines(ads)
+			expects = make(map[string]interface{}, 0)
+			actuals = make(map[string]interface{}, 0)
+		}
+
+	}
+	if s {
+		return sd, ad
+
+	}
 	expect, actual := "", ""
 	diffLines := strings.Split(diffStr, "\n")
 	for i, line := range diffLines {
@@ -721,7 +945,6 @@ func breakWithColor(input string, c *color.Attribute, highlightRanges []Range) s
 	if c != nil {
 		paint = color.New(*c).SprintFunc()
 	}
-
 	var output strings.Builder
 	var isColorRange bool
 	lineLen := 0
@@ -757,6 +980,154 @@ func breakWithColor(input string, c *color.Attribute, highlightRanges []Range) s
 	}
 
 	return output.String()
+}
+func compareValues(a, b interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
+	var expectedOutput strings.Builder
+	var actualOutput strings.Builder
+
+	if reflect.DeepEqual(a, b) {
+		return "", ""
+	}
+	reds := color.New(color.FgRed).SprintFunc()
+	greens := color.New(color.FgGreen).SprintFunc()
+	switch aValue := a.(type) {
+	case JSONMap:
+		if bValue, ok := b.(JSONMap); ok {
+			expectedText, actualText := compareAndColorizeMaps(aValue, bValue, indent)
+			expectedOutput.WriteString(expectedText)
+			actualOutput.WriteString(actualText)
+		} else {
+			expectedOutput.WriteString(red("%v", aValue))
+			actualOutput.WriteString(green("%v", b))
+		}
+	case []interface{}:
+		if bValue, ok := b.([]interface{}); ok {
+			expectedText, actualText := compareAndColorizeSlices(aValue, bValue, indent, reds, greens)
+			expectedOutput.WriteString(expectedText)
+			actualOutput.WriteString(actualText)
+		} else {
+			expectedOutput.WriteString(red("%v", aValue))
+			actualOutput.WriteString(green("%v", b))
+		}
+	case string:
+		if bValue, ok := b.(string); ok {
+			expectedOutput.WriteString(red(aValue))
+			actualOutput.WriteString(green(bValue))
+		} else {
+			expectedOutput.WriteString(red("%v", aValue))
+			actualOutput.WriteString(green("%v", b))
+		}
+	default:
+		expectedOutput.WriteString(red("%v", aValue))
+		actualOutput.WriteString(green("%v", b))
+	}
+
+	return expectedOutput.String(), actualOutput.String()
+}
+
+func highlightWords(str1, str2 string, red, green func(format string, a ...interface{}) string) (string, string) {
+	words1 := strings.Fields(str1)
+	words2 := strings.Fields(str2)
+	var diff1, diff2 []string
+
+	maxLen := len(words1)
+	if len(words2) > maxLen {
+		maxLen = len(words2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		word1 := ""
+		word2 := ""
+		if i < len(words1) {
+			word1 = words1[i]
+		}
+		if i < len(words2) {
+			word2 = words2[i]
+		}
+
+		if word1 != word2 {
+			diff1 = append(diff1, red(word1))
+			diff2 = append(diff2, green(word2))
+		} else {
+			diff1 = append(diff1, word1)
+			diff2 = append(diff2, word2)
+		}
+	}
+
+	return strings.Join(diff1, " "), strings.Join(diff2, " ")
+}
+
+var ansiColorCodeRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func visibleLength(str string) int {
+	re := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return len(re.ReplaceAllString(str, ""))
+}
+
+const ansiStart = "\033[31m" // Example: red font
+const ansiEnd = "\033[0m"    // Reset to default
+
+// breakLines breaks long lines into a specified length and ensures ANSI codes are correctly placed.
+func breakLines(input string) string {
+	const MAX_LINE_LENGTH = 80 // Set your desired max line length
+	var output strings.Builder
+	var currentLine strings.Builder
+	inANSISequence := false
+	lineLength := 0
+
+	// We'll collect ANSI sequences here and then reapply them as needed
+	var ansiSequences []string
+	var ansiSequenceBuilder strings.Builder
+
+	for _, char := range input {
+		// Check for the beginning of an ANSI sequence
+		if char == '\x1b' {
+			inANSISequence = true
+			ansiSequenceBuilder.Reset()
+			ansiSequenceBuilder.WriteRune(char)
+			continue
+		}
+		if inANSISequence {
+			// Continue collecting the ANSI sequence
+			ansiSequenceBuilder.WriteRune(char)
+			if char == 'm' {
+				// End of the ANSI sequence
+				inANSISequence = false
+				ansiSequences = append(ansiSequences, ansiSequenceBuilder.String())
+				continue
+			}
+		} else {
+			currentLine.WriteRune(char)
+			if !isControlCharacter(char) {
+				lineLength++
+			}
+		}
+
+		// Time to wrap the line
+		if lineLength >= MAX_LINE_LENGTH && char == ' ' && !inANSISequence {
+			lastSpace := strings.LastIndex(currentLine.String(), " ")
+			if lastSpace == -1 {
+				lastSpace = MAX_LINE_LENGTH
+			}
+			output.WriteString(currentLine.String()[:lastSpace])
+			output.WriteString("\n")
+			currentLine.Reset()
+			lineLength = 0
+			if len(ansiSequences) > 0 {
+				// Reapply the last ANSI sequence if any
+				output.WriteString(ansiSequences[len(ansiSequences)-1])
+				currentLine.WriteString(ansiSequences[len(ansiSequences)-1])
+			}
+		}
+	}
+
+	// Write any remaining content
+	output.WriteString(currentLine.String())
+	return output.String()
+}
+
+func isControlCharacter(char rune) bool {
+	return !unicode.IsPrint(char) && !unicode.IsSpace(char)
 }
 
 // Will return a string in a two columns table where the left
