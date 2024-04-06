@@ -285,7 +285,6 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 	for _, mock := range m {
 		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
-			continue
 		}
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
@@ -303,7 +302,7 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 		unfilteredMocks = append(unfilteredMocks, mock)
 	}
 	if isNonKeploy {
-		ys.Logger.Warn("Few mocks in the mock File are not recorded by keploy ignoring them")
+		ys.Logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filteredMocks, unfilteredMocks
 }
