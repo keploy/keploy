@@ -114,11 +114,11 @@ func CalPythonCoverage(ctx context.Context, logger *zap.Logger) map[string]strin
 		utils.LogError(logger, err, "failed to get the coverage data file")
 		return nil
 	}
-	generateCovJsonCmd := exec.CommandContext(ctx, "coverage", "json", "--data-file="+covfile)
-	fmt.Println(generateCovJsonCmd.String())
-	_, err = generateCovJsonCmd.Output()
+	generateCovJSONCmd := exec.CommandContext(ctx, "coverage", "json", "--data-file="+covfile)
+	fmt.Println(generateCovJSONCmd.String())
+	_, err = generateCovJSONCmd.Output()
 	if err != nil {
-		utils.LogError(logger, err, "failed to create a json report of coverage", zap.Any("cmd", generateCovJsonCmd.String()))
+		utils.LogError(logger, err, "failed to create a json report of coverage", zap.Any("cmd", generateCovJSONCmd.String()))
 		return nil
 	}
 	coverageData, err := os.ReadFile("coverage.json")
