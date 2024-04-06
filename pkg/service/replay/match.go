@@ -835,7 +835,6 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 	actuals := make(map[string]interface{}, 0)
 	s := true
 	sd, ad := "", ""
-	sds, ads := "", ""
 	for i, line := range lines {
 		if len(line) > 0 && line[0] == '-' && i != len(lines)-1 {
 
@@ -877,8 +876,8 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ")
 			// sds, ads = diffJSONObjects(expects, actuals)
 			fmt.Println(expectedText, actualText)
-			sd += breakLines(sds)
-			ad += breakLines(ads)
+			sd += breakLines(expectedText)
+			ad += breakLines(actualText)
 			expects = make(map[string]interface{}, 0)
 			actuals = make(map[string]interface{}, 0)
 		}
@@ -1080,23 +1079,19 @@ const ansiEnd = "\033[0m"    // Reset to default
 
 // breakLines breaks long lines into a specified length and ensures ANSI codes are correctly placed.
 func breakLines(input string) string {
-	const MAX_LINE_LENGTH = 80 // Set your desired max line length
+	const MAX_LINE_LENGTH = 50 // Set your desired max line length
 	var output strings.Builder
 	var currentLine strings.Builder
 	inANSISequence := false
 	lineLength := 0
 
 	// We'll collect ANSI sequences here and then reapply them as needed
-	var ansiSequences []string
 	var ansiSequenceBuilder strings.Builder
 
 	for _, char := range input {
 		// Check for the beginning of an ANSI sequence
 		if char == '\x1b' {
 			inANSISequence = true
-			ansiSequenceBuilder.Reset()
-			ansiSequenceBuilder.WriteRune(char)
-			continue
 		}
 		if inANSISequence {
 			// Continue collecting the ANSI sequence
@@ -1104,36 +1099,34 @@ func breakLines(input string) string {
 			if char == 'm' {
 				// End of the ANSI sequence
 				inANSISequence = false
-				ansiSequences = append(ansiSequences, ansiSequenceBuilder.String())
+				// Reapply the ANSI sequence to the current line and the output
+				currentLine.WriteString(ansiSequenceBuilder.String())
+				output.WriteString(ansiSequenceBuilder.String())
+				ansiSequenceBuilder.Reset()
 				continue
 			}
 		} else {
-			currentLine.WriteRune(char)
+			// Time to wrap the line if we reach the max length or end of input
+			if lineLength >= MAX_LINE_LENGTH || char == '\n' {
+				output.WriteString(currentLine.String())
+				if char != '\n' {
+					output.WriteRune('\n')
+				}
+				currentLine.Reset()
+				lineLength = 0
+			}
+
 			if !isControlCharacter(char) {
 				lineLength++
-			}
-		}
-
-		// Time to wrap the line
-		if lineLength >= MAX_LINE_LENGTH && char == ' ' && !inANSISequence {
-			lastSpace := strings.LastIndex(currentLine.String(), " ")
-			if lastSpace == -1 {
-				lastSpace = MAX_LINE_LENGTH
-			}
-			output.WriteString(currentLine.String()[:lastSpace])
-			output.WriteString("\n")
-			currentLine.Reset()
-			lineLength = 0
-			if len(ansiSequences) > 0 {
-				// Reapply the last ANSI sequence if any
-				output.WriteString(ansiSequences[len(ansiSequences)-1])
-				currentLine.WriteString(ansiSequences[len(ansiSequences)-1])
+				currentLine.WriteRune(char)
 			}
 		}
 	}
 
-	// Write any remaining content
-	output.WriteString(currentLine.String())
+	// Write any remaining content in currentLine to output
+	if currentLine.Len() > 0 {
+		output.WriteString(currentLine.String())
+	}
 	return output.String()
 }
 
